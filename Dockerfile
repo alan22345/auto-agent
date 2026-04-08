@@ -1,0 +1,37 @@
+FROM node:20-slim
+
+# Install Python, git, gh CLI, and dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    git \
+    gh \
+    jq \
+    curl \
+    ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code@latest
+
+# node user already exists in the node:20 base image
+# Create workspace and claude config dirs owned by node
+RUN mkdir -p /workspace /workspaces /home/node/.claude && \
+    chown -R node:node /workspace /workspaces /home/node/.claude
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+COPY . .
+RUN chown -R node:node /app
+
+USER node
+ENV HOME=/home/node
+
+EXPOSE 2020
+
+CMD ["python3", "run.py"]

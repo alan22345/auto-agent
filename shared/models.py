@@ -1,0 +1,135 @@
+import enum
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TaskComplexity(str, enum.Enum):
+    SIMPLE = "simple"
+    COMPLEX = "complex"
+
+
+class TaskStatus(str, enum.Enum):
+    INTAKE = "intake"
+    CLASSIFYING = "classifying"
+    QUEUED = "queued"
+    PLANNING = "planning"
+    AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_CLARIFICATION = "awaiting_clarification"
+    CODING = "coding"
+    PR_CREATED = "pr_created"
+    AWAITING_CI = "awaiting_ci"
+    AWAITING_REVIEW = "awaiting_review"
+    DONE = "done"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class TaskSource(str, enum.Enum):
+    SLACK = "slack"
+    LINEAR = "linear"
+    TELEGRAM = "telegram"
+    MANUAL = "manual"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Repo(Base):
+    __tablename__ = "repos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, unique=True)
+    url = Column(String(512), nullable=False)
+    default_branch = Column(String(128), default="main")
+    summary = Column(Text, nullable=True)  # Cached repo summary for context injection
+    summary_updated_at = Column(DateTime(timezone=True), nullable=True)
+    ci_checks = Column(Text, nullable=True)  # Extracted CI check commands from workflow files
+    harness_onboarded = Column(Boolean, default=False)  # Whether harness engineering PR has been raised
+    harness_pr_url = Column(String(512), nullable=True)  # URL of the harness onboarding PR
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    tasks = relationship("Task", back_populates="repo")
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, default="")
+    source = Column(Enum(TaskSource), nullable=False)
+    source_id = Column(String(255), default="")  # Slack ts, Linear issue ID, etc.
+    status = Column(Enum(TaskStatus), default=TaskStatus.INTAKE, nullable=False)
+    complexity = Column(Enum(TaskComplexity), nullable=True)
+    repo_id = Column(Integer, ForeignKey("repos.id"), nullable=True)
+    branch_name = Column(String(255), nullable=True)
+    pr_url = Column(String(512), nullable=True)
+    plan = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    repo = relationship("Repo", back_populates="tasks", lazy="selectin")
+    history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")
+
+
+class TaskHistory(Base):
+    __tablename__ = "task_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
+    from_status = Column(Enum(TaskStatus), nullable=True)
+    to_status = Column(Enum(TaskStatus), nullable=False)
+    message = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    task = relationship("Task", back_populates="history")
+
+
+class TaskOutcome(Base):
+    """Tracks PR outcomes for the learning/feedback loop."""
+    __tablename__ = "task_outcomes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, unique=True)
+    pr_approved = Column(Boolean, nullable=True)  # True=merged, False=closed/rejected
+    review_rounds = Column(Integer, default=0)  # How many review iterations
+    time_to_complete_seconds = Column(Float, nullable=True)  # Total wall time
+    tokens_used = Column(Integer, nullable=True)  # Estimated token usage
+    feedback_summary = Column(Text, default="")  # Summary of review feedback patterns
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    task = relationship("Task")
+
+
+class ScheduledTask(Base):
+    """Recurring tasks triggered on a cron schedule."""
+    __tablename__ = "scheduled_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, unique=True)
+    cron_expression = Column(String(100), nullable=False)  # e.g. "0 9 * * 1" (Monday 9am)
+    task_title = Column(String(512), nullable=False)
+    task_description = Column(Text, default="")
+    repo_name = Column(String(255), nullable=True)
+    enabled = Column(Boolean, default=True)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+

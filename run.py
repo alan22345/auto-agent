@@ -1,0 +1,780 @@
+"""Auto-agent — single entrypoint that starts everything.
+
+Usage:
+    python run.py           # local dev
+    docker compose up       # containerised (same image)
+
+Starts on port 2020:
+    - Web UI at /
+    - API at /api
+    - Webhooks at /api/webhooks/*
+    - Health at /health
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+from shared.database import async_session, engine
+from shared.events import Event, EventBus
+from shared.logging import setup_logging
+from shared.models import Base, Task, TaskComplexity, TaskStatus
+from shared.notifier import send_telegram
+from shared.redis_client import (
+    ack_event,
+    ensure_stream_group,
+    get_redis,
+    publish_event,
+    read_events,
+)
+
+from datetime import datetime, timezone
+
+from orchestrator.classifier import classify_task
+from orchestrator.metrics import router as metrics_router
+from orchestrator.queue import can_start, next_queued_task
+from orchestrator.repo_sync import match_repo, sync_repos
+from orchestrator.router import router as api_router
+from orchestrator.scheduler import run_scheduler
+from orchestrator.state_machine import get_task, transition
+from orchestrator.webhooks.github import router as github_webhook_router
+from orchestrator.webhooks.linear import router as linear_webhook_router
+
+from web.main import (
+    websocket_endpoint,
+    event_listener as web_event_listener,
+)
+from integrations.telegram.main import (
+    inbound_loop as telegram_inbound_loop,
+    notification_loop as telegram_notification_loop,
+)
+from claude_runner.main import event_loop as claude_runner_loop
+
+log = setup_logging("auto-agent")
+
+
+# ---------------------------------------------------------------------------
+# Unified FastAPI app — API + webhooks + web UI, all on one port
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="Auto-Agent", version="0.1.0")
+
+# API
+app.include_router(api_router, prefix="/api")
+app.include_router(metrics_router, prefix="/api")
+
+# Webhooks
+app.include_router(github_webhook_router, prefix="/api")
+app.include_router(linear_webhook_router, prefix="/api")
+
+# Static files for web UI
+STATIC_DIR = Path(__file__).parent / "web" / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root() -> HTMLResponse:
+    return HTMLResponse((STATIC_DIR / "index.html").read_text())
+
+
+@app.websocket("/ws")
+async def ws_proxy(ws: WebSocket) -> None:
+    await websocket_endpoint(ws)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator event handlers
+# ---------------------------------------------------------------------------
+
+
+async def on_task_created(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+
+        # Auto-match repo from task text if not already set
+        if not task.repo_id:
+            repo = await match_repo(session, f"{task.title} {task.description}")
+            if repo:
+                task.repo_id = repo.id
+                log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
+
+        task = await transition(session, task, TaskStatus.CLASSIFYING, "Auto-classifying")
+        await session.commit()
+
+        complexity, classification = classify_task(task.title, task.description)
+        task.complexity = complexity
+        await session.commit()
+
+        r = await get_redis()
+        await publish_event(r, Event(
+            type="task.classified",
+            task_id=task.id,
+            payload={"complexity": complexity.value, **classification.model_dump()},
+        ).to_redis())
+        await r.aclose()
+
+
+async def on_task_classified(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+
+        if await can_start(session, task.complexity):
+            if task.complexity == TaskComplexity.COMPLEX:
+                task = await transition(session, task, TaskStatus.QUEUED)
+                task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
+            else:
+                task = await transition(session, task, TaskStatus.QUEUED)
+                task = await transition(session, task, TaskStatus.CODING, "Starting coding")
+        else:
+            task = await transition(session, task, TaskStatus.QUEUED, "Waiting for available slot")
+        await session.commit()
+
+        r = await get_redis()
+        if task.status == TaskStatus.PLANNING:
+            await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
+        elif task.status == TaskStatus.CODING:
+            await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+        await r.aclose()
+
+
+async def on_clarification_resolved(event: Event) -> None:
+    """After a clarification is answered and Claude continued, resume the task phase."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+
+        # Determine which phase to resume based on complexity and prior state
+        if task.complexity == TaskComplexity.COMPLEX and task.plan is None:
+            # Was in planning phase, hasn't produced a plan yet — resume planning
+            task = await transition(session, task, TaskStatus.PLANNING, "Clarification resolved, resuming planning")
+            await session.commit()
+            r = await get_redis()
+            await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
+            await r.aclose()
+        else:
+            # Was in coding phase — resume coding
+            task = await transition(session, task, TaskStatus.CODING, "Clarification resolved, resuming coding")
+            await session.commit()
+            r = await get_redis()
+            await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+            await r.aclose()
+
+
+async def on_task_approved(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        r = await get_redis()
+        await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+        await r.aclose()
+
+
+async def on_review_complete(event: Event) -> None:
+    """Independent review finished — transition to PR_CREATED → AWAITING_CI."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        pr_url = event.payload.get("pr_url", "")
+        review = event.payload.get("review", "")
+        task.pr_url = pr_url
+        task = await transition(session, task, TaskStatus.PR_CREATED, f"PR created: {pr_url}")
+        task = await transition(
+            session, task, TaskStatus.AWAITING_CI,
+            f"Independent review complete. Waiting for CI.\n\n{review[:2000]}",
+        )
+        await session.commit()
+
+
+async def on_ci_passed(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review")
+        await session.commit()
+
+    # Trigger dev deploy so the user can review a live preview
+    r = await get_redis()
+    await publish_event(
+        r, Event(type="task.deploy_preview", task_id=event.task_id).to_redis()
+    )
+    await r.aclose()
+
+
+async def on_ci_failed(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        reason = event.payload.get("reason", "CI checks failed")
+        task = await transition(session, task, TaskStatus.CODING, f"CI failed: {reason}")
+        await session.commit()
+
+        r = await get_redis()
+        await publish_event(r, Event(
+            type="task.start_coding",
+            task_id=task.id,
+            payload={"retry_reason": reason},
+        ).to_redis())
+        await r.aclose()
+
+
+async def on_review_approved(event: Event) -> None:
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        task = await transition(session, task, TaskStatus.DONE, "PR merged, task complete")
+        await session.commit()
+        await _try_start_queued(session)
+
+
+async def on_task_finished(event: Event) -> None:
+    # Clean up workspace and session for the finished task
+    if event.task_id:
+        r = await get_redis()
+        await publish_event(
+            r, Event(type="task.cleanup", task_id=event.task_id).to_redis()
+        )
+        await r.aclose()
+
+    async with async_session() as session:
+        await _try_start_queued(session)
+
+
+async def _try_start_queued(session) -> None:
+    for complexity in TaskComplexity:
+        if await can_start(session, complexity):
+            task = await next_queued_task(session, complexity)
+            if task:
+                if complexity == TaskComplexity.COMPLEX:
+                    task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
+                else:
+                    task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
+                await session.commit()
+
+                r = await get_redis()
+                evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
+                await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
+                await r.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Event bus wiring
+# ---------------------------------------------------------------------------
+
+bus = EventBus()
+bus.on("task.created", on_task_created)
+bus.on("task.classified", on_task_classified)
+bus.on("task.clarification_resolved", on_clarification_resolved)
+bus.on("task.approved", on_task_approved)
+bus.on("task.review_complete", on_review_complete)
+bus.on("task.ci_passed", on_ci_passed)
+bus.on("task.ci_failed", on_ci_failed)
+bus.on("task.review_approved", on_review_approved)
+bus.on("task.done", on_task_finished)
+bus.on("task.failed", on_task_finished)
+
+
+async def orchestrator_event_loop() -> None:
+    r = await get_redis()
+    await ensure_stream_group(r)
+    log.info("Orchestrator event loop started")
+
+    backoff = 1
+    max_backoff = 60
+
+    while True:
+        try:
+            messages = await read_events(r, consumer="orchestrator", count=5, block=5000)
+            backoff = 1  # Reset on success
+            for msg_id, data in messages:
+                try:
+                    event = Event.from_redis(data)
+                    log.info("processing_event", type=event.type, task_id=event.task_id)
+                    await bus.dispatch(event)
+                except Exception:
+                    log.exception("event_processing_error", msg_id=msg_id)
+                finally:
+                    await ack_event(r, msg_id, consumer="orchestrator")
+        except Exception:
+            log.exception("event_loop_error", retry_in=backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+            # Reconnect Redis in case connection dropped
+            try:
+                r = await get_redis()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Task timeout watchdog — fail tasks stuck too long in active states
+# ---------------------------------------------------------------------------
+
+TASK_TIMEOUT_SECONDS = 3600  # 1 hour
+WATCHDOG_INTERVAL = 120  # Check every 2 minutes
+
+TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
+
+
+async def task_timeout_watchdog() -> None:
+    """Periodically check for tasks stuck in active states and fail them."""
+    log.info("Task timeout watchdog started")
+    while True:
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select as sa_select
+                result = await session.execute(
+                    sa_select(Task).where(Task.status.in_(TIMED_STATUSES))
+                )
+                now = datetime.now(timezone.utc)
+                for task in result.scalars().all():
+                    updated = task.updated_at
+                    if updated and updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    if updated and (now - updated).total_seconds() > TASK_TIMEOUT_SECONDS:
+                        log.warning(
+                            f"Task #{task.id} timed out in {task.status.value} "
+                            f"(stuck for {(now - updated).total_seconds():.0f}s)"
+                        )
+                        task = await transition(
+                            session, task, TaskStatus.FAILED,
+                            f"Timed out after {TASK_TIMEOUT_SECONDS}s in {task.status.value}",
+                        )
+                        await session.commit()
+
+                        r = await get_redis()
+                        await publish_event(
+                            r, Event(type="task.failed", task_id=task.id, payload={
+                                "error": f"Timed out in {task.status.value}",
+                            }).to_redis()
+                        )
+                        await publish_event(
+                            r, Event(type="task.cleanup", task_id=task.id).to_redis()
+                        )
+                        await r.aclose()
+        except Exception:
+            log.exception("Watchdog error")
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# CI status poller — fallback when GitHub webhooks aren't configured
+# ---------------------------------------------------------------------------
+
+CI_POLL_INTERVAL = 60  # Check every 60 seconds
+
+
+async def ci_status_poller() -> None:
+    """Poll GitHub API for CI status on tasks in AWAITING_CI.
+
+    This is a fallback for when GitHub webhooks aren't configured or can't
+    reach the server. Checks the combined commit status and check runs
+    for the PR's head branch.
+    """
+    from shared.config import settings as _settings
+    if not _settings.github_token:
+        log.info("CI poller: no GITHUB_TOKEN, skipping")
+        return
+
+    log.info("CI status poller started")
+
+    while True:
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select as sa_select
+                result = await session.execute(
+                    sa_select(Task).where(Task.status == TaskStatus.AWAITING_CI)
+                )
+                tasks_awaiting = result.scalars().all()
+
+                for task in tasks_awaiting:
+                    if not task.pr_url:
+                        continue
+
+                    try:
+                        conclusion = await _check_pr_ci_status(task.pr_url, _settings.github_token)
+                    except Exception:
+                        log.exception(f"CI poll failed for task #{task.id}")
+                        continue
+
+                    if conclusion is None:
+                        # CI still running or no checks found — check if repo has no CI at all
+                        no_ci = await _pr_has_no_checks(task.pr_url, _settings.github_token)
+                        if no_ci:
+                            log.info(f"Task #{task.id}: no CI checks on PR, skipping to review")
+                            r = await get_redis()
+                            await publish_event(r, Event(
+                                type="task.ci_passed",
+                                task_id=task.id,
+                            ).to_redis())
+                            await r.aclose()
+                        continue
+
+                    r = await get_redis()
+                    if conclusion == "success":
+                        log.info(f"Task #{task.id}: CI passed (polled)")
+                        await publish_event(r, Event(
+                            type="task.ci_passed",
+                            task_id=task.id,
+                        ).to_redis())
+                    elif conclusion in ("failure", "timed_out", "action_required"):
+                        log.info(f"Task #{task.id}: CI failed: {conclusion} (polled)")
+                        await publish_event(r, Event(
+                            type="task.ci_failed",
+                            task_id=task.id,
+                            payload={"reason": f"CI conclusion: {conclusion}"},
+                        ).to_redis())
+                    await r.aclose()
+
+        except Exception:
+            log.exception("CI poller error")
+        await asyncio.sleep(CI_POLL_INTERVAL)
+
+
+async def _check_pr_ci_status(pr_url: str, token: str) -> str | None:
+    """Check combined CI status for a PR via GitHub API.
+
+    Returns: 'success', 'failure', 'timed_out', 'action_required', or None if pending/in-progress.
+    """
+    # Parse owner/repo/number from PR URL
+    # e.g. https://github.com/ergodic-ai/cardamon/pull/38
+    parts = pr_url.rstrip("/").split("/")
+    owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        # Get PR head SHA
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code != 200:
+            return None
+        head_sha = resp.json()["head"]["sha"]
+
+        # Check check runs (GitHub Actions)
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code == 200:
+            check_runs = resp.json().get("check_runs", [])
+            if check_runs:
+                # All must complete
+                conclusions = [cr.get("conclusion") for cr in check_runs]
+                statuses = [cr.get("status") for cr in check_runs]
+
+                if any(s != "completed" for s in statuses):
+                    return None  # Still running
+
+                if any(c in ("failure", "timed_out", "action_required") for c in conclusions):
+                    return next(c for c in conclusions if c in ("failure", "timed_out", "action_required"))
+
+                if all(c == "success" or c == "skipped" for c in conclusions):
+                    return "success"
+
+        # Fallback: check commit status API
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/status",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code == 200:
+            state = resp.json().get("state")  # success, failure, pending
+            if state == "success":
+                return "success"
+            elif state == "failure":
+                return "failure"
+            elif state == "pending":
+                return None
+
+    return None
+
+
+async def _pr_has_no_checks(pr_url: str, token: str) -> bool:
+    """Return True if the PR has zero check runs and zero commit statuses."""
+    parts = pr_url.rstrip("/").split("/")
+    owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code != 200:
+            return False
+        head_sha = resp.json()["head"]["sha"]
+
+        # Check runs
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code == 200 and resp.json().get("total_count", 0) > 0:
+            return False
+
+        # Commit statuses
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/status",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code == 200 and resp.json().get("total_count", 0) > 0:
+            return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# PR comment poller — picks up GitHub PR comments without webhooks
+# ---------------------------------------------------------------------------
+
+COMMENT_POLL_INTERVAL = 30  # Check every 30 seconds
+REVIEW_POLL_STATUSES = {TaskStatus.AWAITING_REVIEW, TaskStatus.AWAITING_CI, TaskStatus.PR_CREATED}
+
+# Track last seen comment ID per task to avoid re-processing
+_last_seen_comments: dict[int, int] = {}
+
+
+async def pr_comment_poller() -> None:
+    """Poll GitHub API for new comments on PRs in review states.
+
+    Picks up both PR review comments (inline) and issue comments (conversation)
+    so the agent can respond to feedback even without webhooks configured.
+    """
+    from shared.config import settings as _settings
+    if not _settings.github_token:
+        log.info("PR comment poller: no GITHUB_TOKEN, skipping")
+        return
+
+    log.info("PR comment poller started")
+
+    while True:
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select as sa_select
+                result = await session.execute(
+                    sa_select(Task).where(Task.status.in_(REVIEW_POLL_STATUSES))
+                )
+                for task in result.scalars().all():
+                    if not task.pr_url:
+                        continue
+                    try:
+                        await _poll_pr_comments(task, _settings.github_token)
+                    except Exception:
+                        log.exception(f"Comment poll failed for task #{task.id}")
+
+        except Exception:
+            log.exception("PR comment poller error")
+        await asyncio.sleep(COMMENT_POLL_INTERVAL)
+
+
+async def _poll_pr_comments(task: Task, token: str) -> None:
+    """Check for new comments on a PR and emit human.message events."""
+    parts = task.pr_url.rstrip("/").split("/")
+    owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        # Get issue comments (conversation-level comments on the PR)
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            headers=headers,
+            params={"sort": "created", "direction": "desc", "per_page": 10},
+        )
+        if resp.status_code != 200:
+            return
+
+        comments = resp.json()
+
+        # Also get review comments (inline code comments)
+        resp2 = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            headers=headers,
+            params={"sort": "created", "direction": "desc", "per_page": 10},
+        )
+        if resp2.status_code == 200:
+            comments.extend(resp2.json())
+
+        # Also get PR reviews (formal reviews with body text)
+        resp3 = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            headers=headers,
+            params={"per_page": 10},
+        )
+        if resp3.status_code == 200:
+            for review in resp3.json():
+                if review.get("body") and review.get("state") in ("CHANGES_REQUESTED", "COMMENTED"):
+                    # Treat formal reviews as comments too
+                    comments.append({
+                        "id": review["id"],
+                        "user": review.get("user", {}),
+                        "body": f"[Review - {review['state']}] {review['body']}",
+                        "created_at": review.get("submitted_at", ""),
+                    })
+
+    if not comments:
+        return
+
+    # Find the highest comment ID we've already seen
+    last_seen = _last_seen_comments.get(task.id, 0)
+    new_comments = []
+    max_id = last_seen
+
+    for c in comments:
+        cid = c.get("id", 0)
+        author = c.get("user", {}).get("login", "unknown")
+        user_type = c.get("user", {}).get("type", "")
+        body = c.get("body", "").strip()
+
+        # Skip bots, empty comments, and already-seen comments
+        if user_type == "Bot" or not body or cid <= last_seen:
+            continue
+
+        path = c.get("path", "")
+        file_context = f" on `{path}`" if path else ""
+        new_comments.append((cid, f"[{author}] PR comment{file_context}: {body}"))
+        max_id = max(max_id, cid)
+
+    if not new_comments:
+        return
+
+    _last_seen_comments[task.id] = max_id
+
+    # Batch all new comments into a single message
+    all_feedback = "\n\n---\n\n".join(msg for _, msg in sorted(new_comments))
+    log.info(f"Task #{task.id}: {len(new_comments)} new PR comment(s) found (polled)")
+
+    r = await get_redis()
+    await publish_event(r, Event(
+        type="human.message",
+        task_id=task.id,
+        payload={
+            "message": all_feedback,
+            "source": "github_pr_comment_poll",
+        },
+    ).to_redis())
+    await r.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Optional workers (only start if configured)
+# ---------------------------------------------------------------------------
+
+
+async def start_slack_if_configured() -> None:
+    from shared.config import settings
+    if not settings.slack_bot_token or not settings.slack_app_token:
+        log.info("Slack not configured, skipping")
+        return
+    from integrations.slack.main import main as slack_main
+    log.info("Starting Slack worker")
+    await slack_main()
+
+
+# ---------------------------------------------------------------------------
+# Startup recovery — re-emit events for tasks stuck in active states
+# ---------------------------------------------------------------------------
+
+
+async def _recover_stuck_tasks() -> None:
+    """On startup, find tasks stuck in PLANNING or CODING and re-emit their events.
+
+    This handles the case where the container restarted mid-task and the
+    original event was already acknowledged.
+    """
+    from sqlalchemy import select as sa_select
+    async with async_session() as session:
+        result = await session.execute(
+            sa_select(Task).where(Task.status.in_({TaskStatus.PLANNING, TaskStatus.CODING}))
+        )
+        stuck_tasks = result.scalars().all()
+
+        if not stuck_tasks:
+            return
+
+        r = await get_redis()
+        for task in stuck_tasks:
+            if task.status == TaskStatus.PLANNING:
+                log.info(f"Recovering task #{task.id}: re-emitting start_planning")
+                await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
+            elif task.status == TaskStatus.CODING:
+                log.info(f"Recovering task #{task.id}: re-emitting start_coding")
+                await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+        await r.aclose()
+        log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — one place to start everything
+# ---------------------------------------------------------------------------
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Auto-discover repos from GitHub
+    async with async_session() as session:
+        await sync_repos(session)
+
+    # Recover tasks stuck in active states (e.g. from a restart mid-task)
+    await _recover_stuck_tasks()
+
+    bg = [
+        asyncio.create_task(orchestrator_event_loop()),
+        asyncio.create_task(run_scheduler()),
+        asyncio.create_task(claude_runner_loop()),
+        asyncio.create_task(telegram_inbound_loop()),
+        asyncio.create_task(telegram_notification_loop()),
+        asyncio.create_task(web_event_listener()),
+        asyncio.create_task(start_slack_if_configured()),
+        asyncio.create_task(task_timeout_watchdog()),
+        asyncio.create_task(ci_status_poller()),
+        asyncio.create_task(pr_comment_poller()),
+    ]
+
+    send_telegram("Auto-agent is online and ready for tasks.")
+    log.info("All systems started — http://localhost:2020")
+
+    yield
+
+    send_telegram("Auto-agent is shutting down.")
+    for t in bg:
+        t.cancel()
+    for t in bg:
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+
+
+app.router.lifespan_context = lifespan
+
+
+if __name__ == "__main__":
+    from shared.preflight import check_all
+    print("Running preflight checks...")
+    check_all()
+    uvicorn.run("run:app", host="0.0.0.0", port=2020, reload=False)

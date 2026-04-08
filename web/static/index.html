@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-Agent</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #d29922;
+      --orange: #db6d28;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 320px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sidebar-header .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .task-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .task-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      border: 1px solid transparent;
+    }
+    .task-item:hover { background: rgba(255,255,255,0.04); }
+    .task-item.selected { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+    .task-item .task-id { color: var(--text-muted); font-size: 11px; }
+    .task-item .task-title { margin-top: 2px; }
+    .task-item .task-status { font-size: 11px; margin-top: 4px; }
+
+    .status-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .status-intake, .status-classifying, .status-queued { background: rgba(139,148,158,0.2); color: var(--text-muted); }
+    .status-planning, .status-awaiting_approval, .status-awaiting_clarification { background: rgba(210,153,34,0.2); color: var(--yellow); }
+    .status-coding { background: rgba(88,166,255,0.2); color: var(--accent); }
+    .status-pr_created, .status-awaiting_ci, .status-awaiting_review { background: rgba(219,109,40,0.2); color: var(--orange); }
+    .status-done { background: rgba(63,185,80,0.2); color: var(--green); }
+    .status-failed, .status-blocked { background: rgba(248,81,73,0.2); color: var(--red); }
+
+    /* Main area */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .main-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .chat-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .message {
+      margin-bottom: 12px;
+      max-width: 80%;
+    }
+    .message.user { margin-left: auto; }
+    .message.system, .message.event { margin-right: auto; }
+    .message-bubble {
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .message.user .message-bubble { background: var(--accent); color: #fff; }
+    .message.system .message-bubble { background: var(--surface); border: 1px solid var(--border); }
+    .message.event .message-bubble { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); font-size: 12px; }
+    .message.error .message-bubble { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); color: var(--red); }
+    .message-time { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+    /* Markdown formatting inside bubbles */
+    .message-bubble h1, .message-bubble h2, .message-bubble h3, .message-bubble h4 {
+      margin: 8px 0 4px; font-weight: 600;
+    }
+    .message-bubble h1 { font-size: 16px; }
+    .message-bubble h2 { font-size: 15px; color: var(--accent); }
+    .message-bubble h3 { font-size: 14px; }
+    .message-bubble h4 { font-size: 13px; color: var(--text-muted); }
+    .message-bubble p { margin: 4px 0; }
+    .message-bubble ul, .message-bubble ol { margin: 4px 0 4px 20px; }
+    .message-bubble li { margin: 2px 0; }
+    .message-bubble code {
+      background: rgba(255,255,255,0.08); padding: 1px 5px;
+      border-radius: 3px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
+    }
+    .message-bubble pre {
+      background: rgba(0,0,0,0.3); padding: 8px 10px; border-radius: 4px;
+      overflow-x: auto; margin: 6px 0; font-size: 12px;
+    }
+    .message-bubble pre code { background: transparent; padding: 0; }
+    .message-bubble strong { font-weight: 600; }
+    .message-bubble em { font-style: italic; }
+    .message-bubble hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+    .message-bubble a { color: var(--accent); text-decoration: none; }
+    .message-bubble a:hover { text-decoration: underline; }
+
+    /* Input area */
+    .input-area {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+    }
+    .input-area input, .input-area textarea {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      resize: none;
+    }
+    .input-area input:focus, .input-area textarea:focus { outline: none; border-color: var(--accent); }
+    .input-area button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .input-area button:hover { opacity: 0.9; }
+    .input-area button.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    /* New task form */
+    .new-task-form {
+      padding: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .new-task-form input, .new-task-form textarea {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: inherit;
+      margin-bottom: 6px;
+      resize: none;
+    }
+    .new-task-form input:focus, .new-task-form textarea:focus { outline: none; border-color: var(--accent); }
+    .new-task-form button {
+      width: 100%;
+      background: var(--green);
+      color: #fff;
+      border: none;
+      padding: 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    /* Approval bar */
+    .approval-bar {
+      padding: 10px 16px;
+      border-top: 1px solid var(--border);
+      background: rgba(210,153,34,0.08);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .approval-bar .approve-btn { background: var(--green); color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+    .approval-bar .reject-btn { background: var(--red); color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+    .approval-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; font-size: 12px; }
+    .approval-bar input:focus { outline: none; border-color: var(--accent); }
+
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <span><span class="dot"></span> Auto-Agent</span>
+      <span style="color: var(--text-muted); font-size: 12px;" id="task-count">0 tasks</span>
+    </div>
+    <div class="task-list" id="task-list"></div>
+    <div class="new-task-form">
+      <input type="text" id="new-title" placeholder="Task title...">
+      <textarea id="new-desc" rows="2" placeholder="Description (optional)"></textarea>
+      <input type="text" id="new-repo" placeholder="Repo name (optional)">
+      <button onclick="createTask()">Create Task</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="main-header" id="main-header">Select a task or create one</div>
+    <div class="chat-area" id="chat-area">
+      <div class="empty-state">Messages and events will appear here</div>
+    </div>
+    <div class="approval-bar" id="approval-bar" style="display:none;">
+      <span>Plan awaiting approval:</span>
+      <input type="text" id="reject-feedback" placeholder="Feedback (if rejecting)...">
+      <button class="approve-btn" onclick="approveTask()">Approve</button>
+      <button class="reject-btn" onclick="rejectTask()">Reject</button>
+    </div>
+    <div class="approval-bar" id="clarification-bar" style="display:none;">
+      <span>&#10067; Clarification needed:</span>
+      <input type="text" id="clarification-input" placeholder="Type your answer..." onkeydown="if(event.key==='Enter')sendClarification()">
+      <button class="approve-btn" onclick="sendClarification()">Answer</button>
+    </div>
+    <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);display:flex;gap:6px;">
+      <button onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
+      <button onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
+    </div>
+    <div class="input-area">
+      <input type="text" id="msg-input" placeholder="Describe a task or send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
+      <button onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    let ws;
+    let tasks = [];
+    let selectedTaskId = null;
+    let chatMessages = {}; // task_id -> [messages]
+
+    function connect() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        handleMessage(data);
+      };
+      ws.onclose = () => {
+        setTimeout(connect, 2000);
+      };
+    }
+
+    function handleMessage(data) {
+      switch (data.type) {
+        case "task_list":
+          tasks = data.tasks;
+          renderTasks();
+          break;
+        case "history":
+          // Load persisted history for a task
+          const key = data.task_id;
+          chatMessages[key] = (data.entries || []).map(e => ({
+            type: "event",
+            message: e.message ? `[${e.to_status}] ${e.message}` : `[${e.to_status}]`,
+            time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "",
+          }));
+          if (selectedTaskId === data.task_id) renderChat();
+          break;
+        case "event":
+          addChat(data.task_id, "event", formatEvent(data.event_type, data.payload || {}));
+          break;
+        case "system":
+          addChat(selectedTaskId, "system", data.message);
+          break;
+        case "user":
+          addChat(selectedTaskId, "user", data.message);
+          break;
+        case "error":
+          addChat(selectedTaskId, "error", data.message);
+          break;
+      }
+    }
+
+    function addChat(taskId, type, message) {
+      const key = taskId || "_global";
+      if (!chatMessages[key]) chatMessages[key] = [];
+      chatMessages[key].push({ type, message, time: new Date().toLocaleTimeString() });
+      if (key === "_global" || taskId === selectedTaskId) {
+        renderChat();
+      }
+    }
+
+    function renderTasks() {
+      const el = document.getElementById("task-list");
+      const count = document.getElementById("task-count");
+      const active = tasks.filter(t => !["done", "failed"].includes(t.status));
+      count.textContent = `${active.length} active / ${tasks.length} total`;
+
+      // Sort: active tasks first, then by id descending (newest first)
+      const statusOrder = {
+        'awaiting_clarification': 0, 'awaiting_approval': 0, 'coding': 1, 'planning': 1,
+        'awaiting_ci': 2, 'awaiting_review': 2, 'pr_created': 2,
+        'intake': 3, 'classifying': 3, 'queued': 3, 'blocked': 4,
+        'done': 5, 'failed': 5
+      };
+      const sorted = [...tasks].sort((a, b) => {
+        const oa = statusOrder[a.status] ?? 4, ob = statusOrder[b.status] ?? 4;
+        if (oa !== ob) return oa - ob;
+        return b.id - a.id;
+      });
+
+      el.innerHTML = sorted.map(t => `
+        <div class="task-item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask(${t.id})">
+          <div class="task-id">#${t.id} ${t.repo_name ? '(' + t.repo_name + ')' : ''}</div>
+          <div class="task-title">${escHtml(t.title)}</div>
+          <div class="task-status">
+            <span class="status-badge status-${t.status}">${t.status}</span>
+            ${t.complexity ? `<span style="color:var(--text-muted);margin-left:4px;">${t.complexity}</span>` : ''}
+          </div>
+        </div>
+      `).join("");
+
+      // Show/hide approval and clarification bars
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      document.getElementById("approval-bar").style.display =
+        (selected && selected.status === "awaiting_approval") ? "flex" : "none";
+      document.getElementById("clarification-bar").style.display =
+        (selected && selected.status === "awaiting_clarification") ? "flex" : "none";
+      document.getElementById("task-actions").style.display =
+        selected ? "flex" : "none";
+    }
+
+    function selectTask(id) {
+      selectedTaskId = id;
+      renderTasks();
+      renderChat();
+
+      const task = tasks.find(t => t.id === id);
+      if (task) {
+        let header = `#${task.id} — ${escHtml(task.title)}`;
+        if (task.pr_url) header += ` <a href="${task.pr_url}" target="_blank" style="color:var(--accent);font-size:12px;">PR</a>`;
+        document.getElementById("main-header").innerHTML = header;
+      }
+
+      // Load persisted history from server
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "load_history", task_id: id }));
+      }
+    }
+
+    function renderChat() {
+      const el = document.getElementById("chat-area");
+      const key = selectedTaskId || "_global";
+      const msgs = [...(chatMessages["_global"] || []), ...(chatMessages[key] || [])];
+
+      if (msgs.length === 0) {
+        el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
+        return;
+      }
+
+      el.innerHTML = msgs.map(m => `
+        <div class="message ${m.type}">
+          <div class="message-bubble">${renderMarkdown(m.message)}</div>
+          <div class="message-time">${m.time}</div>
+        </div>
+      `).join("");
+
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function createTask() {
+      const title = document.getElementById("new-title").value.trim();
+      const description = document.getElementById("new-desc").value.trim();
+      const repo_name = document.getElementById("new-repo").value.trim();
+      if (!title) return;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "send_task", title, description, repo_name }));
+      } else {
+        // Fallback to REST API
+        const resp = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
+        });
+        if (resp.ok) {
+          const task = await resp.json();
+          addChat(null, "system", `Task #${task.id} created: ${task.title}`);
+        } else {
+          addChat(null, "error", `Failed to create task: ${await resp.text()}`);
+        }
+      }
+      document.getElementById("new-title").value = "";
+      document.getElementById("new-desc").value = "";
+      document.getElementById("new-repo").value = "";
+    }
+
+    function sendMessage() {
+      const input = document.getElementById("msg-input");
+      const text = input.value.trim();
+      if (!text) return;
+
+      ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      input.value = "";
+    }
+
+    function approveTask() {
+      if (!selectedTaskId) return;
+      ws.send(JSON.stringify({ type: "approve", task_id: selectedTaskId }));
+    }
+
+    function rejectTask() {
+      if (!selectedTaskId) return;
+      const feedback = document.getElementById("reject-feedback").value.trim();
+      ws.send(JSON.stringify({ type: "reject", task_id: selectedTaskId, feedback }));
+      document.getElementById("reject-feedback").value = "";
+    }
+
+    function sendClarification() {
+      if (!selectedTaskId) return;
+      const input = document.getElementById("clarification-input");
+      const text = input.value.trim();
+      if (!text) return;
+      ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      input.value = "";
+    }
+
+    async function cancelTask() {
+      if (!selectedTaskId || !confirm("Cancel this task?")) return;
+      const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
+      if (resp.ok) addChat(selectedTaskId, "system", "Task cancelled.");
+      else addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+    }
+
+    async function deleteTask() {
+      if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
+      const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
+      if (resp.ok) {
+        delete chatMessages[selectedTaskId];
+        selectedTaskId = null;
+        document.getElementById("main-header").textContent = "Select a task or create one";
+        renderChat();
+        ws.send(JSON.stringify({ type: "refresh" }));
+      } else {
+        addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
+      }
+    }
+
+    function renderMarkdown(s) {
+      // Escape HTML first
+      let h = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+      // Code blocks (```...```)
+      h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+        `<pre><code>${code.trimEnd()}</code></pre>`);
+
+      // Inline code
+      h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+      // Headers
+      h = h.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+      h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      h = h.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      h = h.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // Horizontal rule
+      h = h.replace(/^---+$/gm, '<hr>');
+
+      // Bold and italic
+      h = h.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      h = h.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+
+      // Links [text](url)
+      h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+      // Lists: group consecutive lines starting with -, *, or number.
+      const lines = h.split('\n');
+      const out = [];
+      let inList = null; // 'ul' | 'ol' | null
+      for (const line of lines) {
+        const ulMatch = /^[-*]\s+(.+)$/.exec(line);
+        const olMatch = /^\d+\.\s+(.+)$/.exec(line);
+        if (ulMatch) {
+          if (inList !== 'ul') { if (inList) out.push(`</${inList}>`); out.push('<ul>'); inList = 'ul'; }
+          out.push(`<li>${ulMatch[1]}</li>`);
+        } else if (olMatch) {
+          if (inList !== 'ol') { if (inList) out.push(`</${inList}>`); out.push('<ol>'); inList = 'ol'; }
+          out.push(`<li>${olMatch[1]}</li>`);
+        } else {
+          if (inList) { out.push(`</${inList}>`); inList = null; }
+          out.push(line);
+        }
+      }
+      if (inList) out.push(`</${inList}>`);
+      h = out.join('\n');
+
+      // Paragraphs: wrap remaining plain-text blocks, preserve newlines inside blocks
+      return h.replace(/\n\n+/g, '<br><br>').replace(/\n/g, '<br>');
+    }
+
+    function formatEvent(eventType, payload) {
+      const p = payload || {};
+      switch (eventType) {
+        case "task.created":
+          return "📋 **Task created**";
+        case "task.classified":
+          return `🏷️ Classified as **${p.complexity || "unknown"}** (risk: ${p.risk_level || "?"})`;
+        case "task.start_planning":
+          return p.feedback ? "✏️ **Revising plan** based on feedback" : "🔍 **Planning started**";
+        case "task.plan_ready":
+          return `**Plan ready for review:**\n\n${p.plan || "No details"}`;
+        case "task.approved":
+          return "✅ **Plan approved** — starting coding";
+        case "task.rejected":
+          return `↩️ **Plan rejected** — revising\n\nFeedback: ${p.feedback || "none"}`;
+        case "task.start_coding":
+          return p.retry_reason ? `⚡ **Retrying coding** — ${p.retry_reason}` : "⚡ **Coding started**";
+        case "task.review_complete":
+          const approved = p.approved ? "✅ Approved" : "🔧 Changes requested and fixed";
+          return `**Independent review:** ${approved}\n\n${(p.review || "").slice(0, 1000)}${p.pr_url ? "\n\n[View PR](" + p.pr_url + ")" : ""}`;
+        case "task.ci_passed":
+          return "✅ **CI passed** — awaiting review";
+        case "task.ci_failed":
+          return `❌ **CI failed** — retrying\n\n${p.reason || ""}`;
+        case "task.dev_deployed":
+          return `🚀 **Deployed to dev**\nBranch \`${p.branch || ""}\` deployed.\n${p.pr_url || ""}\n\nPlease review the changes and merge or request changes.${p.output ? "\n\n" + p.output.slice(-500) : ""}`;
+        case "task.dev_deploy_failed":
+          return `❌ **Dev deployment failed**\n${p.pr_url || ""}\n\n${p.output || "Unknown error"}`;
+        case "task.review_comments_addressed":
+          return `**Review comments addressed** — changes pushed.\n${p.pr_url || ""}${p.output ? "\n\n" + p.output.slice(0, 500) : ""}`;
+        case "task.clarification_needed":
+          return `❓ **Clarification needed:**\n\n${p.question || "Unknown question"}`;
+        case "task.clarification_resolved":
+          return "💬 Clarification resolved — resuming";
+        case "task.done":
+          return "🎉 **Task complete!**";
+        case "task.failed":
+          return `❌ **Task failed**\n\n${p.error || p.reason || "Unknown error"}`;
+        case "task.blocked":
+          return `🚫 **Task blocked** — ${p.error || "needs input"}`;
+        case "task.cleanup":
+          return "🧹 Workspace cleaned up";
+        case "task.deploy_preview":
+          return "🚀 Deploying to dev environment...";
+        default:
+          const detail = Object.keys(p).length > 0 ? JSON.stringify(p) : "";
+          return `[${eventType}]${detail ? " " + detail : ""}`;
+      }
+    }
+
+    function escHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    connect();
+  </script>
+</body>
+</html>

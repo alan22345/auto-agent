@@ -1,0 +1,138 @@
+"""Sync repos from GitHub — auto-discovers all repos the token can access."""
+
+from __future__ import annotations
+
+import logging
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.config import settings
+from shared.models import Repo
+from orchestrator.ci_extractor import extract_ci_checks
+
+log = logging.getLogger(__name__)
+
+GITHUB_API = "https://api.github.com"
+
+
+async def sync_repos(session: AsyncSession) -> int:
+    """Fetch all repos visible to the GitHub token and upsert into the DB.
+
+    Returns the number of new repos added.
+    """
+    if not settings.github_token:
+        log.warning("No GITHUB_TOKEN set, skipping repo sync")
+        return 0
+
+    headers = {
+        "Authorization": f"token {settings.github_token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    repos_from_gh: list[dict] = []
+    page = 1
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            resp = await client.get(
+                f"{GITHUB_API}/user/repos",
+                headers=headers,
+                params={"per_page": 100, "page": page, "sort": "updated"},
+            )
+            if resp.status_code != 200:
+                log.error(f"GitHub API error: {resp.status_code} {resp.text[:200]}")
+                break
+
+            batch = resp.json()
+            if not batch:
+                break
+
+            repos_from_gh.extend(batch)
+            page += 1
+
+    # Upsert into DB — insert new repos, update default_branch on existing ones
+    added = 0
+    for gh_repo in repos_from_gh:
+        name = gh_repo["full_name"]  # e.g. "Ergodic/cardamon"
+        clone_url = gh_repo["clone_url"]
+        default_branch = gh_repo.get("default_branch", "main")
+
+        result = await session.execute(select(Repo).where(Repo.name == name))
+        existing = result.scalar_one_or_none()
+        if existing:
+            # Update URL in case it changed, but don't touch default_branch
+            # — it may have been manually overridden via /branch command
+            if existing.url != clone_url:
+                existing.url = clone_url
+            # Extract CI checks if not already cached
+            if not existing.ci_checks:
+                ci_checks = await extract_ci_checks(clone_url)
+                if ci_checks:
+                    existing.ci_checks = ci_checks
+                    log.info(f"Extracted CI checks for '{name}'")
+            continue
+
+        # New repo — extract CI checks
+        ci_checks = await extract_ci_checks(clone_url)
+        repo = Repo(name=name, url=clone_url, default_branch=default_branch, ci_checks=ci_checks)
+        session.add(repo)
+        if ci_checks:
+            log.info(f"Extracted CI checks for new repo '{name}'")
+        added += 1
+
+    # Also add/update short-name aliases (e.g. "cardamon" -> same URL)
+    # so users can refer to repos by just the repo name
+    for gh_repo in repos_from_gh:
+        short_name = gh_repo["name"]  # e.g. "cardamon"
+        default_branch = gh_repo.get("default_branch", "main")
+
+        result = await session.execute(select(Repo).where(Repo.name == short_name))
+        existing = result.scalar_one_or_none()
+        if existing:
+            # Copy CI checks from full-name entry if missing
+            if not existing.ci_checks:
+                full_result = await session.execute(
+                    select(Repo).where(Repo.name == gh_repo["full_name"])
+                )
+                full_repo = full_result.scalar_one_or_none()
+                if full_repo and full_repo.ci_checks:
+                    existing.ci_checks = full_repo.ci_checks
+            continue
+
+        # Copy CI checks from the full-name entry we just created
+        full_result = await session.execute(
+            select(Repo).where(Repo.name == gh_repo["full_name"])
+        )
+        full_repo = full_result.scalar_one_or_none()
+        ci_checks = full_repo.ci_checks if full_repo else None
+
+        repo = Repo(
+            name=short_name,
+            url=gh_repo["clone_url"],
+            default_branch=default_branch,
+            ci_checks=ci_checks,
+        )
+        session.add(repo)
+        added += 1
+
+    await session.commit()
+    log.info(f"Repo sync complete: {len(repos_from_gh)} from GitHub, {added} new in DB")
+    return added
+
+
+async def match_repo(session: AsyncSession, text: str) -> Repo | None:
+    """Try to find a repo name mentioned in the text."""
+    text_lower = text.lower()
+
+    result = await session.execute(select(Repo).order_by(Repo.name))
+    repos = result.scalars().all()
+
+    # Try longest names first to prefer "Ergodic/cardamon" over "cardamon"
+    repos_sorted = sorted(repos, key=lambda r: len(r.name), reverse=True)
+    for repo in repos_sorted:
+        if repo.name.lower() in text_lower:
+            return repo
+
+    return None
