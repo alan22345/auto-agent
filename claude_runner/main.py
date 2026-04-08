@@ -897,15 +897,29 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
             proc.kill()
             await proc.wait()
             log.warning(f"Task #{task_id}: deploy script timed out after 300s")
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(
+                    type="task.dev_deploy_failed",
+                    task_id=task_id,
+                    payload={
+                        "branch": branch_name,
+                        "output": "Deploy script timed out after 300s",
+                        "pr_url": task.pr_url or "",
+                    },
+                ).to_redis(),
+            )
+            await r.aclose()
             return
 
         stdout_str = (stdout or b"").decode()
         stderr_str = (stderr or b"").decode()
         output = (stdout_str + stderr_str).strip()
 
+        r = await get_redis()
         if proc.returncode == 0:
             log.info(f"Task #{task_id}: dev deploy succeeded")
-            r = await get_redis()
             await publish_event(
                 r,
                 Event(
@@ -918,12 +932,41 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
                     },
                 ).to_redis(),
             )
-            await r.aclose()
         else:
             log.warning(f"Task #{task_id}: deploy script failed (exit {proc.returncode}): {output[-500:]}")
+            await publish_event(
+                r,
+                Event(
+                    type="task.dev_deploy_failed",
+                    task_id=task_id,
+                    payload={
+                        "branch": branch_name,
+                        "output": f"Deploy script failed (exit {proc.returncode}):\n{output[-1000:]}",
+                        "pr_url": task.pr_url or "",
+                    },
+                ).to_redis(),
+            )
+        await r.aclose()
 
     except Exception:
         log.exception(f"Task #{task_id}: deploy preview failed")
+        try:
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(
+                    type="task.dev_deploy_failed",
+                    task_id=task_id,
+                    payload={
+                        "branch": branch_name,
+                        "output": "Deploy preview failed due to an unexpected error",
+                        "pr_url": task.pr_url or "",
+                    },
+                ).to_redis(),
+            )
+            await r.aclose()
+        except Exception:
+            log.exception(f"Task #{task_id}: failed to publish deploy failure event")
 
 
 async def handle_task_cleanup(task_id: int) -> None:

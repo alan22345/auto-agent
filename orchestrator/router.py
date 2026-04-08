@@ -231,6 +231,25 @@ async def transition_task(
     return _task_to_response(task)
 
 
+@router.post("/tasks/{task_id}/done", response_model=TaskData)
+async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.status == TaskStatus.DONE:
+        return _task_to_response(task)
+    if task.status != TaskStatus.AWAITING_REVIEW:
+        raise HTTPException(400, f"Task is in {task.status.value}, not awaiting_review")
+
+    r = await get_redis()
+    await publish_event(r, Event(type="task.review_approved", task_id=task.id).to_redis())
+    await r.aclose()
+
+    task = await transition(session, task, TaskStatus.DONE, "Marked done by user")
+    await session.commit()
+    return _task_to_response(task)
+
+
 @router.post("/tasks/{task_id}/approve", response_model=TaskData)
 async def approve_task(
     task_id: int,
@@ -475,7 +494,7 @@ async def trigger_harness_onboarding(
             (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
         )
     )
-    repo = result.scalar_one_or_none()
+    repo = result.scalars().first()
     if not repo:
         raise HTTPException(404, f"Repo '{repo_name}' not found")
 

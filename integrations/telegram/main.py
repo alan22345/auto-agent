@@ -153,7 +153,7 @@ async def _handle_approval(approved: bool = True, feedback: str = "") -> None:
 
 async def _handle_command(text: str) -> None:
     """Process Telegram commands."""
-    cmd = text.lower().split()[0]
+    cmd = text.lower().split()[0].split("@")[0]
 
     if cmd == "/status":
         try:
@@ -248,10 +248,28 @@ async def _handle_command(text: str) -> None:
             else:
                 await send_telegram_async(f"Failed: {resp.text[:200]}")
 
+    elif cmd == "/done":
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_telegram_async("Usage: `/done <task_id>`")
+            return
+        try:
+            task_id = int(parts[1])
+        except ValueError:
+            await send_telegram_async("Invalid task ID.")
+            return
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/done")
+            if resp.status_code == 200:
+                await send_telegram_async(f"Task #{task_id} marked as done.")
+            else:
+                await send_telegram_async(f"Failed: {resp.text[:200]}")
+
     elif cmd == "/help":
         await send_telegram_async(
             "*Available commands:*\n"
             "/status — show active tasks\n"
+            "/done <task\\_id> — mark a task as done (approve)\n"
             "/cancel <task\\_id> — cancel a running task\n"
             "/delete <task\\_id> — permanently delete a task\n"
             "/answer <task\\_id> <response> — answer a clarification question\n"

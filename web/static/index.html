@@ -68,7 +68,7 @@
     .task-item:hover { background: rgba(255,255,255,0.04); }
     .task-item.selected { border-color: var(--accent); background: rgba(88,166,255,0.08); }
     .task-item .task-id { color: var(--text-muted); font-size: 11px; }
-    .task-item .task-title { margin-top: 2px; }
+    .task-item .task-title { margin-top: 2px; word-break: break-word; }
     .task-item .task-status { font-size: 11px; margin-top: 4px; }
 
     .status-badge {
@@ -269,7 +269,11 @@
       <input type="text" id="clarification-input" placeholder="Type your answer..." onkeydown="if(event.key==='Enter')sendClarification()">
       <button class="approve-btn" onclick="sendClarification()">Answer</button>
     </div>
-    <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);display:flex;gap:6px;">
+    <div class="approval-bar" id="done-bar" style="display:none;">
+      <span>PR merged? Mark this task as complete:</span>
+      <button class="approve-btn" onclick="markDone()">Mark Done</button>
+    </div>
+    <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;">
       <button onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
       <button onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
     </div>
@@ -372,6 +376,8 @@
         (selected && selected.status === "awaiting_approval") ? "flex" : "none";
       document.getElementById("clarification-bar").style.display =
         (selected && selected.status === "awaiting_clarification") ? "flex" : "none";
+      document.getElementById("done-bar").style.display =
+        (selected && selected.status === "awaiting_review") ? "flex" : "none";
       document.getElementById("task-actions").style.display =
         selected ? "flex" : "none";
     }
@@ -476,6 +482,13 @@
       const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
       if (resp.ok) addChat(selectedTaskId, "system", "Task cancelled.");
       else addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+    }
+
+    async function markDone() {
+      if (!selectedTaskId) return;
+      const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
+      if (resp.ok) addChat(selectedTaskId, "system", "Task marked as done.");
+      else addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
     }
 
     async function deleteTask() {

@@ -82,6 +82,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await _handle_approve(ws, data)
             elif msg_type == "reject":
                 await _handle_reject(ws, data)
+            elif msg_type == "mark_done":
+                await _handle_mark_done(ws, data)
             elif msg_type == "load_history":
                 task_id = data.get("task_id")
                 if task_id:
@@ -196,6 +198,19 @@ async def _handle_approve(ws: WebSocket, data: dict) -> None:
             await broadcast({"type": "system", "message": f"Task #{task_id} approved"})
         else:
             await ws.send_json({"type": "error", "message": f"Failed to approve: {resp.text}"})
+
+
+async def _handle_mark_done(ws: WebSocket, data: dict) -> None:
+    task_id = data.get("task_id")
+    if not task_id:
+        return
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/done")
+        if resp.status_code == 200:
+            await broadcast({"type": "system", "message": f"Task #{task_id} marked as done"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed to mark done: {resp.text}"})
 
 
 async def _handle_reject(ws: WebSocket, data: dict) -> None:

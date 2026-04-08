@@ -550,6 +550,109 @@ async def _pr_has_no_checks(pr_url: str, token: str) -> bool:
 # ---------------------------------------------------------------------------
 
 COMMENT_POLL_INTERVAL = 30  # Check every 30 seconds
+
+# ---------------------------------------------------------------------------
+# PR merge poller — detects merged PRs without webhooks (exponential backoff)
+# ---------------------------------------------------------------------------
+
+MERGE_POLL_INITIAL = 30  # Start polling every 30 seconds
+MERGE_POLL_MAX = 600  # Max interval: 10 minutes
+
+# Per-task backoff state: task_id -> current interval
+_merge_poll_intervals: dict[int, float] = {}
+_merge_poll_last_check: dict[int, float] = {}
+
+
+async def pr_merge_poller() -> None:
+    """Poll GitHub API to detect merged PRs for tasks in AWAITING_REVIEW.
+
+    Uses exponential backoff per task, starting at 30s and maxing out at 10 min.
+    """
+    from shared.config import settings as _settings
+    if not _settings.github_token:
+        log.info("PR merge poller: no GITHUB_TOKEN, skipping")
+        return
+
+    import time
+    log.info("PR merge poller started")
+
+    while True:
+        try:
+            now = time.monotonic()
+            async with async_session() as session:
+                from sqlalchemy import select as sa_select
+                result = await session.execute(
+                    sa_select(Task).where(Task.status == TaskStatus.AWAITING_REVIEW)
+                )
+                tasks_awaiting = result.scalars().all()
+
+                # Clean up backoff state for tasks no longer awaiting review
+                active_ids = {t.id for t in tasks_awaiting}
+                for tid in list(_merge_poll_intervals.keys()):
+                    if tid not in active_ids:
+                        _merge_poll_intervals.pop(tid, None)
+                        _merge_poll_last_check.pop(tid, None)
+
+                for task in tasks_awaiting:
+                    if not task.pr_url:
+                        continue
+
+                    # Initialize backoff for new tasks
+                    if task.id not in _merge_poll_intervals:
+                        _merge_poll_intervals[task.id] = MERGE_POLL_INITIAL
+                        _merge_poll_last_check[task.id] = 0.0
+
+                    # Check if enough time has passed for this task
+                    interval = _merge_poll_intervals[task.id]
+                    last = _merge_poll_last_check[task.id]
+                    if now - last < interval:
+                        continue
+
+                    _merge_poll_last_check[task.id] = now
+
+                    try:
+                        merged = await _check_pr_merged(task.pr_url, _settings.github_token)
+                    except Exception:
+                        log.exception(f"Merge poll failed for task #{task.id}")
+                        # Back off on errors too
+                        _merge_poll_intervals[task.id] = min(interval * 2, MERGE_POLL_MAX)
+                        continue
+
+                    if merged:
+                        log.info(f"Task #{task.id}: PR merged detected (polled)")
+                        r = await get_redis()
+                        await publish_event(r, Event(
+                            type="task.review_approved",
+                            task_id=task.id,
+                        ).to_redis())
+                        await r.aclose()
+                        # Clean up — task will transition out of AWAITING_REVIEW
+                        _merge_poll_intervals.pop(task.id, None)
+                        _merge_poll_last_check.pop(task.id, None)
+                    else:
+                        # Exponential backoff
+                        _merge_poll_intervals[task.id] = min(interval * 2, MERGE_POLL_MAX)
+
+        except Exception:
+            log.exception("PR merge poller error")
+        await asyncio.sleep(15)  # Base loop tick — individual tasks have their own intervals
+
+
+async def _check_pr_merged(pr_url: str, token: str) -> bool:
+    """Check if a PR has been merged via GitHub API."""
+    parts = pr_url.rstrip("/").split("/")
+    owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code != 200:
+            return False
+        pr_data = resp.json()
+        return pr_data.get("merged", False)
 REVIEW_POLL_STATUSES = {TaskStatus.AWAITING_REVIEW, TaskStatus.AWAITING_CI, TaskStatus.PR_CREATED}
 
 # Track last seen comment ID per task to avoid re-processing
@@ -755,6 +858,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(task_timeout_watchdog()),
         asyncio.create_task(ci_status_poller()),
         asyncio.create_task(pr_comment_poller()),
+        asyncio.create_task(pr_merge_poller()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")
