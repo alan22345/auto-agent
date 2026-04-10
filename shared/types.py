@@ -45,6 +45,7 @@ class TaskData(BaseModel):
     pr_url: str | None = None
     plan: str | None = None
     error: str | None = None
+    freeform_mode: bool = False
     created_at: str | None = None
 
 
@@ -152,6 +153,37 @@ class RepoResponse(BaseModel):
     id: int
     name: str
     url: str
+
+
+# --- Linear types ---
+
+
+# --- Freeform / Suggestion types ---
+
+
+class SuggestionData(BaseModel):
+    """Typed representation of a PO suggestion."""
+    id: int
+    repo_name: str | None = None
+    title: str
+    description: str = ""
+    rationale: str = ""
+    category: str = ""
+    priority: int = 3
+    status: str = "pending"
+    task_id: int | None = None
+    created_at: str | None = None
+
+
+class FreeformConfigData(BaseModel):
+    """Typed representation of a freeform mode config."""
+    id: int
+    repo_name: str | None = None
+    enabled: bool = False
+    dev_branch: str = "dev"
+    analysis_cron: str = "0 9 * * 1"
+    last_analysis_at: str | None = None
+    created_at: str | None = None
 
 
 # --- Linear types ---

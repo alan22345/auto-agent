@@ -265,6 +265,38 @@ async def _handle_command(text: str) -> None:
             else:
                 await send_telegram_async(f"Failed: {resp.text[:200]}")
 
+    elif cmd == "/freeform":
+        # /freeform <repo_name> [on|off]
+        parts = text.split(maxsplit=2)
+        if len(parts) < 2:
+            await send_telegram_async(
+                "Usage: `/freeform <repo_name> [on|off]`\n"
+                "Example: `/freeform synapse-common` (enables)\n"
+                "         `/freeform synapse-common off` (disables)"
+            )
+            return
+        repo_name = parts[1]
+        toggle = parts[2].lower() if len(parts) > 2 else "on"
+        if toggle not in ("on", "off"):
+            await send_telegram_async("Toggle must be `on` or `off`.")
+            return
+        enabled = toggle == "on"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{ORCHESTRATOR_URL}/freeform/config",
+                json={
+                    "repo_name": repo_name,
+                    "enabled": enabled,
+                    "dev_branch": "dev",
+                    "analysis_cron": "0 9 * * 1",
+                },
+            )
+            if resp.status_code == 200:
+                state = "enabled" if enabled else "disabled"
+                await send_telegram_async(f"Freeform mode *{state}* for `{repo_name}`.")
+            else:
+                await send_telegram_async(f"Failed: {resp.text[:200]}")
+
     elif cmd == "/help":
         await send_telegram_async(
             "*Available commands:*\n"
@@ -274,6 +306,7 @@ async def _handle_command(text: str) -> None:
             "/delete <task\\_id> — permanently delete a task\n"
             "/answer <task\\_id> <response> — answer a clarification question\n"
             "/branch <repo> <branch> — change a repo's default branch\n"
+            "/freeform <repo> \\[on|off] — enable/disable freeform mode\n"
             "/help — show this message"
         )
 

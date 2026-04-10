@@ -236,6 +236,101 @@
       color: var(--text-muted);
       font-size: 14px;
     }
+
+    /* Sidebar tabs */
+    .sidebar-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-tabs button {
+      flex: 1;
+      padding: 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 12px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .sidebar-tabs button.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .sidebar-tabs button:hover { color: var(--text); }
+
+    /* Freeform panel */
+    .freeform-panel { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+    .freeform-panel.visible { display: flex; }
+    .task-list-panel { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+    .task-list-panel.hidden { display: none; }
+
+    .suggestion-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .suggestion-item .sug-title { font-weight: 600; margin-bottom: 2px; }
+    .suggestion-item .sug-rationale { color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
+    .suggestion-item .sug-meta { display: flex; gap: 6px; align-items: center; }
+    .suggestion-item .sug-category {
+      font-size: 10px; padding: 1px 6px; border-radius: 8px;
+      background: rgba(88,166,255,0.15); color: var(--accent);
+    }
+    .suggestion-item .sug-priority {
+      font-size: 10px; color: var(--text-muted);
+    }
+    .suggestion-item .sug-actions { margin-top: 6px; display: flex; gap: 4px; }
+    .suggestion-item .sug-actions button {
+      padding: 3px 10px; border: none; border-radius: 3px; font-size: 11px; cursor: pointer;
+    }
+    .sug-approve { background: var(--green); color: #fff; }
+    .sug-reject { background: var(--red); color: #fff; }
+    .sug-promote { background: var(--green); color: #fff; }
+    .sug-revert { background: var(--orange); color: #fff; }
+
+    .freeform-section { padding: 8px; overflow-y: auto; flex: 1; }
+    .freeform-section h3 { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; }
+
+    .freeform-config-form {
+      padding: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .freeform-config-form input, .freeform-config-form select {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .freeform-config-form button {
+      width: 100%;
+      padding: 5px;
+      border: none;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      margin-bottom: 4px;
+    }
+    .dev-task-item {
+      padding: 8px 10px;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .dev-task-item .dt-title { font-weight: 600; margin-bottom: 2px; }
+    .dev-task-item .dt-status { font-size: 10px; color: var(--text-muted); }
+    .dev-task-item .dt-actions { margin-top: 4px; display: flex; gap: 4px; }
+    .dev-task-item .dt-actions button {
+      padding: 2px 8px; border: none; border-radius: 3px; font-size: 10px; cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -244,12 +339,39 @@
       <span><span class="dot"></span> Auto-Agent</span>
       <span style="color: var(--text-muted); font-size: 12px;" id="task-count">0 tasks</span>
     </div>
-    <div class="task-list" id="task-list"></div>
-    <div class="new-task-form">
-      <input type="text" id="new-title" placeholder="Task title...">
-      <textarea id="new-desc" rows="2" placeholder="Description (optional)"></textarea>
-      <input type="text" id="new-repo" placeholder="Repo name (optional)">
-      <button onclick="createTask()">Create Task</button>
+    <div class="sidebar-tabs">
+      <button class="active" onclick="switchTab('tasks')" id="tab-tasks">Tasks</button>
+      <button onclick="switchTab('freeform')" id="tab-freeform">Freeform</button>
+    </div>
+
+    <!-- Tasks tab -->
+    <div class="task-list-panel" id="tasks-panel">
+      <div class="task-list" id="task-list"></div>
+      <div class="new-task-form">
+        <input type="text" id="new-title" placeholder="Task title...">
+        <textarea id="new-desc" rows="2" placeholder="Description (optional)"></textarea>
+        <input type="text" id="new-repo" placeholder="Repo name (optional)">
+        <button onclick="createTask()">Create Task</button>
+      </div>
+    </div>
+
+    <!-- Freeform tab -->
+    <div class="freeform-panel" id="freeform-panel">
+      <div class="freeform-section" id="freeform-content">
+        <h3>Suggestions</h3>
+        <div id="suggestion-list"><div class="empty-state" style="height:60px;font-size:12px;">No suggestions yet</div></div>
+
+        <h3 style="margin-top:12px;">Dev Changes</h3>
+        <div id="dev-task-list"><div class="empty-state" style="height:60px;font-size:12px;">No freeform tasks yet</div></div>
+      </div>
+
+      <div class="freeform-config-form">
+        <input type="text" id="ff-repo" placeholder="Repo name">
+        <input type="text" id="ff-branch" placeholder="Dev branch (default: dev)" value="dev">
+        <input type="text" id="ff-cron" placeholder="Cron (default: 0 9 * * 1)" value="0 9 * * 1">
+        <button style="background:var(--green);color:#fff;" onclick="enableFreeform()">Enable Freeform</button>
+        <button style="background:var(--accent);color:#fff;" onclick="triggerAnalysis()">Run PO Analysis Now</button>
+      </div>
     </div>
   </div>
 
@@ -300,11 +422,129 @@
       };
     }
 
+    let suggestions = [];
+    let freeformTasks = [];
+    let currentTab = "tasks";
+
+    function switchTab(tab) {
+      currentTab = tab;
+      document.getElementById("tab-tasks").classList.toggle("active", tab === "tasks");
+      document.getElementById("tab-freeform").classList.toggle("active", tab === "freeform");
+      document.getElementById("tasks-panel").classList.toggle("hidden", tab !== "tasks");
+      document.getElementById("freeform-panel").classList.toggle("visible", tab === "freeform");
+      if (tab === "freeform") {
+        loadSuggestions();
+        loadFreeformTasks();
+      }
+    }
+
+    function loadSuggestions() {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "load_suggestions", status: "pending" }));
+    }
+
+    function loadFreeformTasks() {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "load_freeform_tasks" }));
+    }
+
+    function renderSuggestions() {
+      const el = document.getElementById("suggestion-list");
+      if (suggestions.length === 0) {
+        el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No pending suggestions</div>';
+        return;
+      }
+      el.innerHTML = suggestions.map(s => `
+        <div class="suggestion-item">
+          <div class="sug-title">${escHtml(s.title)}</div>
+          <div class="sug-rationale">${escHtml(s.rationale || '')}</div>
+          <div class="sug-meta">
+            ${s.category ? `<span class="sug-category">${s.category}</span>` : ''}
+            <span class="sug-priority">P${s.priority || 3}</span>
+            ${s.repo_name ? `<span style="color:var(--text-muted)">${s.repo_name}</span>` : ''}
+          </div>
+          ${s.status === 'pending' ? `
+            <div class="sug-actions">
+              <button class="sug-approve" onclick="approveSuggestion(${s.id})">Approve</button>
+              <button class="sug-reject" onclick="rejectSuggestion(${s.id})">Reject</button>
+            </div>
+          ` : `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;">${s.status}${s.task_id ? ' (Task #' + s.task_id + ')' : ''}</div>`}
+        </div>
+      `).join("");
+    }
+
+    function renderFreeformTasks() {
+      const el = document.getElementById("dev-task-list");
+      if (freeformTasks.length === 0) {
+        el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No freeform tasks yet</div>';
+        return;
+      }
+      el.innerHTML = freeformTasks.map(t => `
+        <div class="dev-task-item">
+          <div class="dt-title">#${t.id} ${escHtml(t.title)}</div>
+          <div class="dt-status">
+            <span class="status-badge status-${t.status}">${t.status}</span>
+            ${t.pr_url ? ` <a href="${t.pr_url}" target="_blank" style="color:var(--accent);font-size:10px;">PR</a>` : ''}
+          </div>
+          ${t.status === 'done' ? `
+            <div class="dt-actions">
+              <button class="sug-promote" onclick="promoteTask(${t.id})">Promote to Main</button>
+              <button class="sug-revert" onclick="revertTask(${t.id})">Revert</button>
+            </div>
+          ` : ''}
+        </div>
+      `).join("");
+    }
+
+    function approveSuggestion(id) {
+      ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
+      suggestions = suggestions.filter(s => s.id !== id);
+      renderSuggestions();
+    }
+
+    function rejectSuggestion(id) {
+      ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
+      suggestions = suggestions.filter(s => s.id !== id);
+      renderSuggestions();
+    }
+
+    function promoteTask(id) {
+      if (!confirm("Promote this change to main?")) return;
+      ws.send(JSON.stringify({ type: "promote_task", task_id: id }));
+    }
+
+    function revertTask(id) {
+      if (!confirm("Revert this change from dev?")) return;
+      ws.send(JSON.stringify({ type: "revert_task", task_id: id }));
+    }
+
+    function enableFreeform() {
+      const repo = document.getElementById("ff-repo").value.trim();
+      const branch = document.getElementById("ff-branch").value.trim() || "dev";
+      const cron = document.getElementById("ff-cron").value.trim() || "0 9 * * 1";
+      if (!repo) { alert("Enter a repo name"); return; }
+      ws.send(JSON.stringify({ type: "toggle_freeform", repo_name: repo, enabled: true, dev_branch: branch, analysis_cron: cron }));
+    }
+
+    function triggerAnalysis() {
+      const repo = document.getElementById("ff-repo").value.trim();
+      if (!repo) { alert("Enter a repo name"); return; }
+      ws.send(JSON.stringify({ type: "trigger_analysis", repo_name: repo }));
+    }
+
     function handleMessage(data) {
       switch (data.type) {
         case "task_list":
           tasks = data.tasks;
           renderTasks();
+          break;
+        case "suggestion_list":
+          suggestions = data.suggestions || [];
+          renderSuggestions();
+          break;
+        case "freeform_task_list":
+          freeformTasks = data.tasks || [];
+          renderFreeformTasks();
           break;
         case "history":
           // Load persisted history for a task
@@ -601,6 +841,8 @@
           return "🧹 Workspace cleaned up";
         case "task.deploy_preview":
           return "🚀 Deploying to dev environment...";
+        case "po.suggestions_ready":
+          return `🧠 **PO Analysis complete** — ${p.count || 0} new suggestions for ${p.repo_name || "repo"}`;
         default:
           const detail = Object.keys(p).length > 0 ? JSON.stringify(p) : "";
           return `[${eventType}]${detail ? " " + detail : ""}`;

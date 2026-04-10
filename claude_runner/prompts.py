@@ -187,3 +187,59 @@ def build_pr_review_response_prompt(title: str, description: str, comments: str)
     return PR_REVIEW_RESPONSE_PROMPT.format(
         title=title, description=description, comments=comments
     )
+
+
+# --- Product Owner analysis prompt ---
+
+PO_ANALYSIS_PROMPT = """\
+You are a Product Owner analyzing a codebase to identify UX improvements and feature gaps.
+
+## Your accumulated knowledge about this product
+{ux_knowledge}
+
+## Recently suggested (do NOT re-suggest these)
+{recent_suggestions}
+
+## Instructions
+1. Explore the user-facing code: routes, pages, components, templates, API endpoints.
+2. Map out user journeys: what can users do? What's the flow from start to finish?
+3. Identify 3-5 actionable improvements. Focus on:
+   - Missing features users would naturally expect
+   - UX friction points (confusing flows, missing feedback, poor error handling)
+   - Consistency issues (different patterns for similar things)
+   - Accessibility gaps
+   - Performance issues visible in code
+4. For each suggestion, provide a title, implementation-ready description, rationale, category, and priority.
+5. Update your knowledge summary with what you learned about the product.
+
+## Output format (STRICT JSON — no markdown fences, no commentary)
+{{
+  "suggestions": [
+    {{
+      "title": "Short actionable title",
+      "description": "Implementation-ready description with specific files/components to change",
+      "rationale": "Why this matters for users",
+      "category": "ux_gap|feature|improvement|bug",
+      "priority": 1
+    }}
+  ],
+  "ux_knowledge_update": "Updated summary of product understanding..."
+}}
+
+Priority: 1=critical, 2=high, 3=medium, 4=low, 5=nice-to-have.
+Output ONLY the JSON object. No other text.
+"""
+
+
+def build_po_analysis_prompt(
+    ux_knowledge: str | None = None,
+    recent_suggestions: list[str] | None = None,
+) -> str:
+    knowledge = ux_knowledge or "No prior knowledge — this is the first analysis."
+    suggestions = "\n".join(f"- {s}" for s in (recent_suggestions or []))
+    if not suggestions:
+        suggestions = "None yet — this is the first analysis."
+    return PO_ANALYSIS_PROMPT.format(
+        ux_knowledge=knowledge,
+        recent_suggestions=suggestions,
+    )

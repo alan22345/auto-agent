@@ -27,13 +27,18 @@ async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> t
     return stdout_str, stderr_str, proc.returncode
 
 
-async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main") -> str:
+async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", workspace_name: str | None = None) -> str:
     """Clone a repo into an isolated workspace directory. Returns the workspace path.
 
     If the workspace already exists (from a previous phase of the same task),
     it is reused and pulled to get latest changes instead of re-cloning.
+
+    Args:
+        workspace_name: Override the workspace directory name. If not provided,
+            defaults to "task-{task_id}".
     """
-    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+    dirname = workspace_name or f"task-{task_id}"
+    workspace = os.path.join(WORKSPACES_DIR, dirname)
     if os.path.exists(workspace):
         # Reuse existing workspace — make sure we have the latest default branch
         await _run_git("fetch", "origin", default_branch, cwd=workspace)

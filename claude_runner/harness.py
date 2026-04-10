@@ -159,8 +159,9 @@ async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
         log.error(f"Repo '{repo_name}' (id={repo_id}) not found")
         return None
 
-    # Clone repo into a dedicated workspace (task_id=0 is used for non-task work)
-    workspace = await clone_repo(repo_data.url, task_id=0, default_branch=repo_data.default_branch)
+    # Clone repo into a repo-specific workspace to avoid collisions between repos
+    ws_name = f"harness-{repo_name.replace('/', '-')}"
+    workspace = await clone_repo(repo_data.url, task_id=0, default_branch=repo_data.default_branch, workspace_name=ws_name)
 
     branch_name = "auto-agent/harness-onboarding"
 

@@ -24,7 +24,8 @@ Output as plain text, not to any file.
 
 async def generate_repo_summary(repo_url: str, repo_name: str, default_branch: str = "main") -> str:
     """Clone a repo (or reuse existing checkout) and generate a summary using Claude."""
-    workspace = await clone_repo(repo_url, task_id=0, default_branch=default_branch)
+    ws_name = f"summary-{repo_name.replace('/', '-')}"
+    workspace = await clone_repo(repo_url, task_id=0, default_branch=default_branch, workspace_name=ws_name)
 
     proc = await asyncio.create_subprocess_exec(
         "claude", "--print", "--dangerously-skip-permissions", SUMMARIZE_PROMPT,

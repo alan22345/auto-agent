@@ -11,19 +11,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_session
 from shared.events import Event
-from shared.models import Repo, ScheduledTask, Task, TaskHistory, TaskSource, TaskStatus
+from shared.models import (
+    FreeformConfig,
+    Repo,
+    ScheduledTask,
+    Suggestion,
+    SuggestionStatus,
+    Task,
+    TaskHistory,
+    TaskSource,
+    TaskStatus,
+)
 from shared.redis_client import get_redis, publish_event
 from shared.types import (
     FeedbackSummary,
+    FreeformConfigData,
     OutcomeResponse,
     RepoData,
     RepoResponse,
     ScheduleResponse,
+    SuggestionData,
     TaskData,
 )
 
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
+from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 
 router = APIRouter()
@@ -554,7 +567,252 @@ async def update_repo_summary(
     return {"ok": True}
 
 
+# --- Freeform / Suggestions ---
+
+
+class FreeformConfigRequest(BaseModel):
+    repo_name: str
+    dev_branch: str = "dev"
+    analysis_cron: str = "0 9 * * 1"
+    enabled: bool = True
+
+
+@router.post("/freeform/config", response_model=FreeformConfigData)
+async def upsert_freeform_config(
+    req: FreeformConfigRequest,
+    session: AsyncSession = Depends(get_session),
+) -> FreeformConfigData:
+    """Enable or update freeform mode for a repo."""
+    repo = await _get_repo_by_name(session, req.repo_name)
+    if not repo:
+        raise HTTPException(404, f"Repo '{req.repo_name}' not found")
+
+    result = await session.execute(
+        select(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
+    )
+    config = result.scalar_one_or_none()
+    if config:
+        config.enabled = req.enabled
+        config.dev_branch = req.dev_branch
+        config.analysis_cron = req.analysis_cron
+    else:
+        config = FreeformConfig(
+            repo_id=repo.id,
+            enabled=req.enabled,
+            dev_branch=req.dev_branch,
+            analysis_cron=req.analysis_cron,
+        )
+        session.add(config)
+    await session.commit()
+    await session.refresh(config)
+    return _freeform_config_to_response(config, repo.name)
+
+
+@router.get("/freeform/config", response_model=list[FreeformConfigData])
+async def list_freeform_configs(
+    session: AsyncSession = Depends(get_session),
+) -> list[FreeformConfigData]:
+    result = await session.execute(select(FreeformConfig))
+    configs = result.scalars().all()
+    out = []
+    for c in configs:
+        repo_result = await session.execute(select(Repo).where(Repo.id == c.repo_id))
+        repo = repo_result.scalar_one_or_none()
+        out.append(_freeform_config_to_response(c, repo.name if repo else None))
+    return out
+
+
+@router.delete("/freeform/config/{config_id}")
+async def delete_freeform_config(
+    config_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    result = await session.execute(select(FreeformConfig).where(FreeformConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(404, "Config not found")
+    await session.delete(config)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/freeform/analyze/{repo_name}")
+async def trigger_po_analysis(
+    repo_name: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Manually trigger a PO analysis for a repo."""
+    repo = await _get_repo_by_name(session, repo_name)
+    if not repo:
+        raise HTTPException(404, f"Repo '{repo_name}' not found")
+
+    r = await get_redis()
+    await publish_event(
+        r,
+        Event(type="po.analyze", task_id=0, payload={"repo_id": repo.id}).to_redis(),
+    )
+    await r.aclose()
+    return {"ok": True, "message": f"PO analysis triggered for {repo_name}"}
+
+
+@router.get("/suggestions", response_model=list[SuggestionData])
+async def list_suggestions(
+    status: str | None = None,
+    repo_name: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[SuggestionData]:
+    query = select(Suggestion).order_by(Suggestion.created_at.desc()).limit(100)
+    if status:
+        query = query.where(Suggestion.status == status)
+    if repo_name:
+        repo = await _get_repo_by_name(session, repo_name)
+        if repo:
+            query = query.where(Suggestion.repo_id == repo.id)
+    result = await session.execute(query)
+    suggestions = result.scalars().all()
+    return [await _suggestion_to_response(session, s) for s in suggestions]
+
+
+@router.post("/suggestions/{suggestion_id}/approve", response_model=TaskData)
+async def approve_suggestion(
+    suggestion_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    """Approve a suggestion — creates a freeform task."""
+    result = await session.execute(select(Suggestion).where(Suggestion.id == suggestion_id))
+    suggestion = result.scalar_one_or_none()
+    if not suggestion:
+        raise HTTPException(404, "Suggestion not found")
+    if suggestion.status != SuggestionStatus.PENDING:
+        raise HTTPException(400, f"Suggestion is already {suggestion.status.value}")
+
+    # Create task from suggestion
+    task = Task(
+        title=suggestion.title,
+        description=suggestion.description,
+        source=TaskSource.FREEFORM,
+        source_id=f"suggestion:{suggestion.id}",
+        repo_id=suggestion.repo_id,
+        freeform_mode=True,
+    )
+    session.add(task)
+    await session.flush()
+
+    suggestion.status = SuggestionStatus.APPROVED
+    suggestion.task_id = task.id
+    await session.commit()
+
+    # Trigger task pipeline
+    r = await get_redis()
+    await publish_event(r, Event(type="task.created", task_id=task.id).to_redis())
+    await r.aclose()
+
+    return _task_to_response(task)
+
+
+@router.post("/suggestions/{suggestion_id}/reject")
+async def reject_suggestion(
+    suggestion_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    result = await session.execute(select(Suggestion).where(Suggestion.id == suggestion_id))
+    suggestion = result.scalar_one_or_none()
+    if not suggestion:
+        raise HTTPException(404, "Suggestion not found")
+    suggestion.status = SuggestionStatus.REJECTED
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/freeform/{task_id}/promote")
+async def promote_task(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Promote a completed freeform task's changes from dev to main."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not task.freeform_mode:
+        raise HTTPException(400, "Task is not a freeform task")
+    if task.status != TaskStatus.DONE:
+        raise HTTPException(400, f"Task is in {task.status.value}, not done")
+    if not task.pr_url:
+        raise HTTPException(400, "Task has no PR URL")
+
+    branch_name = task.branch_name or f"auto-agent/task-{task_id}"
+    repo_url = task.repo.url if task.repo else ""
+    pr_url = await promote_task_to_main(task.pr_url, branch_name, repo_url)
+    if not pr_url:
+        raise HTTPException(500, "Failed to create promotion PR")
+    return {"ok": True, "pr_url": pr_url}
+
+
+@router.post("/freeform/{task_id}/revert")
+async def revert_task(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Revert a freeform task's changes from the dev branch."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not task.freeform_mode:
+        raise HTTPException(400, "Task is not a freeform task")
+    if not task.pr_url:
+        raise HTTPException(400, "Task has no PR URL")
+
+    # Get the dev branch from freeform config
+    dev_branch = "dev"
+    if task.repo_id:
+        result = await session.execute(
+            select(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+        )
+        config = result.scalar_one_or_none()
+        if config:
+            dev_branch = config.dev_branch or "dev"
+
+    revert_url = await revert_task_from_dev(task.pr_url, dev_branch)
+    if not revert_url:
+        raise HTTPException(500, "Failed to create revert PR")
+    return {"ok": True, "pr_url": revert_url}
+
+
 # --- Helpers ---
+
+
+async def _get_repo_by_name(session: AsyncSession, name: str) -> Repo | None:
+    result = await session.execute(select(Repo).where(Repo.name == name))
+    return result.scalar_one_or_none()
+
+
+async def _suggestion_to_response(session: AsyncSession, s: Suggestion) -> SuggestionData:
+    repo_result = await session.execute(select(Repo).where(Repo.id == s.repo_id))
+    repo = repo_result.scalar_one_or_none()
+    return SuggestionData(
+        id=s.id,
+        repo_name=repo.name if repo else None,
+        title=s.title,
+        description=s.description,
+        rationale=s.rationale,
+        category=s.category or "",
+        priority=s.priority or 3,
+        status=s.status.value if s.status else "pending",
+        task_id=s.task_id,
+        created_at=s.created_at.isoformat() if s.created_at else None,
+    )
+
+
+def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> FreeformConfigData:
+    return FreeformConfigData(
+        id=c.id,
+        repo_name=repo_name,
+        enabled=c.enabled or False,
+        dev_branch=c.dev_branch or "dev",
+        analysis_cron=c.analysis_cron or "0 9 * * 1",
+        last_analysis_at=c.last_analysis_at.isoformat() if c.last_analysis_at else None,
+        created_at=c.created_at.isoformat() if c.created_at else None,
+    )
 
 
 def _task_to_response(task: Task) -> TaskData:
@@ -570,6 +828,7 @@ def _task_to_response(task: Task) -> TaskData:
         pr_url=task.pr_url,
         plan=task.plan,
         error=task.error,
+        freeform_mode=task.freeform_mode or False,
         created_at=task.created_at.isoformat() if task.created_at else None,
     )
 

@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_webhook_secret: str = ""
 
+    # Web UI auth (HTTP Basic). Empty password disables auth.
+    # Username is always "admin".
+    web_auth_password: str = ""
+
     # Concurrency
     max_concurrent_simple: int = 1
     max_concurrent_complex: int = 1

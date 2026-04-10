@@ -14,14 +14,19 @@ Starts on port 2020:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import secrets
 from pathlib import Path
+
+import httpx
 
 import uvicorn
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from shared.config import settings
 from shared.database import async_session, engine
 from shared.events import Event, EventBus
 from shared.logging import setup_logging
@@ -56,6 +61,7 @@ from integrations.telegram.main import (
     notification_loop as telegram_notification_loop,
 )
 from claude_runner.main import event_loop as claude_runner_loop
+from claude_runner.po_analyzer import run_po_analysis_loop
 
 log = setup_logging("auto-agent")
 
@@ -65,6 +71,56 @@ log = setup_logging("auto-agent")
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Auto-Agent", version="0.1.0")
+
+
+# ---------------------------------------------------------------------------
+# HTTP Basic auth middleware
+#
+# Protects the web UI and API from random visitors. Stays out of the way of:
+#   - /health (so the deploy script's health check still works)
+#   - /api/webhooks/* (GitHub/Linear webhooks need to be reachable)
+#   - Loopback requests from inside the same container (web -> orchestrator)
+#
+# Set WEB_AUTH_PASSWORD in .env to enable. Empty = disabled.
+# ---------------------------------------------------------------------------
+
+_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/")
+
+
+def _is_auth_exempt(path: str) -> bool:
+    return any(path == p or path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES)
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request, call_next):
+    password = settings.web_auth_password
+    if not password:
+        return await call_next(request)
+
+    if _is_auth_exempt(request.url.path):
+        return await call_next(request)
+
+    # Allow internal HTTP calls between services running in the same container.
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1"):
+        return await call_next(request)
+
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
+            user, _, supplied = decoded.partition(":")
+            if user == "admin" and secrets.compare_digest(supplied, password):
+                return await call_next(request)
+        except Exception:
+            pass
+
+    return Response(
+        status_code=401,
+        content="Authentication required",
+        headers={"WWW-Authenticate": 'Basic realm="auto-agent"'},
+    )
+
 
 # API
 app.include_router(api_router, prefix="/api")
@@ -84,8 +140,29 @@ async def root() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text())
 
 
+def _websocket_authorized(ws: WebSocket) -> bool:
+    password = settings.web_auth_password
+    if not password:
+        return True
+    client_host = ws.client.host if ws.client else ""
+    if client_host in ("127.0.0.1", "::1"):
+        return True
+    auth = ws.headers.get("authorization", "")
+    if not auth.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
+        user, _, supplied = decoded.partition(":")
+        return user == "admin" and secrets.compare_digest(supplied, password)
+    except Exception:
+        return False
+
+
 @app.websocket("/ws")
 async def ws_proxy(ws: WebSocket) -> None:
+    if not _websocket_authorized(ws):
+        await ws.close(code=1008)
+        return
     await websocket_endpoint(ws)
 
 
@@ -204,11 +281,36 @@ async def on_review_complete(event: Event) -> None:
         await session.commit()
 
 
+async def on_review_comments_addressed(event: Event) -> None:
+    """Review feedback addressed — re-enter CI pipeline so deployment is triggered."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        task = await transition(session, task, TaskStatus.PR_CREATED, "Review feedback addressed, new changes pushed")
+        task = await transition(session, task, TaskStatus.AWAITING_CI, "Waiting for CI on updated code")
+        await session.commit()
+
+
 async def on_ci_passed(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
+
+        if task.freeform_mode:
+            # Freeform mode: auto-merge to dev, skip human review
+            merge_ok = await _auto_merge_pr(task)
+            if merge_ok:
+                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merging to dev")
+                task = await transition(session, task, TaskStatus.DONE, "Auto-merged to dev branch")
+                await session.commit()
+                await _try_start_queued(session)
+            else:
+                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merge failed — awaiting manual review")
+                await session.commit()
+            return
+
         task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review")
         await session.commit()
 
@@ -278,6 +380,35 @@ async def _try_start_queued(session) -> None:
                 await r.aclose()
 
 
+async def _auto_merge_pr(task: Task) -> bool:
+    """Merge a PR via GitHub API (squash merge). Returns True on success."""
+    from shared.config import settings as _settings
+    if not task.pr_url or not _settings.github_token:
+        log.warning(f"Cannot auto-merge task #{task.id}: no PR URL or GitHub token")
+        return False
+
+    try:
+        parts = task.pr_url.rstrip("/").split("/")
+        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+                headers={
+                    "Authorization": f"token {_settings.github_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+                json={"merge_method": "squash"},
+            )
+            if resp.status_code in (200, 201):
+                log.info(f"Auto-merged PR {task.pr_url} for task #{task.id}")
+                return True
+            log.warning(f"Auto-merge failed for task #{task.id}: {resp.status_code} {resp.text[:200]}")
+            return False
+    except Exception:
+        log.exception(f"Auto-merge error for task #{task.id}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Event bus wiring
 # ---------------------------------------------------------------------------
@@ -288,6 +419,7 @@ bus.on("task.classified", on_task_classified)
 bus.on("task.clarification_resolved", on_clarification_resolved)
 bus.on("task.approved", on_task_approved)
 bus.on("task.review_complete", on_review_complete)
+bus.on("task.review_comments_addressed", on_review_comments_addressed)
 bus.on("task.ci_passed", on_ci_passed)
 bus.on("task.ci_failed", on_ci_failed)
 bus.on("task.review_approved", on_review_approved)
@@ -859,6 +991,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(ci_status_poller()),
         asyncio.create_task(pr_comment_poller()),
         asyncio.create_task(pr_merge_poller()),
+        asyncio.create_task(run_po_analysis_loop()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")

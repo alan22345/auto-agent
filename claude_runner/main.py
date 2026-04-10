@@ -19,13 +19,14 @@ from shared.redis_client import (
     publish_event,
     read_events,
 )
-from shared.types import RepoData, TaskData
+from shared.types import FreeformConfigData, RepoData, TaskData
 
 from claude_runner.harness import handle_harness_onboarding
 from claude_runner.prompts import (
     CLARIFICATION_MARKER,
     build_coding_prompt,
     build_planning_prompt,
+    build_po_analysis_prompt,
     build_pr_independent_review_prompt,
     build_pr_review_response_prompt,
     build_review_prompt,
@@ -90,6 +91,20 @@ async def get_repo(repo_name: str) -> RepoData | None:
             repo = RepoData.model_validate(repo_dict)
             if repo.name == repo_name:
                 return repo
+    return None
+
+
+async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
+    """Fetch freeform config for a repo via the orchestrator API."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
+        if resp.status_code != 200:
+            return None
+        configs = resp.json()
+        for cfg in configs:
+            cfg_data = FreeformConfigData.model_validate(cfg)
+            if cfg_data.repo_name == repo_name and cfg_data.enabled:
+                return cfg_data
     return None
 
 
@@ -344,6 +359,14 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
     session_id = _session_id(task_id, task.created_at)
     base_branch = repo.default_branch
+
+    # Freeform mode: target the dev branch instead of main
+    if task.freeform_mode and task.repo_name:
+        freeform_cfg = await get_freeform_config(task.repo_name)
+        if freeform_cfg:
+            base_branch = freeform_cfg.dev_branch
+            log.info(f"Freeform mode: targeting dev branch '{base_branch}' for task #{task_id}")
+
     # Resume session if this task already had a planning or previous coding run
     is_continuation = task.plan is not None or retry_reason is not None
     log.info(
@@ -445,6 +468,11 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         return
 
     base_branch = repo.default_branch
+    if task.freeform_mode and task.repo_name:
+        freeform_cfg = await get_freeform_config(task.repo_name)
+        if freeform_cfg:
+            base_branch = freeform_cfg.dev_branch
+
     # Use a different session ID for the reviewer (append "-review")
     reviewer_session = str(uuid.uuid5(
         uuid.NAMESPACE_URL,
@@ -569,6 +597,8 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     branch_name = f"auto-agent/task-{task_id}"
 
     log.info(f"Addressing PR review for task #{task_id} (session={session_id})")
+    if task.status in ("awaiting_review", "awaiting_ci"):
+        await transition_task(task_id, "coding", f"Addressing feedback: {comments[:200]}")
     workspace = await clone_repo(repo.url, task_id, base_branch)
 
     try:
@@ -1007,6 +1037,22 @@ async def event_loop() -> None:
                         answer = event.payload.get("answer", "")
                         if answer:
                             await handle_clarification_response(event.task_id, answer)
+                    elif event.type == "po.analyze":
+                        repo_id = event.payload.get("repo_id")
+                        if repo_id:
+                            from claude_runner.po_analyzer import handle_po_analysis as _handle_po
+                            from shared.database import async_session as _async_session
+                            from shared.models import FreeformConfig as _FC
+                            from sqlalchemy import select as _select
+                            async with _async_session() as _session:
+                                _result = await _session.execute(
+                                    _select(_FC).where(_FC.repo_id == repo_id)
+                                )
+                                _config = _result.scalar_one_or_none()
+                                if _config:
+                                    await _handle_po(_session, _config)
+                                    _config.last_analysis_at = datetime.now(timezone.utc)
+                                    await _session.commit()
                     elif event.type == "repo.onboard":
                         repo_id = event.payload.get("repo_id")
                         repo_name = event.payload.get("repo_name", "")

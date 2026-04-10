@@ -84,6 +84,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await _handle_reject(ws, data)
             elif msg_type == "mark_done":
                 await _handle_mark_done(ws, data)
+            elif msg_type == "approve_suggestion":
+                await _handle_approve_suggestion(ws, data)
+            elif msg_type == "reject_suggestion":
+                await _handle_reject_suggestion(ws, data)
+            elif msg_type == "promote_task":
+                await _handle_promote_task(ws, data)
+            elif msg_type == "revert_task":
+                await _handle_revert_task(ws, data)
+            elif msg_type == "toggle_freeform":
+                await _handle_toggle_freeform(ws, data)
+            elif msg_type == "trigger_analysis":
+                await _handle_trigger_analysis(ws, data)
+            elif msg_type == "load_suggestions":
+                await _handle_load_suggestions(ws, data)
+            elif msg_type == "load_freeform_tasks":
+                await _handle_load_freeform_tasks(ws, data)
+            elif msg_type == "load_freeform_config":
+                await _handle_load_freeform_config(ws, data)
             elif msg_type == "load_history":
                 task_id = data.get("task_id")
                 if task_id:
@@ -230,6 +248,129 @@ async def _handle_reject(ws: WebSocket, data: dict) -> None:
             await ws.send_json({"type": "error", "message": f"Failed to reject: {resp.text}"})
 
 
+# --- Freeform handlers ---
+
+
+async def _handle_approve_suggestion(ws: WebSocket, data: dict) -> None:
+    suggestion_id = data.get("suggestion_id")
+    if not suggestion_id:
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/suggestions/{suggestion_id}/approve")
+        if resp.status_code == 200:
+            task = resp.json()
+            await broadcast({"type": "system", "message": f"Suggestion #{suggestion_id} approved -> Task #{task.get('id')}"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed to approve suggestion: {resp.text[:200]}"})
+
+
+async def _handle_reject_suggestion(ws: WebSocket, data: dict) -> None:
+    suggestion_id = data.get("suggestion_id")
+    if not suggestion_id:
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/suggestions/{suggestion_id}/reject")
+        if resp.status_code == 200:
+            await broadcast({"type": "system", "message": f"Suggestion #{suggestion_id} rejected"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed to reject suggestion: {resp.text[:200]}"})
+
+
+async def _handle_promote_task(ws: WebSocket, data: dict) -> None:
+    task_id = data.get("task_id")
+    if not task_id:
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/promote")
+        if resp.status_code == 200:
+            result = resp.json()
+            await broadcast({"type": "system", "message": f"Promoted task #{task_id} to main: {result.get('pr_url', '')}"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed to promote: {resp.text[:200]}"})
+
+
+async def _handle_revert_task(ws: WebSocket, data: dict) -> None:
+    task_id = data.get("task_id")
+    if not task_id:
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/revert")
+        if resp.status_code == 200:
+            result = resp.json()
+            await broadcast({"type": "system", "message": f"Reverted task #{task_id}: {result.get('pr_url', '')}"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed to revert: {resp.text[:200]}"})
+
+
+async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
+    repo_name = data.get("repo_name", "").strip()
+    enabled = data.get("enabled", True)
+    dev_branch = data.get("dev_branch", "dev")
+    analysis_cron = data.get("analysis_cron", "0 9 * * 1")
+    if not repo_name:
+        await ws.send_json({"type": "error", "message": "repo_name is required"})
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{ORCHESTRATOR_URL}/freeform/config",
+            json={
+                "repo_name": repo_name,
+                "enabled": enabled,
+                "dev_branch": dev_branch,
+                "analysis_cron": analysis_cron,
+            },
+        )
+        if resp.status_code == 200:
+            state = "enabled" if enabled else "disabled"
+            await broadcast({"type": "system", "message": f"Freeform mode {state} for {repo_name}"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:200]}"})
+
+
+async def _handle_trigger_analysis(ws: WebSocket, data: dict) -> None:
+    repo_name = data.get("repo_name", "").strip()
+    if not repo_name:
+        await ws.send_json({"type": "error", "message": "repo_name is required"})
+        return
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/analyze/{repo_name}")
+        if resp.status_code == 200:
+            await broadcast({"type": "system", "message": f"PO analysis triggered for {repo_name}"})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:200]}"})
+
+
+async def _handle_load_suggestions(ws: WebSocket, data: dict) -> None:
+    status = data.get("status", "")
+    repo_name = data.get("repo_name", "")
+    params = {}
+    if status:
+        params["status"] = status
+    if repo_name:
+        params["repo_name"] = repo_name
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{ORCHESTRATOR_URL}/suggestions", params=params)
+        if resp.status_code == 200:
+            await ws.send_json({"type": "suggestion_list", "suggestions": resp.json()})
+
+
+async def _handle_load_freeform_tasks(ws: WebSocket, data: dict) -> None:
+    """Load completed freeform tasks for the dev changes panel."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
+        if resp.status_code == 200:
+            all_tasks = resp.json()
+            freeform_tasks = [t for t in all_tasks if t.get("freeform_mode")]
+            await ws.send_json({"type": "freeform_task_list", "tasks": freeform_tasks})
+
+
+async def _handle_load_freeform_config(ws: WebSocket, data: dict) -> None:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
+        if resp.status_code == 200:
+            await ws.send_json({"type": "freeform_config_list", "configs": resp.json()})
+
+
 # --- Event listener: push task updates to the web UI ---
 
 
@@ -261,6 +402,13 @@ async def event_listener() -> None:
                             if resp.status_code == 200:
                                 tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
                                 await broadcast({"type": "task_list", "tasks": tasks})
+
+                    # Refresh suggestions when PO analysis completes
+                    if event.type == "po.suggestions_ready":
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.get(f"{ORCHESTRATOR_URL}/suggestions", params={"status": "pending"})
+                            if resp.status_code == 200:
+                                await broadcast({"type": "suggestion_list", "suggestions": resp.json()})
                 except Exception:
                     log.exception("Error processing web event")
                 finally:

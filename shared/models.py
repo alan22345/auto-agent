@@ -45,6 +45,13 @@ class TaskSource(str, enum.Enum):
     LINEAR = "linear"
     TELEGRAM = "telegram"
     MANUAL = "manual"
+    FREEFORM = "freeform"
+
+
+class SuggestionStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 def _utcnow() -> datetime:
@@ -83,6 +90,7 @@ class Task(Base):
     pr_url = Column(String(512), nullable=True)
     plan = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
+    freeform_mode = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -132,4 +140,39 @@ class ScheduledTask(Base):
     enabled = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+
+class Suggestion(Base):
+    """PO-generated improvement suggestions for a repo."""
+    __tablename__ = "suggestions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repos.id"), nullable=False)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, default="")
+    rationale = Column(Text, default="")
+    category = Column(String(100), default="")  # ux_gap, feature, improvement
+    priority = Column(Integer, default=3)  # 1=critical, 5=nice-to-have
+    status = Column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    repo = relationship("Repo")
+    task = relationship("Task")
+
+
+class FreeformConfig(Base):
+    """Per-repo freeform mode configuration."""
+    __tablename__ = "freeform_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repos.id"), nullable=False, unique=True)
+    enabled = Column(Boolean, default=False)
+    dev_branch = Column(String(128), default="dev")
+    analysis_cron = Column(String(100), default="0 9 * * 1")  # weekly Monday 9am
+    last_analysis_at = Column(DateTime(timezone=True), nullable=True)
+    ux_knowledge = Column(Text, nullable=True)  # PO's accumulated understanding
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    repo = relationship("Repo")
 
