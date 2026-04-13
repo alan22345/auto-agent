@@ -30,7 +30,17 @@ from shared.config import settings
 from shared.database import async_session, engine
 from shared.events import Event, EventBus
 from shared.logging import setup_logging
-from shared.models import Base, Task, TaskComplexity, TaskStatus
+from shared.models import (
+    Base,
+    FreeformConfig,
+    Repo,
+    Suggestion,
+    SuggestionStatus,
+    Task,
+    TaskComplexity,
+    TaskSource,
+    TaskStatus,
+)
 from shared.notifier import send_telegram
 from shared.redis_client import (
     ack_event,
@@ -192,15 +202,22 @@ async def on_task_created(event: Event) -> None:
         task = await transition(session, task, TaskStatus.CLASSIFYING, "Auto-classifying")
         await session.commit()
 
-        complexity, classification = classify_task(task.title, task.description)
-        task.complexity = complexity
-        await session.commit()
+        # If complexity was pre-set at task creation (e.g. scaffold tasks from
+        # the create-repo flow), trust it and skip the keyword classifier.
+        if task.complexity is None:
+            complexity, classification = classify_task(task.title, task.description)
+            task.complexity = complexity
+            await session.commit()
+            payload = {"complexity": complexity.value, **classification.model_dump()}
+        else:
+            log.info(f"Task #{task.id} pre-classified as {task.complexity.value}, skipping classifier")
+            payload = {"complexity": task.complexity.value, "reasoning": "Pre-classified at creation"}
 
         r = await get_redis()
         await publish_event(r, Event(
             type="task.classified",
             task_id=task.id,
-            payload={"complexity": complexity.value, **classification.model_dump()},
+            payload=payload,
         ).to_redis())
         await r.aclose()
 
@@ -211,8 +228,19 @@ async def on_task_classified(event: Event) -> None:
         if not task:
             return
 
-        if await can_start(session, task.complexity):
-            if task.complexity == TaskComplexity.COMPLEX:
+        # Freeform tasks with auto_start_tasks bypass the concurrency queue
+        force_start = False
+        if task.freeform_mode and task.repo_id:
+            from sqlalchemy import select as _sel
+            cfg_result = await session.execute(
+                _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+            )
+            cfg = cfg_result.scalar_one_or_none()
+            if cfg and cfg.auto_start_tasks:
+                force_start = True
+
+        if force_start or await can_start(session, task.complexity):
+            if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
                 task = await transition(session, task, TaskStatus.QUEUED)
                 task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
             else:
@@ -350,6 +378,106 @@ async def on_review_approved(event: Event) -> None:
         await _try_start_queued(session)
 
 
+# ---------------------------------------------------------------------------
+# Continuous-loop scrum master: auto-approve PO suggestions
+# ---------------------------------------------------------------------------
+
+# Cap on simultaneously-active freeform tasks per repo, so an enthusiastic PO
+# can't flood the queue. When this is hit, new suggestions are left PENDING
+# until the queue drains.
+MAX_ACTIVE_PER_REPO = 5
+
+
+async def on_po_suggestions_ready(event: Event) -> None:
+    """If the repo has auto_approve_suggestions enabled, convert pending
+    suggestions into freeform tasks until the per-repo cap is reached.
+    """
+    from sqlalchemy import select as sa_select
+
+    repo_name = (event.payload or {}).get("repo_name")
+    if not repo_name:
+        return
+
+    async with async_session() as session:
+        repo_result = await session.execute(sa_select(Repo).where(Repo.name == repo_name))
+        repo = repo_result.scalar_one_or_none()
+        if not repo:
+            return
+
+        config_result = await session.execute(
+            sa_select(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
+        )
+        config = config_result.scalar_one_or_none()
+        if not config or not config.enabled or not config.auto_approve_suggestions:
+            return
+
+        # Count active freeform tasks for this repo to enforce the cap
+        active_result = await session.execute(
+            sa_select(Task).where(
+                Task.repo_id == repo.id,
+                Task.freeform_mode == True,  # noqa: E712
+                Task.status.in_([
+                    TaskStatus.INTAKE, TaskStatus.CLASSIFYING, TaskStatus.QUEUED,
+                    TaskStatus.PLANNING, TaskStatus.AWAITING_APPROVAL,
+                    TaskStatus.AWAITING_CLARIFICATION, TaskStatus.CODING,
+                    TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI,
+                    TaskStatus.AWAITING_REVIEW, TaskStatus.BLOCKED,
+                ]),
+            )
+        )
+        active_count = len(active_result.scalars().all())
+        slots = MAX_ACTIVE_PER_REPO - active_count
+        if slots <= 0:
+            log.info(
+                f"Auto-approve skipped for '{repo_name}': {active_count} active tasks "
+                f"already (cap={MAX_ACTIVE_PER_REPO})"
+            )
+            return
+
+        # Pull pending suggestions for this repo, highest priority first
+        pending_result = await session.execute(
+            sa_select(Suggestion)
+            .where(
+                Suggestion.repo_id == repo.id,
+                Suggestion.status == SuggestionStatus.PENDING,
+            )
+            .order_by(Suggestion.priority.asc(), Suggestion.created_at.asc())
+            .limit(slots)
+        )
+        suggestions = pending_result.scalars().all()
+        if not suggestions:
+            return
+
+        created_task_ids: list[int] = []
+        for suggestion in suggestions:
+            task = Task(
+                title=suggestion.title,
+                description=suggestion.description,
+                source=TaskSource.FREEFORM,
+                source_id=f"suggestion:{suggestion.id}",
+                # Pre-classify as complex so it goes through planning + auto-review
+                complexity=TaskComplexity.COMPLEX,
+                repo_id=suggestion.repo_id,
+                freeform_mode=True,
+            )
+            session.add(task)
+            await session.flush()
+            suggestion.status = SuggestionStatus.APPROVED
+            suggestion.task_id = task.id
+            created_task_ids.append(task.id)
+
+        await session.commit()
+        log.info(
+            f"Auto-approved {len(created_task_ids)} suggestions for '{repo_name}' "
+            f"(slots remaining: {slots - len(created_task_ids)}): tasks {created_task_ids}"
+        )
+
+    r = await get_redis()
+    for tid in created_task_ids:
+        await publish_event(r, Event(type="task.created", task_id=tid).to_redis())
+    await r.aclose()
+
+
 async def on_task_finished(event: Event) -> None:
     # Clean up workspace and session for the finished task
     if event.task_id:
@@ -423,6 +551,7 @@ bus.on("task.review_comments_addressed", on_review_comments_addressed)
 bus.on("task.ci_passed", on_ci_passed)
 bus.on("task.ci_failed", on_ci_failed)
 bus.on("task.review_approved", on_review_approved)
+bus.on("po.suggestions_ready", on_po_suggestions_ready)
 bus.on("task.done", on_task_finished)
 bus.on("task.failed", on_task_finished)
 

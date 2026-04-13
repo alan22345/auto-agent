@@ -265,6 +265,34 @@ async def _handle_command(text: str) -> None:
             else:
                 await send_telegram_async(f"Failed: {resp.text[:200]}")
 
+    elif cmd == "/newrepo":
+        # /newrepo <description>
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_telegram_async(
+                "Usage: `/newrepo <description>`\n"
+                "Example: `/newrepo a Next.js todo app with dark mode`"
+            )
+            return
+        description = parts[1]
+        await send_telegram_async("Creating repo... (this can take ~30s)")
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{ORCHESTRATOR_URL}/freeform/create-repo",
+                json={"description": description, "private": True},
+            )
+            if resp.status_code == 200:
+                payload = resp.json()
+                repo = payload.get("repo", {})
+                task = payload.get("task", {})
+                await send_telegram_async(
+                    f"Created *{repo.get('name')}*\n"
+                    f"{repo.get('url')}\n\n"
+                    f"Scaffold task #{task.get('id')} queued."
+                )
+            else:
+                await send_telegram_async(f"Failed: {resp.text[:300]}")
+
     elif cmd == "/freeform":
         # /freeform <repo_name> [on|off]
         parts = text.split(maxsplit=2)
@@ -282,15 +310,23 @@ async def _handle_command(text: str) -> None:
             return
         enabled = toggle == "on"
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{ORCHESTRATOR_URL}/freeform/config",
-                json={
-                    "repo_name": repo_name,
-                    "enabled": enabled,
-                    "dev_branch": "dev",
-                    "analysis_cron": "0 9 * * 1",
-                },
-            )
+            # Fetch existing config (if any) so we don't clobber dev_branch /
+            # analysis_cron when just toggling enabled.
+            list_resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
+            existing = None
+            if list_resp.status_code == 200:
+                for cfg in list_resp.json():
+                    if cfg.get("repo_name") == repo_name:
+                        existing = cfg
+                        break
+
+            payload = {
+                "repo_name": repo_name,
+                "enabled": enabled,
+                "dev_branch": existing["dev_branch"] if existing else "dev",
+                "analysis_cron": existing["analysis_cron"] if existing else "0 9 * * 1",
+            }
+            resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/config", json=payload)
             if resp.status_code == 200:
                 state = "enabled" if enabled else "disabled"
                 await send_telegram_async(f"Freeform mode *{state}* for `{repo_name}`.")
@@ -307,6 +343,7 @@ async def _handle_command(text: str) -> None:
             "/answer <task\\_id> <response> — answer a clarification question\n"
             "/branch <repo> <branch> — change a repo's default branch\n"
             "/freeform <repo> \\[on|off] — enable/disable freeform mode\n"
+            "/newrepo <description> — create a new repo and scaffold it from scratch\n"
             "/help — show this message"
         )
 
@@ -335,6 +372,11 @@ NOTIFY_EVENTS = {
     "task.dev_deployed",
     "task.review_comments_addressed",
     "task.dev_deploy_failed",
+    "task.subtask_progress",
+    "po.analysis_queued",
+    "po.analysis_started",
+    "po.suggestions_ready",
+    "po.analysis_failed",
 }
 
 
@@ -370,6 +412,7 @@ async def notification_loop() -> None:
 async def _notify_user(event: Event) -> None:
     """Send a Telegram notification based on event type."""
     task_info = ""
+    is_freeform = False
     if event.task_id:
         try:
             async with httpx.AsyncClient() as client:
@@ -377,6 +420,7 @@ async def _notify_user(event: Event) -> None:
                 if resp.status_code == 200:
                     task = TaskData.model_validate(resp.json())
                     task_info = f"Task #{task.id}: {task.title[:80]}"
+                    is_freeform = bool(task.freeform_mode)
         except Exception:
             pass
 
@@ -402,7 +446,13 @@ async def _notify_user(event: Event) -> None:
         review = event.payload.get("review", "")
         approved = event.payload.get("approved", False)
         review_preview = review[:800] if review else ""
-        if approved:
+        if is_freeform:
+            # Freeform tasks auto-merge — no human review needed.
+            await send_telegram_async(
+                f"🤖 *Independent review complete (freeform — auto-merging)*\n{task_info}\n{pr_url}\n\n"
+                f"{review_preview}"
+            )
+        elif approved:
             await send_telegram_async(
                 f"✅ *PR ready for your review*\n{task_info}\n{pr_url}\n\n"
                 f"Independent review passed.\n{review_preview}"
@@ -416,10 +466,16 @@ async def _notify_user(event: Event) -> None:
     elif event.type == "task.plan_ready":
         plan = event.payload.get("plan", "")
         plan_preview = plan[:1500] if plan else "No plan details available."
-        await send_telegram_async(
-            f"*Plan ready for review.*\n{task_info}\n\n{plan_preview}\n\n"
-            f"Reply to approve or provide feedback."
-        )
+        if is_freeform:
+            # Freeform tasks have their plan auto-reviewed — no human action needed.
+            await send_telegram_async(
+                f"📝 *Plan ready (freeform — auto-reviewing)*\n{task_info}\n\n{plan_preview}"
+            )
+        else:
+            await send_telegram_async(
+                f"*Plan ready for review.*\n{task_info}\n\n{plan_preview}\n\n"
+                f"Reply to approve or provide feedback."
+            )
     elif event.type == "task.clarification_needed":
         question = event.payload.get("question", "")
         await send_telegram_async(
@@ -427,7 +483,12 @@ async def _notify_user(event: Event) -> None:
             f"Reply with `/answer {event.task_id} <your answer>` to respond."
         )
     elif event.type == "task.blocked":
-        await send_telegram_async(f"*Task blocked* — needs your input.\n{task_info}")
+        reason = event.payload.get("error", "")
+        reason_text = f"\nReason: {reason}" if reason else ""
+        await send_telegram_async(
+            f"*Task blocked* — needs your input.\n{task_info}{reason_text}\n\n"
+            f"Reply with `/answer {event.task_id} <your response>` to unblock."
+        )
     elif event.type == "task.failed":
         error = event.payload.get("error", "unknown")
         await send_telegram_async(f"*Task failed.*\n{task_info}\nError: {error}")
@@ -457,5 +518,30 @@ async def _notify_user(event: Event) -> None:
             f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}"
             + (f"\n\n{output_preview}" if output_preview else "")
         )
+    elif event.type == "task.subtask_progress":
+        current = event.payload.get("current", "?")
+        total = event.payload.get("total", "?")
+        title = event.payload.get("title", "")
+        status = event.payload.get("status", "")
+        icon = "✅" if status == "done" else "⚙️"
+        await send_telegram_async(f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}")
     elif event.type == "task.ci_passed":
         await send_telegram_async(f"*CI passed* — ready for your review.\n{task_info}")
+    elif event.type == "po.analysis_queued":
+        repo_name = event.payload.get("repo_name", "unknown")
+        position = event.payload.get("position", "?")
+        await send_telegram_async(f"⏳ *PO analysis queued* for `{repo_name}` (position {position})")
+    elif event.type == "po.analysis_started":
+        repo_name = event.payload.get("repo_name", "unknown")
+        await send_telegram_async(f"🔄 *PO analysis started* for `{repo_name}`")
+    elif event.type == "po.suggestions_ready":
+        repo_name = event.payload.get("repo_name", "unknown")
+        count = event.payload.get("count", 0)
+        await send_telegram_async(f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`")
+    elif event.type == "po.analysis_failed":
+        repo_name = event.payload.get("repo_name", "unknown")
+        reason = event.payload.get("reason", "")
+        await send_telegram_async(
+            f"❌ *PO analysis failed* for `{repo_name}`"
+            + (f"\nReason: {reason}" if reason else "")
+        )

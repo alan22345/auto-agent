@@ -21,7 +21,7 @@ from shared.config import settings
 from shared.logging import setup_logging
 from shared.types import RepoData
 
-from claude_runner.workspace import clone_repo, push_branch, create_branch
+from claude_runner.workspace import clone_repo, push_branch, create_branch, _run_git
 
 log = setup_logging("harness")
 
@@ -160,12 +160,18 @@ async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
         return None
 
     # Clone repo into a repo-specific workspace to avoid collisions between repos
-    ws_name = f"harness-{repo_name.replace('/', '-')}"
+    # Use full owner/name to prevent collisions when same repo name exists under different owners
+    owner_and_name = repo_data.url.replace("https://github.com/", "").replace(".git", "").replace("/", "-")
+    ws_name = f"harness-{owner_and_name}"
     workspace = await clone_repo(repo_data.url, task_id=0, default_branch=repo_data.default_branch, workspace_name=ws_name)
 
     branch_name = "auto-agent/harness-onboarding"
 
     try:
+        # Delete any stale local/remote branch from a previous failed attempt
+        # so we always branch fresh from the default branch
+        await _run_git("branch", "-D", branch_name, cwd=workspace)
+        await _run_git("push", "origin", "--delete", branch_name, cwd=workspace)
         await create_branch(workspace, branch_name)
 
         # Run Claude Code with the harness onboarding prompt

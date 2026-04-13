@@ -59,6 +59,12 @@ Fill in at least:
 ```bash
 GITHUB_TOKEN=<from step 2>
 
+# Optional: where new repos get created when you use the "build something new"
+# feature. Leave empty to default to your own GitHub user account. Set to an
+# org name (e.g. "my-org") to create them under that org instead — your token
+# needs `admin:org` scope in that case.
+GITHUB_OWNER=
+
 # Optional but recommended
 TELEGRAM_BOT_TOKEN=<from step 3>
 TELEGRAM_CHAT_ID=<from step 3>
@@ -115,7 +121,24 @@ In the web UI, open the **Repos** tab and add a GitHub repo by `owner/name`. Aut
 Either type a description in the web UI's task box, or message your Telegram bot. The bot interprets:
 
 - Plain text → creates a task
-- `/status`, `/done`, `/cancel`, `/delete`, `/answer`, `/branch`, `/freeform`, `/help` → commands
+- `/status`, `/done`, `/cancel`, `/delete`, `/answer`, `/branch`, `/freeform`, `/newrepo`, `/help` → commands
+
+## 10. Build something new from a description
+
+Auto-agent can also create a brand-new GitHub repo from a natural-language description and scaffold the initial code itself, then keep improving it autonomously via freeform mode.
+
+**From the web UI:** open the **Freeform** tab, type your description in the "Build something new" box (e.g. "a Next.js todo app with dark mode"), optionally specify a GitHub org, and click **Create & Scaffold**.
+
+**From Telegram:** `/newrepo a Next.js todo app with dark mode`
+
+What happens:
+1. Claude picks a short repo name from your description
+2. Auto-agent creates a private GitHub repo (under `GITHUB_OWNER` or your user) with an auto-generated README
+3. The repo is registered, freeform mode is enabled, and a "Scaffold" task is queued
+4. The task runs through the normal pipeline (planning → coding → PR → CI → merge), but **no human approval is required** — an independent reviewer auto-approves the plan and the PR auto-merges to `main` once CI passes
+5. From then on, the PO analyzer periodically generates improvement suggestions for the repo on the configured cron
+
+The full reasoning of the auto-reviewer's decisions is logged in the task's history (visible in the task timeline), so you can audit what was approved and why.
 
 ## Running on a VM instead of your laptop
 

@@ -78,6 +78,9 @@ class TransitionRequest(BaseModel):
 class ApprovalRequest(BaseModel):
     approved: bool
     feedback: str = ""
+    # Optional override for the TaskHistory message. Used by the freeform-mode
+    # auto-reviewer so its decision (and reasoning) lands in the audit log.
+    message: str = ""
 
 
 class RecordOutcomeRequest(BaseModel):
@@ -244,6 +247,50 @@ async def transition_task(
     return _task_to_response(task)
 
 
+class AssignRepoRequest(BaseModel):
+    repo_name: str
+
+
+@router.patch("/tasks/{task_id}/repo", response_model=TaskData)
+async def assign_repo(
+    task_id: int,
+    req: AssignRepoRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
+    repo = result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(404, f"Repo '{req.repo_name}' not found")
+    task.repo_id = repo.id
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
+class SubtaskUpdate(BaseModel):
+    subtasks: list[dict]
+    current_subtask: int | None = None
+
+
+@router.patch("/tasks/{task_id}/subtasks", response_model=TaskData)
+async def update_subtasks(
+    task_id: int,
+    req: SubtaskUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.subtasks = req.subtasks
+    task.current_subtask = req.current_subtask
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 @router.post("/tasks/{task_id}/done", response_model=TaskData)
 async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
     task = await get_task(session, task_id)
@@ -277,13 +324,15 @@ async def approve_task(
 
     r = await get_redis()
     if req.approved:
-        task = await transition(session, task, TaskStatus.CODING, "Plan approved by user")
+        approve_msg = req.message or "Plan approved by user"
+        task = await transition(session, task, TaskStatus.CODING, approve_msg)
         await session.commit()
         await publish_event(r, Event(type="task.approved", task_id=task.id).to_redis())
     else:
         # Clear the old plan and re-run planning with feedback
         task.plan = None
-        task = await transition(session, task, TaskStatus.PLANNING, f"Plan rejected: {req.feedback}")
+        reject_msg = req.message or f"Plan rejected: {req.feedback}"
+        task = await transition(session, task, TaskStatus.PLANNING, reject_msg)
         await session.commit()
         await publish_event(
             r,
@@ -575,6 +624,8 @@ class FreeformConfigRequest(BaseModel):
     dev_branch: str = "dev"
     analysis_cron: str = "0 9 * * 1"
     enabled: bool = True
+    auto_approve_suggestions: bool = False
+    auto_start_tasks: bool = False
 
 
 @router.post("/freeform/config", response_model=FreeformConfigData)
@@ -595,12 +646,16 @@ async def upsert_freeform_config(
         config.enabled = req.enabled
         config.dev_branch = req.dev_branch
         config.analysis_cron = req.analysis_cron
+        config.auto_approve_suggestions = req.auto_approve_suggestions
+        config.auto_start_tasks = req.auto_start_tasks
     else:
         config = FreeformConfig(
             repo_id=repo.id,
             enabled=req.enabled,
             dev_branch=req.dev_branch,
             analysis_cron=req.analysis_cron,
+            auto_approve_suggestions=req.auto_approve_suggestions,
+            auto_start_tasks=req.auto_start_tasks,
         )
         session.add(config)
     await session.commit()
@@ -636,6 +691,53 @@ async def delete_freeform_config(
     return {"ok": True}
 
 
+class CreateRepoRequest(BaseModel):
+    description: str
+    org: str = ""
+    private: bool = True
+    # When True (default), the new repo enters the continuous-improvement loop
+    # immediately: every-30-min PO analysis with auto-approval of suggestions.
+    loop: bool = True
+
+
+@router.post("/freeform/create-repo")
+async def create_repo_from_description(
+    req: CreateRepoRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Create a brand-new GitHub repo from a natural-language description.
+
+    Picks a name via Claude, creates the repo on GitHub (private, auto_init),
+    enables freeform mode for it, and queues a scaffold task that runs through
+    the normal coding pipeline with auto-approval.
+    """
+    from orchestrator.create_repo import CreateRepoError, create_repo_and_scaffold_task
+
+    if not req.description.strip():
+        raise HTTPException(400, "description is required")
+
+    try:
+        repo, task = await create_repo_and_scaffold_task(
+            session,
+            description=req.description,
+            org_override=req.org,
+            private=req.private,
+            loop=req.loop,
+        )
+    except CreateRepoError as e:
+        raise HTTPException(400, str(e))
+
+    return {
+        "repo": {
+            "id": repo.id,
+            "name": repo.name,
+            "url": repo.url,
+            "default_branch": repo.default_branch,
+        },
+        "task": _task_to_response(task).model_dump(),
+    }
+
+
 @router.post("/freeform/analyze/{repo_name}")
 async def trigger_po_analysis(
     repo_name: str,
@@ -649,7 +751,7 @@ async def trigger_po_analysis(
     r = await get_redis()
     await publish_event(
         r,
-        Event(type="po.analyze", task_id=0, payload={"repo_id": repo.id}).to_redis(),
+        Event(type="po.analyze", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}).to_redis(),
     )
     await r.aclose()
     return {"ok": True, "message": f"PO analysis triggered for {repo_name}"}
@@ -810,6 +912,8 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         enabled=c.enabled or False,
         dev_branch=c.dev_branch or "dev",
         analysis_cron=c.analysis_cron or "0 9 * * 1",
+        auto_approve_suggestions=c.auto_approve_suggestions or False,
+        auto_start_tasks=c.auto_start_tasks or False,
         last_analysis_at=c.last_analysis_at.isoformat() if c.last_analysis_at else None,
         created_at=c.created_at.isoformat() if c.created_at else None,
     )
@@ -829,6 +933,8 @@ def _task_to_response(task: Task) -> TaskData:
         plan=task.plan,
         error=task.error,
         freeform_mode=task.freeform_mode or False,
+        subtasks=task.subtasks,
+        current_subtask=task.current_subtask,
         created_at=task.created_at.isoformat() if task.created_at else None,
     )
 

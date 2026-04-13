@@ -96,6 +96,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await _handle_toggle_freeform(ws, data)
             elif msg_type == "trigger_analysis":
                 await _handle_trigger_analysis(ws, data)
+            elif msg_type == "create_repo":
+                await _handle_create_repo(ws, data)
             elif msg_type == "load_suggestions":
                 await _handle_load_suggestions(ws, data)
             elif msg_type == "load_freeform_tasks":
@@ -307,6 +309,8 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
     enabled = data.get("enabled", True)
     dev_branch = data.get("dev_branch", "dev")
     analysis_cron = data.get("analysis_cron", "0 9 * * 1")
+    auto_approve_suggestions = data.get("auto_approve_suggestions", False)
+    auto_start_tasks = data.get("auto_start_tasks", False)
     if not repo_name:
         await ws.send_json({"type": "error", "message": "repo_name is required"})
         return
@@ -318,13 +322,48 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
                 "enabled": enabled,
                 "dev_branch": dev_branch,
                 "analysis_cron": analysis_cron,
+                "auto_approve_suggestions": auto_approve_suggestions,
+                "auto_start_tasks": auto_start_tasks,
             },
         )
         if resp.status_code == 200:
             state = "enabled" if enabled else "disabled"
             await broadcast({"type": "system", "message": f"Freeform mode {state} for {repo_name}"})
+            # Push refreshed config list to all clients
+            list_resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
+            if list_resp.status_code == 200:
+                await broadcast({"type": "freeform_config_list", "configs": list_resp.json()})
         else:
             await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:200]}"})
+
+
+async def _handle_create_repo(ws: WebSocket, data: dict) -> None:
+    description = data.get("description", "").strip()
+    org = data.get("org", "").strip()
+    # The "loop" toggle from the UI controls whether the new repo enters the
+    # continuous-improvement loop after scaffolding. When False, freeform mode
+    # is still enabled but auto_approve_suggestions is left off so the PO won't
+    # turn its suggestions into tasks without a human click.
+    loop = data.get("loop", True)
+    if not description:
+        await ws.send_json({"type": "error", "message": "Description is required"})
+        return
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{ORCHESTRATOR_URL}/freeform/create-repo",
+            json={"description": description, "org": org, "private": True, "loop": loop},
+        )
+        if resp.status_code == 200:
+            payload = resp.json()
+            repo = payload.get("repo", {})
+            task = payload.get("task", {})
+            await broadcast({
+                "type": "system",
+                "message": f"Created repo {repo.get('name')} ({repo.get('url')}) and queued scaffold task #{task.get('id')}",
+            })
+            await ws.send_json({"type": "repo_created", "repo": repo, "task": task})
+        else:
+            await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:300]}"})
 
 
 async def _handle_trigger_analysis(ws: WebSocket, data: dict) -> None:
@@ -403,12 +442,16 @@ async def event_listener() -> None:
                                 tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
                                 await broadcast({"type": "task_list", "tasks": tasks})
 
-                    # Refresh suggestions when PO analysis completes
+                    # Refresh suggestions and configs when PO analysis completes
                     if event.type == "po.suggestions_ready":
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(f"{ORCHESTRATOR_URL}/suggestions", params={"status": "pending"})
                             if resp.status_code == 200:
                                 await broadcast({"type": "suggestion_list", "suggestions": resp.json()})
+                            # Refresh freeform configs so last_analysis_at updates in UI
+                            cfg_resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
+                            if cfg_resp.status_code == 200:
+                                await broadcast({"type": "freeform_config_list", "configs": cfg_resp.json()})
                 except Exception:
                     log.exception("Error processing web event")
                 finally:

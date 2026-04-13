@@ -25,6 +25,7 @@ from claude_runner.harness import handle_harness_onboarding
 from claude_runner.prompts import (
     CLARIFICATION_MARKER,
     build_coding_prompt,
+    build_plan_independent_review_prompt,
     build_planning_prompt,
     build_po_analysis_prompt,
     build_pr_independent_review_prompt,
@@ -324,6 +325,39 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         cleanup_workspace(task_id)
 
 
+def _parse_plan_phases(plan: str) -> list[dict]:
+    """Parse a plan into phases by splitting on '## Phase N' headers."""
+    import re as _re
+    phase_pattern = _re.compile(r'^##\s+Phase\s+\d+', _re.MULTILINE)
+    splits = list(phase_pattern.finditer(plan))
+    if len(splits) < 2:
+        return []  # Not enough phases to split — treat as normal complex task
+    phases = []
+    for i, match in enumerate(splits):
+        start = match.start()
+        end = splits[i + 1].start() if i + 1 < len(splits) else len(plan)
+        chunk = plan[start:end].strip()
+        # Extract title from first line
+        first_line = chunk.split("\n", 1)[0]
+        title = first_line.lstrip("#").strip()
+        phases.append({"title": title, "content": chunk, "status": "pending", "output_preview": ""})
+    return phases
+
+
+async def _update_subtasks(task_id: int, subtasks: list[dict], current: int | None) -> None:
+    """Update subtask progress on the orchestrator."""
+    # Strip 'content' from subtasks before sending to API (too large for JSON response)
+    api_subtasks = [
+        {"title": s["title"], "status": s["status"], "output_preview": s.get("output_preview", "")}
+        for s in subtasks
+    ]
+    async with httpx.AsyncClient() as client:
+        await client.patch(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/subtasks",
+            json={"subtasks": api_subtasks, "current_subtask": current},
+        )
+
+
 async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     """Run Claude Code to implement, self-review, test, and create a PR.
 
@@ -380,20 +414,126 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     await create_branch(workspace, branch_name)
 
     try:
-        # Step 1: Implement the task
-        coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks)
-        if retry_reason:
-            coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
-        output = await run_claude_code(
-            workspace, coding_prompt, timeout=1800,
-            session_id=session_id, resume=is_continuation,
-        )
-        log.info(f"Coding output for task #{task_id}: {output[:300]}...")
+        # Check if this is a complex-large task that should use subtask decomposition
+        phases = []
+        if task.complexity == "complex_large" and task.plan and not retry_reason:
+            phases = _parse_plan_phases(task.plan)
 
-        # Check if Claude needs clarification before proceeding
+        if phases and len(phases) >= 2:
+            await _handle_coding_with_subtasks(
+                task_id, task, phases, workspace, session_id,
+                base_branch, branch_name, is_continuation, repo,
+            )
+        else:
+            await _handle_coding_single(
+                task_id, task, workspace, session_id,
+                base_branch, branch_name, is_continuation, repo,
+                retry_reason,
+            )
+
+    except Exception as e:
+        log.exception(f"Coding failed for task #{task_id}")
+        await transition_task(task_id, "failed", str(e))
+        cleanup_workspace(task_id)
+
+
+async def _handle_coding_single(
+    task_id: int, task, workspace: str, session_id: str,
+    base_branch: str, branch_name: str, is_continuation: bool, repo,
+    retry_reason: str | None = None,
+) -> None:
+    """Standard coding path — single implementation pass."""
+    coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks)
+    if retry_reason:
+        coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
+    output = await run_claude_code(
+        workspace, coding_prompt, timeout=1800,
+        session_id=session_id, resume=is_continuation,
+    )
+    log.info(f"Coding output for task #{task_id}: {output[:300]}...")
+
+    # Check if Claude needs clarification before proceeding
+    question = _extract_clarification(output)
+    if question:
+        log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
+        await transition_task(task_id, "awaiting_clarification", question)
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(
+                type="task.clarification_needed",
+                task_id=task_id,
+                payload={"question": question, "phase": "coding"},
+            ).to_redis(),
+        )
+        await r.aclose()
+        return
+
+    await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
+
+
+async def _handle_coding_with_subtasks(
+    task_id: int, task, phases: list[dict], workspace: str, session_id: str,
+    base_branch: str, branch_name: str, is_continuation: bool, repo,
+) -> None:
+    """Complex-large coding path — implement each phase as a subtask with its own timeout."""
+    total = len(phases)
+    log.info(f"Task #{task_id}: complex-large with {total} subtasks")
+
+    # Initialize subtask tracking
+    await _update_subtasks(task_id, phases, 0)
+
+    for i, phase in enumerate(phases):
+        phases[i]["status"] = "running"
+        await _update_subtasks(task_id, phases, i)
+
+        # Publish progress event
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(
+                type="task.subtask_progress",
+                task_id=task_id,
+                payload={
+                    "current": i + 1,
+                    "total": total,
+                    "title": phase["title"],
+                    "status": "running",
+                },
+            ).to_redis(),
+        )
+        await r.aclose()
+
+        prompt = (
+            f"You are implementing a large task in phases. This is phase {i + 1} of {total}.\n\n"
+            f"## Overall task\n{task.title}\n\n{task.description}\n\n"
+            f"## Current phase to implement\n{phase['content']}\n\n"
+        )
+        if i == 0:
+            prompt += (
+                f"## Full plan for context (implement ONLY the current phase above)\n{task.plan}\n\n"
+                "Start by reading README.md and CLAUDE.md (if they exist) to understand the repo.\n"
+                "Implement ONLY the current phase. Commit your changes before stopping.\n"
+            )
+        else:
+            prompt += (
+                "Continue from where you left off. The previous phases are already implemented.\n"
+                "Implement ONLY the current phase. Commit your changes before stopping.\n"
+            )
+
+        log.info(f"Task #{task_id}: starting subtask {i + 1}/{total} — {phase['title']}")
+        resume = is_continuation or i > 0
+        output = await run_claude_code(
+            workspace, prompt, timeout=1800,
+            session_id=session_id, resume=resume,
+        )
+        log.info(f"Task #{task_id} subtask {i + 1} output: {output[:300]}...")
+
+        # Check for clarification
         question = _extract_clarification(output)
         if question:
-            log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
+            phases[i]["status"] = "blocked"
+            await _update_subtasks(task_id, phases, i)
             await transition_task(task_id, "awaiting_clarification", question)
             r = await get_redis()
             await publish_event(
@@ -401,56 +541,81 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
                 Event(
                     type="task.clarification_needed",
                     task_id=task_id,
-                    payload={"question": question, "phase": "coding"},
+                    payload={"question": question, "phase": f"subtask {i + 1}: {phase['title']}"},
                 ).to_redis(),
             )
             await r.aclose()
             return
 
-        # Step 2: Self-review loop (always resumes within the same session)
-        for attempt in range(MAX_REVIEW_RETRIES):
-            review_prompt = build_review_prompt(base_branch)
-            review_output = await run_claude_code(
-                workspace, review_prompt, timeout=300,
-                session_id=session_id, resume=True,
-            )
-            log.info(
-                f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}..."
-            )
+        phases[i]["status"] = "done"
+        phases[i]["output_preview"] = output[:200]
+        await _update_subtasks(task_id, phases, i)
 
-            if "REVIEW_PASSED" in review_output:
-                log.info(f"Self-review passed for task #{task_id}")
-                break
-            log.info(
-                f"Self-review found issues, Claude fixed them (attempt {attempt + 1})"
-            )
-        else:
-            log.warning(
-                f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
-            )
-
-        # Step 3: Push and create PR
-        await push_branch(workspace, branch_name)
-        pr_body = (
-            f"## Auto-Agent Task #{task_id}\n\n"
-            f"**Task:** {task.title}\n\n"
-            f"**Description:** {task.description[:500]}\n\n"
-            f"---\n"
-            f"*Generated by auto-agent via Claude Code. "
-            f"Code was self-reviewed for correctness, security, and root-cause analysis.*"
+        # Publish completion event for this subtask
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(
+                type="task.subtask_progress",
+                task_id=task_id,
+                payload={
+                    "current": i + 1,
+                    "total": total,
+                    "title": phase["title"],
+                    "status": "done",
+                },
+            ).to_redis(),
         )
-        pr_url = await create_pr(workspace, task.title, pr_body, base_branch, branch_name)
-        log.info(f"PR created: {pr_url}")
-        if not pr_url.startswith("http"):
-            raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
+        await r.aclose()
 
-        # Step 4: Trigger independent review (separate session)
-        await handle_independent_review(task_id, pr_url, branch_name)
+    log.info(f"Task #{task_id}: all {total} subtasks complete, proceeding to review + PR")
+    await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
 
-    except Exception as e:
-        log.exception(f"Coding failed for task #{task_id}")
-        await transition_task(task_id, "failed", str(e))
-        cleanup_workspace(task_id)
+
+async def _finish_coding(
+    task_id: int, task, workspace: str, session_id: str,
+    base_branch: str, branch_name: str,
+) -> None:
+    """Self-review, push, create PR, and trigger independent review."""
+    # Self-review loop
+    for attempt in range(MAX_REVIEW_RETRIES):
+        review_prompt = build_review_prompt(base_branch)
+        review_output = await run_claude_code(
+            workspace, review_prompt, timeout=900,
+            session_id=session_id, resume=True,
+        )
+        log.info(
+            f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}..."
+        )
+
+        if "REVIEW_PASSED" in review_output:
+            log.info(f"Self-review passed for task #{task_id}")
+            break
+        log.info(
+            f"Self-review found issues, Claude fixed them (attempt {attempt + 1})"
+        )
+    else:
+        log.warning(
+            f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
+        )
+
+    # Push and create PR
+    await push_branch(workspace, branch_name)
+    pr_body = (
+        f"## Auto-Agent Task #{task_id}\n\n"
+        f"**Task:** {task.title}\n\n"
+        f"**Description:** {task.description[:500]}\n\n"
+        f"---\n"
+        f"*Generated by auto-agent via Claude Code. "
+        f"Code was self-reviewed for correctness, security, and root-cause analysis.*"
+    )
+    pr_url = await create_pr(workspace, task.title, pr_body, base_branch, branch_name)
+    log.info(f"PR created: {pr_url}")
+    if not pr_url.startswith("http"):
+        raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
+
+    # Trigger independent review (separate session)
+    await handle_independent_review(task_id, pr_url, branch_name)
 
 
 async def handle_independent_review(task_id: int, pr_url: str, branch_name: str) -> None:
@@ -576,6 +741,77 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         await r.aclose()
 
 
+async def handle_plan_independent_review(task_id: int) -> None:
+    """Run an independent reviewer on a freeform task's plan and auto-approve or auto-reject.
+
+    Only fires for tasks where freeform_mode=True. The reviewer's full reasoning
+    is logged in TaskHistory via the transition message so the user can audit it.
+    """
+    import tempfile
+
+    task = await get_task(task_id)
+    if not task:
+        return
+    if task.status != "awaiting_approval":
+        log.info(
+            f"Plan auto-review skipped for task #{task_id}: status is '{task.status}', not awaiting_approval"
+        )
+        return
+    if not task.freeform_mode:
+        return
+    if not task.plan:
+        log.warning(f"Plan auto-review skipped for task #{task_id}: no plan stored")
+        return
+
+    log.info(f"Running independent plan review for freeform task #{task_id}")
+    prompt = build_plan_independent_review_prompt(task.title, task.description, task.plan)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"plan-review-{task_id}-") as tmp:
+            output = await run_claude_code(tmp, prompt, timeout=300)
+    except Exception as e:
+        log.exception(f"Plan auto-review failed for task #{task_id}")
+        # On reviewer failure, fall back to auto-approving so the task isn't stuck
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
+                json={
+                    "approved": True,
+                    "message": f"Plan auto-approved (reviewer error: {e})",
+                },
+            )
+        return
+
+    output_stripped = output.strip()
+    log.info(f"Plan reviewer output for task #{task_id}: {output_stripped[:300]}...")
+
+    # Parse first non-empty line for verdict
+    verdict = ""
+    reasoning_start = 0
+    for i, line in enumerate(output_stripped.splitlines()):
+        if line.strip():
+            verdict = line.strip().upper()
+            reasoning_start = i + 1
+            break
+    reasoning = "\n".join(output_stripped.splitlines()[reasoning_start:]).strip() or "(no reasoning provided)"
+
+    approved = verdict.startswith("APPROVE")
+    decision_label = "APPROVED" if approved else "REJECTED"
+    log_message = f"Plan {decision_label} by independent reviewer\n\n{reasoning[:1900]}"
+
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
+            json={
+                "approved": approved,
+                "feedback": reasoning if not approved else "",
+                "message": log_message,
+            },
+        )
+
+    log.info(f"Plan auto-review complete for task #{task_id}: {decision_label}")
+
+
 async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     """Address PR review comments by re-running Claude Code with the feedback.
 
@@ -696,6 +932,77 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
         ).to_redis(),
     )
     await r.aclose()
+
+
+async def _try_assign_repo(task_id: int, message: str) -> bool:
+    """Try to extract a repo name from the user's message and assign it to the task.
+
+    Returns True if a repo was successfully assigned.
+    """
+    # Get all known repos and check if any name appears in the message
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
+        if resp.status_code != 200:
+            return False
+        repos = resp.json()
+
+        msg_lower = message.lower()
+        for repo_dict in repos:
+            name = repo_dict.get("name", "")
+            if name and name.lower() in msg_lower:
+                resp = await client.patch(
+                    f"{ORCHESTRATOR_URL}/tasks/{task_id}/repo",
+                    json={"repo_name": name},
+                )
+                if resp.status_code == 200:
+                    log.info(f"Assigned repo '{name}' to task #{task_id} from user message")
+                    return True
+    return False
+
+
+async def handle_blocked_response(task_id: int, task: TaskData, message: str) -> None:
+    """Resume a blocked task after the user provides input.
+
+    Determines which phase to retry based on task state:
+    - If the task has a PR, retry coding (likely a review-address failure).
+    - If no repo assigned, try to extract repo name from message and assign it.
+    - Otherwise, retry planning.
+    """
+    log.info(f"Resuming blocked task #{task_id} with user message: {message[:100]}...")
+
+    # If no repo assigned, try to extract one from the user's message
+    if not task.repo_name:
+        assigned = await _try_assign_repo(task_id, message)
+        if not assigned:
+            log.warning(
+                f"Task #{task_id} blocked with no repo and couldn't extract repo name "
+                f"from message: {message[:100]}"
+            )
+            # Re-publish blocked event so user gets notified with instructions
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(
+                    type="task.blocked",
+                    task_id=task_id,
+                    payload={"error": "No repo assigned. Please include the repo name in your message."},
+                ).to_redis(),
+            )
+            await r.aclose()
+            return
+
+    if task.pr_url:
+        # Task was blocked during review handling — retry as review feedback
+        await transition_task(task_id, "coding", f"User unblocked: {message[:200]}")
+        await handle_pr_review_comments(task_id, message)
+    elif task.plan:
+        # Task had a plan but got blocked during coding — retry coding
+        await transition_task(task_id, "coding", f"User unblocked: {message[:200]}")
+        await handle_coding(task_id)
+    else:
+        # Task blocked before planning ran — start fresh (no session to resume)
+        await transition_task(task_id, "planning", f"User unblocked: {message[:200]}")
+        await handle_planning(task_id)
 
 
 DEPLOY_WORKFLOW_NAMES = ["deploy.yml", "deploy-dev.yml"]
@@ -1005,10 +1312,40 @@ async def handle_task_cleanup(task_id: int) -> None:
     cleanup_workspace(task_id)
 
 
+_po_queue: asyncio.Queue[int] = asyncio.Queue()
+
+
+async def _po_worker() -> None:
+    """Background worker — runs PO analyses sequentially, one at a time."""
+    from claude_runner.po_analyzer import handle_po_analysis as _handle_po
+    from shared.database import async_session as _async_session
+    from shared.models import FreeformConfig as _FC
+    from sqlalchemy import select as _select
+
+    log.info("PO analysis worker started")
+    while True:
+        repo_id = await _po_queue.get()
+        try:
+            async with _async_session() as _session:
+                _result = await _session.execute(
+                    _select(_FC).where(_FC.repo_id == repo_id)
+                )
+                _config = _result.scalar_one_or_none()
+                if _config:
+                    await _handle_po(_session, _config)
+                    _config.last_analysis_at = datetime.now(timezone.utc)
+                    await _session.commit()
+        except Exception:
+            log.exception(f"PO analysis worker error for repo_id={repo_id}")
+        finally:
+            _po_queue.task_done()
+
+
 async def event_loop() -> None:
     """Main loop — listen for planning, coding, cleanup, and PR review events."""
     r = await get_redis()
     await ensure_stream_group(r)
+    asyncio.create_task(_po_worker())
     log.info("Claude runner event loop started")
 
     backoff = 1
@@ -1026,6 +1363,11 @@ async def event_loop() -> None:
                     if event.type == "task.start_planning" and event.task_id:
                         feedback = event.payload.get("feedback") if event.payload else None
                         await handle_planning(event.task_id, feedback=feedback)
+                    elif event.type == "task.plan_ready" and event.task_id:
+                        # Auto-review plans for freeform tasks; no-op for normal tasks.
+                        _t = await get_task(event.task_id)
+                        if _t and _t.freeform_mode and _t.status == "awaiting_approval":
+                            await handle_plan_independent_review(event.task_id)
                     elif event.type == "task.start_coding" and event.task_id:
                         retry_reason = event.payload.get("retry_reason")
                         await handle_coding(event.task_id, retry_reason=retry_reason)
@@ -1039,20 +1381,21 @@ async def event_loop() -> None:
                             await handle_clarification_response(event.task_id, answer)
                     elif event.type == "po.analyze":
                         repo_id = event.payload.get("repo_id")
+                        repo_name = event.payload.get("repo_name", "")
                         if repo_id:
-                            from claude_runner.po_analyzer import handle_po_analysis as _handle_po
-                            from shared.database import async_session as _async_session
-                            from shared.models import FreeformConfig as _FC
-                            from sqlalchemy import select as _select
-                            async with _async_session() as _session:
-                                _result = await _session.execute(
-                                    _select(_FC).where(_FC.repo_id == repo_id)
+                            queued = _po_queue.qsize() > 0
+                            await _po_queue.put(repo_id)
+                            if queued:
+                                r2 = await get_redis()
+                                await publish_event(
+                                    r2,
+                                    Event(
+                                        type="po.analysis_queued",
+                                        task_id=0,
+                                        payload={"repo_name": repo_name, "position": _po_queue.qsize()},
+                                    ).to_redis(),
                                 )
-                                _config = _result.scalar_one_or_none()
-                                if _config:
-                                    await _handle_po(_session, _config)
-                                    _config.last_analysis_at = datetime.now(timezone.utc)
-                                    await _session.commit()
+                                await r2.aclose()
                     elif event.type == "repo.onboard":
                         repo_id = event.payload.get("repo_id")
                         repo_name = event.payload.get("repo_name", "")
@@ -1068,6 +1411,8 @@ async def event_loop() -> None:
                             # Route based on task status
                             if task.status == "awaiting_clarification":
                                 await handle_clarification_response(task_id, comments)
+                            elif task.status == "blocked":
+                                await handle_blocked_response(task_id, task, comments)
                             elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding"):
                                 # PR exists — treat as review feedback
                                 await handle_pr_review_comments(task_id, comments)

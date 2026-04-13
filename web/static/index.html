@@ -331,6 +331,319 @@
     .dev-task-item .dt-actions button {
       padding: 2px 8px; border: none; border-radius: 3px; font-size: 10px; cursor: pointer;
     }
+
+    /* ---------- Freeform v2: full-width main-area dashboard ---------- */
+
+    /* Sidebar list of freeform repos (replaces the cramped form) */
+    .ff-sidebar-action {
+      padding: 10px 12px;
+      margin: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      border: 1px dashed var(--border);
+      color: var(--text-muted);
+      text-align: center;
+      transition: all 0.15s;
+    }
+    .ff-sidebar-action:hover { border-color: var(--accent); color: var(--accent); }
+    .ff-sidebar-action.selected { border-style: solid; border-color: var(--accent); color: var(--accent); background: rgba(88,166,255,0.08); }
+
+    .ff-sidebar-section {
+      padding: 8px 12px 4px;
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .ff-repo-card {
+      padding: 10px 12px;
+      margin: 2px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      font-size: 13px;
+    }
+    .ff-repo-card:hover { background: rgba(255,255,255,0.04); }
+    .ff-repo-card.selected { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+    .ff-repo-card .ff-repo-name { font-weight: 500; word-break: break-word; }
+    .ff-repo-card .ff-repo-meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; display: flex; align-items: center; gap: 6px; }
+    .ff-repo-card .ff-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .ff-repo-card .ff-status-dot.on { background: var(--green); }
+    .ff-repo-card .ff-status-dot.off { background: var(--text-muted); }
+
+    /* Main-area freeform dashboard */
+    .freeform-main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 32px 40px;
+      max-width: 100%;
+    }
+    .freeform-main.hidden { display: none; }
+    .ff-page {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    .ff-page h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .ff-page .ff-page-subtitle {
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-bottom: 28px;
+    }
+    .ff-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px 22px;
+      margin-bottom: 18px;
+    }
+    .ff-section h2 {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .ff-field {
+      margin-bottom: 14px;
+    }
+    .ff-field:last-child { margin-bottom: 0; }
+    .ff-field label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+      font-weight: 500;
+    }
+    .ff-field .hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .ff-input, .ff-select, .ff-textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      transition: border-color 0.15s;
+    }
+    .ff-input:focus, .ff-select:focus, .ff-textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .ff-textarea {
+      resize: none;
+      overflow: hidden;
+      min-height: 80px;
+      line-height: 1.5;
+      /* Modern browsers: lets the box grow with content automatically */
+      field-sizing: content;
+    }
+
+    /* Toggle switch */
+    .ff-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 0;
+    }
+    .ff-toggle-row + .ff-toggle-row { border-top: 1px solid var(--border); }
+    .ff-toggle-row .toggle-info {
+      flex: 1;
+    }
+    .ff-toggle-row .toggle-info .toggle-label {
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 500;
+    }
+    .ff-toggle-row .toggle-info .toggle-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+    .toggle-switch {
+      position: relative;
+      width: 38px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle-switch .slider {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #444c56;
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle-switch .slider::before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle-switch input:checked + .slider {
+      background: var(--green);
+    }
+    .toggle-switch input:checked + .slider::before {
+      transform: translateX(16px);
+    }
+
+    /* Buttons */
+    .ff-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 9px 18px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .ff-btn:hover { opacity: 0.9; }
+    .ff-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .ff-btn.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .ff-btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .ff-btn.danger { background: var(--red); }
+    .ff-btn.success { background: var(--green); }
+    .ff-button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .ff-analysis-status {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .po-running {
+      color: var(--accent);
+    }
+    .po-queued {
+      color: var(--yellow, #e8a838);
+    }
+    .po-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: po-spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes po-spin {
+      to { transform: rotate(360deg); }
+    }
+    .subtask-bar {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .subtask-header {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+    .subtask-progress-track {
+      height: 6px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .subtask-progress-fill {
+      height: 100%;
+      background: var(--green, #3fb950);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+    .subtask-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .subtask-item {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 2px 0;
+    }
+    .subtask-item.subtask-active {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .subtask-title {
+      margin-left: 4px;
+    }
+
+    /* Suggestion cards in dashboard */
+    .ff-suggestion {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      background: var(--bg);
+    }
+    .ff-suggestion .ff-sug-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .ff-suggestion .ff-sug-rationale { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4; }
+    .ff-suggestion .ff-sug-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .ff-suggestion .ff-sug-pill {
+      font-size: 10px; padding: 2px 8px; border-radius: 10px;
+      background: rgba(88,166,255,0.15); color: var(--accent); text-transform: uppercase; font-weight: 600;
+    }
+    .ff-suggestion .ff-sug-priority {
+      font-size: 10px; padding: 2px 8px; border-radius: 10px;
+      background: rgba(210,153,34,0.15); color: var(--yellow);
+      text-transform: uppercase; font-weight: 600;
+    }
+    .ff-suggestion .ff-sug-actions { display: flex; gap: 6px; }
+    .ff-suggestion .ff-sug-actions button {
+      padding: 5px 12px; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 500;
+    }
+
+    /* Recent task entry in dashboard */
+    .ff-recent-task {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .ff-recent-task:hover { background: rgba(255,255,255,0.03); }
+    .ff-recent-task .ff-rt-title { flex: 1; word-break: break-word; }
+    .ff-recent-task .ff-rt-id { color: var(--text-muted); font-size: 11px; }
   </style>
 </head>
 <body>
@@ -355,28 +668,25 @@
       </div>
     </div>
 
-    <!-- Freeform tab -->
+    <!-- Freeform tab — sidebar list of freeform repos + actions -->
     <div class="freeform-panel" id="freeform-panel">
-      <div class="freeform-section" id="freeform-content">
-        <h3>Suggestions</h3>
-        <div id="suggestion-list"><div class="empty-state" style="height:60px;font-size:12px;">No suggestions yet</div></div>
+      <div class="freeform-section" id="freeform-content" style="padding:8px 0;">
+        <div class="ff-sidebar-action" id="ff-action-build" onclick="selectFreeformView('build')">+ Build something new</div>
+        <div class="ff-sidebar-action" id="ff-action-existing" onclick="selectFreeformView('existing')">+ Add to existing repo</div>
 
-        <h3 style="margin-top:12px;">Dev Changes</h3>
-        <div id="dev-task-list"><div class="empty-state" style="height:60px;font-size:12px;">No freeform tasks yet</div></div>
-      </div>
-
-      <div class="freeform-config-form">
-        <input type="text" id="ff-repo" placeholder="Repo name">
-        <input type="text" id="ff-branch" placeholder="Dev branch (default: dev)" value="dev">
-        <input type="text" id="ff-cron" placeholder="Cron (default: 0 9 * * 1)" value="0 9 * * 1">
-        <button style="background:var(--green);color:#fff;" onclick="enableFreeform()">Enable Freeform</button>
-        <button style="background:var(--accent);color:#fff;" onclick="triggerAnalysis()">Run PO Analysis Now</button>
+        <div class="ff-sidebar-section">Freeform Repos</div>
+        <div id="ff-repo-list">
+          <div class="empty-state" style="height:60px;font-size:12px;">No freeform repos yet</div>
+        </div>
       </div>
     </div>
   </div>
 
   <div class="main">
+    <!-- Tasks-tab main content -->
+    <div id="tasks-main" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
     <div class="main-header" id="main-header">Select a task or create one</div>
+    <div id="subtask-bar" class="subtask-bar" style="display:none;"></div>
     <div class="chat-area" id="chat-area">
       <div class="empty-state">Messages and events will appear here</div>
     </div>
@@ -403,6 +713,14 @@
       <input type="text" id="msg-input" placeholder="Describe a task or send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
       <button onclick="sendMessage()">Send</button>
     </div>
+    </div><!-- /#tasks-main -->
+
+    <!-- Freeform-tab main content (full width dashboard) -->
+    <div id="freeform-main" class="freeform-main hidden">
+      <div id="freeform-main-content" class="ff-page">
+        <div class="empty-state" style="margin-top:80px;">Select an option from the sidebar</div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -422,9 +740,23 @@
       };
     }
 
-    let suggestions = [];
-    let freeformTasks = [];
+    let suggestions = [];           // currently-displayed pending suggestions for the selected repo
+    let freeformTasks = [];          // recent freeform tasks (across all repos)
+    let freeformConfigs = [];        // all freeform configs (one per repo)
     let currentTab = "tasks";
+    let selectedFreeformView = null; // 'build' | 'existing' | { repoName: '...' }
+    let poAnalysisRunning = new Set(); // repo names with analysis actively running
+    let poAnalysisQueued = new Set();  // repo names waiting in queue
+
+    // Cron schedule presets shown in the dropdown.
+    const CRON_PRESETS = [
+      { label: "Every 10 minutes", value: "*/10 * * * *" },
+      { label: "Every 30 minutes", value: "*/30 * * * *" },
+      { label: "Every hour", value: "0 * * * *" },
+      { label: "Every 4 hours", value: "0 */4 * * *" },
+      { label: "Daily at 9am", value: "0 9 * * *" },
+      { label: "Weekly (Mon 9am)", value: "0 9 * * 1" },
+    ];
 
     function switchTab(tab) {
       currentTab = tab;
@@ -432,15 +764,19 @@
       document.getElementById("tab-freeform").classList.toggle("active", tab === "freeform");
       document.getElementById("tasks-panel").classList.toggle("hidden", tab !== "tasks");
       document.getElementById("freeform-panel").classList.toggle("visible", tab === "freeform");
+      // Swap the main area too
+      document.getElementById("tasks-main").style.display = (tab === "tasks") ? "flex" : "none";
+      document.getElementById("freeform-main").classList.toggle("hidden", tab !== "freeform");
+
       if (tab === "freeform") {
-        loadSuggestions();
+        loadFreeformConfigs();
         loadFreeformTasks();
       }
     }
 
-    function loadSuggestions() {
+    function loadFreeformConfigs() {
       if (ws && ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: "load_suggestions", status: "pending" }));
+        ws.send(JSON.stringify({ type: "load_freeform_config" }));
     }
 
     function loadFreeformTasks() {
@@ -448,64 +784,410 @@
         ws.send(JSON.stringify({ type: "load_freeform_tasks" }));
     }
 
-    function renderSuggestions() {
-      const el = document.getElementById("suggestion-list");
+    function loadSuggestionsForRepo(repoName) {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "load_suggestions", status: "pending", repo_name: repoName }));
+    }
+
+    /* ----- Sidebar list rendering ----- */
+
+    function renderFreeformSidebar() {
+      // Highlight active sidebar action
+      document.getElementById("ff-action-build").classList.toggle(
+        "selected", selectedFreeformView === "build");
+      document.getElementById("ff-action-existing").classList.toggle(
+        "selected", selectedFreeformView === "existing");
+
+      const el = document.getElementById("ff-repo-list");
+      if (!freeformConfigs || freeformConfigs.length === 0) {
+        el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No freeform repos yet</div>';
+        return;
+      }
+      const sortedConfigs = [...freeformConfigs].sort((a, b) => {
+        if (a.enabled !== b.enabled) return b.enabled - a.enabled;
+        return (a.repo_name || "").localeCompare(b.repo_name || "");
+      });
+      el.innerHTML = sortedConfigs.map(cfg => {
+        const isSelected = (selectedFreeformView && selectedFreeformView.repoName === cfg.repo_name);
+        return `
+        <div class="ff-repo-card ${isSelected ? 'selected' : ''}" onclick="selectFreeformRepo('${escAttr(cfg.repo_name)}')">
+          <div class="ff-repo-name">${escHtml(cfg.repo_name || '(unnamed)')}</div>
+          <div class="ff-repo-meta">
+            <span class="ff-status-dot ${cfg.enabled ? 'on' : 'off'}"></span>
+            ${cfg.enabled ? 'enabled' : 'disabled'}
+            ${cfg.auto_approve_suggestions ? ' • auto-approve' : ''}
+          </div>
+        </div>
+      `}).join("");
+    }
+
+    /* ----- Sidebar action / repo selection ----- */
+
+    function selectFreeformView(view) {
+      selectedFreeformView = view;
+      renderFreeformSidebar();
+      if (view === "build") renderFreeformBuildNew();
+      else if (view === "existing") renderFreeformAddExisting();
+    }
+
+    function selectFreeformRepo(repoName) {
+      selectedFreeformView = { repoName };
+      renderFreeformSidebar();
+      // Pre-fetch suggestions for this repo
+      suggestions = [];
+      loadSuggestionsForRepo(repoName);
+      renderFreeformRepoDetail(repoName);
+    }
+
+    /* ----- Main-area views ----- */
+
+    function renderFreeformBuildNew() {
+      const el = document.getElementById("freeform-main-content");
+      el.innerHTML = `
+        <h1>Build something new</h1>
+        <div class="ff-page-subtitle">
+          Describe a project and auto-agent will create a new GitHub repo, scaffold the initial codebase, and (if you enable the loop) keep improving it on its own.
+        </div>
+
+        <div class="ff-section">
+          <h2>Project description</h2>
+          <div class="ff-field">
+            <label>What do you want to build?</label>
+            <textarea class="ff-textarea" id="cr-description" rows="4"
+              placeholder="e.g. A Next.js todo app with dark mode, drag-and-drop, and local storage persistence"
+              oninput="autoGrow(this)"></textarea>
+            <div class="hint">Claude will pick a short repo name from this. Be specific about features you want in the first version.</div>
+          </div>
+          <div class="ff-field">
+            <label>GitHub org (optional)</label>
+            <input type="text" class="ff-input" id="cr-org"
+              placeholder="Leave empty to use your personal account">
+          </div>
+        </div>
+
+        <div class="ff-section">
+          <h2>Options</h2>
+          <div class="ff-toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label">Continuous improvement loop</div>
+              <div class="toggle-desc">After scaffolding, the PO agent generates suggestions every 30 min and auto-approves them. The repo will keep improving on its own until you turn this off.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="cr-loop" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="ff-button-row">
+          <button class="ff-btn" onclick="submitCreateRepo()">Create &amp; Scaffold</button>
+        </div>
+      `;
+    }
+
+    function renderFreeformAddExisting() {
+      const el = document.getElementById("freeform-main-content");
+      el.innerHTML = `
+        <h1>Add freeform to an existing repo</h1>
+        <div class="ff-page-subtitle">
+          Enable freeform mode on a repo that's already registered with auto-agent. The PO agent will analyze it on a schedule and generate improvement suggestions.
+        </div>
+
+        <div class="ff-section">
+          <h2>Repo</h2>
+          <div class="ff-field">
+            <label>Repo name</label>
+            <input type="text" class="ff-input" id="ae-repo"
+              placeholder="e.g. cardamon or org/cardamon">
+            <div class="hint">Must already be registered. The repo sync runs at startup; check the Tasks tab dropdown for the exact name.</div>
+          </div>
+          <div class="ff-field">
+            <label>Dev branch</label>
+            <input type="text" class="ff-input" id="ae-branch" value="dev">
+            <div class="hint">PRs from freeform tasks will merge into this branch. Use <code>main</code> for greenfield repos.</div>
+          </div>
+        </div>
+
+        <div class="ff-section">
+          <h2>Analysis schedule</h2>
+          <div class="ff-field">
+            <label>How often should the PO analyze the repo?</label>
+            <select class="ff-select" id="ae-cron">
+              ${CRON_PRESETS.map(p => `<option value="${p.value}">${p.label}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+
+        <div class="ff-section">
+          <h2>Options</h2>
+          <div class="ff-toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label">Auto-approve suggestions</div>
+              <div class="toggle-desc">When the PO produces suggestions, automatically convert them into freeform tasks (no human click required). Capped at 5 active tasks per repo.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ae-auto">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="ff-button-row">
+          <button class="ff-btn" onclick="submitAddExisting()">Enable Freeform</button>
+        </div>
+      `;
+      // Default cron to weekly for existing repos (less aggressive than greenfield)
+      document.getElementById("ae-cron").value = "0 9 * * 1";
+    }
+
+    function renderFreeformRepoDetail(repoName) {
+      const cfg = freeformConfigs.find(c => c.repo_name === repoName);
+      if (!cfg) {
+        document.getElementById("freeform-main-content").innerHTML =
+          `<div class="empty-state">Repo not found</div>`;
+        return;
+      }
+      // Build cron preset options, marking the current value as selected,
+      // and supporting custom values that aren't in the preset list.
+      const presetMatch = CRON_PRESETS.find(p => p.value === cfg.analysis_cron);
+      const cronOptions = CRON_PRESETS.map(p =>
+        `<option value="${p.value}" ${p.value === cfg.analysis_cron ? 'selected' : ''}>${p.label}</option>`
+      ).join("");
+      const customCron = !presetMatch
+        ? `<option value="${escAttr(cfg.analysis_cron)}" selected>Custom: ${escHtml(cfg.analysis_cron)}</option>`
+        : "";
+
+      const repoTasks = freeformTasks
+        .filter(t => t.repo_name === repoName)
+        .sort((a, b) => b.id - a.id)
+        .slice(0, 10);
+
+      document.getElementById("freeform-main-content").innerHTML = `
+        <h1>${escHtml(repoName)}</h1>
+        <div class="ff-page-subtitle">Freeform configuration and live activity for this repo.</div>
+
+        <div class="ff-section">
+          <h2>Status</h2>
+          <div class="ff-toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label">Freeform mode enabled</div>
+              <div class="toggle-desc">Master switch. When off, the PO loop stops and no new analysis runs.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="rd-enabled" ${cfg.enabled ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="ff-toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label">Auto-approve suggestions</div>
+              <div class="toggle-desc">Automatically convert PO suggestions into freeform tasks. Capped at 5 active tasks per repo.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="rd-auto" ${cfg.auto_approve_suggestions ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="ff-toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label">Auto-start tasks</div>
+              <div class="toggle-desc">Immediately start work on approved freeform tasks, bypassing the concurrency queue.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="rd-autostart" ${cfg.auto_start_tasks ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="ff-section">
+          <h2>Configuration</h2>
+          <div class="ff-field">
+            <label>Dev branch</label>
+            <input type="text" class="ff-input" id="rd-branch" value="${escAttr(cfg.dev_branch)}">
+            <div class="hint">Freeform PRs auto-merge into this branch when CI passes.</div>
+          </div>
+          <div class="ff-field">
+            <label>Analysis schedule</label>
+            <select class="ff-select" id="rd-cron">
+              ${customCron}${cronOptions}
+            </select>
+          </div>
+        </div>
+
+        <div class="ff-button-row">
+          <button class="ff-btn" onclick="saveRepoConfig('${escAttr(repoName)}')">Save changes</button>
+          <button class="ff-btn secondary" id="rd-analyze-btn" onclick="triggerAnalysisFor('${escAttr(repoName)}')"
+            ${poAnalysisRunning.has(repoName) || poAnalysisQueued.has(repoName) ? 'disabled' : ''}>
+            ${poAnalysisRunning.has(repoName)
+              ? '<span class="po-spinner"></span> PO analysis running...'
+              : poAnalysisQueued.has(repoName)
+                ? '<span class="po-spinner"></span> Queued...'
+                : 'Run PO analysis now'}
+          </button>
+        </div>
+        <div id="rd-analysis-status" class="ff-analysis-status">
+          ${poAnalysisRunning.has(repoName)
+            ? '<span class="po-running">Analysis in progress...</span>'
+            : poAnalysisQueued.has(repoName)
+              ? '<span class="po-queued">Waiting for other analysis to finish...</span>'
+              : cfg.last_analysis_at
+                ? '<span class="po-last-run">Last analysis: ' + new Date(cfg.last_analysis_at).toLocaleString() + '</span>'
+                : '<span class="po-last-run">No analysis run yet</span>'
+          }
+        </div>
+
+        <div class="ff-section" style="margin-top:24px;">
+          <h2>Pending suggestions</h2>
+          <div id="rd-suggestions">
+            <div class="empty-state" style="height:60px;font-size:12px;">Loading...</div>
+          </div>
+        </div>
+
+        <div class="ff-section">
+          <h2>Recent freeform tasks</h2>
+          <div id="rd-recent-tasks">
+            ${repoTasks.length === 0
+              ? '<div class="empty-state" style="height:60px;font-size:12px;">No freeform tasks yet</div>'
+              : repoTasks.map(t => `
+                <div class="ff-recent-task" onclick="switchTab('tasks');selectTask(${t.id})">
+                  <span class="status-badge status-${t.status}">${t.status}</span>
+                  <span class="ff-rt-title">${escHtml(t.title)}</span>
+                  <span class="ff-rt-id">#${t.id}</span>
+                  ${t.pr_url ? `<a href="${escAttr(t.pr_url)}" target="_blank" style="color:var(--accent);font-size:11px;" onclick="event.stopPropagation()">PR</a>` : ''}
+                </div>
+              `).join("")
+            }
+          </div>
+        </div>
+      `;
+      // If suggestions are already loaded (cached) render them now.
+      renderRepoDetailSuggestions();
+    }
+
+    function renderRepoDetailSuggestions() {
+      const el = document.getElementById("rd-suggestions");
+      if (!el) return;
       if (suggestions.length === 0) {
         el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No pending suggestions</div>';
         return;
       }
       el.innerHTML = suggestions.map(s => `
-        <div class="suggestion-item">
-          <div class="sug-title">${escHtml(s.title)}</div>
-          <div class="sug-rationale">${escHtml(s.rationale || '')}</div>
-          <div class="sug-meta">
-            ${s.category ? `<span class="sug-category">${s.category}</span>` : ''}
-            <span class="sug-priority">P${s.priority || 3}</span>
-            ${s.repo_name ? `<span style="color:var(--text-muted)">${s.repo_name}</span>` : ''}
+        <div class="ff-suggestion">
+          <div class="ff-sug-title">${escHtml(s.title)}</div>
+          <div class="ff-sug-rationale">${escHtml(s.rationale || s.description || '')}</div>
+          <div class="ff-sug-meta">
+            ${s.category ? `<span class="ff-sug-pill">${escHtml(s.category)}</span>` : ''}
+            <span class="ff-sug-priority">P${s.priority || 3}</span>
           </div>
-          ${s.status === 'pending' ? `
-            <div class="sug-actions">
-              <button class="sug-approve" onclick="approveSuggestion(${s.id})">Approve</button>
-              <button class="sug-reject" onclick="rejectSuggestion(${s.id})">Reject</button>
-            </div>
-          ` : `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;">${s.status}${s.task_id ? ' (Task #' + s.task_id + ')' : ''}</div>`}
+          <div class="ff-sug-actions">
+            <button style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
+            <button style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
+          </div>
         </div>
       `).join("");
     }
 
-    function renderFreeformTasks() {
-      const el = document.getElementById("dev-task-list");
-      if (freeformTasks.length === 0) {
-        el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No freeform tasks yet</div>';
-        return;
+    /* ----- Form submit helpers ----- */
+
+    function submitCreateRepo() {
+      const desc = document.getElementById("cr-description").value.trim();
+      if (!desc) { alert("Describe what you want to build"); return; }
+      const org = document.getElementById("cr-org").value.trim();
+      // The continuous-improvement loop is enabled by default in create_repo.py;
+      // when the toggle is off we send loop=false and the backend will create
+      // the freeform config with auto_approve_suggestions=false.
+      const loop = document.getElementById("cr-loop").checked;
+      ws.send(JSON.stringify({ type: "create_repo", description: desc, org, loop }));
+      document.getElementById("cr-description").value = "";
+      document.getElementById("cr-org").value = "";
+    }
+
+    function submitAddExisting() {
+      const repo = document.getElementById("ae-repo").value.trim();
+      const branch = document.getElementById("ae-branch").value.trim() || "dev";
+      const cron = document.getElementById("ae-cron").value;
+      const auto = document.getElementById("ae-auto").checked;
+      if (!repo) { alert("Enter a repo name"); return; }
+      ws.send(JSON.stringify({
+        type: "toggle_freeform",
+        repo_name: repo,
+        enabled: true,
+        dev_branch: branch,
+        analysis_cron: cron,
+        auto_approve_suggestions: auto,
+      }));
+    }
+
+    function saveRepoConfig(repoName) {
+      const enabled = document.getElementById("rd-enabled").checked;
+      const auto = document.getElementById("rd-auto").checked;
+      const autostart = document.getElementById("rd-autostart").checked;
+      const branch = document.getElementById("rd-branch").value.trim() || "dev";
+      const cron = document.getElementById("rd-cron").value;
+      ws.send(JSON.stringify({
+        type: "toggle_freeform",
+        repo_name: repoName,
+        enabled,
+        dev_branch: branch,
+        analysis_cron: cron,
+        auto_approve_suggestions: auto,
+        auto_start_tasks: autostart,
+      }));
+    }
+
+    function triggerAnalysisFor(repoName) {
+      ws.send(JSON.stringify({ type: "trigger_analysis", repo_name: repoName }));
+      // Optimistically show pending state — the actual started/queued event
+      // will update to the correct state once the server responds
+      poAnalysisQueued.add(repoName);
+      updatePoAnalysisUI(repoName);
+    }
+
+    function updatePoAnalysisUI(repoName) {
+      // Update the button and status if we're viewing this repo's detail page
+      if (!selectedFreeformView || selectedFreeformView.repoName !== repoName) return;
+      const btn = document.getElementById("rd-analyze-btn");
+      const status = document.getElementById("rd-analysis-status");
+      const isRunning = poAnalysisRunning.has(repoName);
+      const isQueued = poAnalysisQueued.has(repoName);
+      if (btn) {
+        if (isRunning) {
+          btn.disabled = true;
+          btn.innerHTML = '<span class="po-spinner"></span> PO analysis running...';
+        } else if (isQueued) {
+          btn.disabled = true;
+          btn.innerHTML = '<span class="po-spinner"></span> Queued...';
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = 'Run PO analysis now';
+        }
       }
-      el.innerHTML = freeformTasks.map(t => `
-        <div class="dev-task-item">
-          <div class="dt-title">#${t.id} ${escHtml(t.title)}</div>
-          <div class="dt-status">
-            <span class="status-badge status-${t.status}">${t.status}</span>
-            ${t.pr_url ? ` <a href="${t.pr_url}" target="_blank" style="color:var(--accent);font-size:10px;">PR</a>` : ''}
-          </div>
-          ${t.status === 'done' ? `
-            <div class="dt-actions">
-              <button class="sug-promote" onclick="promoteTask(${t.id})">Promote to Main</button>
-              <button class="sug-revert" onclick="revertTask(${t.id})">Revert</button>
-            </div>
-          ` : ''}
-        </div>
-      `).join("");
+      if (status) {
+        if (isRunning) {
+          status.innerHTML = '<span class="po-running">Analysis in progress...</span>';
+        } else if (isQueued) {
+          status.innerHTML = '<span class="po-queued">Waiting for other analysis to finish...</span>';
+        } else {
+          const cfg = freeformConfigs.find(c => c.repo_name === repoName);
+          const ts = cfg && cfg.last_analysis_at;
+          status.innerHTML = ts
+            ? '<span class="po-last-run">Last analysis: ' + new Date(ts).toLocaleString() + '</span>'
+            : '<span class="po-last-run">No analysis run yet</span>';
+        }
+      }
     }
 
     function approveSuggestion(id) {
       ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
       suggestions = suggestions.filter(s => s.id !== id);
-      renderSuggestions();
+      renderRepoDetailSuggestions();
     }
 
     function rejectSuggestion(id) {
       ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
       suggestions = suggestions.filter(s => s.id !== id);
-      renderSuggestions();
+      renderRepoDetailSuggestions();
     }
 
     function promoteTask(id) {
@@ -518,18 +1200,14 @@
       ws.send(JSON.stringify({ type: "revert_task", task_id: id }));
     }
 
-    function enableFreeform() {
-      const repo = document.getElementById("ff-repo").value.trim();
-      const branch = document.getElementById("ff-branch").value.trim() || "dev";
-      const cron = document.getElementById("ff-cron").value.trim() || "0 9 * * 1";
-      if (!repo) { alert("Enter a repo name"); return; }
-      ws.send(JSON.stringify({ type: "toggle_freeform", repo_name: repo, enabled: true, dev_branch: branch, analysis_cron: cron }));
+    /* Auto-grow textareas (fallback for browsers without field-sizing: content) */
+    function autoGrow(el) {
+      el.style.height = "auto";
+      el.style.height = (el.scrollHeight + 2) + "px";
     }
 
-    function triggerAnalysis() {
-      const repo = document.getElementById("ff-repo").value.trim();
-      if (!repo) { alert("Enter a repo name"); return; }
-      ws.send(JSON.stringify({ type: "trigger_analysis", repo_name: repo }));
+    function escAttr(s) {
+      return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
     }
 
     function handleMessage(data) {
@@ -537,14 +1215,42 @@
         case "task_list":
           tasks = data.tasks;
           renderTasks();
+          renderSubtaskBar();
           break;
         case "suggestion_list":
           suggestions = data.suggestions || [];
-          renderSuggestions();
+          renderRepoDetailSuggestions();
           break;
         case "freeform_task_list":
           freeformTasks = data.tasks || [];
-          renderFreeformTasks();
+          // Re-render the repo detail view if it's currently shown so the
+          // "Recent freeform tasks" section reflects the latest data.
+          if (currentTab === "freeform" && selectedFreeformView && selectedFreeformView.repoName) {
+            renderFreeformRepoDetail(selectedFreeformView.repoName);
+          }
+          break;
+        case "freeform_config_list":
+          freeformConfigs = data.configs || [];
+          if (currentTab === "freeform") {
+            renderFreeformSidebar();
+            // Refresh the repo detail view if currently shown so the toggles
+            // reflect the latest server state.
+            if (selectedFreeformView && selectedFreeformView.repoName) {
+              renderFreeformRepoDetail(selectedFreeformView.repoName);
+            }
+          }
+          break;
+        case "repo_created":
+          // Refresh the freeform configs (a new one was just created)
+          loadFreeformConfigs();
+          loadFreeformTasks();
+          // Switch to Tasks tab and select the freshly-created scaffold task
+          if (data.task && data.task.id) {
+            switchTab('tasks');
+            selectedTaskId = data.task.id;
+            renderTasks();
+            renderChat();
+          }
           break;
         case "history":
           // Load persisted history for a task
@@ -558,6 +1264,26 @@
           break;
         case "event":
           addChat(data.task_id, "event", formatEvent(data.event_type, data.payload || {}));
+          // Refresh subtask bar on subtask progress events
+          if (data.event_type === "task.subtask_progress" && data.task_id) {
+            // Refresh the task list so subtask data is up to date
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "get_tasks" }));
+            }
+          }
+          // Track PO analysis running/queued state
+          if (data.event_type === "po.analysis_queued" && data.payload?.repo_name) {
+            poAnalysisQueued.add(data.payload.repo_name);
+            updatePoAnalysisUI(data.payload.repo_name);
+          } else if (data.event_type === "po.analysis_started" && data.payload?.repo_name) {
+            poAnalysisQueued.delete(data.payload.repo_name);
+            poAnalysisRunning.add(data.payload.repo_name);
+            updatePoAnalysisUI(data.payload.repo_name);
+          } else if ((data.event_type === "po.suggestions_ready" || data.event_type === "po.analysis_failed") && data.payload?.repo_name) {
+            poAnalysisRunning.delete(data.payload.repo_name);
+            poAnalysisQueued.delete(data.payload.repo_name);
+            updatePoAnalysisUI(data.payload.repo_name);
+          }
           break;
         case "system":
           addChat(selectedTaskId, "system", data.message);
@@ -610,14 +1336,17 @@
         </div>
       `).join("");
 
-      // Show/hide approval and clarification bars
+      // Show/hide approval and clarification bars.
+      // Freeform tasks are fully autonomous: their plan is auto-reviewed and
+      // the PR auto-merges, so we never want the human-action bars to appear.
       const selected = tasks.find(t => t.id === selectedTaskId);
+      const isFreeform = selected && selected.freeform_mode;
       document.getElementById("approval-bar").style.display =
-        (selected && selected.status === "awaiting_approval") ? "flex" : "none";
+        (selected && selected.status === "awaiting_approval" && !isFreeform) ? "flex" : "none";
       document.getElementById("clarification-bar").style.display =
-        (selected && selected.status === "awaiting_clarification") ? "flex" : "none";
+        (selected && selected.status === "awaiting_clarification" && !isFreeform) ? "flex" : "none";
       document.getElementById("done-bar").style.display =
-        (selected && selected.status === "awaiting_review") ? "flex" : "none";
+        (selected && selected.status === "awaiting_review" && !isFreeform) ? "flex" : "none";
       document.getElementById("task-actions").style.display =
         selected ? "flex" : "none";
     }
@@ -640,10 +1369,40 @@
       }
     }
 
+    function renderSubtaskBar() {
+      const el = document.getElementById("subtask-bar");
+      if (!el) return;
+      const task = tasks.find(t => t.id === selectedTaskId);
+      if (!task || !task.subtasks || task.subtasks.length === 0) {
+        el.style.display = "none";
+        return;
+      }
+      const total = task.subtasks.length;
+      const done = task.subtasks.filter(s => s.status === "done").length;
+      const current = task.current_subtask;
+      const pct = Math.round((done / total) * 100);
+      el.style.display = "block";
+      el.innerHTML = `
+        <div class="subtask-header">Subtasks: ${done}/${total} complete</div>
+        <div class="subtask-progress-track">
+          <div class="subtask-progress-fill" style="width:${pct}%"></div>
+        </div>
+        <div class="subtask-list">
+          ${task.subtasks.map((s, i) => {
+            const icon = s.status === "done" ? "✅" : s.status === "running" ? "⚙️" : "⏳";
+            const active = i === current && s.status === "running" ? "subtask-active" : "";
+            return `<div class="subtask-item ${active}">${icon} <span class="subtask-title">${escHtml(s.title)}</span></div>`;
+          }).join("")}
+        </div>
+      `;
+    }
+
     function renderChat() {
       const el = document.getElementById("chat-area");
       const key = selectedTaskId || "_global";
       const msgs = [...(chatMessages["_global"] || []), ...(chatMessages[key] || [])];
+
+      renderSubtaskBar();
 
       if (msgs.length === 0) {
         el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
@@ -837,10 +1596,20 @@
           return `❌ **Task failed**\n\n${p.error || p.reason || "Unknown error"}`;
         case "task.blocked":
           return `🚫 **Task blocked** — ${p.error || "needs input"}`;
+        case "task.subtask_progress": {
+          const icon = p.status === "done" ? "✅" : "⚙️";
+          return `${icon} **Subtask ${p.current}/${p.total}** — ${p.title} [${p.status}]`;
+        }
         case "task.cleanup":
           return "🧹 Workspace cleaned up";
         case "task.deploy_preview":
           return "🚀 Deploying to dev environment...";
+        case "po.analysis_queued":
+          return `⏳ **PO Analysis queued** for ${p.repo_name || "repo"} (position ${p.position || "?"})`;
+        case "po.analysis_started":
+          return `🔄 **PO Analysis running** for ${p.repo_name || "repo"}...`;
+        case "po.analysis_failed":
+          return `❌ **PO Analysis failed** for ${p.repo_name || "repo"}${p.reason ? " — " + p.reason : ""}`;
         case "po.suggestions_ready":
           return `🧠 **PO Analysis complete** — ${p.count || 0} new suggestions for ${p.repo_name || "repo"}`;
         default:

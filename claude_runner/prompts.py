@@ -141,9 +141,12 @@ def _repo_context(repo_summary: str | None) -> str:
     return f"\n## Repo context (cached summary — skip re-exploring known areas)\n{repo_summary}\n"
 
 
-def build_planning_prompt(title: str, description: str, repo_summary: str | None = None) -> str:
+def build_planning_prompt(
+    title: str, description: str, repo_summary: str | None = None
+) -> str:
     return PLANNING_PROMPT.format(
-        title=title, description=description,
+        title=title,
+        description=description,
         clarification_instructions=CLARIFICATION_INSTRUCTIONS,
     ) + _repo_context(repo_summary)
 
@@ -151,7 +154,9 @@ def build_planning_prompt(title: str, description: str, repo_summary: str | None
 def _ci_checks_section(ci_checks: str | None) -> str:
     if not ci_checks:
         return "1. Run the full test suite and fix any failures."
-    commands = "\n".join(f"   - `{cmd.strip()}`" for cmd in ci_checks.strip().splitlines() if cmd.strip())
+    commands = "\n".join(
+        f"   - `{cmd.strip()}`" for cmd in ci_checks.strip().splitlines() if cmd.strip()
+    )
     return (
         "**MANDATORY: Run these CI checks before committing (these are the exact checks that CI will run):**\n"
         f"{commands}\n"
@@ -160,12 +165,17 @@ def _ci_checks_section(ci_checks: str | None) -> str:
 
 
 def build_coding_prompt(
-    title: str, description: str, plan: str | None = None,
-    repo_summary: str | None = None, ci_checks: str | None = None,
+    title: str,
+    description: str,
+    plan: str | None = None,
+    repo_summary: str | None = None,
+    ci_checks: str | None = None,
 ) -> str:
     plan_section = f"\n## Approved plan\n{plan}\n" if plan else ""
     return CODING_PROMPT.format(
-        title=title, description=description, plan_section=plan_section,
+        title=title,
+        description=description,
+        plan_section=plan_section,
         clarification_instructions=CLARIFICATION_INSTRUCTIONS,
         ci_checks_section=_ci_checks_section(ci_checks),
     ) + _repo_context(repo_summary)
@@ -176,10 +186,16 @@ def build_review_prompt(base_branch: str = "main") -> str:
 
 
 def build_pr_independent_review_prompt(
-    title: str, description: str, pr_url: str, base_branch: str,
+    title: str,
+    description: str,
+    pr_url: str,
+    base_branch: str,
 ) -> str:
     return PR_INDEPENDENT_REVIEW_PROMPT.format(
-        title=title, description=description, pr_url=pr_url, base_branch=base_branch,
+        title=title,
+        description=description,
+        pr_url=pr_url,
+        base_branch=base_branch,
     )
 
 
@@ -207,7 +223,7 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
    - Missing features users would naturally expect
    - UX friction points (confusing flows, missing feedback, poor error handling)
    - Consistency issues (different patterns for similar things)
-   - Accessibility gaps
+   - New features that would improve the product that are not currently implemented
    - Performance issues visible in code
 4. For each suggestion, provide a title, implementation-ready description, rationale, category, and priority.
 5. Update your knowledge summary with what you learned about the product.
@@ -229,6 +245,72 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
 Priority: 1=critical, 2=high, 3=medium, 4=low, 5=nice-to-have.
 Output ONLY the JSON object. No other text.
 """
+
+
+# --- Repo name generation (for create-from-description) ---
+
+REPO_NAME_PROMPT = """\
+You will receive a description of a project a user wants to build. Your only job \
+is to pick a short, lowercase, hyphen-separated GitHub repository name for it.
+
+## Rules
+- 2-5 words, hyphen-separated, all lowercase
+- No special characters, no underscores, no slashes
+- Maximum 40 characters
+- Descriptive but concise — favour the core noun (e.g. "todo-app" not "my-personal-task-tracker")
+- Output ONLY the name. No quotes, no explanation, no markdown, no trailing punctuation.
+
+## Description
+{description}
+"""
+
+
+def build_repo_name_prompt(description: str) -> str:
+    return REPO_NAME_PROMPT.format(description=description)
+
+
+# --- Plan independent review (auto-approves plans for freeform tasks) ---
+
+PLAN_INDEPENDENT_REVIEW_PROMPT = """\
+You are an independent reviewer evaluating an implementation plan written by another \
+agent. The user is NOT going to look at this plan — your decision is final. Be \
+thoughtful but pragmatic.
+
+## Task
+Title: {title}
+Description: {description}
+
+## Plan to review
+{plan}
+
+## Your job
+Decide if the plan is good enough to start coding. Check:
+1. **Coverage** — Does the plan address what the task description actually asks for?
+2. **Soundness** — Are the proposed steps technically reasonable?
+3. **Scope** — Is the plan focused, or does it sprawl into unrelated work?
+4. **Clarity** — Is the plan specific enough that a coder could follow it without guessing?
+
+## Output format (STRICT — first line must be the verdict)
+On the very first line, output exactly one of:
+- `APPROVE`
+- `REJECT`
+
+Then on the following lines, write 2-6 sentences explaining your reasoning. \
+If you REJECT, be specific about what needs to change so the next iteration can fix it. \
+If you APPROVE, briefly note what convinced you.
+
+Do NOT output anything else. No markdown fences, no preamble.
+"""
+
+
+def build_plan_independent_review_prompt(
+    title: str, description: str, plan: str
+) -> str:
+    return PLAN_INDEPENDENT_REVIEW_PROMPT.format(
+        title=title,
+        description=description,
+        plan=plan,
+    )
 
 
 def build_po_analysis_prompt(

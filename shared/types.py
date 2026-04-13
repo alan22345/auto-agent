@@ -46,6 +46,8 @@ class TaskData(BaseModel):
     plan: str | None = None
     error: str | None = None
     freeform_mode: bool = False
+    subtasks: list[dict] | None = None
+    current_subtask: int | None = None
     created_at: str | None = None
 
 
@@ -182,6 +184,8 @@ class FreeformConfigData(BaseModel):
     enabled: bool = False
     dev_branch: str = "dev"
     analysis_cron: str = "0 9 * * 1"
+    auto_approve_suggestions: bool = False
+    auto_start_tasks: bool = False
     last_analysis_at: str | None = None
     created_at: str | None = None
 

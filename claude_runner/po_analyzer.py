@@ -58,8 +58,14 @@ async def _check_and_analyze(session: AsyncSession) -> None:
 
 
 def _is_due(config: FreeformConfig, now: datetime) -> bool:
-    """Check if analysis should run now based on cron schedule."""
-    base_time = config.last_analysis_at or config.created_at or now
+    """Check if analysis should run now based on cron schedule.
+
+    If analysis has never run (last_analysis_at is null), it's immediately due
+    so newly enabled repos don't have to wait for the next cron window.
+    """
+    if config.last_analysis_at is None:
+        return True
+    base_time = config.last_analysis_at
     if base_time.tzinfo is None:
         base_time = base_time.replace(tzinfo=timezone.utc)
     cron = croniter(config.analysis_cron, base_time)
@@ -97,13 +103,49 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         recent_suggestions=recent_titles,
     )
 
+    # Notify UI that analysis is starting
+    r = await get_redis()
+    await publish_event(
+        r,
+        Event(
+            type="po.analysis_started",
+            task_id=0,
+            payload={"repo_name": repo.name},
+        ).to_redis(),
+    )
+    await r.aclose()
+
     log.info(f"Running PO analysis for repo '{repo.name}'")
-    output = await run_claude_code(workspace, prompt, timeout=900)
+    try:
+        output = await run_claude_code(workspace, prompt, timeout=900)
+    except Exception:
+        log.exception(f"PO analysis for '{repo.name}' failed during Claude Code execution")
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(
+                type="po.analysis_failed",
+                task_id=0,
+                payload={"repo_name": repo.name},
+            ).to_redis(),
+        )
+        await r.aclose()
+        raise
 
     # Parse JSON output
     suggestions_data = _parse_analysis_output(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(
+                type="po.analysis_failed",
+                task_id=0,
+                payload={"repo_name": repo.name, "reason": "No parseable output from Claude"},
+            ).to_redis(),
+        )
+        await r.aclose()
         return
 
     # Insert suggestions

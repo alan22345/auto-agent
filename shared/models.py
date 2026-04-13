@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -22,6 +23,7 @@ class Base(DeclarativeBase):
 class TaskComplexity(str, enum.Enum):
     SIMPLE = "simple"
     COMPLEX = "complex"
+    COMPLEX_LARGE = "complex_large"
 
 
 class TaskStatus(str, enum.Enum):
@@ -91,6 +93,8 @@ class Task(Base):
     plan = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     freeform_mode = Column(Boolean, default=False)
+    subtasks = Column(JSONB, nullable=True)  # [{title, status, output_preview}]
+    current_subtask = Column(Integer, nullable=True)  # 0-indexed, null = not started
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -172,6 +176,11 @@ class FreeformConfig(Base):
     analysis_cron = Column(String(100), default="0 9 * * 1")  # weekly Monday 9am
     last_analysis_at = Column(DateTime(timezone=True), nullable=True)
     ux_knowledge = Column(Text, nullable=True)  # PO's accumulated understanding
+    # When True, the orchestrator auto-approves PO-generated suggestions
+    # for this repo (closing the continuous-improvement loop). Bounded by
+    # the per-repo active task cap so the queue doesn't grow unboundedly.
+    auto_approve_suggestions = Column(Boolean, default=False, nullable=False)
+    auto_start_tasks = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     repo = relationship("Repo")

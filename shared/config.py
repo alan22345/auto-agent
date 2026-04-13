@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = ""
     github_webhook_secret: str = ""
+    # Default owner (user or org) for newly-created repos. Empty = look up
+    # the token's user from GET /user.
+    github_owner: str = ""
 
     # Web UI auth (HTTP Basic). Empty password disables auth.
     # Username is always "admin".
