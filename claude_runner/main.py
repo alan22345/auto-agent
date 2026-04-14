@@ -48,6 +48,69 @@ MAX_REVIEW_RETRIES = 2
 SUMMARY_MAX_AGE = timedelta(days=7)
 
 
+def _slugify(title: str, max_len: int = 40) -> str:
+    """Convert a task title into a short, meaningful branch slug using an LLM."""
+    import re as _re
+    # Remove common prefixes like "repo - name -"
+    cleaned = _re.sub(r'^repo\s*[-–—]\s*\S+\s*[-–—]\s*', '', title, flags=_re.IGNORECASE).strip()
+
+    # Use Claude to generate a concise slug
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["claude", "--print", "-p",
+             f"Generate a short git branch slug (2-4 words, lowercase, hyphenated, no special chars) "
+             f"that captures the essence of this task. Reply with ONLY the slug, nothing else.\n\n"
+             f"Task: {cleaned[:200]}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        slug = result.stdout.strip().lower()
+        # Sanitize: keep only alphanumeric and hyphens
+        slug = _re.sub(r'[^a-z0-9-]', '', slug)
+        slug = _re.sub(r'-+', '-', slug).strip('-')
+        if 3 <= len(slug) <= max_len:
+            return slug
+    except Exception:
+        pass
+
+    # Fallback: mechanical slugify
+    cleaned = _re.sub(r'[^a-z0-9\s]', '', cleaned.lower())
+    slug = _re.sub(r'\s+', '-', cleaned.strip())
+    if len(slug) > max_len:
+        slug = slug[:max_len].rsplit('-', 1)[0]
+    return slug or 'task'
+
+
+def _branch_name(task_id: int, title: str) -> str:
+    """Generate a descriptive branch name from a task."""
+    slug = _slugify(title)
+    return f"auto-agent/{slug}-{task_id}"
+
+
+def _pr_title(title: str) -> str:
+    """Generate a clean PR title."""
+    import re as _re
+    # Remove "repo - name -" prefix
+    cleaned = _re.sub(r'^repo\s*[-–—]\s*\S+\s*[-–—]\s*', '', title, flags=_re.IGNORECASE).strip()
+
+    # Use Claude to generate a concise PR title
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["claude", "--print", "-p",
+             f"Write a concise PR title (under 60 chars) for this task. "
+             f"Reply with ONLY the title, nothing else.\n\nTask: {cleaned[:300]}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        pr_title = result.stdout.strip()
+        if 5 <= len(pr_title) <= 80:
+            return f"[auto-agent] {pr_title}"
+    except Exception:
+        pass
+
+    return f"[auto-agent] {cleaned[:100]}"
+
+
 def _session_id(task_id: int, created_at: str | None = None) -> str:
     """Deterministic UUID session ID for a task — all Claude invocations for the
     same task share this session so context is preserved across phases.
@@ -408,7 +471,17 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         f"(session={session_id}, resume={is_continuation})"
     )
     workspace = await clone_repo(repo.url, task_id, base_branch)
-    branch_name = f"auto-agent/task-{task_id}"
+
+    # Reuse existing branch name if set (stable across retries), otherwise generate and persist
+    if task.branch_name:
+        branch_name = task.branch_name
+    else:
+        branch_name = _branch_name(task_id, task.title)
+        async with httpx.AsyncClient() as client:
+            await client.patch(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/branch",
+                json={"branch_name": branch_name},
+            )
 
     # Create or checkout the task branch (idempotent)
     await create_branch(workspace, branch_name)
@@ -478,12 +551,32 @@ async def _handle_coding_with_subtasks(
 ) -> None:
     """Complex-large coding path — implement each phase as a subtask with its own timeout."""
     total = len(phases)
-    log.info(f"Task #{task_id}: complex-large with {total} subtasks")
 
-    # Initialize subtask tracking
-    await _update_subtasks(task_id, phases, 0)
+    # Resume from existing subtask state if available
+    existing = task.subtasks or []
+    if existing and len(existing) == total:
+        done_count = sum(1 for s in existing if s.get("status") == "done")
+        if done_count == total:
+            log.info(f"Task #{task_id}: all {total} subtasks already done, skipping to review + PR")
+            await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
+            return
+        # Restore status from existing state into the parsed phases
+        for i, ex in enumerate(existing):
+            if ex.get("status") == "done":
+                phases[i]["status"] = "done"
+                phases[i]["output_preview"] = ex.get("output_preview", "")
+        start_from = done_count
+        log.info(f"Task #{task_id}: resuming complex-large from subtask {start_from + 1}/{total} ({done_count} already done)")
+    else:
+        start_from = 0
+        log.info(f"Task #{task_id}: complex-large with {total} subtasks")
+
+    # Initialize/update subtask tracking
+    await _update_subtasks(task_id, phases, start_from)
 
     for i, phase in enumerate(phases):
+        if phase["status"] == "done":
+            continue
         phases[i]["status"] = "running"
         await _update_subtasks(task_id, phases, i)
 
@@ -609,7 +702,7 @@ async def _finish_coding(
         f"*Generated by auto-agent via Claude Code. "
         f"Code was self-reviewed for correctness, security, and root-cause analysis.*"
     )
-    pr_url = await create_pr(workspace, task.title, pr_body, base_branch, branch_name)
+    pr_url = await create_pr(workspace, _pr_title(task.title), pr_body, base_branch, branch_name)
     log.info(f"PR created: {pr_url}")
     if not pr_url.startswith("http"):
         raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
@@ -830,7 +923,7 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
 
     session_id = _session_id(task_id, task.created_at)
     base_branch = repo.default_branch
-    branch_name = f"auto-agent/task-{task_id}"
+    branch_name = task.branch_name or _branch_name(task_id, task.title)
 
     log.info(f"Addressing PR review for task #{task_id} (session={session_id})")
     if task.status in ("awaiting_review", "awaiting_ci"):
@@ -1030,7 +1123,7 @@ async def handle_deploy_preview(task_id: int) -> None:
     if not task or not task.repo_name:
         return
 
-    branch_name = f"auto-agent/task-{task_id}"
+    branch_name = task.branch_name or _branch_name(task_id, task.title)
 
     # Strategy 1: Try GitHub Actions workflow_dispatch
     if task.pr_url and settings.github_token:

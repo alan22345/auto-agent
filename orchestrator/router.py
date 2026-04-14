@@ -270,6 +270,25 @@ async def assign_repo(
     return _task_to_response(task)
 
 
+class BranchUpdate(BaseModel):
+    branch_name: str
+
+
+@router.patch("/tasks/{task_id}/branch", response_model=TaskData)
+async def set_branch_name(
+    task_id: int,
+    req: BranchUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.branch_name = req.branch_name
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 class SubtaskUpdate(BaseModel):
     subtasks: list[dict]
     current_subtask: int | None = None

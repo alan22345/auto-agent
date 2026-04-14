@@ -368,6 +368,27 @@ async def on_ci_failed(event: Event) -> None:
         await r.aclose()
 
 
+async def on_dev_deploy_failed(event: Event) -> None:
+    """When dev deployment fails, retry coding with the failure output so Claude can fix it."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        output = event.payload.get("output", "Deployment failed (no details)")
+        # Truncate to avoid oversized prompts
+        reason = f"Dev deployment failed. Fix the deployment issue:\n\n{output[-2000:]}"
+        task = await transition(session, task, TaskStatus.CODING, f"Deploy failed: {output[:200]}")
+        await session.commit()
+
+        r = await get_redis()
+        await publish_event(r, Event(
+            type="task.start_coding",
+            task_id=task.id,
+            payload={"retry_reason": reason},
+        ).to_redis())
+        await r.aclose()
+
+
 async def on_review_approved(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
@@ -551,6 +572,7 @@ bus.on("task.review_comments_addressed", on_review_comments_addressed)
 bus.on("task.ci_passed", on_ci_passed)
 bus.on("task.ci_failed", on_ci_failed)
 bus.on("task.review_approved", on_review_approved)
+bus.on("task.dev_deploy_failed", on_dev_deploy_failed)
 bus.on("po.suggestions_ready", on_po_suggestions_ready)
 bus.on("task.done", on_task_finished)
 bus.on("task.failed", on_task_finished)
