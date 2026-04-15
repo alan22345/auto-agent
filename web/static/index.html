@@ -1205,6 +1205,18 @@
       const loop = document.getElementById("cr-loop").checked;
       const btn = document.getElementById("create-repo-btn");
       setButtonLoading(btn, true, 'Creating repository... this may take up to 3 minutes');
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "repo_created") return "done";
+          if (data.type === "error") return "error";
+        },
+        {
+          onDone()    { setButtonLoading(btn, false); },
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+          timeoutMs: 200000,
+        }
+      );
       ws.send(JSON.stringify({ type: "create_repo", description: desc, org, loop }));
       document.getElementById("cr-description").value = "";
       document.getElementById("cr-org").value = "";
@@ -1310,14 +1322,6 @@
         showToast(`Connection lost — cannot ${action} suggestion`, "error");
         return;
       }
-      // Disable both buttons in the row to prevent double-submission
-      const approveBtn = document.getElementById("sug-approve-" + id);
-      const rejectBtn = document.getElementById("sug-reject-" + id);
-      if (action === "approve") setButtonLoading(approveBtn, true);
-      else setButtonLoading(rejectBtn, true);
-      if (approveBtn) approveBtn.disabled = true;
-      if (rejectBtn) rejectBtn.disabled = true;
-
       const idx = suggestions.findIndex(s => s.id === id);
       const removed = idx !== -1 ? suggestions.splice(idx, 1)[0] : null;
       renderRepoDetailSuggestions();
@@ -1390,12 +1394,10 @@
             }
           }
           break;
-        case "repo_created": {
+        case "repo_created":
           // Refresh the freeform configs (a new one was just created)
           loadFreeformConfigs();
           loadFreeformTasks();
-          const crBtn = document.getElementById("create-repo-btn");
-          setButtonLoading(crBtn, false);
           // Switch to Tasks tab and select the freshly-created scaffold task
           if (data.task && data.task.id) {
             switchTab('tasks');
@@ -1404,7 +1406,6 @@
             renderChat();
           }
           break;
-        }
         case "history":
           // Load persisted history for a task
           const key = data.task_id;
@@ -1444,13 +1445,9 @@
         case "user":
           addChat(selectedTaskId, "user", data.message);
           break;
-        case "error": {
+        case "error":
           addChat(selectedTaskId, "error", data.message);
-          // Re-enable create-repo button if it's in loading state
-          const errBtn = document.getElementById("create-repo-btn");
-          if (errBtn && errBtn.disabled) setButtonLoading(errBtn, false);
           break;
-        }
       }
     }
 
@@ -1591,8 +1588,18 @@
       setButtonLoading(btn, true);
 
       if (ws && ws.readyState === WebSocket.OPEN) {
+        onNextWsMessage(
+          (data) => {
+            if (data.type === "error") return "error";
+            if (data.type === "task_list" || data.type === "system") return "done";
+          },
+          {
+            onDone()    { setButtonLoading(btn, false); },
+            onError()   { setButtonLoading(btn, false); },
+            onTimeout() { setButtonLoading(btn, false); },
+          }
+        );
         ws.send(JSON.stringify({ type: "send_task", title, description, repo_name }));
-        setButtonLoading(btn, false);
       } else {
         // Fallback to REST API
         try {
@@ -1629,6 +1636,16 @@
       if (!selectedTaskId) return;
       const btn = document.getElementById("approve-task-btn");
       setButtonLoading(btn, true);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "task_list" || data.type === "system") return "done";
+        },
+        {
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+        }
+      );
       ws.send(JSON.stringify({ type: "approve", task_id: selectedTaskId }));
     }
 
@@ -1636,6 +1653,16 @@
       if (!selectedTaskId) return;
       const btn = document.getElementById("reject-task-btn");
       setButtonLoading(btn, true);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "task_list" || data.type === "system") return "done";
+        },
+        {
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+        }
+      );
       const feedback = document.getElementById("reject-feedback").value.trim();
       ws.send(JSON.stringify({ type: "reject", task_id: selectedTaskId, feedback }));
       document.getElementById("reject-feedback").value = "";
