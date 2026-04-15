@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # Username is always "admin".
     web_auth_password: str = ""
 
+    # LLM provider: "anthropic", "openai", or "claude_cli"
+    llm_provider: str = "anthropic"
+    llm_model: str = "claude-sonnet-4-20250514"
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+
     # Concurrency
     max_concurrent_simple: int = 1
     max_concurrent_complex: int = 1

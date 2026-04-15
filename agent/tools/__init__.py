@@ -1,0 +1,35 @@
+"""Tool registry and factory."""
+
+from __future__ import annotations
+
+from agent.tools.base import Tool, ToolContext, ToolRegistry
+from agent.tools.bash import BashTool
+from agent.tools.file_edit import FileEditTool
+from agent.tools.file_read import FileReadTool
+from agent.tools.file_write import FileWriteTool
+from agent.tools.git import GitTool
+from agent.tools.glob_tool import GlobTool
+from agent.tools.grep_tool import GrepTool
+
+
+def create_default_registry(readonly: bool = False) -> ToolRegistry:
+    """Create a registry with all standard coding tools.
+
+    Args:
+        readonly: If True, exclude tools that modify files (planning mode).
+    """
+    registry = ToolRegistry()
+
+    # Always available — read-only tools
+    registry.register(FileReadTool())
+    registry.register(GlobTool())
+    registry.register(GrepTool())
+    registry.register(GitTool())
+
+    # Write tools — excluded in planning/readonly mode
+    if not readonly:
+        registry.register(FileWriteTool())
+        registry.register(FileEditTool())
+        registry.register(BashTool())
+
+    return registry
