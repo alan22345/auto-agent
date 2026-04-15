@@ -656,9 +656,8 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
             f"Cannot delete repo '{repo_name}': {len(active_tasks)} active task(s) reference it",
         )
 
-    # Delete all suggestions for this repo (not just pending) because the
-    # non-nullable repo_id FK would otherwise block repo deletion.
-    #
+    # Delete all suggestions — including approved/rejected ones — because
+    # Suggestion.repo_id is non-nullable, so we can't orphan them.
     await session.execute(
         sql_delete(Suggestion).where(Suggestion.repo_id == repo.id)
     )
