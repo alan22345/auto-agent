@@ -1186,6 +1186,23 @@
       }
     }
 
+    /** Register a one-shot WS message handler with automatic cleanup.
+     *  `matcher(data)` returns "done"|"error"|falsy.  Calls `onDone`/`onError`
+     *  accordingly, or cleans up silently after `timeoutMs`. */
+    function onNextWsMessage(matcher, { onDone, onError, onTimeout, timeoutMs = 10000 } = {}) {
+      function cleanup() { ws.removeEventListener("message", handler); clearTimeout(timer); }
+      function handler(e) {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+        const result = matcher(data);
+        if (result === "done")  { cleanup(); if (onDone)  onDone(data); }
+        if (result === "error") { cleanup(); if (onError) onError(data); }
+      }
+      const timer = setTimeout(() => { cleanup(); if (onTimeout) onTimeout(); }, timeoutMs);
+      ws.addEventListener("message", handler);
+      return cleanup;
+    }
+
     /* ----- Form submit helpers ----- */
 
     function submitCreateRepo() {
@@ -1218,34 +1235,30 @@
     }
 
     function saveRepoConfig(repoName) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast("Connection lost — cannot save", "error");
+        return;
+      }
       const btn = document.querySelector(`button[onclick="saveRepoConfig('${CSS.escape(repoName)}')"]`)
                 || document.querySelector('.ff-btn:not(.secondary)');
       if (btn) setButtonLoading(btn, true, "Save changes");
+      const resetBtn = () => { if (btn) setButtonLoading(btn, false, "Save changes"); };
       const enabled = document.getElementById("rd-enabled").checked;
       const auto = document.getElementById("rd-auto").checked;
       const autostart = document.getElementById("rd-autostart").checked;
       const branch = document.getElementById("rd-branch").value.trim() || "dev";
       const cron = document.getElementById("rd-cron").value;
-      // Listen for the server response to show feedback
-      const handler = (e) => {
-        const data = JSON.parse(e.data);
-        if (data.type === "freeform_config_list" || (data.type === "system" && data.message && data.message.includes(repoName))) {
-          if (btn) setButtonLoading(btn, false, "Save changes");
-          showToast("Saved", "success");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
-        } else if (data.type === "error") {
-          if (btn) setButtonLoading(btn, false, "Save changes");
-          showToast(data.message || "Failed to save", "error");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "freeform_config_list") return "done";
+          if (data.type === "error") return "error";
+        },
+        {
+          onDone()  { resetBtn(); showToast("Saved", "success"); },
+          onError(data) { resetBtn(); showToast(data.message || "Failed to save", "error"); },
+          onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
         }
-      };
-      const timeout = setTimeout(() => {
-        ws.removeEventListener("message", handler);
-        if (btn) setButtonLoading(btn, false, "Save changes");
-      }, 10000);
-      ws.addEventListener("message", handler);
+      );
       ws.send(JSON.stringify({
         type: "toggle_freeform",
         repo_name: repoName,
@@ -1299,58 +1312,33 @@
       }
     }
 
-    function approveSuggestion(id) {
+    function handleSuggestionAction(id, action) {
+      const label = action === "approve" ? "approved" : "rejected";
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        showToast("Connection lost — cannot approve suggestion", "error");
+        showToast(`Connection lost — cannot ${action} suggestion`, "error");
         return;
       }
-      const removed = suggestions.find(s => s.id === id);
-      suggestions = suggestions.filter(s => s.id !== id);
+      const idx = suggestions.findIndex(s => s.id === id);
+      const removed = idx !== -1 ? suggestions.splice(idx, 1)[0] : null;
       renderRepoDetailSuggestions();
-      const handler = (e) => {
-        const data = JSON.parse(e.data);
-        if (data.type === "error" && data.message && data.message.includes(String(id))) {
-          // Re-add the suggestion so the user can retry
-          if (removed) { suggestions.push(removed); renderRepoDetailSuggestions(); }
-          showToast(data.message, "error");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
-        } else if (data.type === "system" && data.message && data.message.includes(String(id))) {
-          showToast("Suggestion approved", "success");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "system") return "done";
+        },
+        {
+          onDone()  { showToast(`Suggestion ${label}`, "success"); },
+          onError(data) {
+            if (removed) { suggestions.splice(idx, 0, removed); renderRepoDetailSuggestions(); }
+            showToast(data.message || `Failed to ${action} suggestion`, "error");
+          },
         }
-      };
-      const timeout = setTimeout(() => ws.removeEventListener("message", handler), 10000);
-      ws.addEventListener("message", handler);
-      ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
+      );
+      ws.send(JSON.stringify({ type: `${action}_suggestion`, suggestion_id: id }));
     }
 
-    function rejectSuggestion(id) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        showToast("Connection lost — cannot reject suggestion", "error");
-        return;
-      }
-      const removed = suggestions.find(s => s.id === id);
-      suggestions = suggestions.filter(s => s.id !== id);
-      renderRepoDetailSuggestions();
-      const handler = (e) => {
-        const data = JSON.parse(e.data);
-        if (data.type === "error" && data.message && data.message.includes(String(id))) {
-          if (removed) { suggestions.push(removed); renderRepoDetailSuggestions(); }
-          showToast(data.message, "error");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
-        } else if (data.type === "system" && data.message && data.message.includes(String(id))) {
-          showToast("Suggestion rejected", "success");
-          ws.removeEventListener("message", handler);
-          clearTimeout(timeout);
-        }
-      };
-      const timeout = setTimeout(() => ws.removeEventListener("message", handler), 10000);
-      ws.addEventListener("message", handler);
-      ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
-    }
+    function approveSuggestion(id) { handleSuggestionAction(id, "approve"); }
+    function rejectSuggestion(id)  { handleSuggestionAction(id, "reject"); }
 
     function promoteTask(id) {
       if (!confirm("Promote this change to main?")) return;
