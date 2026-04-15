@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,7 @@ from shared.types import TaskData
 log = setup_logging("web-ui")
 
 ORCHESTRATOR_URL = settings.orchestrator_url
+BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
 
 app = FastAPI(title="Auto-Agent Chat")
 
@@ -110,7 +112,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     async with httpx.AsyncClient() as client:
                         resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/history")
                         if resp.status_code == 200:
-                            await ws.send_json({"type": "history", "task_id": task_id, "entries": resp.json()})
+                            await ws.send_json(
+                                {"type": "history", "task_id": task_id, "entries": resp.json()}
+                            )
             elif msg_type == "refresh":
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
@@ -129,6 +133,16 @@ async def _handle_create_task(ws: WebSocket, data: dict) -> None:
 
     if not title:
         await ws.send_json({"type": "error", "message": "Task title is required"})
+        return
+    if len(title) > 256:
+        await ws.send_json(
+            {"type": "error", "message": "Task title must be 256 characters or fewer"}
+        )
+        return
+    if len(description) > 10000:
+        await ws.send_json(
+            {"type": "error", "message": "Task description must be 10,000 characters or fewer"}
+        )
         return
 
     async with httpx.AsyncClient() as client:
@@ -159,9 +173,19 @@ async def _handle_send_message(ws: WebSocket, data: dict) -> None:
     if text.startswith("/branch "):
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
-            await ws.send_json({"type": "error", "message": "Usage: /branch <repo_name> <new_branch>"})
+            await ws.send_json(
+                {"type": "error", "message": "Usage: /branch <repo_name> <new_branch>"}
+            )
             return
         repo_name, new_branch = parts[1], parts[2]
+        if not BRANCH_NAME_RE.match(new_branch):
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "message": "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+                }
+            )
+            return
         async with httpx.AsyncClient() as client:
             resp = await client.patch(
                 f"{ORCHESTRATOR_URL}/repos/{repo_name}/branch",
@@ -169,7 +193,12 @@ async def _handle_send_message(ws: WebSocket, data: dict) -> None:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                await broadcast({"type": "system", "message": f"Updated **{data['repo']}** default branch: `{data['old_branch']}` → `{data['new_branch']}`"})
+                await broadcast(
+                    {
+                        "type": "system",
+                        "message": f"Updated **{data['repo']}** default branch: `{data['old_branch']}` → `{data['new_branch']}`",
+                    }
+                )
             else:
                 await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:200]}"})
         return
@@ -187,9 +216,13 @@ async def _handle_send_message(ws: WebSocket, data: dict) -> None:
             )
             if resp.status_code == 200:
                 task = TaskData.model_validate(resp.json())
-                await broadcast({"type": "system", "message": f"Task #{task.id} created: {task.title}"})
+                await broadcast(
+                    {"type": "system", "message": f"Task #{task.id} created: {task.title}"}
+                )
             else:
-                await ws.send_json({"type": "error", "message": f"Failed to create task: {resp.text}"})
+                await ws.send_json(
+                    {"type": "error", "message": f"Failed to create task: {resp.text}"}
+                )
         return
 
     r = await get_redis()
@@ -261,9 +294,16 @@ async def _handle_approve_suggestion(ws: WebSocket, data: dict) -> None:
         resp = await client.post(f"{ORCHESTRATOR_URL}/suggestions/{suggestion_id}/approve")
         if resp.status_code == 200:
             task = resp.json()
-            await broadcast({"type": "system", "message": f"Suggestion #{suggestion_id} approved -> Task #{task.get('id')}"})
+            await broadcast(
+                {
+                    "type": "system",
+                    "message": f"Suggestion #{suggestion_id} approved -> Task #{task.get('id')}",
+                }
+            )
         else:
-            await ws.send_json({"type": "error", "message": f"Failed to approve suggestion: {resp.text[:200]}"})
+            await ws.send_json(
+                {"type": "error", "message": f"Failed to approve suggestion: {resp.text[:200]}"}
+            )
 
 
 async def _handle_reject_suggestion(ws: WebSocket, data: dict) -> None:
@@ -275,7 +315,9 @@ async def _handle_reject_suggestion(ws: WebSocket, data: dict) -> None:
         if resp.status_code == 200:
             await broadcast({"type": "system", "message": f"Suggestion #{suggestion_id} rejected"})
         else:
-            await ws.send_json({"type": "error", "message": f"Failed to reject suggestion: {resp.text[:200]}"})
+            await ws.send_json(
+                {"type": "error", "message": f"Failed to reject suggestion: {resp.text[:200]}"}
+            )
 
 
 async def _handle_promote_task(ws: WebSocket, data: dict) -> None:
@@ -286,9 +328,16 @@ async def _handle_promote_task(ws: WebSocket, data: dict) -> None:
         resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/promote")
         if resp.status_code == 200:
             result = resp.json()
-            await broadcast({"type": "system", "message": f"Promoted task #{task_id} to main: {result.get('pr_url', '')}"})
+            await broadcast(
+                {
+                    "type": "system",
+                    "message": f"Promoted task #{task_id} to main: {result.get('pr_url', '')}",
+                }
+            )
         else:
-            await ws.send_json({"type": "error", "message": f"Failed to promote: {resp.text[:200]}"})
+            await ws.send_json(
+                {"type": "error", "message": f"Failed to promote: {resp.text[:200]}"}
+            )
 
 
 async def _handle_revert_task(ws: WebSocket, data: dict) -> None:
@@ -299,7 +348,12 @@ async def _handle_revert_task(ws: WebSocket, data: dict) -> None:
         resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/revert")
         if resp.status_code == 200:
             result = resp.json()
-            await broadcast({"type": "system", "message": f"Reverted task #{task_id}: {result.get('pr_url', '')}"})
+            await broadcast(
+                {
+                    "type": "system",
+                    "message": f"Reverted task #{task_id}: {result.get('pr_url', '')}",
+                }
+            )
         else:
             await ws.send_json({"type": "error", "message": f"Failed to revert: {resp.text[:200]}"})
 
@@ -357,10 +411,12 @@ async def _handle_create_repo(ws: WebSocket, data: dict) -> None:
             payload = resp.json()
             repo = payload.get("repo", {})
             task = payload.get("task", {})
-            await broadcast({
-                "type": "system",
-                "message": f"Created repo {repo.get('name')} ({repo.get('url')}) and queued scaffold task #{task.get('id')}",
-            })
+            await broadcast(
+                {
+                    "type": "system",
+                    "message": f"Created repo {repo.get('name')} ({repo.get('url')}) and queued scaffold task #{task.get('id')}",
+                }
+            )
             await ws.send_json({"type": "repo_created", "repo": repo, "task": task})
         else:
             await ws.send_json({"type": "error", "message": f"Failed: {resp.text[:300]}"})
@@ -426,32 +482,42 @@ async def event_listener() -> None:
                 try:
                     event = Event.from_redis(data)
                     # Push every event to the web UI
-                    await broadcast({
-                        "type": "event",
-                        "event_type": event.type,
-                        "task_id": event.task_id,
-                        "payload": event.payload,
-                        "timestamp": event.timestamp.isoformat(),
-                    })
+                    await broadcast(
+                        {
+                            "type": "event",
+                            "event_type": event.type,
+                            "task_id": event.task_id,
+                            "payload": event.payload,
+                            "timestamp": event.timestamp.isoformat(),
+                        }
+                    )
 
                     # Also refresh the task list for clients
                     if event.type.startswith("task."):
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
                             if resp.status_code == 200:
-                                tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
+                                tasks = [
+                                    TaskData.model_validate(t).model_dump() for t in resp.json()
+                                ]
                                 await broadcast({"type": "task_list", "tasks": tasks})
 
                     # Refresh suggestions and configs when PO analysis completes
                     if event.type == "po.suggestions_ready":
                         async with httpx.AsyncClient() as client:
-                            resp = await client.get(f"{ORCHESTRATOR_URL}/suggestions", params={"status": "pending"})
+                            resp = await client.get(
+                                f"{ORCHESTRATOR_URL}/suggestions", params={"status": "pending"}
+                            )
                             if resp.status_code == 200:
-                                await broadcast({"type": "suggestion_list", "suggestions": resp.json()})
+                                await broadcast(
+                                    {"type": "suggestion_list", "suggestions": resp.json()}
+                                )
                             # Refresh freeform configs so last_analysis_at updates in UI
                             cfg_resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
                             if cfg_resp.status_code == 200:
-                                await broadcast({"type": "freeform_config_list", "configs": cfg_resp.json()})
+                                await broadcast(
+                                    {"type": "freeform_config_list", "configs": cfg_resp.json()}
+                                )
                 except Exception:
                     log.exception("Error processing web event")
                 finally:
