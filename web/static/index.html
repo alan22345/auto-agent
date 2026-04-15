@@ -679,18 +679,6 @@
       to { opacity: 0; }
     }
 
-    /* Button loading spinner (reuses po-spin keyframes) */
-    .btn-spinner {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border: 2px solid rgba(255,255,255,0.3);
-      border-top-color: currentColor;
-      border-radius: 50%;
-      animation: po-spin 0.8s linear infinite;
-      vertical-align: middle;
-      margin-right: 4px;
-    }
   </style>
 </head>
 <body>
@@ -1510,8 +1498,13 @@
       // the PR auto-merges, so we never want the human-action bars to appear.
       const selected = tasks.find(t => t.id === selectedTaskId);
       const isFreeform = selected && selected.freeform_mode;
-      document.getElementById("approval-bar").style.display =
-        (selected && selected.status === "awaiting_approval" && !isFreeform) ? "flex" : "none";
+      const showApproval = selected && selected.status === "awaiting_approval" && !isFreeform;
+      document.getElementById("approval-bar").style.display = showApproval ? "flex" : "none";
+      if (showApproval) {
+        // Reset approve/reject buttons in case they were left in loading state
+        setButtonLoading(document.getElementById("approve-task-btn"), false);
+        setButtonLoading(document.getElementById("reject-task-btn"), false);
+      }
       document.getElementById("clarification-bar").style.display =
         (selected && selected.status === "awaiting_clarification" && !isFreeform) ? "flex" : "none";
       document.getElementById("done-bar").style.display =
