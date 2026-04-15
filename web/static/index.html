@@ -712,7 +712,7 @@
         <input type="text" id="new-title" placeholder="Task title...">
         <textarea id="new-desc" rows="2" placeholder="Description (optional)"></textarea>
         <input type="text" id="new-repo" placeholder="Repo name (optional)">
-        <button onclick="createTask()">Create Task</button>
+        <button id="create-task-btn" onclick="createTask()">Create Task</button>
       </div>
     </div>
 
@@ -741,8 +741,8 @@
     <div class="approval-bar" id="approval-bar" style="display:none;">
       <span>Plan awaiting approval:</span>
       <input type="text" id="reject-feedback" placeholder="Feedback (if rejecting)...">
-      <button class="approve-btn" onclick="approveTask()">Approve</button>
-      <button class="reject-btn" onclick="rejectTask()">Reject</button>
+      <button id="approve-task-btn" class="approve-btn" onclick="approveTask()">Approve</button>
+      <button id="reject-task-btn" class="reject-btn" onclick="rejectTask()">Reject</button>
     </div>
     <div class="approval-bar" id="clarification-bar" style="display:none;">
       <span>&#10067; Clarification needed:</span>
@@ -751,11 +751,11 @@
     </div>
     <div class="approval-bar" id="done-bar" style="display:none;">
       <span>PR merged? Mark this task as complete:</span>
-      <button class="approve-btn" onclick="markDone()">Mark Done</button>
+      <button id="mark-done-btn" class="approve-btn" onclick="markDone()">Mark Done</button>
     </div>
     <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;">
-      <button onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
-      <button onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
+      <button id="cancel-task-btn" onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
+      <button id="delete-task-btn" onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
     </div>
     <div class="input-area">
       <input type="text" id="msg-input" placeholder="Describe a task or send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
@@ -956,7 +956,7 @@
         </div>
 
         <div class="ff-button-row">
-          <button class="ff-btn" onclick="submitCreateRepo()">Create &amp; Scaffold</button>
+          <button id="create-repo-btn" class="ff-btn" onclick="submitCreateRepo()">Create &amp; Scaffold</button>
         </div>
       `;
     }
@@ -1157,8 +1157,8 @@
             <span class="ff-sug-priority">P${s.priority || 3}</span>
           </div>
           <div class="ff-sug-actions">
-            <button style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
-            <button style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
+            <button id="sug-approve-${s.id}" style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
+            <button id="sug-reject-${s.id}" style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
           </div>
         </div>
       `).join("");
@@ -1175,14 +1175,16 @@
       setTimeout(() => toast.remove(), 3000);
     }
 
-    function setButtonLoading(btn, loading, originalText) {
+    function setButtonLoading(btn, loading, label) {
+      if (!btn) return;
       if (loading) {
-        btn._originalText = btn.textContent;
+        btn._originalHTML = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<span class="btn-spinner"></span>' + (originalText || btn._originalText || '') + '...';
+        btn.innerHTML = '<span class="po-spinner"></span> ' + (label || btn.textContent.trim());
       } else {
         btn.disabled = false;
-        btn.textContent = btn._originalText || originalText || '';
+        if (btn._originalHTML !== undefined) btn.innerHTML = btn._originalHTML;
+        else if (label) btn.textContent = label;
       }
     }
 
@@ -1213,6 +1215,8 @@
       // when the toggle is off we send loop=false and the backend will create
       // the freeform config with auto_approve_suggestions=false.
       const loop = document.getElementById("cr-loop").checked;
+      const btn = document.getElementById("create-repo-btn");
+      setButtonLoading(btn, true, 'Creating repository... this may take up to 3 minutes');
       ws.send(JSON.stringify({ type: "create_repo", description: desc, org, loop }));
       document.getElementById("cr-description").value = "";
       document.getElementById("cr-org").value = "";
@@ -1318,6 +1322,14 @@
         showToast(`Connection lost — cannot ${action} suggestion`, "error");
         return;
       }
+      // Disable both buttons in the row to prevent double-submission
+      const approveBtn = document.getElementById("sug-approve-" + id);
+      const rejectBtn = document.getElementById("sug-reject-" + id);
+      if (action === "approve") setButtonLoading(approveBtn, true);
+      else setButtonLoading(rejectBtn, true);
+      if (approveBtn) approveBtn.disabled = true;
+      if (rejectBtn) rejectBtn.disabled = true;
+
       const idx = suggestions.findIndex(s => s.id === id);
       const removed = idx !== -1 ? suggestions.splice(idx, 1)[0] : null;
       renderRepoDetailSuggestions();
@@ -1390,10 +1402,12 @@
             }
           }
           break;
-        case "repo_created":
+        case "repo_created": {
           // Refresh the freeform configs (a new one was just created)
           loadFreeformConfigs();
           loadFreeformTasks();
+          const crBtn = document.getElementById("create-repo-btn");
+          setButtonLoading(crBtn, false);
           // Switch to Tasks tab and select the freshly-created scaffold task
           if (data.task && data.task.id) {
             switchTab('tasks');
@@ -1402,6 +1416,7 @@
             renderChat();
           }
           break;
+        }
         case "history":
           // Load persisted history for a task
           const key = data.task_id;
@@ -1441,9 +1456,13 @@
         case "user":
           addChat(selectedTaskId, "user", data.message);
           break;
-        case "error":
+        case "error": {
           addChat(selectedTaskId, "error", data.message);
+          // Re-enable create-repo button if it's in loading state
+          const errBtn = document.getElementById("create-repo-btn");
+          if (errBtn && errBtn.disabled) setButtonLoading(errBtn, false);
           break;
+        }
       }
     }
 
@@ -1575,20 +1594,28 @@
       const repo_name = document.getElementById("new-repo").value.trim();
       if (!title) return;
 
+      const btn = document.getElementById("create-task-btn");
+      setButtonLoading(btn, true);
+
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "send_task", title, description, repo_name }));
+        setButtonLoading(btn, false);
       } else {
         // Fallback to REST API
-        const resp = await fetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
-        });
-        if (resp.ok) {
-          const task = await resp.json();
-          addChat(null, "system", `Task #${task.id} created: ${task.title}`);
-        } else {
-          addChat(null, "error", `Failed to create task: ${await resp.text()}`);
+        try {
+          const resp = await fetch("/api/tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
+          });
+          if (resp.ok) {
+            const task = await resp.json();
+            addChat(null, "system", `Task #${task.id} created: ${task.title}`);
+          } else {
+            addChat(null, "error", `Failed to create task: ${await resp.text()}`);
+          }
+        } finally {
+          setButtonLoading(btn, false);
         }
       }
       document.getElementById("new-title").value = "";
@@ -1607,11 +1634,15 @@
 
     function approveTask() {
       if (!selectedTaskId) return;
+      const btn = document.getElementById("approve-task-btn");
+      setButtonLoading(btn, true);
       ws.send(JSON.stringify({ type: "approve", task_id: selectedTaskId }));
     }
 
     function rejectTask() {
       if (!selectedTaskId) return;
+      const btn = document.getElementById("reject-task-btn");
+      setButtonLoading(btn, true);
       const feedback = document.getElementById("reject-feedback").value.trim();
       ws.send(JSON.stringify({ type: "reject", task_id: selectedTaskId, feedback }));
       document.getElementById("reject-feedback").value = "";
@@ -1628,8 +1659,8 @@
 
     async function cancelTask() {
       if (!selectedTaskId || !confirm("Cancel this task?")) return;
-      const btn = document.querySelector('#task-actions button[onclick="cancelTask()"]');
-      if (btn) setButtonLoading(btn, true, "Cancel");
+      const btn = document.getElementById("cancel-task-btn");
+      setButtonLoading(btn, true);
       try {
         const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
         if (resp.ok) {
@@ -1640,14 +1671,14 @@
           showToast("Failed to cancel task", "error");
         }
       } finally {
-        if (btn) setButtonLoading(btn, false, "Cancel");
+        setButtonLoading(btn, false);
       }
     }
 
     async function markDone() {
       if (!selectedTaskId) return;
-      const btn = document.querySelector('#done-bar .approve-btn');
-      if (btn) setButtonLoading(btn, true, "Mark Done");
+      const btn = document.getElementById("mark-done-btn");
+      setButtonLoading(btn, true);
       try {
         const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
         if (resp.ok) {
@@ -1658,14 +1689,14 @@
           showToast("Failed to mark task as done", "error");
         }
       } finally {
-        if (btn) setButtonLoading(btn, false, "Mark Done");
+        setButtonLoading(btn, false);
       }
     }
 
     async function deleteTask() {
       if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
-      const btn = document.querySelector('#task-actions button[onclick="deleteTask()"]');
-      if (btn) setButtonLoading(btn, true, "Delete");
+      const btn = document.getElementById("delete-task-btn");
+      setButtonLoading(btn, true);
       try {
         const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
         if (resp.ok) {
@@ -1680,7 +1711,7 @@
           showToast("Failed to delete task", "error");
         }
       } finally {
-        if (btn) setButtonLoading(btn, false, "Delete");
+        setButtonLoading(btn, false);
       }
     }
 
