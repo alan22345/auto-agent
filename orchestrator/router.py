@@ -6,7 +6,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_session
@@ -40,6 +40,9 @@ from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 
 router = APIRouter()
+
+# Statuses that indicate a task is no longer actively running.
+TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}
 
 # --- Rate limiting ---
 
@@ -184,14 +187,11 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     await session.execute(
         select(TaskHistory).where(TaskHistory.task_id == task_id)
     )
-    from sqlalchemy import delete as sql_delete
     await session.execute(sql_delete(TaskHistory).where(TaskHistory.task_id == task_id))
     await session.delete(task)
     await session.commit()
 
     # Publish cleanup event to free workspace
-    from shared.redis_client import get_redis, publish_event
-    from shared.events import Event
     r = await get_redis()
     await publish_event(r, Event(type="task.cleanup", task_id=task_id).to_redis())
     await publish_event(r, Event(type="task.failed", task_id=task_id).to_redis())
@@ -635,9 +635,6 @@ async def update_repo_summary(
     return {"ok": True}
 
 
-TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED}
-
-
 @router.delete("/repos/{repo_name}")
 async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_session)) -> dict:
     """Remove a repo and its associated FreeformConfig + pending suggestions."""
@@ -659,9 +656,9 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
             f"Cannot delete repo '{repo_name}': {len(active_tasks)} active task(s) reference it",
         )
 
-    from sqlalchemy import delete as sql_delete, update as sql_update
-
-    # Cascade-delete pending suggestions
+    # Delete all suggestions for this repo (not just pending) because the
+    # non-nullable repo_id FK would otherwise block repo deletion.
+    #
     await session.execute(
         sql_delete(Suggestion).where(Suggestion.repo_id == repo.id)
     )
