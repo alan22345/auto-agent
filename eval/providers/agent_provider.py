@@ -15,6 +15,10 @@ import tempfile
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+# Load .env so shared.config picks up LLM settings
+from dotenv import load_dotenv
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
 
 def call_api(prompt, options, context):
     """Promptfoo entry point. Returns the agent's output + workspace diff."""
@@ -66,18 +70,33 @@ async def _run_agent(prompt, options, context):
         )
         result = await agent.run(task)
 
-        # Capture the diff
+        # Capture the diff — check both uncommitted and committed changes
+        proc = await asyncio.create_subprocess_exec(
+            "git", "diff", cwd=workspace,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        unstaged_diff, _ = await proc.communicate()
+
         proc = await asyncio.create_subprocess_exec(
             "git", "diff", "--cached", cwd=workspace,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         staged_diff, _ = await proc.communicate()
 
+        # Also check committed changes (agent may have committed)
         proc = await asyncio.create_subprocess_exec(
-            "git", "diff", cwd=workspace,
+            "git", "log", "--oneline", "-1", "--format=%H", cwd=workspace,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        unstaged_diff, _ = await proc.communicate()
+        head_hash, _ = await proc.communicate()
+
+        committed_diff = b""
+        if head_hash.strip():
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "HEAD~1..HEAD", cwd=workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            committed_diff, _ = await proc.communicate()
 
         # Read modified files
         modified_files = {}
@@ -92,7 +111,11 @@ async def _run_agent(prompt, options, context):
                 except Exception:
                     pass
 
-        diff_text = (staged_diff or b"").decode() + (unstaged_diff or b"").decode()
+        diff_text = (
+            (unstaged_diff or b"").decode()
+            + (staged_diff or b"").decode()
+            + (committed_diff or b"").decode()
+        )
 
         output = {
             "agent_output": result.output,

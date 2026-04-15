@@ -65,12 +65,27 @@ async def _run_cli(prompt, options, context):
 
         cli_output = (stdout or b"").decode()
 
-        # Capture diff
+        # Capture diff — uncommitted + committed
         proc = await asyncio.create_subprocess_exec(
             "git", "diff", cwd=workspace,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         diff_out, _ = await proc.communicate()
+
+        # Also check committed changes
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "--oneline", "-1", "--format=%H", cwd=workspace,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        head_hash, _ = await proc.communicate()
+
+        committed_diff = b""
+        if head_hash.strip():
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "HEAD~1..HEAD", cwd=workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            committed_diff, _ = await proc.communicate()
 
         # Read modified files
         modified_files = {}
@@ -85,9 +100,10 @@ async def _run_cli(prompt, options, context):
                 except Exception:
                     pass
 
+        full_diff = (diff_out or b"").decode() + (committed_diff or b"").decode()
         output = {
             "cli_output": cli_output[:5000],
-            "diff": (diff_out or b"").decode()[:5000],
+            "diff": full_diff[:5000],
             "files": modified_files,
         }
 

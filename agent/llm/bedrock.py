@@ -23,11 +23,16 @@ from agent.llm.types import (
     context_window_for_model,
 )
 
-# Bedrock model IDs use a different format than the Anthropic API
+# Map friendly model names to Bedrock inference profile IDs.
+# Use the latest cross-region profiles (us.*) for highest throughput.
 BEDROCK_MODEL_MAP: dict[str, str] = {
+    # Latest models (use these)
+    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
+    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    # Older Sonnet/Opus 4.0 (lower quotas)
     "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
     "claude-opus-4-20250514": "us.anthropic.claude-opus-4-20250514-v1:0",
-    "claude-haiku-4-20250506": "us.anthropic.claude-haiku-4-20250506-v1:0",
 }
 
 

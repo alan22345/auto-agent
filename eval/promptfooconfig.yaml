@@ -1,19 +1,28 @@
 description: "Agent vs Claude Code CLI — coding capability evaluation"
 
+# Use Bedrock Claude for LLM-rubric grading (not OpenAI)
+defaultTest:
+  options:
+    provider:
+      id: "bedrock:us.anthropic.claude-sonnet-4-6"
+      config:
+        region: "us-east-1"
+
 providers:
   - id: "file://providers/agent_provider.py"
     label: "Auto-Agent (Bedrock)"
+    config:
+      pythonExecutable: ../.venv/bin/python3
   - id: "file://providers/claude_cli_provider.py"
     label: "Claude Code CLI"
+    config:
+      pythonExecutable: ../.venv/bin/python3
 
 prompts:
   - "{{task}}"
 
-defaultTest:
-  options:
-    provider:
-      python:
-        pythonExecutable: ../.venv/bin/python3
+evaluateOptions:
+  maxConcurrency: 4
 
 tests:
   # -------------------------------------------------------------------

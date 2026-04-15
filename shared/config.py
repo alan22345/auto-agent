@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # LLM provider: "anthropic", "bedrock", or "claude_cli"
     llm_provider: str = "anthropic"
-    llm_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
     # Bedrock (uses AWS credential chain — no keys needed if IAM/SSO configured)
     bedrock_region: str = "us-east-1"
