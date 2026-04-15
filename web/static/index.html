@@ -849,9 +849,13 @@
       };
       ws.onclose = () => {
         showConnStatus('disconnected');
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        const base = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        const jitter = Math.random() * base * 0.3;
         reconnectAttempts++;
-        reconnectTimer = setTimeout(connect, delay);
+        reconnectTimer = setTimeout(connect, base + jitter);
+      };
+      ws.onerror = () => {
+        showConnStatus('disconnected');
       };
     }
 
