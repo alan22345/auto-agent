@@ -16,11 +16,11 @@ def get_provider() -> LLMProvider:
             api_key=settings.anthropic_api_key,
             model=settings.llm_model,
         )
-    elif settings.llm_provider == "openai":
-        from agent.llm.openai import OpenAIProvider
+    elif settings.llm_provider == "bedrock":
+        from agent.llm.bedrock import BedrockProvider
 
-        return OpenAIProvider(
-            api_key=settings.openai_api_key,
+        return BedrockProvider(
+            region=settings.bedrock_region,
             model=settings.llm_model,
         )
     elif settings.llm_provider == "claude_cli":

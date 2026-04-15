@@ -70,8 +70,8 @@ from integrations.telegram.main import (
     inbound_loop as telegram_inbound_loop,
     notification_loop as telegram_notification_loop,
 )
-from claude_runner.main import event_loop as claude_runner_loop
-from claude_runner.po_analyzer import run_po_analysis_loop
+from agent.main import event_loop as claude_runner_loop
+from agent.po_analyzer import run_po_analysis_loop
 
 log = setup_logging("auto-agent")
 
