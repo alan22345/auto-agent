@@ -373,6 +373,10 @@
     .ff-repo-card .ff-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .ff-repo-card .ff-status-dot.on { background: var(--green); }
     .ff-repo-card .ff-status-dot.off { background: var(--text-muted); }
+    .ff-repo-card { position: relative; }
+    .ff-repo-delete { position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 4px; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
+    .ff-repo-card:hover .ff-repo-delete { opacity: 1; }
+    .ff-repo-delete:hover { color: var(--red, #f85149); background: rgba(248,81,73,0.1); }
 
     /* Main-area freeform dashboard */
     .freeform-main {
@@ -811,6 +815,7 @@
         const isSelected = (selectedFreeformView && selectedFreeformView.repoName === cfg.repo_name);
         return `
         <div class="ff-repo-card ${isSelected ? 'selected' : ''}" onclick="selectFreeformRepo('${escAttr(cfg.repo_name)}')">
+          <span class="ff-repo-delete" onclick="event.stopPropagation(); confirmDeleteRepo('${escAttr(cfg.repo_name)}')" title="Remove repo">&times;</span>
           <div class="ff-repo-name">${escHtml(cfg.repo_name || '(unnamed)')}</div>
           <div class="ff-repo-meta">
             <span class="ff-status-dot ${cfg.enabled ? 'on' : 'off'}"></span>
@@ -819,6 +824,31 @@
           </div>
         </div>
       `}).join("");
+    }
+
+    async function confirmDeleteRepo(repoName) {
+      if (!confirm(`Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`)) return;
+      try {
+        const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
+        if (res.status === 409) {
+          const data = await res.json();
+          alert(data.detail || "Cannot delete: active tasks reference this repo.");
+          return;
+        }
+        if (!res.ok) {
+          const data = await res.json();
+          alert(data.detail || "Failed to delete repo.");
+          return;
+        }
+        freeformConfigs = freeformConfigs.filter(c => c.repo_name !== repoName);
+        if (selectedFreeformView && selectedFreeformView.repoName === repoName) {
+          selectedFreeformView = "existing";
+        }
+        renderFreeformSidebar();
+        renderFreeformAddExisting();
+      } catch (e) {
+        alert("Error deleting repo: " + e.message);
+      }
     }
 
     /* ----- Sidebar action / repo selection ----- */

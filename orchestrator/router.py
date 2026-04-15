@@ -635,6 +635,60 @@ async def update_repo_summary(
     return {"ok": True}
 
 
+TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED}
+
+
+@router.delete("/repos/{repo_name}")
+async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Remove a repo and its associated FreeformConfig + pending suggestions."""
+    repo = await _get_repo_by_name(session, repo_name)
+    if not repo:
+        raise HTTPException(404, f"Repo '{repo_name}' not found")
+
+    # Block deletion if any tasks are still active
+    active_result = await session.execute(
+        select(Task).where(
+            Task.repo_id == repo.id,
+            Task.status.notin_(TERMINAL_STATUSES),
+        )
+    )
+    active_tasks = active_result.scalars().all()
+    if active_tasks:
+        raise HTTPException(
+            409,
+            f"Cannot delete repo '{repo_name}': {len(active_tasks)} active task(s) reference it",
+        )
+
+    from sqlalchemy import delete as sql_delete, update as sql_update
+
+    # Cascade-delete pending suggestions
+    await session.execute(
+        sql_delete(Suggestion).where(Suggestion.repo_id == repo.id)
+    )
+    # Cascade-delete freeform config
+    await session.execute(
+        sql_delete(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
+    )
+    # Orphan completed/failed tasks (don't delete them)
+    await session.execute(
+        sql_update(Task).where(Task.repo_id == repo.id).values(repo_id=None)
+    )
+
+    await session.delete(repo)
+    await session.commit()
+
+    # Publish event so background loops can react
+    r = await get_redis()
+    await publish_event(r, Event(
+        type="repo.deleted",
+        task_id=0,
+        payload={"repo_name": repo_name},
+    ).to_redis())
+    await r.aclose()
+
+    return {"deleted": repo_name}
+
+
 # --- Freeform / Suggestions ---
 
 
