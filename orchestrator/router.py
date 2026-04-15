@@ -732,6 +732,15 @@ class FreeformConfigRequest(BaseModel):
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
 
+    @field_validator("dev_branch")
+    @classmethod
+    def validate_branch(cls, v: str) -> str:
+        if not BRANCH_NAME_RE.match(v):
+            raise ValueError(
+                "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
+            )
+        return v
+
     @field_validator("analysis_cron")
     @classmethod
     def validate_cron(cls, v: str) -> str:
