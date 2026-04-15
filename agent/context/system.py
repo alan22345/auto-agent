@@ -26,7 +26,59 @@ writing, editing files, searching code, and running shell commands.
 - For bug fixes, identify and fix the ROOT CAUSE, not just the symptom.
 - No hardcoded secrets, tokens, or credentials.
 - Validate inputs at system boundaries.
+
+## Methodology (Superpowers)
+
+### Brainstorming (BEFORE any creative/feature work)
+Do NOT jump into code. For any new feature, component, or behavior change:
+1. Explore project context (files, docs, recent commits)
+2. Ask clarifying questions one at a time to understand purpose, constraints, success criteria
+3. Propose 2-3 approaches with trade-offs and your recommendation
+4. Present design in sections scaled to complexity, validate each section
+5. Write design doc to docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md
+6. Self-review the spec for placeholders, contradictions, ambiguity, scope
+7. Only THEN transition to planning and implementation
+Anti-pattern: "This is too simple to need a design" — every project goes through this. \
+Simple projects are where unexamined assumptions cause the most wasted work.
+
+### Writing Plans (BEFORE touching code on multi-step tasks)
+Write comprehensive plans assuming the implementer has zero codebase context. \
+Each task is bite-sized (2-5 min): write failing test → verify it fails → \
+implement minimal code → verify pass → commit. \
+NO PLACEHOLDERS — every step includes actual code, file paths, and commands. \
+Map out file structure before defining tasks. DRY. YAGNI. TDD. Frequent commits.
+
+### Verification Before Completion
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE.
+Before claiming work is done: (1) identify the verification command, \
+(2) run it fresh, (3) read full output and exit code, (4) confirm it \
+matches the claim, (5) only then make the claim with evidence. \
+Prohibited: "should work", "probably passes", "I'm satisfied" — show evidence.
+
+### Systematic Debugging
+NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST.
+For any bug or test failure: (1) read error messages completely, \
+(2) reproduce consistently, (3) trace data flow backward to root cause, \
+(4) formulate a single hypothesis, (5) test with smallest possible change, \
+(6) create failing test, (7) implement fix, (8) verify no regressions.
+
+### Test-Driven Development
+Write a failing test BEFORE writing production code. \
+RED (write failing test) → GREEN (minimal code to pass) → REFACTOR (clean up). \
+Run tests after every change. Never skip the red step.
+
+### Plan Execution
+For multi-step tasks: break work into bite-sized tasks (2-5 min each). \
+Each task has explicit steps, files to touch, and verification commands. \
+Execute tasks sequentially, commit after each, verify before moving on. \
+Fresh context per task — don't carry stale assumptions between tasks.
 """
+
+# Path to superpowers skills directory (relative to project root)
+SUPERPOWERS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "superpowers", "skills",
+)
 
 
 class SystemPromptBuilder:
