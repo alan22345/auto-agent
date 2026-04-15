@@ -648,9 +648,53 @@
     .ff-recent-task:hover { background: rgba(255,255,255,0.03); }
     .ff-recent-task .ff-rt-title { flex: 1; word-break: break-word; }
     .ff-recent-task .ff-rt-id { color: var(--text-muted); font-size: 11px; }
+
+    /* Toast notifications */
+    .toast-container {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #fff;
+      animation: toast-in 0.25s ease-out, toast-out 0.3s ease-in forwards;
+      animation-delay: 0s, 2.7s;
+      pointer-events: auto;
+    }
+    .toast-success { background: var(--green); }
+    .toast-error { background: var(--red); }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(40px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes toast-out {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+
+    /* Button loading spinner (reuses po-spin keyframes) */
+    .btn-spinner {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: po-spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
   </style>
 </head>
 <body>
+  <div class="toast-container" id="toast-container"></div>
   <div class="sidebar">
     <div class="sidebar-header">
       <span><span class="dot"></span> Auto-Agent</span>
@@ -1120,6 +1164,45 @@
       `).join("");
     }
 
+    /* ----- Utility helpers ----- */
+
+    function showToast(message, type = "success") {
+      const container = document.getElementById("toast-container");
+      const toast = document.createElement("div");
+      toast.className = `toast toast-${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    }
+
+    function setButtonLoading(btn, loading, originalText) {
+      if (loading) {
+        btn._originalText = btn.textContent;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-spinner"></span>' + (originalText || btn._originalText || '') + '...';
+      } else {
+        btn.disabled = false;
+        btn.textContent = btn._originalText || originalText || '';
+      }
+    }
+
+    /** Register a one-shot WS message handler with automatic cleanup.
+     *  `matcher(data)` returns "done"|"error"|falsy.  Calls `onDone`/`onError`
+     *  accordingly, or cleans up silently after `timeoutMs`. */
+    function onNextWsMessage(matcher, { onDone, onError, onTimeout, timeoutMs = 10000 } = {}) {
+      function cleanup() { ws.removeEventListener("message", handler); clearTimeout(timer); }
+      function handler(e) {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+        const result = matcher(data);
+        if (result === "done")  { cleanup(); if (onDone)  onDone(data); }
+        if (result === "error") { cleanup(); if (onError) onError(data); }
+      }
+      const timer = setTimeout(() => { cleanup(); if (onTimeout) onTimeout(); }, timeoutMs);
+      ws.addEventListener("message", handler);
+      return cleanup;
+    }
+
     /* ----- Form submit helpers ----- */
 
     function submitCreateRepo() {
@@ -1152,11 +1235,30 @@
     }
 
     function saveRepoConfig(repoName) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast("Connection lost — cannot save", "error");
+        return;
+      }
+      const btn = document.querySelector(`button[onclick="saveRepoConfig('${CSS.escape(repoName)}')"]`)
+                || document.querySelector('.ff-btn:not(.secondary)');
+      if (btn) setButtonLoading(btn, true, "Save changes");
+      const resetBtn = () => { if (btn) setButtonLoading(btn, false, "Save changes"); };
       const enabled = document.getElementById("rd-enabled").checked;
       const auto = document.getElementById("rd-auto").checked;
       const autostart = document.getElementById("rd-autostart").checked;
       const branch = document.getElementById("rd-branch").value.trim() || "dev";
       const cron = document.getElementById("rd-cron").value;
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "freeform_config_list") return "done";
+          if (data.type === "error") return "error";
+        },
+        {
+          onDone()  { resetBtn(); showToast("Saved", "success"); },
+          onError(data) { resetBtn(); showToast(data.message || "Failed to save", "error"); },
+          onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
+        }
+      );
       ws.send(JSON.stringify({
         type: "toggle_freeform",
         repo_name: repoName,
@@ -1210,17 +1312,33 @@
       }
     }
 
-    function approveSuggestion(id) {
-      ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
-      suggestions = suggestions.filter(s => s.id !== id);
+    function handleSuggestionAction(id, action) {
+      const label = action === "approve" ? "approved" : "rejected";
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast(`Connection lost — cannot ${action} suggestion`, "error");
+        return;
+      }
+      const idx = suggestions.findIndex(s => s.id === id);
+      const removed = idx !== -1 ? suggestions.splice(idx, 1)[0] : null;
       renderRepoDetailSuggestions();
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "system") return "done";
+        },
+        {
+          onDone()  { showToast(`Suggestion ${label}`, "success"); },
+          onError(data) {
+            if (removed) { suggestions.splice(idx, 0, removed); renderRepoDetailSuggestions(); }
+            showToast(data.message || `Failed to ${action} suggestion`, "error");
+          },
+        }
+      );
+      ws.send(JSON.stringify({ type: `${action}_suggestion`, suggestion_id: id }));
     }
 
-    function rejectSuggestion(id) {
-      ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
-      suggestions = suggestions.filter(s => s.id !== id);
-      renderRepoDetailSuggestions();
-    }
+    function approveSuggestion(id) { handleSuggestionAction(id, "approve"); }
+    function rejectSuggestion(id)  { handleSuggestionAction(id, "reject"); }
 
     function promoteTask(id) {
       if (!confirm("Promote this change to main?")) return;
@@ -1510,29 +1628,59 @@
 
     async function cancelTask() {
       if (!selectedTaskId || !confirm("Cancel this task?")) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
-      if (resp.ok) addChat(selectedTaskId, "system", "Task cancelled.");
-      else addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+      const btn = document.querySelector('#task-actions button[onclick="cancelTask()"]');
+      if (btn) setButtonLoading(btn, true, "Cancel");
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
+        if (resp.ok) {
+          addChat(selectedTaskId, "system", "Task cancelled.");
+          showToast("Task cancelled", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+          showToast("Failed to cancel task", "error");
+        }
+      } finally {
+        if (btn) setButtonLoading(btn, false, "Cancel");
+      }
     }
 
     async function markDone() {
       if (!selectedTaskId) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
-      if (resp.ok) addChat(selectedTaskId, "system", "Task marked as done.");
-      else addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
+      const btn = document.querySelector('#done-bar .approve-btn');
+      if (btn) setButtonLoading(btn, true, "Mark Done");
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
+        if (resp.ok) {
+          addChat(selectedTaskId, "system", "Task marked as done.");
+          showToast("Task marked as done", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
+          showToast("Failed to mark task as done", "error");
+        }
+      } finally {
+        if (btn) setButtonLoading(btn, false, "Mark Done");
+      }
     }
 
     async function deleteTask() {
       if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
-      if (resp.ok) {
-        delete chatMessages[selectedTaskId];
-        selectedTaskId = null;
-        document.getElementById("main-header").textContent = "Select a task or create one";
-        renderChat();
-        ws.send(JSON.stringify({ type: "refresh" }));
-      } else {
-        addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
+      const btn = document.querySelector('#task-actions button[onclick="deleteTask()"]');
+      if (btn) setButtonLoading(btn, true, "Delete");
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
+        if (resp.ok) {
+          delete chatMessages[selectedTaskId];
+          selectedTaskId = null;
+          document.getElementById("main-header").textContent = "Select a task or create one";
+          renderChat();
+          ws.send(JSON.stringify({ type: "refresh" }));
+          showToast("Task deleted", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
+          showToast("Failed to delete task", "error");
+        }
+      } finally {
+        if (btn) setButtonLoading(btn, false, "Delete");
       }
     }
 
