@@ -704,9 +704,33 @@
       to { opacity: 0; }
     }
 
+    /* Connection status banner */
+    #conn-status {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 9999;
+      text-align: center;
+      padding: 6px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: opacity 0.3s ease;
+    }
+    #conn-status.conn-disconnected {
+      background: var(--yellow);
+      color: #000;
+    }
+    #conn-status.conn-connected {
+      background: var(--green);
+      color: #000;
+    }
+
   </style>
 </head>
 <body>
+  <div id="conn-status"></div>
   <div class="toast-container" id="toast-container"></div>
   <div class="sidebar">
     <div class="sidebar-header">
@@ -789,15 +813,49 @@
     let tasks = [];
     let selectedTaskId = null;
     let chatMessages = {}; // task_id -> [messages]
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    let connStatusTimer = null;
+    let hasConnectedOnce = false;
+
+    function showConnStatus(type) {
+      const el = document.getElementById('conn-status');
+      el.className = type === 'disconnected' ? 'conn-disconnected' : 'conn-connected';
+      el.textContent = type === 'disconnected' ? 'Reconnecting\u2026' : 'Connected';
+      el.style.display = 'block';
+    }
+
+    function hideConnStatus() {
+      const el = document.getElementById('conn-status');
+      el.style.display = 'none';
+      clearTimeout(connStatusTimer);
+      connStatusTimer = null;
+    }
 
     function connect() {
       ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onopen = () => {
+        if (hasConnectedOnce) {
+          showConnStatus('connected');
+          clearTimeout(connStatusTimer);
+          connStatusTimer = setTimeout(hideConnStatus, 2000);
+        }
+        hasConnectedOnce = true;
+        reconnectAttempts = 0;
+      };
       ws.onmessage = (e) => {
         const data = JSON.parse(e.data);
         handleMessage(data);
       };
       ws.onclose = () => {
-        setTimeout(connect, 2000);
+        showConnStatus('disconnected');
+        const base = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        const jitter = Math.random() * base * 0.3;
+        reconnectAttempts++;
+        reconnectTimer = setTimeout(connect, base + jitter);
+      };
+      ws.onerror = () => {
+        showConnStatus('disconnected');
       };
     }
 
