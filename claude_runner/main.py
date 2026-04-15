@@ -917,6 +917,11 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     if not task.repo_name:
         return
 
+    # Only address review comments if a PR actually exists
+    if not task.pr_url:
+        log.warning(f"Task #{task_id}: ignoring review comments — no PR exists yet")
+        return
+
     repo = await get_repo(task.repo_name)
     if not repo:
         return
@@ -1506,7 +1511,7 @@ async def event_loop() -> None:
                                 await handle_clarification_response(task_id, comments)
                             elif task.status == "blocked":
                                 await handle_blocked_response(task_id, task, comments)
-                            elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding"):
+                            elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
                                 # PR exists — treat as review feedback
                                 await handle_pr_review_comments(task_id, comments)
                             else:

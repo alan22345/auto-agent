@@ -350,20 +350,139 @@ async def on_ci_passed(event: Event) -> None:
     await r.aclose()
 
 
+async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
+    """Fetch the failed GitHub Actions job logs for a PR.
+
+    Returns the log output (truncated) or a fallback message.
+    """
+    try:
+        import httpx as _httpx
+        parts = pr_url.rstrip("/").split("/")
+        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+        async with _httpx.AsyncClient() as client:
+            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+            # Get PR head SHA
+            resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return "Could not fetch PR details"
+            head_sha = resp.json()["head"]["sha"]
+
+            # Get check runs for this commit
+            resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return "Could not fetch check runs"
+
+            check_runs = resp.json().get("check_runs", [])
+            failed_runs = [
+                cr for cr in check_runs
+                if cr.get("conclusion") in ("failure", "timed_out")
+            ]
+
+            if not failed_runs:
+                return "No failed check runs found"
+
+            logs_parts = []
+            for cr in failed_runs[:3]:  # Limit to 3 failed runs
+                run_id = cr.get("id")
+                name = cr.get("name", "unknown")
+
+                # Try to get the run log via the Actions API
+                # check_run has details_url or we can get annotations
+                resp = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}/check-runs/{run_id}/annotations",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    annotations = resp.json()
+                    if annotations:
+                        ann_text = "\n".join(
+                            f"  {a.get('path', '')}:{a.get('start_line', '')}: {a.get('message', '')}"
+                            for a in annotations[:20]
+                        )
+                        logs_parts.append(f"## Failed: {name}\n{ann_text}")
+                        continue
+
+                # Fallback: try to get workflow run logs
+                # The check_run has an external_id that may be the job ID
+                # Get the workflow run via check_suite
+                suite_url = cr.get("check_suite", {}).get("url")
+                if suite_url:
+                    resp = await client.get(suite_url, headers=headers)
+                    if resp.status_code == 200:
+                        suite = resp.json()
+                        # Get jobs for this workflow run
+                        run_url = suite.get("url", "").replace("/check-suites/", "/actions/runs/").rsplit("/", 1)[0]
+                        # Actually use the check_suite -> workflow run relationship
+                        head_branch = suite.get("head_branch", "")
+                        # Try listing workflow runs for this SHA
+                        resp = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/actions/runs",
+                            headers=headers,
+                            params={"head_sha": head_sha, "status": "completed", "per_page": 5},
+                        )
+                        if resp.status_code == 200:
+                            runs = resp.json().get("workflow_runs", [])
+                            for wf_run in runs:
+                                if wf_run.get("conclusion") == "failure":
+                                    jobs_url = wf_run.get("jobs_url")
+                                    if jobs_url:
+                                        resp = await client.get(jobs_url, headers=headers)
+                                        if resp.status_code == 200:
+                                            jobs = resp.json().get("jobs", [])
+                                            for job in jobs:
+                                                if job.get("conclusion") == "failure":
+                                                    steps = job.get("steps", [])
+                                                    failed_steps = [
+                                                        s for s in steps
+                                                        if s.get("conclusion") == "failure"
+                                                    ]
+                                                    step_info = "\n".join(
+                                                        f"  Step '{s.get('name', '?')}' failed"
+                                                        for s in failed_steps
+                                                    )
+                                                    logs_parts.append(
+                                                        f"## Failed: {job.get('name', name)}\n{step_info}"
+                                                    )
+                                    break
+
+                if not logs_parts or not any(name in p for p in logs_parts):
+                    logs_parts.append(f"## Failed: {name} (no detailed logs available)")
+
+            return "\n\n".join(logs_parts) if logs_parts else "CI failed but could not fetch logs"
+
+    except Exception as e:
+        log.exception("Failed to fetch CI logs")
+        return f"Could not fetch CI logs: {e}"
+
+
 async def on_ci_failed(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
         reason = event.payload.get("reason", "CI checks failed")
-        task = await transition(session, task, TaskStatus.CODING, f"CI failed: {reason}")
+
+        # Fetch actual failure logs if we have a PR URL
+        if task.pr_url:
+            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
+
+        task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
         await session.commit()
 
         r = await get_redis()
         await publish_event(r, Event(
             type="task.start_coding",
             task_id=task.id,
-            payload={"retry_reason": reason},
+            payload={"retry_reason": reason[-3000:]},
         ).to_redis())
         await r.aclose()
 
@@ -374,17 +493,23 @@ async def on_dev_deploy_failed(event: Event) -> None:
         task = await get_task(session, event.task_id)
         if not task:
             return
-        output = event.payload.get("output", "Deployment failed (no details)")
-        # Truncate to avoid oversized prompts
-        reason = f"Dev deployment failed. Fix the deployment issue:\n\n{output[-2000:]}"
-        task = await transition(session, task, TaskStatus.CODING, f"Deploy failed: {output[:200]}")
+        output = event.payload.get("output", "")
+
+        # Fetch actual failure logs if we have a PR URL and output is sparse
+        if task.pr_url and len(output) < 200:
+            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            reason = f"Deployment failed. Here are the failure details:\n\n{ci_logs}"
+        else:
+            reason = f"Dev deployment failed. Fix the deployment issue:\n\n{output[-2000:]}"
+
+        task = await transition(session, task, TaskStatus.CODING, f"Deploy failed — fetched logs")
         await session.commit()
 
         r = await get_redis()
         await publish_event(r, Event(
             type="task.start_coding",
             task_id=task.id,
-            payload={"retry_reason": reason},
+            payload={"retry_reason": reason[-3000:]},
         ).to_redis())
         await r.aclose()
 
