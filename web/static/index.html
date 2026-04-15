@@ -644,6 +644,32 @@
     .ff-recent-task:hover { background: rgba(255,255,255,0.03); }
     .ff-recent-task .ff-rt-title { flex: 1; word-break: break-word; }
     .ff-recent-task .ff-rt-id { color: var(--text-muted); font-size: 11px; }
+
+    /* Confirm modal */
+    .confirm-overlay {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      animation: confirmFadeIn .15s ease;
+    }
+    @keyframes confirmFadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .confirm-modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px; max-width: 420px; width: 90%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .confirm-modal h3 { margin-bottom: 8px; font-size: 16px; }
+    .confirm-modal p { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin-bottom: 20px; }
+    .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .confirm-actions button {
+      padding: 8px 16px; border: none; border-radius: 6px;
+      font-size: 13px; cursor: pointer; font-weight: 500;
+    }
+    .confirm-actions .btn-cancel {
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+    }
+    .confirm-actions .btn-cancel:hover { background: rgba(255,255,255,0.05); }
+    .confirm-actions .btn-confirm { color: #fff; }
   </style>
 </head>
 <body>
@@ -1125,15 +1151,18 @@
       const autostart = document.getElementById("rd-autostart").checked;
       const branch = document.getElementById("rd-branch").value.trim() || "dev";
       const cron = document.getElementById("rd-cron").value;
-      ws.send(JSON.stringify({
-        type: "toggle_freeform",
-        repo_name: repoName,
-        enabled,
-        dev_branch: branch,
-        analysis_cron: cron,
-        auto_approve_suggestions: auto,
-        auto_start_tasks: autostart,
-      }));
+      const payload = { type: "toggle_freeform", repo_name: repoName, enabled, dev_branch: branch, analysis_cron: cron, auto_approve_suggestions: auto, auto_start_tasks: autostart };
+      const wasEnabled = (freeformConfigs.find(c => c.repo_name === repoName) || {}).enabled;
+      if (wasEnabled && !enabled) {
+        showConfirmModal({
+          title: "Disable freeform mode?",
+          message: "Scheduled PO analyses will stop running for this repo. You can re-enable it later.",
+          confirmText: "Disable", confirmColor: "var(--red)",
+          onConfirm() { ws.send(JSON.stringify(payload)); }
+        });
+      } else {
+        ws.send(JSON.stringify(payload));
+      }
     }
 
     function triggerAnalysisFor(repoName) {
@@ -1178,26 +1207,73 @@
       }
     }
 
+    function showConfirmModal({ title, message, confirmText, confirmColor, onConfirm }) {
+      const overlay = document.createElement("div");
+      overlay.className = "confirm-overlay";
+      overlay.innerHTML = `
+        <div class="confirm-modal">
+          <h3>${title}</h3>
+          <p>${message}</p>
+          <div class="confirm-actions">
+            <button class="btn-cancel">Cancel</button>
+            <button class="btn-confirm" style="background:${confirmColor}">${confirmText}</button>
+          </div>
+        </div>`;
+      function close() { overlay.remove(); document.removeEventListener("keydown", onKey); }
+      function onKey(e) { if (e.key === "Escape") close(); }
+      document.addEventListener("keydown", onKey);
+      overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
+      overlay.querySelector(".btn-cancel").addEventListener("click", close);
+      overlay.querySelector(".btn-confirm").addEventListener("click", () => { close(); onConfirm(); });
+      document.body.appendChild(overlay);
+    }
+
     function approveSuggestion(id) {
-      ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
-      suggestions = suggestions.filter(s => s.id !== id);
-      renderRepoDetailSuggestions();
+      const s = suggestions.find(s => s.id === id);
+      const title = s ? escHtml(s.title) : "this suggestion";
+      showConfirmModal({
+        title: "Approve suggestion?",
+        message: `"${title}" &mdash; This will create a new task. Continue?`,
+        confirmText: "Approve", confirmColor: "var(--green)",
+        onConfirm() {
+          ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
+          suggestions = suggestions.filter(s => s.id !== id);
+          renderRepoDetailSuggestions();
+        }
+      });
     }
 
     function rejectSuggestion(id) {
-      ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
-      suggestions = suggestions.filter(s => s.id !== id);
-      renderRepoDetailSuggestions();
+      const s = suggestions.find(s => s.id === id);
+      const title = s ? escHtml(s.title) : "this suggestion";
+      showConfirmModal({
+        title: "Reject suggestion?",
+        message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
+        confirmText: "Reject", confirmColor: "var(--red)",
+        onConfirm() {
+          ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
+          suggestions = suggestions.filter(s => s.id !== id);
+          renderRepoDetailSuggestions();
+        }
+      });
     }
 
     function promoteTask(id) {
-      if (!confirm("Promote this change to main?")) return;
-      ws.send(JSON.stringify({ type: "promote_task", task_id: id }));
+      showConfirmModal({
+        title: "Promote to main?",
+        message: "This will merge the change from the dev branch into main.",
+        confirmText: "Promote", confirmColor: "var(--green)",
+        onConfirm() { ws.send(JSON.stringify({ type: "promote_task", task_id: id })); }
+      });
     }
 
     function revertTask(id) {
-      if (!confirm("Revert this change from dev?")) return;
-      ws.send(JSON.stringify({ type: "revert_task", task_id: id }));
+      showConfirmModal({
+        title: "Revert from dev?",
+        message: "This will revert the change from the dev branch.",
+        confirmText: "Revert", confirmColor: "var(--red)",
+        onConfirm() { ws.send(JSON.stringify({ type: "revert_task", task_id: id })); }
+      });
     }
 
     /* Auto-grow textareas (fallback for browsers without field-sizing: content) */
@@ -1476,11 +1552,19 @@
       input.value = "";
     }
 
-    async function cancelTask() {
-      if (!selectedTaskId || !confirm("Cancel this task?")) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
-      if (resp.ok) addChat(selectedTaskId, "system", "Task cancelled.");
-      else addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+    function cancelTask() {
+      if (!selectedTaskId) return;
+      const taskId = selectedTaskId;
+      showConfirmModal({
+        title: "Cancel this task?",
+        message: "The task will be stopped and marked as cancelled.",
+        confirmText: "Cancel Task", confirmColor: "var(--red)",
+        async onConfirm() {
+          const resp = await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+          if (resp.ok) addChat(taskId, "system", "Task cancelled.");
+          else addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
+        }
+      });
     }
 
     async function markDone() {
@@ -1490,18 +1574,26 @@
       else addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
     }
 
-    async function deleteTask() {
-      if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
-      if (resp.ok) {
-        delete chatMessages[selectedTaskId];
-        selectedTaskId = null;
-        document.getElementById("main-header").textContent = "Select a task or create one";
-        renderChat();
-        ws.send(JSON.stringify({ type: "refresh" }));
-      } else {
-        addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
-      }
+    function deleteTask() {
+      if (!selectedTaskId) return;
+      const taskId = selectedTaskId;
+      showConfirmModal({
+        title: "Delete task permanently?",
+        message: "This task will be permanently deleted. This cannot be undone.",
+        confirmText: "Delete", confirmColor: "var(--red)",
+        async onConfirm() {
+          const resp = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+          if (resp.ok) {
+            delete chatMessages[taskId];
+            selectedTaskId = null;
+            document.getElementById("main-header").textContent = "Select a task or create one";
+            renderChat();
+            ws.send(JSON.stringify({ type: "refresh" }));
+          } else {
+            addChat(taskId, "error", `Failed to delete: ${await resp.text()}`);
+          }
+        }
+      });
     }
 
     function renderMarkdown(s) {
