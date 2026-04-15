@@ -1158,7 +1158,8 @@
           title: "Disable freeform mode?",
           message: "Scheduled PO analyses will stop running for this repo. You can re-enable it later.",
           confirmText: "Disable", confirmColor: "var(--red)",
-          onConfirm() { ws.send(JSON.stringify(payload)); }
+          onConfirm() { ws.send(JSON.stringify(payload)); },
+          onCancel() { document.getElementById("rd-enabled").checked = true; }
         });
       } else {
         ws.send(JSON.stringify(payload));
@@ -1207,30 +1208,40 @@
       }
     }
 
-    function showConfirmModal({ title, message, confirmText, confirmColor, onConfirm }) {
+    function showConfirmModal({ title, message, confirmText, confirmColor, onConfirm, onCancel }) {
       const overlay = document.createElement("div");
       overlay.className = "confirm-overlay";
-      overlay.innerHTML = `
-        <div class="confirm-modal">
-          <h3>${title}</h3>
-          <p>${message}</p>
-          <div class="confirm-actions">
-            <button class="btn-cancel">Cancel</button>
-            <button class="btn-confirm" style="background:${confirmColor}">${confirmText}</button>
-          </div>
-        </div>`;
+      const modal = document.createElement("div");
+      modal.className = "confirm-modal";
+      const h3 = document.createElement("h3");
+      h3.textContent = title;
+      const p = document.createElement("p");
+      p.innerHTML = message;
+      const actions = document.createElement("div");
+      actions.className = "confirm-actions";
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "btn-cancel";
+      cancelBtn.textContent = "Cancel";
+      const confirmBtn = document.createElement("button");
+      confirmBtn.className = "btn-confirm";
+      confirmBtn.style.background = confirmColor;
+      confirmBtn.textContent = confirmText;
+      actions.append(cancelBtn, confirmBtn);
+      modal.append(h3, p, actions);
+      overlay.appendChild(modal);
       function close() { overlay.remove(); document.removeEventListener("keydown", onKey); }
-      function onKey(e) { if (e.key === "Escape") close(); }
+      function dismiss() { close(); if (onCancel) onCancel(); }
+      function onKey(e) { if (e.key === "Escape") dismiss(); }
       document.addEventListener("keydown", onKey);
-      overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
-      overlay.querySelector(".btn-cancel").addEventListener("click", close);
-      overlay.querySelector(".btn-confirm").addEventListener("click", () => { close(); onConfirm(); });
+      overlay.addEventListener("click", e => { if (e.target === overlay) dismiss(); });
+      cancelBtn.addEventListener("click", dismiss);
+      confirmBtn.addEventListener("click", () => { close(); onConfirm(); });
       document.body.appendChild(overlay);
     }
 
     function approveSuggestion(id) {
-      const s = suggestions.find(s => s.id === id);
-      const title = s ? escHtml(s.title) : "this suggestion";
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
       showConfirmModal({
         title: "Approve suggestion?",
         message: `"${title}" &mdash; This will create a new task. Continue?`,
@@ -1244,8 +1255,8 @@
     }
 
     function rejectSuggestion(id) {
-      const s = suggestions.find(s => s.id === id);
-      const title = s ? escHtml(s.title) : "this suggestion";
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
       showConfirmModal({
         title: "Reject suggestion?",
         message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
