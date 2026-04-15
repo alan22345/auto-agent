@@ -6,7 +6,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_session
@@ -40,6 +40,9 @@ from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 
 router = APIRouter()
+
+# Statuses that indicate a task is no longer actively running.
+TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}
 
 # --- Rate limiting ---
 
@@ -184,14 +187,11 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     await session.execute(
         select(TaskHistory).where(TaskHistory.task_id == task_id)
     )
-    from sqlalchemy import delete as sql_delete
     await session.execute(sql_delete(TaskHistory).where(TaskHistory.task_id == task_id))
     await session.delete(task)
     await session.commit()
 
     # Publish cleanup event to free workspace
-    from shared.redis_client import get_redis, publish_event
-    from shared.events import Event
     r = await get_redis()
     await publish_event(r, Event(type="task.cleanup", task_id=task_id).to_redis())
     await publish_event(r, Event(type="task.failed", task_id=task_id).to_redis())
@@ -633,6 +633,56 @@ async def update_repo_summary(
     repo.summary_updated_at = datetime.now(timezone.utc)
     await session.commit()
     return {"ok": True}
+
+
+@router.delete("/repos/{repo_name}")
+async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Remove a repo and its associated FreeformConfig + pending suggestions."""
+    repo = await _get_repo_by_name(session, repo_name)
+    if not repo:
+        raise HTTPException(404, f"Repo '{repo_name}' not found")
+
+    # Block deletion if any tasks are still active
+    active_result = await session.execute(
+        select(Task).where(
+            Task.repo_id == repo.id,
+            Task.status.notin_(TERMINAL_STATUSES),
+        )
+    )
+    active_tasks = active_result.scalars().all()
+    if active_tasks:
+        raise HTTPException(
+            409,
+            f"Cannot delete repo '{repo_name}': {len(active_tasks)} active task(s) reference it",
+        )
+
+    # Delete all suggestions — including approved/rejected ones — because
+    # Suggestion.repo_id is non-nullable, so we can't orphan them.
+    await session.execute(
+        sql_delete(Suggestion).where(Suggestion.repo_id == repo.id)
+    )
+    # Cascade-delete freeform config
+    await session.execute(
+        sql_delete(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
+    )
+    # Orphan completed/failed tasks (don't delete them)
+    await session.execute(
+        sql_update(Task).where(Task.repo_id == repo.id).values(repo_id=None)
+    )
+
+    await session.delete(repo)
+    await session.commit()
+
+    # Publish event so background loops can react
+    r = await get_redis()
+    await publish_event(r, Event(
+        type="repo.deleted",
+        task_id=0,
+        payload={"repo_name": repo_name},
+    ).to_redis())
+    await r.aclose()
+
+    return {"deleted": repo_name}
 
 
 # --- Freeform / Suggestions ---
