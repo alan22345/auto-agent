@@ -373,6 +373,10 @@
     .ff-repo-card .ff-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .ff-repo-card .ff-status-dot.on { background: var(--green); }
     .ff-repo-card .ff-status-dot.off { background: var(--text-muted); }
+    .ff-repo-card { position: relative; }
+    .ff-repo-delete { position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 4px; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
+    .ff-repo-card:hover .ff-repo-delete { opacity: 1; }
+    .ff-repo-delete:hover { color: var(--red, #f85149); background: rgba(248,81,73,0.1); }
 
     /* Main-area freeform dashboard */
     .freeform-main {
@@ -670,9 +674,40 @@
     }
     .confirm-actions .btn-cancel:hover { background: rgba(255,255,255,0.05); }
     .confirm-actions .btn-confirm { color: #fff; }
+    /* Toast notifications */
+    .toast-container {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #fff;
+      animation: toast-in 0.25s ease-out, toast-out 0.3s ease-in forwards;
+      animation-delay: 0s, 2.7s;
+      pointer-events: auto;
+    }
+    .toast-success { background: var(--green); }
+    .toast-error { background: var(--red); }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(40px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes toast-out {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+
   </style>
 </head>
 <body>
+  <div class="toast-container" id="toast-container"></div>
   <div class="sidebar">
     <div class="sidebar-header">
       <span><span class="dot"></span> Auto-Agent</span>
@@ -690,7 +725,7 @@
         <input type="text" id="new-title" placeholder="Task title...">
         <textarea id="new-desc" rows="2" placeholder="Description (optional)"></textarea>
         <input type="text" id="new-repo" placeholder="Repo name (optional)">
-        <button onclick="createTask()">Create Task</button>
+        <button id="create-task-btn" onclick="createTask()">Create Task</button>
       </div>
     </div>
 
@@ -719,8 +754,8 @@
     <div class="approval-bar" id="approval-bar" style="display:none;">
       <span>Plan awaiting approval:</span>
       <input type="text" id="reject-feedback" placeholder="Feedback (if rejecting)...">
-      <button class="approve-btn" onclick="approveTask()">Approve</button>
-      <button class="reject-btn" onclick="rejectTask()">Reject</button>
+      <button id="approve-task-btn" class="approve-btn" onclick="approveTask()">Approve</button>
+      <button id="reject-task-btn" class="reject-btn" onclick="rejectTask()">Reject</button>
     </div>
     <div class="approval-bar" id="clarification-bar" style="display:none;">
       <span>&#10067; Clarification needed:</span>
@@ -729,11 +764,11 @@
     </div>
     <div class="approval-bar" id="done-bar" style="display:none;">
       <span>PR merged? Mark this task as complete:</span>
-      <button class="approve-btn" onclick="markDone()">Mark Done</button>
+      <button id="mark-done-btn" class="approve-btn" onclick="markDone()">Mark Done</button>
     </div>
     <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;">
-      <button onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
-      <button onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
+      <button id="cancel-task-btn" onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
+      <button id="delete-task-btn" onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
     </div>
     <div class="input-area">
       <input type="text" id="msg-input" placeholder="Describe a task or send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
@@ -837,6 +872,7 @@
         const isSelected = (selectedFreeformView && selectedFreeformView.repoName === cfg.repo_name);
         return `
         <div class="ff-repo-card ${isSelected ? 'selected' : ''}" onclick="selectFreeformRepo('${escAttr(cfg.repo_name)}')">
+          <span class="ff-repo-delete" onclick="event.stopPropagation(); confirmDeleteRepo('${escAttr(cfg.repo_name)}')" title="Remove repo">&times;</span>
           <div class="ff-repo-name">${escHtml(cfg.repo_name || '(unnamed)')}</div>
           <div class="ff-repo-meta">
             <span class="ff-status-dot ${cfg.enabled ? 'on' : 'off'}"></span>
@@ -845,6 +881,33 @@
           </div>
         </div>
       `}).join("");
+    }
+
+    async function confirmDeleteRepo(repoName) {
+      if (!confirm(`Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`)) return;
+      try {
+        const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
+        if (res.status === 409) {
+          const data = await res.json();
+          alert(data.detail || "Cannot delete: active tasks reference this repo.");
+          return;
+        }
+        if (!res.ok) {
+          const data = await res.json();
+          alert(data.detail || "Failed to delete repo.");
+          return;
+        }
+        freeformConfigs = freeformConfigs.filter(c => c.repo_name !== repoName);
+        if (selectedFreeformView && selectedFreeformView.repoName === repoName) {
+          selectedFreeformView = "existing";
+          renderFreeformSidebar();
+          renderFreeformAddExisting();
+        } else {
+          renderFreeformSidebar();
+        }
+      } catch (e) {
+        alert("Error deleting repo: " + e.message);
+      }
     }
 
     /* ----- Sidebar action / repo selection ----- */
@@ -906,7 +969,7 @@
         </div>
 
         <div class="ff-button-row">
-          <button class="ff-btn" onclick="submitCreateRepo()">Create &amp; Scaffold</button>
+          <button id="create-repo-btn" class="ff-btn" onclick="submitCreateRepo()">Create &amp; Scaffold</button>
         </div>
       `;
     }
@@ -1107,11 +1170,52 @@
             <span class="ff-sug-priority">P${s.priority || 3}</span>
           </div>
           <div class="ff-sug-actions">
-            <button style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
-            <button style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
+            <button id="sug-approve-${s.id}" style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
+            <button id="sug-reject-${s.id}" style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
           </div>
         </div>
       `).join("");
+    }
+
+    /* ----- Utility helpers ----- */
+
+    function showToast(message, type = "success") {
+      const container = document.getElementById("toast-container");
+      const toast = document.createElement("div");
+      toast.className = `toast toast-${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    }
+
+    function setButtonLoading(btn, loading, label) {
+      if (!btn) return;
+      if (loading) {
+        btn._originalHTML = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="po-spinner"></span> ' + (label || btn.textContent.trim());
+      } else {
+        btn.disabled = false;
+        if (btn._originalHTML !== undefined) btn.innerHTML = btn._originalHTML;
+        else if (label) btn.textContent = label;
+      }
+    }
+
+    /** Register a one-shot WS message handler with automatic cleanup.
+     *  `matcher(data)` returns "done"|"error"|falsy.  Calls `onDone`/`onError`
+     *  accordingly, or cleans up silently after `timeoutMs`. */
+    function onNextWsMessage(matcher, { onDone, onError, onTimeout, timeoutMs = 10000 } = {}) {
+      function cleanup() { ws.removeEventListener("message", handler); clearTimeout(timer); }
+      function handler(e) {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+        const result = matcher(data);
+        if (result === "done")  { cleanup(); if (onDone)  onDone(data); }
+        if (result === "error") { cleanup(); if (onError) onError(data); }
+      }
+      const timer = setTimeout(() => { cleanup(); if (onTimeout) onTimeout(); }, timeoutMs);
+      ws.addEventListener("message", handler);
+      return cleanup;
     }
 
     /* ----- Form submit helpers ----- */
@@ -1124,6 +1228,20 @@
       // when the toggle is off we send loop=false and the backend will create
       // the freeform config with auto_approve_suggestions=false.
       const loop = document.getElementById("cr-loop").checked;
+      const btn = document.getElementById("create-repo-btn");
+      setButtonLoading(btn, true, 'Creating repository... this may take up to 3 minutes');
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "repo_created") return "done";
+          if (data.type === "error") return "error";
+        },
+        {
+          onDone()    { setButtonLoading(btn, false); },
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+          timeoutMs: 200000,
+        }
+      );
       ws.send(JSON.stringify({ type: "create_repo", description: desc, org, loop }));
       document.getElementById("cr-description").value = "";
       document.getElementById("cr-org").value = "";
@@ -1146,6 +1264,14 @@
     }
 
     function saveRepoConfig(repoName) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast("Connection lost — cannot save", "error");
+        return;
+      }
+      const btn = document.querySelector(`button[onclick="saveRepoConfig('${CSS.escape(repoName)}')"]`)
+                || document.querySelector('.ff-btn:not(.secondary)');
+      if (btn) setButtonLoading(btn, true, "Save changes");
+      const resetBtn = () => { if (btn) setButtonLoading(btn, false, "Save changes"); };
       const enabled = document.getElementById("rd-enabled").checked;
       const auto = document.getElementById("rd-auto").checked;
       const autostart = document.getElementById("rd-autostart").checked;
@@ -1164,6 +1290,26 @@
       } else {
         ws.send(JSON.stringify(payload));
       }
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "freeform_config_list") return "done";
+          if (data.type === "error") return "error";
+        },
+        {
+          onDone()  { resetBtn(); showToast("Saved", "success"); },
+          onError(data) { resetBtn(); showToast(data.message || "Failed to save", "error"); },
+          onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
+        }
+      );
+      ws.send(JSON.stringify({
+        type: "toggle_freeform",
+        repo_name: repoName,
+        enabled,
+        dev_branch: branch,
+        analysis_cron: cron,
+        auto_approve_suggestions: auto,
+        auto_start_tasks: autostart,
+      }));
     }
 
     function triggerAnalysisFor(repoName) {
@@ -1268,6 +1414,33 @@
         }
       });
     }
+    function handleSuggestionAction(id, action) {
+      const label = action === "approve" ? "approved" : "rejected";
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast(`Connection lost — cannot ${action} suggestion`, "error");
+        return;
+      }
+      const idx = suggestions.findIndex(s => s.id === id);
+      const removed = idx !== -1 ? suggestions.splice(idx, 1)[0] : null;
+      renderRepoDetailSuggestions();
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "system") return "done";
+        },
+        {
+          onDone()  { showToast(`Suggestion ${label}`, "success"); },
+          onError(data) {
+            if (removed) { suggestions.splice(idx, 0, removed); renderRepoDetailSuggestions(); }
+            showToast(data.message || `Failed to ${action} suggestion`, "error");
+          },
+        }
+      );
+      ws.send(JSON.stringify({ type: `${action}_suggestion`, suggestion_id: id }));
+    }
+
+    function approveSuggestion(id) { handleSuggestionAction(id, "approve"); }
+    function rejectSuggestion(id)  { handleSuggestionAction(id, "reject"); }
 
     function promoteTask(id) {
       showConfirmModal({
@@ -1428,8 +1601,13 @@
       // the PR auto-merges, so we never want the human-action bars to appear.
       const selected = tasks.find(t => t.id === selectedTaskId);
       const isFreeform = selected && selected.freeform_mode;
-      document.getElementById("approval-bar").style.display =
-        (selected && selected.status === "awaiting_approval" && !isFreeform) ? "flex" : "none";
+      const showApproval = selected && selected.status === "awaiting_approval" && !isFreeform;
+      document.getElementById("approval-bar").style.display = showApproval ? "flex" : "none";
+      if (showApproval) {
+        // Reset approve/reject buttons in case they were left in loading state
+        setButtonLoading(document.getElementById("approve-task-btn"), false);
+        setButtonLoading(document.getElementById("reject-task-btn"), false);
+      }
       document.getElementById("clarification-bar").style.display =
         (selected && selected.status === "awaiting_clarification" && !isFreeform) ? "flex" : "none";
       document.getElementById("done-bar").style.display =
@@ -1512,20 +1690,38 @@
       const repo_name = document.getElementById("new-repo").value.trim();
       if (!title) return;
 
+      const btn = document.getElementById("create-task-btn");
+      setButtonLoading(btn, true);
+
       if (ws && ws.readyState === WebSocket.OPEN) {
+        onNextWsMessage(
+          (data) => {
+            if (data.type === "error") return "error";
+            if (data.type === "task_list" || data.type === "system") return "done";
+          },
+          {
+            onDone()    { setButtonLoading(btn, false); },
+            onError()   { setButtonLoading(btn, false); },
+            onTimeout() { setButtonLoading(btn, false); },
+          }
+        );
         ws.send(JSON.stringify({ type: "send_task", title, description, repo_name }));
       } else {
         // Fallback to REST API
-        const resp = await fetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
-        });
-        if (resp.ok) {
-          const task = await resp.json();
-          addChat(null, "system", `Task #${task.id} created: ${task.title}`);
-        } else {
-          addChat(null, "error", `Failed to create task: ${await resp.text()}`);
+        try {
+          const resp = await fetch("/api/tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
+          });
+          if (resp.ok) {
+            const task = await resp.json();
+            addChat(null, "system", `Task #${task.id} created: ${task.title}`);
+          } else {
+            addChat(null, "error", `Failed to create task: ${await resp.text()}`);
+          }
+        } finally {
+          setButtonLoading(btn, false);
         }
       }
       document.getElementById("new-title").value = "";
@@ -1544,11 +1740,35 @@
 
     function approveTask() {
       if (!selectedTaskId) return;
+      const btn = document.getElementById("approve-task-btn");
+      setButtonLoading(btn, true);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "task_list" || data.type === "system") return "done";
+        },
+        {
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+        }
+      );
       ws.send(JSON.stringify({ type: "approve", task_id: selectedTaskId }));
     }
 
     function rejectTask() {
       if (!selectedTaskId) return;
+      const btn = document.getElementById("reject-task-btn");
+      setButtonLoading(btn, true);
+      onNextWsMessage(
+        (data) => {
+          if (data.type === "error") return "error";
+          if (data.type === "task_list" || data.type === "system") return "done";
+        },
+        {
+          onError()   { setButtonLoading(btn, false); },
+          onTimeout() { setButtonLoading(btn, false); },
+        }
+      );
       const feedback = document.getElementById("reject-feedback").value.trim();
       ws.send(JSON.stringify({ type: "reject", task_id: selectedTaskId, feedback }));
       document.getElementById("reject-feedback").value = "";
@@ -1576,13 +1796,40 @@
           else addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
         }
       });
+    async function cancelTask() {
+      if (!selectedTaskId || !confirm("Cancel this task?")) return;
+      const btn = document.getElementById("cancel-task-btn");
+      setButtonLoading(btn, true);
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
+        if (resp.ok) {
+          addChat(selectedTaskId, "system", "Task cancelled.");
+          showToast("Task cancelled", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
+          showToast("Failed to cancel task", "error");
+        }
+      } finally {
+        setButtonLoading(btn, false);
+      }
     }
 
     async function markDone() {
       if (!selectedTaskId) return;
-      const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
-      if (resp.ok) addChat(selectedTaskId, "system", "Task marked as done.");
-      else addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
+      const btn = document.getElementById("mark-done-btn");
+      setButtonLoading(btn, true);
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
+        if (resp.ok) {
+          addChat(selectedTaskId, "system", "Task marked as done.");
+          showToast("Task marked as done", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed: ${await resp.text()}`);
+          showToast("Failed to mark task as done", "error");
+        }
+      } finally {
+        setButtonLoading(btn, false);
+      }
     }
 
     function deleteTask() {
@@ -1605,6 +1852,26 @@
           }
         }
       });
+    async function deleteTask() {
+      if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
+      const btn = document.getElementById("delete-task-btn");
+      setButtonLoading(btn, true);
+      try {
+        const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
+        if (resp.ok) {
+          delete chatMessages[selectedTaskId];
+          selectedTaskId = null;
+          document.getElementById("main-header").textContent = "Select a task or create one";
+          renderChat();
+          ws.send(JSON.stringify({ type: "refresh" }));
+          showToast("Task deleted", "success");
+        } else {
+          addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
+          showToast("Failed to delete task", "error");
+        }
+      } finally {
+        setButtonLoading(btn, false);
+      }
     }
 
     function renderMarkdown(s) {
