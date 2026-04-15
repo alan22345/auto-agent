@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import re
 import time
+from datetime import UTC
 
+from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import delete as sql_delete, select, update as sql_update
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import select
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
+from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
+from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
+from orchestrator.state_machine import InvalidTransition, get_task, transition
 from shared.database import get_session
 from shared.events import Event
 from shared.models import (
@@ -34,11 +43,6 @@ from shared.types import (
     TaskData,
 )
 
-from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
-from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
-from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
-from orchestrator.state_machine import InvalidTransition, get_task, transition
-
 router = APIRouter()
 
 # Statuses that indicate a task is no longer actively running.
@@ -58,52 +62,65 @@ def _check_rate_limit() -> None:
     while _task_creation_timestamps and _task_creation_timestamps[0] < now - TASK_CREATION_WINDOW:
         _task_creation_timestamps.pop(0)
     if len(_task_creation_timestamps) >= TASK_CREATION_RATE_LIMIT:
-        raise HTTPException(429, f"Rate limit exceeded: max {TASK_CREATION_RATE_LIMIT} tasks per {TASK_CREATION_WINDOW}s")
+        raise HTTPException(
+            429,
+            f"Rate limit exceeded: max {TASK_CREATION_RATE_LIMIT} tasks per {TASK_CREATION_WINDOW}s",
+        )
     _task_creation_timestamps.append(now)
 
 
 # --- Request schemas ---
 
 
+BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+
+
 class CreateTaskRequest(BaseModel):
-    title: str
-    description: str = ""
+    title: str = Field(max_length=256)
+    description: str = Field(default="", max_length=10000)
     source: TaskSource = TaskSource.MANUAL
-    source_id: str = ""
-    repo_name: str | None = None
+    source_id: str = Field(default="", max_length=512)
+    repo_name: str | None = Field(default=None, max_length=256)
 
 
 class TransitionRequest(BaseModel):
     status: TaskStatus
-    message: str = ""
+    message: str = Field(default="", max_length=2000)
 
 
 class ApprovalRequest(BaseModel):
     approved: bool
-    feedback: str = ""
+    feedback: str = Field(default="", max_length=5000)
     # Optional override for the TaskHistory message. Used by the freeform-mode
     # auto-reviewer so its decision (and reasoning) lands in the audit log.
-    message: str = ""
+    message: str = Field(default="", max_length=2000)
 
 
 class RecordOutcomeRequest(BaseModel):
     pr_approved: bool
     review_rounds: int = 0
-    feedback_summary: str = ""
+    feedback_summary: str = Field(default="", max_length=5000)
 
 
 class RegisterRepoRequest(BaseModel):
-    name: str
-    url: str
-    default_branch: str = "main"
+    name: str = Field(max_length=256)
+    url: str = Field(max_length=2048)
+    default_branch: str = Field(default="main", max_length=256)
 
 
 class CreateScheduleRequest(BaseModel):
-    name: str
-    cron_expression: str  # e.g. "0 9 * * 1" = every Monday 9am
-    task_title: str
-    task_description: str = ""
-    repo_name: str | None = None
+    name: str = Field(max_length=256)
+    cron_expression: str = Field(max_length=128)  # e.g. "0 9 * * 1" = every Monday 9am
+    task_title: str = Field(max_length=256)
+    task_description: str = Field(default="", max_length=10000)
+    repo_name: str | None = Field(default=None, max_length=256)
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, v: str) -> str:
+        if not croniter.is_valid(v):
+            raise ValueError("Invalid cron expression")
+        return v
 
 
 class DeleteResponse(BaseModel):
@@ -123,7 +140,9 @@ class PatternsResponse(BaseModel):
 
 
 @router.post("/tasks", response_model=TaskData)
-async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(get_session)) -> TaskData:
+async def create_task(
+    req: CreateTaskRequest, session: AsyncSession = Depends(get_session)
+) -> TaskData:
     _check_rate_limit()
     # Dedup check: exact source_id → exact title
     dup = await find_duplicate_by_source_id(session, req.source_id)
@@ -184,9 +203,7 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     if not task:
         raise HTTPException(404, "Task not found")
     # Delete history first (FK constraint)
-    await session.execute(
-        select(TaskHistory).where(TaskHistory.task_id == task_id)
-    )
+    await session.execute(select(TaskHistory).where(TaskHistory.task_id == task_id))
     await session.execute(sql_delete(TaskHistory).where(TaskHistory.task_id == task_id))
     await session.delete(task)
     await session.commit()
@@ -209,16 +226,19 @@ async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)
         raise HTTPException(400, f"Task already in terminal state: {task.status.value}")
     # Force to failed regardless of current state
     task.status = TaskStatus.FAILED
-    session.add(TaskHistory(
-        task_id=task.id,
-        from_status=task.status,
-        to_status=TaskStatus.FAILED,
-        message="Cancelled by user",
-    ))
+    session.add(
+        TaskHistory(
+            task_id=task.id,
+            from_status=task.status,
+            to_status=TaskStatus.FAILED,
+            message="Cancelled by user",
+        )
+    )
     await session.commit()
 
-    from shared.redis_client import get_redis, publish_event
     from shared.events import Event
+    from shared.redis_client import get_redis, publish_event
+
     r = await get_redis()
     await publish_event(r, Event(type="task.cleanup", task_id=task_id).to_redis())
     await publish_event(r, Event(type="task.failed", task_id=task_id).to_redis())
@@ -239,7 +259,7 @@ async def transition_task(
     try:
         # Save plan text when transitioning to awaiting_approval
         if req.status == TaskStatus.AWAITING_APPROVAL and req.message.startswith("Plan:\n"):
-            task.plan = req.message[len("Plan:\n"):]
+            task.plan = req.message[len("Plan:\n") :]
         task = await transition(session, task, req.status, req.message)
         await session.commit()
     except InvalidTransition as e:
@@ -436,7 +456,9 @@ async def list_schedules(session: AsyncSession = Depends(get_session)) -> list[S
 
 
 @router.delete("/schedules/{schedule_id}", response_model=DeleteResponse)
-async def delete_schedule(schedule_id: int, session: AsyncSession = Depends(get_session)) -> DeleteResponse:
+async def delete_schedule(
+    schedule_id: int, session: AsyncSession = Depends(get_session)
+) -> DeleteResponse:
     result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == schedule_id))
     schedule = result.scalar_one_or_none()
     if not schedule:
@@ -447,7 +469,9 @@ async def delete_schedule(schedule_id: int, session: AsyncSession = Depends(get_
 
 
 @router.post("/schedules/{schedule_id}/toggle", response_model=ToggleResponse)
-async def toggle_schedule(schedule_id: int, session: AsyncSession = Depends(get_session)) -> ToggleResponse:
+async def toggle_schedule(
+    schedule_id: int, session: AsyncSession = Depends(get_session)
+) -> ToggleResponse:
     result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == schedule_id))
     schedule = result.scalar_one_or_none()
     if not schedule:
@@ -461,7 +485,9 @@ async def toggle_schedule(schedule_id: int, session: AsyncSession = Depends(get_
 
 
 @router.post("/repos", response_model=RepoResponse)
-async def register_repo(req: RegisterRepoRequest, session: AsyncSession = Depends(get_session)) -> RepoResponse:
+async def register_repo(
+    req: RegisterRepoRequest, session: AsyncSession = Depends(get_session)
+) -> RepoResponse:
     repo = Repo(name=req.name, url=req.url, default_branch=req.default_branch)
     session.add(repo)
     await session.commit()
@@ -474,7 +500,10 @@ async def list_repos(session: AsyncSession = Depends(get_session)) -> list[RepoD
     result = await session.execute(select(Repo).order_by(Repo.name))
     return [
         RepoData(
-            id=r.id, name=r.name, url=r.url, default_branch=r.default_branch,
+            id=r.id,
+            name=r.name,
+            url=r.url,
+            default_branch=r.default_branch,
             summary=r.summary,
             summary_updated_at=r.summary_updated_at.isoformat() if r.summary_updated_at else None,
             ci_checks=r.ci_checks,
@@ -498,12 +527,14 @@ async def update_repo_branch(
     new_branch = req.get("default_branch", "").strip()
     if not new_branch:
         raise HTTPException(400, "default_branch is required")
+    if not BRANCH_NAME_RE.match(new_branch):
+        raise HTTPException(
+            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
+        )
 
     # Find all repo entries that match (short name, full name with org/)
     result = await session.execute(
-        select(Repo).where(
-            (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-        )
+        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
     )
     repos = result.scalars().all()
     if not repos:
@@ -516,7 +547,12 @@ async def update_repo_branch(
         updated.append(repo.name)
     await session.commit()
 
-    return {"repo": repo_name, "old_branch": old_branch, "new_branch": new_branch, "updated": updated}
+    return {
+        "repo": repo_name,
+        "old_branch": old_branch,
+        "new_branch": new_branch,
+        "updated": updated,
+    }
 
 
 @router.post("/repos/{repo_name}/refresh-ci")
@@ -526,10 +562,9 @@ async def refresh_repo_ci_checks(
 ) -> dict:
     """Re-extract CI checks from a repo's workflow files."""
     from orchestrator.ci_extractor import extract_ci_checks
+
     result = await session.execute(
-        select(Repo).where(
-            (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-        )
+        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
     )
     repos = result.scalars().all()
     if not repos:
@@ -571,9 +606,7 @@ async def trigger_harness_onboarding(
     Pass ?force=true to re-onboard a repo that was already onboarded.
     """
     result = await session.execute(
-        select(Repo).where(
-            (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-        )
+        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
     )
     repo = result.scalars().first()
     if not repo:
@@ -590,18 +623,23 @@ async def trigger_harness_onboarding(
 
     # Publish event to trigger onboarding asynchronously
     r = await get_redis()
-    await publish_event(r, Event(
-        type="repo.onboard",
-        task_id=0,
-        payload={"repo_id": repo.id, "repo_name": repo.name},
-    ).to_redis())
+    await publish_event(
+        r,
+        Event(
+            type="repo.onboard",
+            task_id=0,
+            payload={"repo_id": repo.id, "repo_name": repo.name},
+        ).to_redis(),
+    )
     await r.aclose()
 
     return {"status": "onboarding_started", "repo": repo.name}
 
 
 @router.get("/tasks/{task_id}/history")
-async def get_task_history(task_id: int, session: AsyncSession = Depends(get_session)) -> list[dict]:
+async def get_task_history(
+    task_id: int, session: AsyncSession = Depends(get_session)
+) -> list[dict]:
     result = await session.execute(
         select(TaskHistory)
         .where(TaskHistory.task_id == task_id)
@@ -629,8 +667,9 @@ async def update_repo_summary(
     if not repo:
         raise HTTPException(404, "Repo not found")
     repo.summary = req.get("summary", "")
-    from datetime import datetime, timezone
-    repo.summary_updated_at = datetime.now(timezone.utc)
+    from datetime import datetime
+
+    repo.summary_updated_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
 
@@ -658,28 +697,25 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
 
     # Delete all suggestions — including approved/rejected ones — because
     # Suggestion.repo_id is non-nullable, so we can't orphan them.
-    await session.execute(
-        sql_delete(Suggestion).where(Suggestion.repo_id == repo.id)
-    )
+    await session.execute(sql_delete(Suggestion).where(Suggestion.repo_id == repo.id))
     # Cascade-delete freeform config
-    await session.execute(
-        sql_delete(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
-    )
+    await session.execute(sql_delete(FreeformConfig).where(FreeformConfig.repo_id == repo.id))
     # Orphan completed/failed tasks (don't delete them)
-    await session.execute(
-        sql_update(Task).where(Task.repo_id == repo.id).values(repo_id=None)
-    )
+    await session.execute(sql_update(Task).where(Task.repo_id == repo.id).values(repo_id=None))
 
     await session.delete(repo)
     await session.commit()
 
     # Publish event so background loops can react
     r = await get_redis()
-    await publish_event(r, Event(
-        type="repo.deleted",
-        task_id=0,
-        payload={"repo_name": repo_name},
-    ).to_redis())
+    await publish_event(
+        r,
+        Event(
+            type="repo.deleted",
+            task_id=0,
+            payload={"repo_name": repo_name},
+        ).to_redis(),
+    )
     await r.aclose()
 
     return {"deleted": repo_name}
@@ -689,12 +725,28 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
 
 
 class FreeformConfigRequest(BaseModel):
-    repo_name: str
-    dev_branch: str = "dev"
-    analysis_cron: str = "0 9 * * 1"
+    repo_name: str = Field(max_length=256)
+    dev_branch: str = Field(default="dev", max_length=256)
+    analysis_cron: str = Field(default="0 9 * * 1", max_length=128)
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
+
+    @field_validator("dev_branch")
+    @classmethod
+    def validate_branch(cls, v: str) -> str:
+        if not BRANCH_NAME_RE.match(v):
+            raise ValueError(
+                "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
+            )
+        return v
+
+    @field_validator("analysis_cron")
+    @classmethod
+    def validate_cron(cls, v: str) -> str:
+        if not croniter.is_valid(v):
+            raise ValueError("Invalid cron expression")
+        return v
 
 
 @router.post("/freeform/config", response_model=FreeformConfigData)
@@ -707,9 +759,7 @@ async def upsert_freeform_config(
     if not repo:
         raise HTTPException(404, f"Repo '{req.repo_name}' not found")
 
-    result = await session.execute(
-        select(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
-    )
+    result = await session.execute(select(FreeformConfig).where(FreeformConfig.repo_id == repo.id))
     config = result.scalar_one_or_none()
     if config:
         config.enabled = req.enabled
@@ -820,7 +870,9 @@ async def trigger_po_analysis(
     r = await get_redis()
     await publish_event(
         r,
-        Event(type="po.analyze", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}).to_redis(),
+        Event(
+            type="po.analyze", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}
+        ).to_redis(),
     )
     await r.aclose()
     return {"ok": True, "message": f"PO analysis triggered for {repo_name}"}
