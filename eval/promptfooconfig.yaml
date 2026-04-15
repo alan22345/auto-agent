@@ -1,0 +1,159 @@
+description: "Agent vs Claude Code CLI — coding capability evaluation"
+
+providers:
+  - id: "file://providers/agent_provider.py"
+    label: "Auto-Agent (Bedrock)"
+  - id: "file://providers/claude_cli_provider.py"
+    label: "Claude Code CLI"
+
+prompts:
+  - "{{task}}"
+
+defaultTest:
+  options:
+    provider:
+      python:
+        pythonExecutable: ../.venv/bin/python3
+
+tests:
+  # -------------------------------------------------------------------
+  # Test 1: Bug fix — off-by-one pagination + case-sensitive search
+  # -------------------------------------------------------------------
+  - description: "Fix pagination off-by-one and case-sensitive search bugs"
+    vars:
+      fixture: "python-bug-fix"
+      task: |
+        Fix the bugs in app.py:
+        1. get_users() pagination is broken — page 1 should return the first 10 users, but it skips them.
+        2. total_pages calculation doesn't handle remainders (e.g., 51 users with 10 per page should be 6 pages, not 5).
+        3. search_users() is case-sensitive — searching "user" should match "User 1".
+        Fix all three bugs. Do NOT add new features or refactor unrelated code.
+      expected_fixes: |
+        ["(page - 1) * per_page", ".lower()"]
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: python
+        value: "file://assertions/bug_fix_check.py"
+      - type: llm-rubric
+        value: |
+          The code changes should:
+          1. Fix the pagination offset to use (page - 1) * per_page
+          2. Fix total_pages to use ceiling division (math.ceil or equivalent)
+          3. Make search case-insensitive
+          4. NOT add unrelated changes or new features
+          Rate the quality of the fix (focused, correct, minimal).
+        threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 2: Add feature — retry logic with exponential backoff
+  # -------------------------------------------------------------------
+  - description: "Add retry decorator with exponential backoff to utils.py"
+    vars:
+      fixture: "python-add-feature"
+      task: |
+        Add a retry decorator to utils.py that:
+        1. Retries a function up to `max_retries` times (default 3)
+        2. Uses exponential backoff: wait 2^attempt seconds between retries
+        3. Only retries on specified exception types (default: Exception)
+        4. Logs each retry attempt
+        5. Raises the last exception if all retries fail
+
+        Add the decorator to the file and apply it to load_config() with max_retries=2.
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: llm-rubric
+        value: |
+          Check that the implementation:
+          1. Has a retry decorator (function or class-based)
+          2. Implements exponential backoff (2^attempt or similar)
+          3. Accepts max_retries and exception parameters
+          4. Is applied to load_config with max_retries=2
+          5. Code is clean and follows the existing style in utils.py
+        threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 3: Refactor — extract duplicated validation logic
+  # -------------------------------------------------------------------
+  - description: "Extract duplicated validation into reusable functions"
+    vars:
+      fixture: "python-refactor"
+      task: |
+        handlers.py has duplicated validation logic across handle_create_user,
+        handle_update_user, and handle_create_order. Refactor to:
+        1. Extract email validation into a validate_email() function
+        2. Extract name validation into a validate_name() function
+        3. Extract age validation into a validate_age() function
+        4. Use these in all three handlers
+        5. Do NOT change the behavior — same inputs should produce same outputs.
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: llm-rubric
+        value: |
+          Check that:
+          1. Validation functions were extracted (validate_email, validate_name, validate_age)
+          2. All three handlers use the extracted functions
+          3. No duplicate validation code remains
+          4. The external behavior is preserved (same return values)
+          5. The code is cleaner and shorter than the original
+        threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 4: Write tests for existing code
+  # -------------------------------------------------------------------
+  - description: "Write unit tests for calculator module"
+    vars:
+      fixture: "js-add-tests"
+      task: |
+        Write comprehensive unit tests for calculator.js. Create a file
+        calculator.test.js using Jest/Node assert. Cover:
+        1. Basic operations (add, subtract, multiply, divide)
+        2. Edge cases (division by zero, negative numbers, zero)
+        3. Power function with various exponents
+        4. Factorial including edge cases (0, 1, negative)
+        Write the test file, do NOT modify calculator.js.
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: llm-rubric
+        value: |
+          Check that:
+          1. A test file was created (calculator.test.js or similar)
+          2. Tests cover all 6 functions (add, subtract, multiply, divide, power, factorial)
+          3. Edge cases are tested (division by zero, negative factorial, zero inputs)
+          4. calculator.js was NOT modified
+          5. Tests are well-structured and would pass against the implementation
+        threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 5: Code generation from scratch
+  # -------------------------------------------------------------------
+  - description: "Generate a complete LRU cache implementation"
+    vars:
+      fixture: ""
+      files: |
+        {}
+      task: |
+        Create a file called lru_cache.py with a complete LRU cache implementation:
+        1. Class LRUCache with __init__(capacity: int)
+        2. get(key) -> value or -1 if not found
+        3. put(key, value) -> None, evicts least recently used if at capacity
+        4. Both get and put must be O(1) time complexity
+        5. Use an OrderedDict or implement with a doubly-linked list + dict
+        6. Add a __len__ method and a __contains__ method
+        Include docstrings and type hints.
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: llm-rubric
+        value: |
+          Check that:
+          1. lru_cache.py was created
+          2. LRUCache class exists with get/put/len/contains methods
+          3. O(1) operations (uses OrderedDict or linked list + dict)
+          4. Eviction works correctly at capacity
+          5. Has docstrings and type hints
+          6. Code is clean, production-quality Python
+        threshold: 0.7
