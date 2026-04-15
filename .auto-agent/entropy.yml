@@ -1,0 +1,53 @@
+# Auto-agent entropy management config
+# These checks run during idle time to keep the codebase clean
+
+checks:
+  dead_code:
+    enabled: true
+    tool: "vulture"
+    exclude:
+      - "migrations/"
+      - "scripts/"
+      - "web/static/"
+
+  unused_imports:
+    enabled: true
+    # Handled by ruff (F401 rule)
+
+  stale_docs:
+    enabled: true
+    doc_dirs: ["docs/", "README.md", "SETUP.md"]
+    max_age_days: 90
+
+  naming_drift:
+    enabled: true
+    conventions:
+      functions: "snake_case"
+      classes: "PascalCase"
+      constants: "UPPER_SNAKE_CASE"
+    exclude:
+      - "migrations/"
+
+  large_files:
+    enabled: true
+    max_size_kb: 500
+    exclude:
+      - "*.lock"
+      - "*.svg"
+      - "uv.lock"
+      - "web/static/**"
+
+  module_boundaries:
+    enabled: true
+    # Verify shared/ does not import from orchestrator/, claude_runner/, integrations/, web/
+    # Verify integrations/ does not import from orchestrator/, claude_runner/, web/
+    # Verify orchestrator/ does not import from claude_runner/, web/
+    rules:
+      - module: "shared"
+        banned_imports: ["orchestrator", "claude_runner", "integrations", "web"]
+      - module: "integrations"
+        banned_imports: ["orchestrator", "claude_runner", "web"]
+      - module: "orchestrator"
+        banned_imports: ["claude_runner", "web"]
+      - module: "claude_runner"
+        banned_imports: ["web"]
