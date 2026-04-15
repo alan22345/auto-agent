@@ -843,9 +843,11 @@
         freeformConfigs = freeformConfigs.filter(c => c.repo_name !== repoName);
         if (selectedFreeformView && selectedFreeformView.repoName === repoName) {
           selectedFreeformView = "existing";
+          renderFreeformSidebar();
+          renderFreeformAddExisting();
+        } else {
+          renderFreeformSidebar();
         }
-        renderFreeformSidebar();
-        renderFreeformAddExisting();
       } catch (e) {
         alert("Error deleting repo: " + e.message);
       }
