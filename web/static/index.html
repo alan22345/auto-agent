@@ -1443,35 +1443,6 @@
       document.body.appendChild(overlay);
     }
 
-    function approveSuggestion(id) {
-      const sug = suggestions.find(s => s.id === id);
-      const title = sug ? escHtml(sug.title) : "this suggestion";
-      showConfirmModal({
-        title: "Approve suggestion?",
-        message: `"${title}" &mdash; This will create a new task. Continue?`,
-        confirmText: "Approve", confirmColor: "var(--green)",
-        onConfirm() {
-          ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
-          suggestions = suggestions.filter(s => s.id !== id);
-          renderRepoDetailSuggestions();
-        }
-      });
-    }
-
-    function rejectSuggestion(id) {
-      const sug = suggestions.find(s => s.id === id);
-      const title = sug ? escHtml(sug.title) : "this suggestion";
-      showConfirmModal({
-        title: "Reject suggestion?",
-        message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
-        confirmText: "Reject", confirmColor: "var(--red)",
-        onConfirm() {
-          ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
-          suggestions = suggestions.filter(s => s.id !== id);
-          renderRepoDetailSuggestions();
-        }
-      });
-    }
     function handleSuggestionAction(id, action) {
       const label = action === "approve" ? "approved" : "rejected";
       if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1497,8 +1468,27 @@
       ws.send(JSON.stringify({ type: `${action}_suggestion`, suggestion_id: id }));
     }
 
-    function approveSuggestion(id) { handleSuggestionAction(id, "approve"); }
-    function rejectSuggestion(id)  { handleSuggestionAction(id, "reject"); }
+    function approveSuggestion(id) {
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
+      showConfirmModal({
+        title: "Approve suggestion?",
+        message: `"${title}" &mdash; This will create a new task. Continue?`,
+        confirmText: "Approve", confirmColor: "var(--green)",
+        onConfirm() { handleSuggestionAction(id, "approve"); }
+      });
+    }
+
+    function rejectSuggestion(id) {
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
+      showConfirmModal({
+        title: "Reject suggestion?",
+        message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
+        confirmText: "Reject", confirmColor: "var(--red)",
+        onConfirm() { handleSuggestionAction(id, "reject"); }
+      });
+    }
 
     function promoteTask(id) {
       showConfirmModal({
@@ -1844,32 +1834,27 @@
     function cancelTask() {
       if (!selectedTaskId) return;
       const taskId = selectedTaskId;
+      const btn = document.getElementById("cancel-task-btn");
       showConfirmModal({
         title: "Cancel this task?",
         message: "The task will be stopped and marked as cancelled.",
         confirmText: "Cancel Task", confirmColor: "var(--red)",
         async onConfirm() {
-          const resp = await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
-          if (resp.ok) addChat(taskId, "system", "Task cancelled.");
-          else addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
+          setButtonLoading(btn, true);
+          try {
+            const resp = await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+            if (resp.ok) {
+              addChat(taskId, "system", "Task cancelled.");
+              showToast("Task cancelled", "success");
+            } else {
+              addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
+              showToast("Failed to cancel task", "error");
+            }
+          } finally {
+            setButtonLoading(btn, false);
+          }
         }
       });
-    async function cancelTask() {
-      if (!selectedTaskId || !confirm("Cancel this task?")) return;
-      const btn = document.getElementById("cancel-task-btn");
-      setButtonLoading(btn, true);
-      try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
-        if (resp.ok) {
-          addChat(selectedTaskId, "system", "Task cancelled.");
-          showToast("Task cancelled", "success");
-        } else {
-          addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
-          showToast("Failed to cancel task", "error");
-        }
-      } finally {
-        setButtonLoading(btn, false);
-      }
     }
 
     async function markDone() {
@@ -1893,43 +1878,31 @@
     function deleteTask() {
       if (!selectedTaskId) return;
       const taskId = selectedTaskId;
+      const btn = document.getElementById("delete-task-btn");
       showConfirmModal({
         title: "Delete task permanently?",
         message: "This task will be permanently deleted. This cannot be undone.",
         confirmText: "Delete", confirmColor: "var(--red)",
         async onConfirm() {
-          const resp = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
-          if (resp.ok) {
-            delete chatMessages[taskId];
-            selectedTaskId = null;
-            document.getElementById("main-header").textContent = "Select a task or create one";
-            renderChat();
-            ws.send(JSON.stringify({ type: "refresh" }));
-          } else {
-            addChat(taskId, "error", `Failed to delete: ${await resp.text()}`);
+          setButtonLoading(btn, true);
+          try {
+            const resp = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+            if (resp.ok) {
+              delete chatMessages[taskId];
+              selectedTaskId = null;
+              document.getElementById("main-header").textContent = "Select a task or create one";
+              renderChat();
+              ws.send(JSON.stringify({ type: "refresh" }));
+              showToast("Task deleted", "success");
+            } else {
+              addChat(taskId, "error", `Failed to delete: ${await resp.text()}`);
+              showToast("Failed to delete task", "error");
+            }
+          } finally {
+            setButtonLoading(btn, false);
           }
         }
       });
-    async function deleteTask() {
-      if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
-      const btn = document.getElementById("delete-task-btn");
-      setButtonLoading(btn, true);
-      try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
-        if (resp.ok) {
-          delete chatMessages[selectedTaskId];
-          selectedTaskId = null;
-          document.getElementById("main-header").textContent = "Select a task or create one";
-          renderChat();
-          ws.send(JSON.stringify({ type: "refresh" }));
-          showToast("Task deleted", "success");
-        } else {
-          addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
-          showToast("Failed to delete task", "error");
-        }
-      } finally {
-        setButtonLoading(btn, false);
-      }
     }
 
     function renderMarkdown(s) {
