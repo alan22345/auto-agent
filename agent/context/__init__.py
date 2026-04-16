@@ -49,12 +49,14 @@ class ContextManager:
         self,
         repo_summary: str | None = None,
         extra_instructions: str | None = None,
+        include_methodology: bool = False,
     ) -> str:
         """Build the full system prompt for this workspace."""
         return await self.system.build(
             self._workspace,
             repo_summary=repo_summary,
             extra_instructions=extra_instructions,
+            include_methodology=include_methodology,
         )
 
     async def prepare(

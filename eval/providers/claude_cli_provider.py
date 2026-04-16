@@ -28,6 +28,9 @@ async def _run_cli(prompt, options, context):
     try:
         _setup_workspace(workspace, fixture, variables)
 
+        # Match agent provider: add .gitignore for noise dirs before git init
+        _write_gitignore(workspace)
+
         # Initialize git
         for cmd in [
             ["git", "init"],
@@ -65,9 +68,16 @@ async def _run_cli(prompt, options, context):
 
         cli_output = (stdout or b"").decode()
 
+        # Stage all respecting .gitignore — captures untracked files in diff
+        proc = await asyncio.create_subprocess_exec(
+            "git", "add", "-A", cwd=workspace,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
         # Capture diff — uncommitted + committed
         proc = await asyncio.create_subprocess_exec(
-            "git", "diff", cwd=workspace,
+            "git", "diff", "--cached", cwd=workspace,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         diff_out, _ = await proc.communicate()
@@ -113,6 +123,39 @@ async def _run_cli(prompt, options, context):
         return {"output": json.dumps({"error": str(e)}), "error": str(e)}
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+_GITIGNORE_CONTENT = """\
+node_modules/
+__pycache__/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+dist/
+build/
+.next/
+.nuxt/
+coverage/
+*.pyc
+*.pyo
+*.log
+package-lock.json
+yarn.lock
+poetry.lock
+Pipfile.lock
+.DS_Store
+"""
+
+
+def _write_gitignore(workspace):
+    """Write .gitignore to prevent install artifacts from polluting diffs."""
+    gitignore_path = os.path.join(workspace, ".gitignore")
+    if not os.path.exists(gitignore_path):
+        with open(gitignore_path, "w") as f:
+            f.write(_GITIGNORE_CONTENT)
 
 
 def _setup_workspace(workspace, fixture, variables):

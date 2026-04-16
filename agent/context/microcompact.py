@@ -2,6 +2,14 @@
 
 This is the cheapest compaction layer. It replaces old tool result content
 with a placeholder without summarizing the conversation. Runs every turn.
+
+Design principle: file_read results are the agent's working memory of the
+codebase. Clearing them — even with a helpful "superseded" marker — confuses
+the agent into thinking it has amnesia and drives it into a re-read loop.
+We therefore ONLY clear COMPUTED tool results (grep/glob/git/bash), which
+are trivially re-derivable. If the agent re-reads the same file, that's
+wasteful but not catastrophic — autocompact handles it at the context
+boundary.
 """
 
 from __future__ import annotations
@@ -12,8 +20,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent.llm.types import Message
 
-# Tool results eligible for clearing (read/search operations)
-ELIGIBLE_TOOLS = {"file_read", "grep", "glob", "git", "bash"}
+# Tool results whose content is derived/computed and can be safely cleared.
+# The agent can re-derive them from the repo map or other context.
+COMPUTED_TOOLS = {"grep", "glob", "git", "bash"}
 
 # Never clear results from the most recent N assistant turns
 KEEP_RECENT_TURNS = 3
@@ -23,14 +32,14 @@ CLEARED_MARKER = "[Tool result cleared — content was processed in earlier turn
 
 
 class MicrocompactEngine:
-    """Replaces old tool result content with a short placeholder."""
+    """Clears old results from computed tools (grep/glob/git/bash).
+
+    Does NOT clear file_read results — those are the agent's working memory
+    of the codebase. Clearing file reads causes the agent to re-read files
+    in a stuck loop. Token efficiency for reads is handled by autocompact.
+    """
 
     def apply(self, messages: list[Message], max_context_tokens: int) -> list[Message]:
-        """Walk messages oldest-to-newest, clearing eligible tool results
-        that are older than KEEP_RECENT_TURNS assistant turns.
-
-        Returns a new list (does not mutate the originals).
-        """
         # Identify the index of the Nth-most-recent assistant message
         assistant_indices: list[int] = []
         for i, msg in enumerate(messages):
@@ -47,7 +56,7 @@ class MicrocompactEngine:
             if (
                 i < cutoff_index
                 and msg.role == "tool"
-                and msg.tool_name in ELIGIBLE_TOOLS
+                and msg.tool_name in COMPUTED_TOOLS
                 and msg.content != CLEARED_MARKER
                 and len(msg.content) > 200  # Don't bother clearing tiny results
             ):

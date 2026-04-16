@@ -151,9 +151,16 @@ def _create_agent(
     session_id: str | None = None,
     readonly: bool = False,
     max_turns: int = 50,
+    include_methodology: bool = False,
+    model_tier: str | None = None,
 ) -> AgentLoop:
-    """Create a configured AgentLoop instance."""
-    provider = get_provider()
+    """Create a configured AgentLoop instance.
+
+    Args:
+        model_tier: Override model selection. Use "fast" for mechanical tasks,
+                   "standard" for normal work, "capable" for complex architecture.
+    """
+    provider = get_provider(model_override=model_tier)
     tools = create_default_registry(readonly=readonly)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
@@ -164,6 +171,7 @@ def _create_agent(
         session=session,
         max_turns=max_turns,
         workspace=workspace,
+        include_methodology=include_methodology,
     )
 
 
@@ -253,7 +261,7 @@ async def generate_repo_summary(repo_url: str, repo_name: str, default_branch: s
     """Generate a repo summary using the agent with readonly tools."""
     from agent.workspace import clone_repo as _clone
     workspace = await _clone(repo_url, 0, default_branch, workspace_name=f"summary-{repo_name}")
-    agent = _create_agent(workspace, readonly=True, max_turns=15)
+    agent = _create_agent(workspace, readonly=True, max_turns=15, model_tier="fast")
     result = await agent.run(
         "Provide a concise summary of this repository: tech stack, project structure, "
         "key patterns, domain, and any notable conventions. Be brief (under 500 words)."
@@ -321,7 +329,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     workspace = await clone_repo(repo.url, task_id, repo.default_branch)
 
     try:
-        agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30)
+        agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
         if feedback:
             prompt = (
@@ -568,19 +576,28 @@ async def _handle_coding_with_subtasks(
         if i == 0:
             prompt += (
                 f"## Full plan for context (implement ONLY the current phase above)\n{task.plan}\n\n"
-                "Start by reading README.md and CLAUDE.md (if they exist) to understand the repo.\n"
                 "Implement ONLY the current phase. Commit your changes before stopping.\n"
             )
         else:
+            # Provide context about what previous phases did (fresh context pattern)
+            prev_summaries = []
+            for j in range(i):
+                title = phases[j].get("title", f"Phase {j + 1}")
+                preview = phases[j].get("output_preview", "completed")
+                prev_summaries.append(f"  - Phase {j + 1} ({title}): {preview}")
+            prev_context = "\n".join(prev_summaries)
             prompt += (
-                "Continue from where you left off. The previous phases are already implemented.\n"
+                f"## Previous phases (already implemented — do NOT redo)\n{prev_context}\n\n"
                 "Implement ONLY the current phase. Commit your changes before stopping.\n"
             )
 
         log.info(f"Task #{task_id}: starting subtask {i + 1}/{total} — {phase['title']}")
-        resume = is_continuation or i > 0
-        agent = _create_agent(workspace, session_id=session_id, max_turns=40)
-        result = await agent.run(prompt, resume=resume)
+        # Fresh agent per subtask (context isolation — superpowers pattern)
+        # Each subtask gets its own agent with no session resume, so it starts
+        # with clean context. The repo map in the system prompt provides structure.
+        subtask_session = f"{session_id}-phase-{i + 1}"
+        agent = _create_agent(workspace, session_id=subtask_session, max_turns=40)
+        result = await agent.run(prompt, resume=False)
         output = result.output
         log.info(f"Task #{task_id} subtask {i + 1} output: {output[:300]}...")
 
@@ -773,7 +790,7 @@ async def handle_plan_independent_review(task_id: int) -> None:
 
     try:
         with tempfile.TemporaryDirectory(prefix=f"plan-review-{task_id}-") as tmp:
-            agent = _create_agent(tmp, readonly=True, max_turns=5)
+            agent = _create_agent(tmp, readonly=True, max_turns=5, model_tier="fast")
             result = await agent.run(prompt)
             output = result.output
     except Exception as e:

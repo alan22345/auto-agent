@@ -41,7 +41,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 8192,
         temperature: float = 0.0,
     ) -> LLMResponse:
-        api_messages = [self._to_api_message(m) for m in messages if m.role != "system"]
+        api_messages = self._build_api_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
@@ -62,7 +62,7 @@ class AnthropicProvider(LLMProvider):
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
     ) -> int:
-        api_messages = [self._to_api_message(m) for m in messages if m.role != "system"]
+        api_messages = self._build_api_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
@@ -88,37 +88,49 @@ class AnthropicProvider(LLMProvider):
     # Message format conversion
     # ------------------------------------------------------------------
 
-    def _to_api_message(self, msg: Message) -> dict[str, Any]:
-        """Convert our Message to Anthropic API format."""
-        if msg.role == "assistant" and msg.tool_calls:
-            # Assistant message with tool use blocks
-            content: list[dict[str, Any]] = []
-            if msg.content:
-                content.append({"type": "text", "text": msg.content})
-            for tc in msg.tool_calls:
-                content.append({
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.arguments,
+    def _build_api_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
+        """Convert our Messages to Anthropic API format, batching consecutive
+        tool results into one user message (API requirement — see bedrock.py
+        for rationale)."""
+        api_messages: list[dict[str, Any]] = []
+        pending_tool_results: list[dict[str, Any]] = []
+
+        def flush():
+            if pending_tool_results:
+                api_messages.append({
+                    "role": "user",
+                    "content": list(pending_tool_results),
                 })
-            return {"role": "assistant", "content": content}
+                pending_tool_results.clear()
 
-        if msg.role == "tool":
-            # Tool result message
-            return {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content,
-                    }
-                ],
-            }
+        for msg in messages:
+            if msg.role == "system":
+                continue
+            if msg.role == "tool":
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                })
+                continue
+            flush()
+            if msg.role == "assistant" and msg.tool_calls:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                for tc in msg.tool_calls:
+                    content.append({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    })
+                api_messages.append({"role": "assistant", "content": content})
+            else:
+                api_messages.append({"role": msg.role, "content": msg.content})
 
-        # Plain user or assistant text
-        return {"role": msg.role, "content": msg.content}
+        flush()
+        return api_messages
 
     def _to_api_tool(self, tool: ToolDefinition) -> dict[str, Any]:
         """Convert our ToolDefinition to Anthropic API format."""

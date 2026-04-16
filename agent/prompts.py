@@ -30,10 +30,13 @@ Do NOT write any code. Plan only. Output the plan as text.
 
 CODING_PROMPT = """\
 ## Instructions
-1. Read the README and CLAUDE.md (if they exist) to understand repo conventions.
-2. Implement the task following the repo's existing patterns and style.
-3. Run the test suite and fix any failures you introduce.
-4. Self-review your changes before committing.
+Implement the task below IMMEDIATELY. Do NOT explore the codebase broadly — only \
+read files directly relevant to the change. If the task specifies which file(s) to \
+modify, go straight to editing. If unclear, do ONE targeted search then start coding.
+
+1. Implement the task following the repo's existing patterns and style.
+2. Run the test suite and fix any failures you introduce.
+3. Self-review your changes before committing.
 {clarification_instructions}
 ## Task
 Title: {title}

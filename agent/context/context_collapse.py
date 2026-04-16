@@ -1,7 +1,14 @@
-"""Layer 2: Group consecutive read/search operations into summaries.
+"""Layer 2: Group consecutive search operations into summaries.
 
 Creates a projected view of messages without modifying stored history.
-Consecutive read-only tool calls are collapsed into compact summaries.
+Consecutive computed-tool calls (grep/glob/git) are collapsed into compact
+summaries.
+
+IMPORTANT: file_read is deliberately EXCLUDED from collapsible tools. Reading
+a file is the agent's working memory of the codebase — collapsing it into
+"Read 4 files: app.py, models.py, ..." destroys the file content and forces
+the agent into a re-read loop. Computed results (grep matches, glob lists,
+git log) are trivially re-derivable and safe to collapse.
 """
 
 from __future__ import annotations
@@ -13,8 +20,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent.llm.types import Message
 
-# Tools whose results can be collapsed into group summaries
-COLLAPSIBLE_TOOLS = {"file_read", "grep", "glob", "git"}
+# Tools whose results can be collapsed into group summaries.
+# file_read is EXCLUDED — file contents are the agent's working memory.
+COLLAPSIBLE_TOOLS = {"grep", "glob", "git"}
 
 # Tools that break a collapsible group (mutations)
 BREAK_TOOLS = {"file_write", "file_edit", "bash"}

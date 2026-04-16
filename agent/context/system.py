@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import structlog
 
+from agent.context.repo_map import build_repo_map
+
 logger = structlog.get_logger()
 
 # Cap git status output
@@ -26,6 +28,31 @@ writing, editing files, searching code, and running shell commands.
 - For bug fixes, identify and fix the ROOT CAUSE, not just the symptom.
 - No hardcoded secrets, tokens, or credentials.
 - Validate inputs at system boundaries.
+
+## Efficiency
+- Go straight to implementation. Try the simplest approach first.
+- If the task says which file to change, open it and start editing immediately.
+- Do NOT read every file in the project. Use the repo map above to find what you need.
+- Make independent tool calls in parallel when possible (e.g., read 3 files at once).
+- If you have explored enough to understand the problem, START CODING. Do not keep reading.
+
+## Tool usage
+- Use `glob` to find files by pattern — NOT bash `find` or `ls`.
+- Use `grep` to search code — NOT bash `grep` or `rg`. Use context_lines for surrounding code.
+- Use `file_read` to read files — NOT bash `cat` or `head`.
+- Use `file_edit` for precise edits — NOT bash `sed` or full file rewrites.
+- Use `test_runner` to run tests — it auto-detects the framework and parses results.
+- Reserve `bash` for commands that need shell execution (install deps, build, custom scripts).
+
+## Verification (MANDATORY before completion)
+- Before claiming work is done, RUN the test suite or linter.
+- Read the output and confirm it passes.
+- Do NOT say "should work" or "looks correct" — show actual test output as evidence.
+- If tests fail, fix the issue before claiming completion.
+"""
+
+# Extended methodology injected only for complex/planning tasks
+METHODOLOGY_INSTRUCTIONS = """\
 
 ## Methodology (Superpowers)
 
@@ -92,12 +119,20 @@ class SystemPromptBuilder:
         workspace: str,
         repo_summary: str | None = None,
         extra_instructions: str | None = None,
+        include_methodology: bool = False,
     ) -> str:
         """Build the full system prompt.
 
-        Concatenates: base instructions + CLAUDE.md + git context + repo summary + date.
+        Concatenates: base instructions + (optional methodology) + CLAUDE.md + git context + repo summary + date.
+
+        Args:
+            include_methodology: If True, include the full Superpowers methodology section.
+                                 Use for planning and complex tasks. Skip for simple coding tasks.
         """
-        parts: list[str] = [BASE_AGENT_INSTRUCTIONS]
+        base = BASE_AGENT_INSTRUCTIONS
+        if include_methodology:
+            base += METHODOLOGY_INSTRUCTIONS
+        parts: list[str] = [base]
 
         # CLAUDE.md
         claude_md = await self._read_claude_md(workspace)
@@ -108,6 +143,15 @@ class SystemPromptBuilder:
         git_context = await self._git_context(workspace)
         if git_context:
             parts.append(f"## Current git state\n{git_context}")
+
+        # Repo map (AST-based codebase index)
+        repo_map = self._build_repo_map(workspace)
+        if repo_map:
+            parts.append(
+                "## Repo map (file structure with classes/functions)\n"
+                "Use this to find the right files — avoid broad exploration.\n"
+                f"{repo_map}"
+            )
 
         # Repo summary
         if repo_summary:
@@ -125,6 +169,21 @@ class SystemPromptBuilder:
     def invalidate_cache(self) -> None:
         """Clear cached values (call at the start of each new agent run)."""
         self._cache.clear()
+
+    def _build_repo_map(self, workspace: str) -> str | None:
+        """Build an AST-based repo map for the workspace (cached)."""
+        cache_key = f"repo_map:{workspace}"
+        if cache_key in self._cache:
+            return self._cache[cache_key] or None
+
+        try:
+            result = build_repo_map(workspace)
+            self._cache[cache_key] = result or ""
+            return result
+        except Exception as e:
+            logger.warning("repo_map_failed", error=str(e))
+            self._cache[cache_key] = ""
+            return None
 
     async def _read_claude_md(self, workspace: str) -> str | None:
         """Read CLAUDE.md from workspace root if it exists."""

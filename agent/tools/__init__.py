@@ -10,6 +10,7 @@ from agent.tools.file_write import FileWriteTool
 from agent.tools.git import GitTool
 from agent.tools.glob_tool import GlobTool
 from agent.tools.grep_tool import GrepTool
+from agent.tools.test_runner import TestRunnerTool
 
 
 def create_default_registry(readonly: bool = False) -> ToolRegistry:
@@ -31,5 +32,6 @@ def create_default_registry(readonly: bool = False) -> ToolRegistry:
         registry.register(FileWriteTool())
         registry.register(FileEditTool())
         registry.register(BashTool())
+        registry.register(TestRunnerTool())
 
     return registry

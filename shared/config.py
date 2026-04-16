@@ -42,8 +42,15 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"
     llm_model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
-    # Bedrock (uses AWS credential chain — no keys needed if IAM/SSO configured)
+    # Bedrock — explicit credentials for VM deployment (optional).
+    # Preferred: AWS Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) — simpler, no IAM setup.
+    # Alternative: IAM access keys (aws_access_key_id + aws_secret_access_key).
+    # Fallback: AWS credential chain (~/.aws/credentials, SSO, instance role).
     bedrock_region: str = "us-east-1"
+    aws_bearer_token_bedrock: str = ""  # Preferred: Bedrock API key
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""  # Optional, for temporary credentials
 
     # Concurrency
     max_concurrent_simple: int = 1

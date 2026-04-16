@@ -166,3 +166,202 @@ tests:
           5. Has docstrings and type hints
           6. Code is clean, production-quality Python
         threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 6: Multi-file feature — add preferences to Flask app (medium)
+  # -------------------------------------------------------------------
+  - description: "Add user preferences endpoint to multi-file Flask app"
+    vars:
+      fixture: "flask-app"
+      task: |
+        Add a user preferences feature to this Flask app:
+        1. Add a UserPreference model to models.py with fields: id, user_id (FK to users), key (string), value (string)
+        2. Add API endpoints to routes.py:
+           - GET /api/users/<user_id>/preferences — list all preferences for a user
+           - PUT /api/users/<user_id>/preferences — set a preference (JSON body: {"key": "...", "value": "..."})
+           - DELETE /api/users/<user_id>/preferences/<key> — delete a specific preference
+        3. Add validation: key must be non-empty, user must exist
+        4. Add tests in tests/test_preferences.py
+        5. Make sure existing tests still pass
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: llm-rubric
+        value: |
+          Check that:
+          1. UserPreference model was added to models.py with correct fields and FK
+          2. All 3 preference endpoints were added (GET, PUT, DELETE)
+          3. Validation exists for key and user existence
+          4. Tests were written for the new endpoints
+          5. Existing user routes were NOT broken
+          6. Code follows the existing patterns in the codebase
+        threshold: 0.7
+
+  # -------------------------------------------------------------------
+  # Test 7: Cross-file bug — root cause in a different module (hard)
+  # -------------------------------------------------------------------
+  - description: "Fix cross-module pricing bug (root cause analysis)"
+    vars:
+      fixture: "cross-file-bug"
+      task: |
+        The tests in test_orders.py are failing. Run the tests, find the root cause,
+        and fix it. The bug is NOT in test_orders.py or orders.py — the tests and
+        order logic are correct. The root cause is somewhere else.
+
+        IMPORTANT: Fix the ROOT CAUSE, not the symptom. Do not modify the tests.
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: python
+        value: "file://assertions/cross_file_fix.py"
+      - type: llm-rubric
+        value: |
+          Check that:
+          1. The fix is in pricing.py, specifically in calculate_discount()
+          2. calculate_discount() now returns the discount AMOUNT (subtotal * discount_percent / 100), not the discounted price
+          3. test_orders.py was NOT modified
+          4. orders.py was NOT modified (or only minimally)
+          5. The fix is minimal and focused on the root cause
+        threshold: 0.7
+
+  # ===================================================================
+  # ARCHITECTURE & TRADE-OFF TESTS
+  # ===================================================================
+
+  # -------------------------------------------------------------------
+  # Test 8: Architecture trade-off — improve a polling job queue (hard)
+  # -------------------------------------------------------------------
+  - description: "Improve job queue architecture with trade-off reasoning"
+    vars:
+      fixture: "architecture-tradeoff"
+      task: |
+        The job queue in app.py uses naive polling (queries the DB every second).
+        Read the code, understand the problems listed in worker_loop's docstring,
+        then improve the architecture.
+
+        Requirements:
+        1. Reduce unnecessary DB queries when no jobs are pending
+        2. Add retry logic for failed jobs (max 3 retries with backoff)
+        3. Add a callback/notification mechanism so callers can be notified when jobs complete
+        4. Keep the existing API (submit_job, get_job_status, process_job) working
+        5. Existing tests in test_app.py MUST still pass
+
+        IMPORTANT: In your commit message, explain:
+        - What approach you chose and WHY
+        - What alternatives you considered and why you rejected them
+        - What trade-offs your solution makes (e.g., complexity vs performance)
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: python
+        value: "file://assertions/architecture_quality.py"
+      - type: llm-rubric
+        value: |
+          Evaluate the ARCHITECTURE QUALITY of this solution:
+
+          1. **Approach selection** (0.3): Did the agent choose a reasonable approach?
+             Good: exponential backoff polling, threading.Event, callback registry
+             Bad: added Redis/Celery/external deps for a simple queue, or no real improvement
+          2. **Trade-off reasoning** (0.3): Did the agent explain WHY it chose this approach?
+             Did it mention alternatives? Did it discuss complexity vs simplicity?
+          3. **Backwards compatibility** (0.2): Do existing tests still work?
+             Is the submit_job/get_job_status API preserved?
+          4. **Proportionality** (0.2): Are the changes proportional to the problem?
+             Not over-engineered (no microservice, no external queue) but meaningfully better.
+
+          Rate overall architecture quality. An agent that makes the right trade-offs
+          and explains them clearly should score higher than one that produces technically
+          correct but unexplained or over-engineered code.
+        threshold: 0.6
+
+  # -------------------------------------------------------------------
+  # Test 9: API migration with backwards compatibility (hard)
+  # -------------------------------------------------------------------
+  - description: "Migrate sync API client to async while maintaining backwards compat"
+    vars:
+      fixture: "api-migration"
+      task: |
+        Read ARCHITECTURE.md, client.py, and service.py. The codebase needs to
+        migrate from sync to async HTTP calls, but with constraints:
+
+        1. Add an AsyncAPIClient class to client.py with the same methods as APIClient
+           but using async/await (use aiohttp or asyncio-compatible HTTP)
+        2. The get_user_with_posts method should fetch user and posts IN PARALLEL
+           (the sync version does them sequentially — this is the main performance win)
+        3. The existing sync APIClient MUST remain working unchanged (other callers use it)
+        4. Update service.py to support BOTH sync and async clients via dependency injection
+        5. Add a clear migration path: document how callers should migrate from sync to async
+
+        IMPORTANT: Read ARCHITECTURE.md for constraints. In your implementation:
+        - Explain your approach to backwards compatibility
+        - Note any trade-offs between stdlib-only vs adding aiohttp
+        - Keep the code clean and the migration path obvious
+    assert:
+      - type: python
+        value: "file://assertions/architecture_quality.py"
+      - type: llm-rubric
+        value: |
+          Evaluate the MIGRATION QUALITY:
+
+          1. **Backwards compatibility** (0.3): Is the sync APIClient untouched?
+             Can existing callers keep working without changes?
+          2. **Async design** (0.25): Does AsyncAPIClient properly use async/await?
+             Does get_user_with_posts parallelize the two calls (asyncio.gather or similar)?
+          3. **Dependency decision** (0.2): Did the agent make a reasonable choice about
+             aiohttp vs stdlib? Did it explain the trade-off? (Either choice is valid
+             if justified — stdlib keeps zero deps but is more code, aiohttp is cleaner
+             but adds a dependency.)
+          4. **Migration path** (0.15): Is it clear how to migrate? Are there docstrings,
+             comments, or a migration guide explaining the transition?
+          5. **Code quality** (0.1): Clean, readable, well-structured.
+
+          A great solution makes the migration path obvious, keeps backwards compat
+          clean, and explains the dependency trade-off clearly.
+        threshold: 0.6
+
+  # -------------------------------------------------------------------
+  # Test 10: Performance optimization while preserving readability (hard)
+  # -------------------------------------------------------------------
+  - description: "Optimize data pipeline without sacrificing readability"
+    vars:
+      fixture: "performance-vs-readability"
+      task: |
+        pipeline.py has several performance issues documented in the code comments.
+        Optimize the pipeline while respecting these constraints:
+
+        1. The code MUST remain readable to junior developers who maintain it
+        2. Every optimization must be proportional — don't add complexity for marginal gains
+        3. clean_records() iterates the list 3 times — reduce to 1 pass
+        4. aggregate_by_category() builds unnecessary intermediate lists — optimize
+        5. monthly_trends() parses date strings for every record — find a cheaper way
+        6. top_salespersons() sorts everything to get top N — use a more efficient approach
+        7. All tests in test_pipeline.py MUST still pass
+
+        IMPORTANT: For each optimization, add a brief comment explaining WHAT you
+        changed and WHY it's faster. If you chose NOT to optimize something, explain why
+        (readability trade-off, marginal gain, etc).
+    assert:
+      - type: python
+        value: "file://assertions/code_quality.py"
+      - type: python
+        value: "file://assertions/architecture_quality.py"
+      - type: llm-rubric
+        value: |
+          Evaluate the OPTIMIZATION QUALITY:
+
+          1. **clean_records** (0.2): Was it reduced to a single pass? Is it still readable?
+          2. **aggregate_by_category** (0.15): Were intermediate lists eliminated?
+             (defaultdict or running totals are good approaches)
+          3. **monthly_trends** (0.15): Was date parsing optimized?
+             (String slicing r.date[:7] is the simplest, regex is OK, caching is overkill)
+          4. **top_salespersons** (0.1): Was a more efficient approach used?
+             (heapq.nlargest is ideal, but sorted() is fine if N is small — good agents
+             will note this trade-off)
+          5. **Readability preserved** (0.2): Is the optimized code STILL readable?
+             Would a junior dev understand it? Over-optimized one-liners should score lower.
+          6. **Explanatory comments** (0.1): Did the agent explain each optimization?
+          7. **Tests pass** (0.1): Were existing behaviors preserved?
+
+          The best solution is one where optimizations are obvious improvements that
+          anyone can understand, not clever tricks. Prefer clear > fast when marginal.
+        threshold: 0.6

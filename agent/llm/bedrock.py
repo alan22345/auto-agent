@@ -8,10 +8,18 @@ No explicit access keys needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from typing import Any
 
 import anthropic
+
+# Transient errors that should be retried with exponential backoff.
+# 503 = Bedrock unavailable/throttled. 429 = rate limit.
+_RETRYABLE_STATUS_CODES = {429, 503, 529}
+_MAX_RETRIES = 4
+_INITIAL_BACKOFF_S = 2.0
 
 from agent.llm.base import LLMProvider
 from agent.llm.types import (
@@ -41,11 +49,37 @@ class BedrockProvider(LLMProvider):
 
     is_passthrough = False
 
-    def __init__(self, region: str = "us-east-1", model: str = "claude-sonnet-4-20250514"):
+    def __init__(
+        self,
+        region: str = "us-east-1",
+        model: str = "claude-sonnet-4-20250514",
+        aws_access_key: str = "",
+        aws_secret_key: str = "",
+        aws_session_token: str = "",
+        bearer_token: str = "",
+    ):
         self.model = model
         self.max_context_tokens = context_window_for_model(model)
         self._bedrock_model = BEDROCK_MODEL_MAP.get(model, model)
-        self._client = anthropic.AsyncAnthropicBedrock(aws_region=region)
+
+        # Authentication priority:
+        # 1. Bedrock API key (bearer token) — set AWS_BEARER_TOKEN_BEDROCK in env
+        # 2. Explicit IAM access keys
+        # 3. Fall back to AWS credential chain (~/.aws/, SSO, instance role)
+        if bearer_token:
+            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bearer_token
+            self._client = anthropic.AsyncAnthropicBedrock(aws_region=region)
+        elif aws_access_key and aws_secret_key:
+            kwargs: dict[str, str] = {
+                "aws_region": region,
+                "aws_access_key": aws_access_key,
+                "aws_secret_key": aws_secret_key,
+            }
+            if aws_session_token:
+                kwargs["aws_session_token"] = aws_session_token
+            self._client = anthropic.AsyncAnthropicBedrock(**kwargs)
+        else:
+            self._client = anthropic.AsyncAnthropicBedrock(aws_region=region)
 
     async def complete(
         self,
@@ -55,7 +89,7 @@ class BedrockProvider(LLMProvider):
         max_tokens: int = 8192,
         temperature: float = 0.0,
     ) -> LLMResponse:
-        api_messages = [self._to_api_message(m) for m in messages if m.role != "system"]
+        api_messages = self._build_api_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self._bedrock_model,
             "messages": api_messages,
@@ -67,8 +101,21 @@ class BedrockProvider(LLMProvider):
         if tools:
             kwargs["tools"] = [self._to_api_tool(t) for t in tools]
 
-        response = await self._client.messages.create(**kwargs)
-        return self._from_api_response(response)
+        # Retry on transient errors (throttling, service unavailable)
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = await self._client.messages.create(**kwargs)
+                return self._from_api_response(response)
+            except anthropic.APIStatusError as e:
+                last_exc = e
+                if e.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                    backoff = _INITIAL_BACKOFF_S * (2 ** attempt)
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
 
     async def count_tokens(
         self,
@@ -88,33 +135,60 @@ class BedrockProvider(LLMProvider):
     # Message format conversion (same as Anthropic — same API format)
     # ------------------------------------------------------------------
 
-    def _to_api_message(self, msg: Message) -> dict[str, Any]:
-        if msg.role == "assistant" and msg.tool_calls:
-            content: list[dict[str, Any]] = []
-            if msg.content:
-                content.append({"type": "text", "text": msg.content})
-            for tc in msg.tool_calls:
-                content.append({
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.arguments,
+    def _build_api_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
+        """Convert our Messages to Anthropic API format, BATCHING consecutive
+        tool results into a single user message.
+
+        Anthropic's API requires all tool_results responding to a single
+        assistant turn's tool_uses to be grouped in ONE user message's
+        content array — not split across multiple user messages. Splitting
+        them silently breaks the conversation: the assistant may think its
+        tool calls weren't answered and repeat them, causing a read loop.
+        """
+        api_messages: list[dict[str, Any]] = []
+        pending_tool_results: list[dict[str, Any]] = []
+
+        def flush_tool_results():
+            if pending_tool_results:
+                api_messages.append({
+                    "role": "user",
+                    "content": list(pending_tool_results),
                 })
-            return {"role": "assistant", "content": content}
+                pending_tool_results.clear()
 
-        if msg.role == "tool":
-            return {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content,
-                    }
-                ],
-            }
+        for msg in messages:
+            if msg.role == "system":
+                continue
 
-        return {"role": msg.role, "content": msg.content}
+            if msg.role == "tool":
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                })
+                continue
+
+            # Any non-tool message flushes pending tool_results first
+            flush_tool_results()
+
+            if msg.role == "assistant" and msg.tool_calls:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                for tc in msg.tool_calls:
+                    content.append({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    })
+                api_messages.append({"role": "assistant", "content": content})
+            else:
+                api_messages.append({"role": msg.role, "content": msg.content})
+
+        # Trailing tool results (shouldn't normally happen but be safe)
+        flush_tool_results()
+        return api_messages
 
     def _to_api_tool(self, tool: ToolDefinition) -> dict[str, Any]:
         schema = tool.parameters

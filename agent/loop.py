@@ -13,14 +13,43 @@ import structlog
 
 from agent.context import ContextManager
 from agent.context.reactive_compact import PromptTooLongError
+from agent.context.workspace_state import WorkspaceState
 from agent.llm.types import LLMResponse, Message, TokenUsage, ToolCall
 from agent.session import Session
 from agent.tools.base import ToolContext, ToolRegistry, ToolResult
+from agent.tools.cache import ToolCache
 
 if TYPE_CHECKING:
     from agent.llm.base import LLMProvider
 
 logger = structlog.get_logger()
+
+# Tools that count as "read-only" for exploration budget tracking
+_READ_ONLY_TOOLS = frozenset({"file_read", "glob", "grep", "git"})
+# Tools that count as "writing" — reset the exploration counter
+_WRITE_TOOLS = frozenset({"file_write", "file_edit", "bash"})
+# After this many consecutive read-only tool calls, inject a gentle nudge
+_EXPLORATION_BUDGET = 8
+
+_EXPLORATION_NUDGE = (
+    "You have spent several turns reading files without making any changes. "
+    "Start implementing now. Only read more files if you are genuinely blocked."
+)
+
+# Verification gate: patterns in bash commands that count as "ran tests/verification"
+_VERIFICATION_PATTERNS = frozenset({
+    "pytest", "python -m pytest", "npm test", "npx jest", "yarn test",
+    "cargo test", "go test", "make test", "ruff check", "ruff format",
+    "eslint", "mypy", "tsc", "flake8", "black --check",
+})
+
+_VERIFICATION_NUDGE = (
+    "You are about to finish without running verification. Before claiming completion:\n"
+    "1. Run the test suite (or linter if no tests exist)\n"
+    "2. Read the output and confirm it passes\n"
+    "3. Only then state your final result with evidence\n"
+    "Do NOT say 'should work' or 'looks correct' — show the actual test output."
+)
 
 
 @dataclass
@@ -52,6 +81,7 @@ class AgentLoop:
         session: Session | None = None,
         max_turns: int = 50,
         workspace: str = ".",
+        include_methodology: bool = False,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -59,6 +89,7 @@ class AgentLoop:
         self._session = session
         self._max_turns = max_turns
         self._workspace = workspace
+        self._include_methodology = include_methodology
 
     async def run(
         self,
@@ -110,7 +141,9 @@ class AgentLoop:
     ) -> AgentResult:
         # Build system prompt if not provided
         if system is None:
-            system = await self._context.build_system_prompt()
+            system = await self._context.build_system_prompt(
+                include_methodology=self._include_methodology,
+            )
 
         # Load or initialize conversation
         messages: list[Message] = []
@@ -130,8 +163,17 @@ class AgentLoop:
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
         tool_defs = self._tools.definitions()
+        consecutive_reads = 0  # Exploration budget tracker
+        nudge_injected = False
+        has_written = False  # Whether agent has written/edited any files
+        has_verified = False  # Whether agent has run tests/linting
+        verification_nudge_sent = False
+        ws_state = WorkspaceState()  # Track files read/modified/tested
+        tool_cache = ToolCache()  # Cache glob/grep results
 
         for turn in range(self._max_turns):
+            ws_state.advance_turn()
+
             # Run context compaction pipeline
             api_messages = await self._context.prepare(api_messages, system, tool_defs)
 
@@ -176,6 +218,15 @@ class AgentLoop:
 
             # Check stop reason
             if response.stop_reason == "end_turn":
+                # Verification gate: if agent wrote files but never ran tests,
+                # nudge it to verify before completing (once only)
+                if has_written and not has_verified and not verification_nudge_sent:
+                    verification_nudge_sent = True
+                    nudge = Message(role="user", content=_VERIFICATION_NUDGE)
+                    messages.append(nudge)
+                    api_messages.append(nudge)
+                    logger.info("verification_nudge_injected", turn=turn)
+                    continue  # Give agent another chance to verify
                 break
 
             if response.stop_reason == "max_tokens":
@@ -190,8 +241,20 @@ class AgentLoop:
 
             if response.stop_reason == "tool_use" and response.message.tool_calls:
                 # Execute each tool call
+                turn_has_write = False
                 for tc in response.message.tool_calls:
-                    result = await self._execute_tool(tc, tool_context)
+                    # Check cache for read-only tools
+                    cached = tool_cache.get(tc.name, tc.arguments)
+                    if cached is not None:
+                        result = cached
+                        logger.debug("tool_cache_hit", tool=tc.name)
+                    else:
+                        result = await self._execute_tool(tc, tool_context)
+                        tool_cache.put(tc.name, tc.arguments, result)
+
+                    # Invalidate cache on writes
+                    tool_cache.invalidate_on_write(tc.name)
+
                     total_tool_calls += 1
 
                     tool_msg = Message(
@@ -208,6 +271,44 @@ class AgentLoop:
                         "tool_executed",
                         tool=tc.name,
                         is_error=result.is_error,
+                        turn=turn,
+                    )
+
+                    if tc.name in _WRITE_TOOLS:
+                        turn_has_write = True
+
+                    # Track writes for verification gate
+                    if tc.name in ("file_write", "file_edit"):
+                        has_written = True
+
+                    # Track verification commands (test/lint runs via bash or test_runner)
+                    if tc.name == "test_runner":
+                        has_verified = True
+                    elif tc.name == "bash":
+                        cmd = tc.arguments.get("command", "")
+                        if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
+                            has_verified = True
+
+                    # Update workspace state tracker
+                    ws_state.process_tool_call(tc.name, tc.arguments)
+
+                # Exploration budget: track consecutive read-only turns
+                if turn_has_write:
+                    consecutive_reads = 0
+                else:
+                    tool_names = {tc.name for tc in response.message.tool_calls}
+                    if tool_names <= _READ_ONLY_TOOLS:
+                        consecutive_reads += 1
+
+                # Inject nudge if budget exceeded (once)
+                if consecutive_reads >= _EXPLORATION_BUDGET and not nudge_injected:
+                    nudge_msg = Message(role="user", content=_EXPLORATION_NUDGE)
+                    messages.append(nudge_msg)
+                    api_messages.append(nudge_msg)
+                    nudge_injected = True
+                    logger.info(
+                        "exploration_nudge_injected",
+                        consecutive_reads=consecutive_reads,
                         turn=turn,
                     )
 
