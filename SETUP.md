@@ -1,15 +1,18 @@
 # Setup
 
-Auto-agent is a single-user system. Each person who wants to use it runs their own instance with their own credentials. Two people cannot share one instance — there is no per-user isolation in the database, GitHub token, Telegram bot, or Claude Code auth.
+Auto-agent is a single-user system — each person runs their own instance with their own credentials. Two people cannot share one instance (there is no per-user isolation in the database, GitHub token, LLM auth, etc).
 
-This guide walks you through standing up your own instance from scratch.
+This guide walks you through standing up your own instance. It covers the **recommended Bedrock deployment path**. See the end for alternatives (direct Anthropic API, Claude CLI pass-through).
 
 ## Prerequisites
 
 - Docker + Docker Compose
 - A GitHub account with admin access to the repos you want auto-agent to work on
-- A Claude Max subscription (auto-agent uses Claude Code under the hood)
-- (Optional) A Telegram account if you want notifications and remote control
+- One of:
+  - AWS account with Bedrock access + an inference profile for Claude Sonnet 4.6 (**recommended**)
+  - Anthropic API key, or
+  - Claude Max subscription (Claude Code CLI pass-through mode)
+- (Optional) Telegram or Slack for notifications and remote control
 
 ## 1. Clone the repo
 
@@ -20,60 +23,92 @@ cd auto-agent
 
 ## 2. Create a GitHub Personal Access Token
 
-Auto-agent uses one PAT for all git operations. PRs and commits will appear under the account that owns this token.
+Auto-agent uses one PAT for all git operations. PRs and commits appear under the account that owns this token.
 
 1. Go to https://github.com/settings/tokens (Tokens classic)
 2. Generate a new token with scopes: `repo`, `workflow`
 3. Copy the token — you'll paste it into `.env` in step 5
 
-## 3. Create a Telegram bot (optional)
+## 3. Get a Bedrock API key (recommended path)
 
-Skip this section if you don't want Telegram integration.
+On newer AWS accounts you can mint a **Bedrock-only API key** without setting up IAM users or access keys. This is the cleanest deployment path because it works on any VM with zero AWS tooling installed.
 
-1. In Telegram, talk to [@BotFather](https://t.me/BotFather), run `/newbot`, follow the prompts
+1. Open the AWS console → **Bedrock** → **API keys** (left sidebar, under *Inference and Assessment*)
+2. Create a long-lived API key scoped to your Bedrock account
+3. Save the token — you'll paste it into `.env` as `AWS_BEARER_TOKEN_BEDROCK`
+
+Make sure your account has access to the **Claude Sonnet 4.6** inference profile in `us-east-1` (or whichever region you configure). Request access from the Bedrock console → Model access.
+
+Alternatives if Bedrock API keys aren't available:
+- **IAM access keys**: set `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` in `.env` instead
+- **Local dev with SSO**: leave all the AWS vars empty and run `aws sso login` locally — the SDK credential chain picks it up
+
+## 4. (Optional) Create a Telegram bot
+
+Skip if you don't want Telegram integration.
+
+1. In Telegram, talk to [@BotFather](https://t.me/BotFather), run `/newbot`, follow prompts
 2. Save the bot token he gives you
 3. Send any message to your new bot
 4. Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser
 5. Find `"chat":{"id":<NUMBER>}` in the JSON — that's your `TELEGRAM_CHAT_ID`
 
-The bot will only accept messages from this single chat ID. Anyone else who messages it will be silently ignored.
-
-## 4. Authenticate Claude Code
-
-Auto-agent runs Claude Code inside Docker, but it reads your auth from `~/.claude/` on the host. Authenticate once on the machine where you'll run docker-compose:
-
-```bash
-./scripts/auth.sh
-```
-
-Follow the prompts to log in with your Claude Max account. The auth tokens land in `~/.claude/`, which the container bind-mounts at runtime.
+The bot only accepts messages from this chat ID. Other senders are silently ignored.
 
 ## 5. Configure `.env`
 
 ```bash
-cp .env.example .env
+cp .env.example .env   # or create from scratch with the template below
 ```
 
-Fill in at least:
+Minimum viable `.env`:
 
 ```bash
-GITHUB_TOKEN=<from step 2>
+# Database (docker-compose provisions these)
+POSTGRES_PASSWORD=<pick-a-strong-password>
+DATABASE_URL=postgresql+asyncpg://autoagent:<same-password>@postgres:5432/autoagent
+REDIS_URL=redis://redis:6379/0
 
-# Optional: where new repos get created when you use the "build something new"
-# feature. Leave empty to default to your own GitHub user account. Set to an
-# org name (e.g. "my-org") to create them under that org instead — your token
-# needs `admin:org` scope in that case.
+# LLM — Bedrock (recommended)
+LLM_PROVIDER=bedrock
+LLM_MODEL=claude-sonnet-4-6
+BEDROCK_REGION=us-east-1
+AWS_BEARER_TOKEN_BEDROCK=<paste from step 3>
+
+# GitHub
+GITHUB_TOKEN=<from step 2>
+# Optional: org to create new repos under (otherwise goes under your user)
 GITHUB_OWNER=
 
-# Optional but recommended
-TELEGRAM_BOT_TOKEN=<from step 3>
-TELEGRAM_CHAT_ID=<from step 3>
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN=<from step 4>
+TELEGRAM_CHAT_ID=<from step 4>
 
-# REQUIRED if you'll expose this on the internet — see step 7
-WEB_AUTH_PASSWORD=<a strong random password>
+# Web UI auth (REQUIRED if you expose this on the internet — see step 8)
+WEB_AUTH_PASSWORD=
+
+# Concurrency (tune per your Bedrock quota)
+MAX_CONCURRENT_SIMPLE=1
+MAX_CONCURRENT_COMPLEX=1
+
+LOG_LEVEL=INFO
 ```
 
-`DATABASE_URL` and `REDIS_URL` already point at the postgres and redis services that docker-compose will start — leave them alone unless you're using external instances.
+### Alternative LLM providers
+
+**Direct Anthropic API:**
+```bash
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-6
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Claude Code CLI pass-through** (requires Claude Max subscription):
+```bash
+LLM_PROVIDER=claude_cli
+# No model config needed — CLI uses its configured model.
+# Run ./scripts/auth.sh on the host first to log Claude CLI into your Claude Max account.
+```
 
 ## 6. Start it
 
@@ -86,81 +121,133 @@ This brings up postgres, redis, and the auto-agent app on port 2020.
 First time only, run database migrations:
 
 ```bash
-docker compose run --rm -w /app -e PYTHONPATH=/app auto-agent alembic upgrade head
+docker compose exec auto-agent alembic upgrade head
+```
+
+Check health:
+
+```bash
+curl http://localhost:2020/health
+docker compose logs -f auto-agent
 ```
 
 Open http://localhost:2020 — you should see the web UI.
 
-## 7. Securing the web UI
+## 7. Add a repo and send a task
 
-The web UI has no built-in user accounts. It's protected by HTTP Basic auth using the `WEB_AUTH_PASSWORD` you set in `.env`. The username is always `admin`.
+1. Open the web UI → **Repos** tab → add a repo by `owner/name`
+2. Type a task in the task box, or message your Telegram bot
+3. Watch the task move through the lifecycle in the UI
 
-- **Local-only deployment** (running on your laptop, only accessing via `localhost`): you can leave `WEB_AUTH_PASSWORD` empty.
-- **Remote deployment** (VM, cloud, anything reachable from the internet): you **must** set `WEB_AUTH_PASSWORD`. With it empty, anyone who finds your IP can create tasks, approve them, see your repos, and run code on your branches.
+Telegram commands: `/status`, `/done`, `/cancel`, `/delete`, `/answer`, `/branch`, `/freeform`, `/newrepo`, `/help`.
 
-GitHub/Linear webhooks (`/api/webhooks/*`) and the `/health` endpoint stay publicly reachable so external services and the deploy script keep working.
+## 8. Securing the web UI (required for remote deploys)
 
-To pick a strong password:
+The web UI has no per-user accounts. It's protected by HTTP Basic auth using `WEB_AUTH_PASSWORD`. Username is always `admin`.
+
+- **Local-only** (running on your laptop, only accessing via `localhost`): leave `WEB_AUTH_PASSWORD` empty
+- **Remote** (VM, cloud, anything with a public IP): **you must set `WEB_AUTH_PASSWORD`**. With it empty, anyone who finds your IP can create tasks, approve them, see your repos, and run code on your branches
+
+GitHub/Linear webhooks (`/api/webhooks/*`) and `/health` stay publicly reachable so external services and the deploy script keep working.
+
+Pick a strong password:
 
 ```bash
 openssl rand -base64 24
 ```
 
-Paste it as `WEB_AUTH_PASSWORD=...` in `.env` and restart:
+Paste as `WEB_AUTH_PASSWORD=...` in `.env` and restart:
 
 ```bash
 docker compose up -d --build auto-agent
 ```
 
-## 8. Add your first repo
+## 9. Freeform mode (autonomous improvements)
 
-In the web UI, open the **Repos** tab and add a GitHub repo by `owner/name`. Auto-agent will clone it on demand when it picks up a task.
+The PO (Product Owner) agent periodically analyzes a repo and proposes improvement tasks. Approved suggestions run through the pipeline and auto-merge to a dev branch after CI passes. You promote good changes to main or revert from dev.
 
-## 9. Send a task
+**Enable from the web UI:** Freeform tab → select repo → enable → configure cron + dev branch.
 
-Either type a description in the web UI's task box, or message your Telegram bot. The bot interprets:
+**Or via API:**
 
-- Plain text → creates a task
-- `/status`, `/done`, `/cancel`, `/delete`, `/answer`, `/branch`, `/freeform`, `/newrepo`, `/help` → commands
+```bash
+curl -X POST http://localhost:2020/api/freeform/config \
+  -H 'Content-Type: application/json' \
+  -d '{"repo_name": "org/repo", "enabled": true, "dev_branch": "dev", "cron": "0 */4 * * *"}'
+```
 
 ## 10. Build something new from a description
 
-Auto-agent can also create a brand-new GitHub repo from a natural-language description and scaffold the initial code itself, then keep improving it autonomously via freeform mode.
+Auto-agent can create a brand-new GitHub repo from a natural-language description, scaffold it, and keep improving it autonomously via freeform mode.
 
-**From the web UI:** open the **Freeform** tab, type your description in the "Build something new" box (e.g. "a Next.js todo app with dark mode"), optionally specify a GitHub org, and click **Create & Scaffold**.
+**Web UI:** Freeform tab → "Build something new" box → e.g. "a Next.js todo app with dark mode" → *Create & Scaffold*.
 
-**From Telegram:** `/newrepo a Next.js todo app with dark mode`
+**Telegram:** `/newrepo a Next.js todo app with dark mode`
 
 What happens:
-1. Claude picks a short repo name from your description
-2. Auto-agent creates a private GitHub repo (under `GITHUB_OWNER` or your user) with an auto-generated README
-3. The repo is registered, freeform mode is enabled, and a "Scaffold" task is queued
-4. The task runs through the normal pipeline (planning → coding → PR → CI → merge), but **no human approval is required** — an independent reviewer auto-approves the plan and the PR auto-merges to `main` once CI passes
-5. From then on, the PO analyzer periodically generates improvement suggestions for the repo on the configured cron
+1. Agent picks a short repo name from your description (uses `fast` model tier)
+2. A private GitHub repo is created (under `GITHUB_OWNER` or your user)
+3. Freeform mode is enabled and a "Scaffold" task is queued
+4. The task runs through the normal pipeline but **auto-approves the plan** (independent reviewer) and **auto-merges to main** once CI passes
+5. From then on, the PO analyzer proposes improvements on the configured cron
 
-The full reasoning of the auto-reviewer's decisions is logged in the task's history (visible in the task timeline), so you can audit what was approved and why.
+Full auto-reviewer reasoning is logged in the task timeline — you can audit what was approved and why.
 
-## Running on a VM instead of your laptop
+## Deploying to your own VM
 
-If you want auto-agent to keep running when your laptop sleeps, deploy it to a VM you own. The provided `scripts/deploy.sh` is hardcoded to one specific Azure VM — copy it and change the `VM=` line to your own host:
+The provided `scripts/deploy.sh` is a template. Copy it and point at your host:
 
 ```bash
 cp scripts/deploy.sh scripts/deploy-mine.sh
-# edit VM= to point at your host, then:
+# edit VM= and SSH credentials to match your host, then:
 ./scripts/deploy-mine.sh
 ```
 
-The script `rsync`s the source tree, rebuilds the Docker image on the remote, and restarts the container. Your `.env` is excluded from the sync — set it up once on the remote with `scp .env <host>:~/auto-agent/.env`.
+The script `rsync`s the source (excluding `.env`, `.git`, `.venv`, `.workspaces`), rebuilds the Docker image on the remote, runs migrations if needed, and restarts the container.
 
-Make sure `WEB_AUTH_PASSWORD` is set on any remote deployment.
+First-time VM setup:
+
+```bash
+ssh your-user@your-vm
+git clone https://github.com/<owner>/auto-agent.git
+cd auto-agent
+# Copy your .env over (NEVER commit it — it has tokens)
+scp .env your-user@your-vm:~/auto-agent/.env
+docker compose up -d
+docker compose exec auto-agent alembic upgrade head
+```
+
+Set `WEB_AUTH_PASSWORD` on any remote deployment.
+
+## Manual operations on a running deploy
+
+```bash
+# Logs
+docker compose logs -f auto-agent
+
+# Restart
+docker compose restart auto-agent
+
+# Run a migration
+docker compose exec auto-agent alembic upgrade head
+
+# DB shell
+docker compose exec postgres psql -U autoagent -d autoagent
+
+# Redis CLI
+docker compose exec redis redis-cli
+```
 
 ## What's NOT shared between teammates
 
-If two people each follow this guide, they end up with two completely independent instances. Tasks, repos, suggestions, freeform configs, and history live in each person's local postgres. There is no sync between instances.
+Two people following this guide end up with two independent instances. Tasks, repos, suggestions, freeform configs, and history live in each person's local postgres. No sync.
 
 ## Common issues
 
-- **`gh auth` errors** when creating PRs → your `GITHUB_TOKEN` is missing or lacks the `repo`/`workflow` scopes.
-- **Telegram bot ignores messages** → wrong `TELEGRAM_CHAT_ID`. Verify it via `getUpdates`.
-- **Claude Code asks for login on every run** → `~/.claude` isn't being mounted into the container. Check `docker-compose.yml` line 49 and that `./scripts/auth.sh` ran successfully on the host.
-- **Web UI loads but actions silently fail** → check `docker compose logs auto-agent` for the error.
+- **`gh auth` errors when creating PRs** → `GITHUB_TOKEN` is missing or lacks `repo`/`workflow` scopes
+- **Telegram bot ignores messages** → wrong `TELEGRAM_CHAT_ID`. Verify via `getUpdates`
+- **`[ERROR] LLM call failed: Bedrock`** → check `AWS_BEARER_TOKEN_BEDROCK` is set and you have model access in the Bedrock console
+- **`503 Bedrock unable to process your request`** → transient throttling; the provider auto-retries up to 4 times with exponential backoff. If it persists, check your Bedrock quota
+- **`prompt_too_long`** → the context layers (microcompact → autocompact → reactive) should handle this, but you can lower `MAX_CONCURRENT_COMPLEX` if many large tasks run in parallel
+- **Agent is stuck in a read loop** → this is the Groundhog Day bug. Should be fixed by the context pipeline changes on `feature/model-agnostic-agent` branch. If you see it, file an issue with the task ID and the debug output from `eval/debug_flask.py`-style reproduction
+- **Web UI loads but actions silently fail** → check `docker compose logs auto-agent` for the error
