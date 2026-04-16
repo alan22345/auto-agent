@@ -45,6 +45,8 @@ from agent.workspace import (
     cleanup_workspace,
     clone_repo,
     create_branch,
+    commit_pending_changes,
+    ensure_branch_has_commits,
     push_branch,
 )
 
@@ -656,6 +658,16 @@ async def _finish_coding(
     else:
         log.warning(f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}")
 
+    # Safety net: the agent is supposed to commit its changes, but occasionally
+    # forgets (see task 48 post-mortem). Auto-commit anything pending and then
+    # verify we have at least one commit to PR.
+    committed_now = await commit_pending_changes(workspace, task_id, task.title)
+    if committed_now:
+        log.warning(
+            f"Task #{task_id}: agent left uncommitted changes — auto-committed them before push"
+        )
+    await ensure_branch_has_commits(workspace, base_branch)
+
     await push_branch(workspace, branch_name)
     pr_body = (
         f"## Auto-Agent Task #{task_id}\n\n"
@@ -742,6 +754,14 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             fix_result = await fix_agent.run(fix_prompt, resume=True)
             log.info(f"Review fixes for task #{task_id}: {fix_result.output[:300]}...")
 
+            # Safety net — agent may have forgotten to commit review fixes
+            committed_now = await commit_pending_changes(
+                workspace, task_id, f"Address review feedback — {task.title}"
+            )
+            if committed_now:
+                log.warning(
+                    f"Task #{task_id}: review-fix agent left uncommitted changes — auto-committed"
+                )
             await push_branch(workspace, branch_name)
 
             r = await get_redis()
@@ -862,6 +882,14 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         result = await agent.run(prompt, resume=True)
         log.info(f"PR review response for task #{task_id}: {result.output[:300]}...")
 
+        # Safety net — agent may have addressed comments without committing
+        committed_now = await commit_pending_changes(
+            workspace, task_id, f"Address PR review comments — {task.title}"
+        )
+        if committed_now:
+            log.warning(
+                f"Task #{task_id}: PR-review agent left uncommitted changes — auto-committed"
+            )
         await push_branch(workspace, branch_name)
 
         r = await get_redis()

@@ -74,6 +74,73 @@ async def push_branch(workspace: str, branch_name: str) -> None:
     await _run_git("push", "-u", "origin", branch_name, cwd=workspace, check=True)
 
 
+class EmptyBranchError(RuntimeError):
+    """Raised when a task's branch has no commits relative to its base branch.
+
+    This happens when the agent writes code but never runs `git commit`,
+    leaving the branch pointing at base. Pushing and attempting to create
+    a PR would fail with a misleading error from GitHub; we catch it here
+    with a clear message instead. See task 48 post-mortem.
+    """
+
+
+async def commit_pending_changes(workspace: str, task_id: int, title: str) -> bool:
+    """Auto-commit any uncommitted changes in the workspace.
+
+    Safety net for agents that forget to run `git commit`. Stages all
+    tracked modifications AND untracked files, then commits them with a
+    task-descriptive message.
+
+    Returns True if a commit was made, False if there was nothing to commit.
+    """
+    # `git status --porcelain` lists both unstaged + untracked files
+    status, _, _ = await _run_git("status", "--porcelain", cwd=workspace)
+    if not status.strip():
+        return False
+
+    await _run_git("add", "-A", cwd=workspace, check=True)
+
+    # Re-check — `git add` might have turned out to be a no-op if everything
+    # was only in gitignored paths
+    staged, _, _ = await _run_git("diff", "--cached", "--name-only", cwd=workspace)
+    if not staged.strip():
+        return False
+
+    safe_title = title.replace("\n", " ").strip()[:72]
+    message = f"Task #{task_id}: {safe_title}\n\nAuto-committed by auto-agent safety net."
+    await _run_git("commit", "-m", message, cwd=workspace, check=True)
+    return True
+
+
+async def ensure_branch_has_commits(workspace: str, base_branch: str) -> None:
+    """Verify the current branch has at least one commit relative to base.
+
+    Raises EmptyBranchError if the branch's HEAD is the same as `base_branch`'s
+    HEAD (no new work to PR).
+    """
+    log_output, _, returncode = await _run_git(
+        "log", f"{base_branch}..HEAD", "--oneline", cwd=workspace,
+    )
+    if returncode != 0:
+        # The base branch may not exist locally; fetch and retry once
+        await _run_git("fetch", "origin", base_branch, cwd=workspace)
+        log_output, _, returncode = await _run_git(
+            "log", f"origin/{base_branch}..HEAD", "--oneline", cwd=workspace,
+        )
+        if returncode != 0:
+            # If we still can't resolve the base, surface a clear error
+            raise EmptyBranchError(
+                f"Could not verify commits against base '{base_branch}'. "
+                f"The base branch may not exist or is unreachable."
+            )
+
+    if not log_output.strip():
+        raise EmptyBranchError(
+            f"Branch has no commits relative to '{base_branch}'. "
+            f"The agent likely wrote code but forgot to commit it — or made no changes at all."
+        )
+
+
 def cleanup_workspace(task_id: int) -> None:
     """Remove a task's workspace."""
     workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
