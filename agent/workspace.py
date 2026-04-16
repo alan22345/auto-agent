@@ -26,8 +26,17 @@ async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> t
     stdout_str = (stdout or b"").decode()
     stderr_str = (stderr or b"").decode()
     if check and proc.returncode != 0:
-        raise RuntimeError(f"git {args[0]} failed: {stderr_str.strip() or stdout_str.strip()}")
+        # Include the failed git args in the error for easier diagnosis
+        raise RuntimeError(
+            f"git {args[0]} failed: {stderr_str.strip() or stdout_str.strip()}"
+        )
     return stdout_str, stderr_str, proc.returncode
+
+
+# Identity used for auto-commits by the safety net, and configured in each
+# cloned workspace so the agent's own commits don't fail on fresh containers.
+_AGENT_GIT_NAME = "auto-agent"
+_AGENT_GIT_EMAIL = "auto-agent@bot.local"
 
 
 async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", workspace_name: str | None = None) -> str:
@@ -47,6 +56,9 @@ async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", 
         await _run_git("fetch", "origin", default_branch, cwd=workspace)
         await _run_git("checkout", default_branch, cwd=workspace)
         await _run_git("reset", "--hard", f"origin/{default_branch}", cwd=workspace)
+        # Re-assert git identity (local config could have been blown away)
+        await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
+        await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
         return workspace
 
     # Inject GitHub token into URL for auth
@@ -57,6 +69,13 @@ async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", 
         )
 
     await _run_git("clone", "-b", default_branch, repo_url, workspace, check=True)
+
+    # Configure local git identity so the agent's commits work in containers
+    # that have no global gitconfig. Local config overrides nothing upstream
+    # but satisfies `git commit`'s identity requirement.
+    await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
+    await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
+
     return workspace
 
 
@@ -108,7 +127,13 @@ async def commit_pending_changes(workspace: str, task_id: int, title: str) -> bo
 
     safe_title = title.replace("\n", " ").strip()[:72]
     message = f"Task #{task_id}: {safe_title}\n\nAuto-committed by auto-agent safety net."
-    await _run_git("commit", "-m", message, cwd=workspace, check=True)
+    # Pass identity via -c flags so this works regardless of global/local git config
+    await _run_git(
+        "-c", f"user.email={_AGENT_GIT_EMAIL}",
+        "-c", f"user.name={_AGENT_GIT_NAME}",
+        "commit", "-m", message,
+        cwd=workspace, check=True,
+    )
     return True
 
 
