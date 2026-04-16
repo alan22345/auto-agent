@@ -39,8 +39,26 @@ _AGENT_GIT_NAME = "auto-agent"
 _AGENT_GIT_EMAIL = "auto-agent@bot.local"
 
 
-async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", workspace_name: str | None = None) -> str:
+async def _remote_branch_exists(repo_url: str, branch: str) -> bool:
+    """Check whether `branch` exists on the remote. Uses `git ls-remote`."""
+    out, _, rc = await _run_git("ls-remote", "--heads", repo_url, branch)
+    return rc == 0 and bool(out.strip())
+
+
+async def clone_repo(
+    repo_url: str,
+    task_id: int,
+    default_branch: str = "main",
+    workspace_name: str | None = None,
+    fallback_branch: str | None = None,
+) -> str:
     """Clone a repo into an isolated workspace directory. Returns the workspace path.
+
+    If `default_branch` doesn't exist on the remote and `fallback_branch` is
+    provided, the repo is cloned at `fallback_branch`, then `default_branch`
+    is created locally from it and pushed upstream. This supports freeform
+    configs where the dev branch hasn't been created yet — the orchestrator
+    creates it on first use rather than failing.
 
     If the workspace already exists (from a previous phase of the same task),
     it is reused and pulled to get latest changes instead of re-cloning.
@@ -48,9 +66,20 @@ async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", 
     Args:
         workspace_name: Override the workspace directory name. If not provided,
             defaults to "task-{task_id}".
+        fallback_branch: If `default_branch` doesn't exist on the remote, clone
+            this one and create `default_branch` from it.
     """
     dirname = workspace_name or f"task-{task_id}"
     workspace = os.path.join(WORKSPACES_DIR, dirname)
+
+    # Inject GitHub token into URL for auth (used by both reuse and fresh paths)
+    authed_url = repo_url
+    if settings.github_token and "github.com" in authed_url:
+        authed_url = authed_url.replace(
+            "https://github.com",
+            f"https://{settings.github_token}@github.com",
+        )
+
     if os.path.exists(workspace):
         # Reuse existing workspace — make sure we have the latest default branch
         await _run_git("fetch", "origin", default_branch, cwd=workspace)
@@ -61,14 +90,24 @@ async def clone_repo(repo_url: str, task_id: int, default_branch: str = "main", 
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
         return workspace
 
-    # Inject GitHub token into URL for auth
-    if settings.github_token and "github.com" in repo_url:
-        repo_url = repo_url.replace(
-            "https://github.com",
-            f"https://{settings.github_token}@github.com",
+    # Check if the requested branch actually exists on the remote.
+    # If not and we have a fallback, clone that then create the missing branch.
+    if fallback_branch and not await _remote_branch_exists(authed_url, default_branch):
+        import structlog
+        log = structlog.get_logger()
+        log.info(
+            "dev_branch_missing_creating_from_fallback",
+            missing_branch=default_branch,
+            fallback=fallback_branch,
         )
+        await _run_git("clone", "-b", fallback_branch, authed_url, workspace, check=True)
+        await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
+        await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
+        await _run_git("checkout", "-b", default_branch, cwd=workspace, check=True)
+        await _run_git("push", "-u", "origin", default_branch, cwd=workspace, check=True)
+        return workspace
 
-    await _run_git("clone", "-b", default_branch, repo_url, workspace, check=True)
+    await _run_git("clone", "-b", default_branch, authed_url, workspace, check=True)
 
     # Configure local git identity so the agent's commits work in containers
     # that have no global gitconfig. Local config overrides nothing upstream

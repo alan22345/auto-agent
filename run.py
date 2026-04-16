@@ -320,13 +320,42 @@ async def on_review_comments_addressed(event: Event) -> None:
         await session.commit()
 
 
+def _should_auto_merge(task, repo_freeform_config) -> bool:
+    """Decide whether a task with passing CI is allowed to auto-merge.
+
+    Safety gate — requires BOTH:
+      - task.freeform_mode is True (task was routed through freeform pipeline), AND
+      - repo_freeform_config exists and repo_freeform_config.enabled is True
+        (the repo is currently opted-in to auto-merge)
+
+    If either is False/None, fall through to human review. This prevents the
+    task-50 incident where a task's freeform flag alone triggered an unreviewed
+    merge to prod on a repo whose freeform config was disabled.
+    """
+    if not getattr(task, "freeform_mode", False):
+        return False
+    if repo_freeform_config is None:
+        return False
+    return bool(getattr(repo_freeform_config, "enabled", False))
+
+
 async def on_ci_passed(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
 
-        if task.freeform_mode:
+        # Look up the repo's current freeform config (not the task's snapshot flag)
+        repo_freeform_config = None
+        if task.repo_id:
+            from sqlalchemy import select as _sel
+            from shared.models import FreeformConfig as _FC
+            result = await session.execute(
+                _sel(_FC).where(_FC.repo_id == task.repo_id)
+            )
+            repo_freeform_config = result.scalar_one_or_none()
+
+        if _should_auto_merge(task, repo_freeform_config):
             # Freeform mode: auto-merge to dev, skip human review
             merge_ok = await _auto_merge_pr(task)
             if merge_ok:
@@ -338,6 +367,14 @@ async def on_ci_passed(event: Event) -> None:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merge failed — awaiting manual review")
                 await session.commit()
             return
+
+        # Either the task isn't freeform OR the repo's freeform config is
+        # disabled. Fall through to human review — this is the safety path.
+        if task.freeform_mode and not (repo_freeform_config and repo_freeform_config.enabled):
+            log.warning(
+                f"Task #{task.id} has freeform_mode=True but repo freeform is disabled — "
+                f"falling through to human review (safety gate)"
+            )
 
         task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review")
         await session.commit()

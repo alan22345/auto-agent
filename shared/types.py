@@ -182,6 +182,7 @@ class FreeformConfigData(BaseModel):
     id: int
     repo_name: str | None = None
     enabled: bool = False
+    prod_branch: str = "main"
     dev_branch: str = "dev"
     analysis_cron: str = "0 9 * * 1"
     auto_approve_suggestions: bool = False

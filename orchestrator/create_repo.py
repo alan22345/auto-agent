@@ -193,10 +193,13 @@ async def create_repo_and_scaffold_task(
     # the continuous-improvement loop runs autonomously:
     #   loop=True  -> every 30 min PO analysis + auto-approval of suggestions
     #   loop=False -> weekly PO analysis, suggestions sit in PENDING for the user
-    # dev_branch=main since the fresh repo only has a main branch.
+    # For a fresh repo, prod and dev both start as the default branch —
+    # the orchestrator will create a separate dev branch on first freeform
+    # task if the user later configures one.
     config = FreeformConfig(
         repo_id=primary_repo.id,
         enabled=True,
+        prod_branch=default_branch,
         dev_branch=default_branch,
         analysis_cron="*/30 * * * *" if loop else "0 9 * * 1",
         auto_approve_suggestions=loop,

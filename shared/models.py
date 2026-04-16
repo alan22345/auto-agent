@@ -172,6 +172,13 @@ class FreeformConfig(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     repo_id = Column(Integer, ForeignKey("repos.id"), nullable=False, unique=True)
     enabled = Column(Boolean, default=False)
+    # Production branch — PR target when freeform is OFF (normal human-review
+    # path) and the destination of `promote` operations. Defaults to the repo's
+    # default_branch at config creation time.
+    prod_branch = Column(String(128), default="main", nullable=False)
+    # Dev/integration branch — freeform PRs target and auto-merge here. If it
+    # doesn't exist on the remote at task time, the orchestrator creates it
+    # from `prod_branch` before cloning.
     dev_branch = Column(String(128), default="dev")
     analysis_cron = Column(String(100), default="0 9 * * 1")  # weekly Monday 9am
     last_analysis_at = Column(DateTime(timezone=True), nullable=True)

@@ -726,15 +726,20 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
 
 class FreeformConfigRequest(BaseModel):
     repo_name: str = Field(max_length=256)
+    # `prod_branch` is optional — if omitted, server fills it with the repo's
+    # default_branch. This lets existing clients keep working unchanged.
+    prod_branch: str | None = Field(default=None, max_length=256)
     dev_branch: str = Field(default="dev", max_length=256)
     analysis_cron: str = Field(default="0 9 * * 1", max_length=128)
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
 
-    @field_validator("dev_branch")
+    @field_validator("prod_branch", "dev_branch")
     @classmethod
-    def validate_branch(cls, v: str) -> str:
+    def validate_branch(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not BRANCH_NAME_RE.match(v):
             raise ValueError(
                 "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
@@ -759,10 +764,14 @@ async def upsert_freeform_config(
     if not repo:
         raise HTTPException(404, f"Repo '{req.repo_name}' not found")
 
+    # Default prod_branch to the repo's default branch if caller didn't specify
+    prod_branch = req.prod_branch or repo.default_branch or "main"
+
     result = await session.execute(select(FreeformConfig).where(FreeformConfig.repo_id == repo.id))
     config = result.scalar_one_or_none()
     if config:
         config.enabled = req.enabled
+        config.prod_branch = prod_branch
         config.dev_branch = req.dev_branch
         config.analysis_cron = req.analysis_cron
         config.auto_approve_suggestions = req.auto_approve_suggestions
@@ -771,6 +780,7 @@ async def upsert_freeform_config(
         config = FreeformConfig(
             repo_id=repo.id,
             enabled=req.enabled,
+            prod_branch=prod_branch,
             dev_branch=req.dev_branch,
             analysis_cron=req.analysis_cron,
             auto_approve_suggestions=req.auto_approve_suggestions,
@@ -1031,6 +1041,7 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         id=c.id,
         repo_name=repo_name,
         enabled=c.enabled or False,
+        prod_branch=c.prod_branch or "main",
         dev_branch=c.dev_branch or "dev",
         analysis_cron=c.analysis_cron or "0 9 * * 1",
         auto_approve_suggestions=c.auto_approve_suggestions or False,
