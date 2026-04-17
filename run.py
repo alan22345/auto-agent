@@ -1248,15 +1248,28 @@ async def start_slack_if_configured() -> None:
 
 
 async def _recover_stuck_tasks() -> None:
-    """On startup, find tasks stuck in PLANNING or CODING and re-emit their events.
+    """On startup, find tasks stuck in active states and re-emit their events.
 
     This handles the case where the container restarted mid-task and the
     original event was already acknowledged.
+
+    Covers:
+    - PLANNING → re-emit start_planning
+    - CODING → re-emit start_coding
+    - AWAITING_APPROVAL (freeform + has plan) → re-emit plan_ready so
+      the independent plan reviewer triggers. Without this, freeform
+      scaffold tasks get stuck after a restart (see task 52 incident).
     """
     from sqlalchemy import select as sa_select
     async with async_session() as session:
         result = await session.execute(
-            sa_select(Task).where(Task.status.in_({TaskStatus.PLANNING, TaskStatus.CODING}))
+            sa_select(Task).where(
+                Task.status.in_({
+                    TaskStatus.PLANNING,
+                    TaskStatus.CODING,
+                    TaskStatus.AWAITING_APPROVAL,
+                })
+            )
         )
         stuck_tasks = result.scalars().all()
 
@@ -1271,6 +1284,11 @@ async def _recover_stuck_tasks() -> None:
             elif task.status == TaskStatus.CODING:
                 log.info(f"Recovering task #{task.id}: re-emitting start_coding")
                 await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+            elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode and task.plan:
+                log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
+                await publish_event(
+                    r, Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan}).to_redis()
+                )
         await r.aclose()
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
 
