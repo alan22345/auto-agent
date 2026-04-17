@@ -1331,7 +1331,13 @@ async def handle_query(task_id: int) -> None:
             except Exception:
                 pass
 
-        await transition_task(task_id, "done", f"Answer:\n\n{answer}")
+        # Save the answer to the task's plan field so it's visible in the UI
+        # (no-code tasks don't use plan for anything else)
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                json={"status": "done", "message": f"Answer:\n\n{answer}", "plan": answer},
+            )
         log.info(f"Query task #{task_id} completed ({len(answer)} chars)")
 
     except Exception as e:

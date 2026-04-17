@@ -247,7 +247,7 @@ async def on_task_classified(event: Event) -> None:
         # call and complete immediately.
         if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
             task = await transition(session, task, TaskStatus.QUEUED)
-            task = await transition(session, task, TaskStatus.CODING, "Answering query (no code)")
+            task = await transition(session, task, TaskStatus.CODING, "Processing query...")
             await session.commit()
             r = await get_redis()
             await publish_event(
@@ -1392,8 +1392,12 @@ async def _recover_stuck_tasks() -> None:
                 log.info(f"Recovering task #{task.id}: re-emitting start_planning")
                 await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
             elif task.status == TaskStatus.CODING:
-                log.info(f"Recovering task #{task.id}: re-emitting start_coding")
-                await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+                if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
+                    log.info(f"Recovering query task #{task.id}: re-emitting task.query")
+                    await publish_event(r, Event(type="task.query", task_id=task.id).to_redis())
+                else:
+                    log.info(f"Recovering task #{task.id}: re-emitting start_coding")
+                    await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
             elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
                 log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
                 await publish_event(
