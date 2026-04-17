@@ -49,6 +49,19 @@ writing, editing files, searching code, and running shell commands.
 - Read the output and confirm it passes.
 - Do NOT say "should work" or "looks correct" — show actual test output as evidence.
 - If tests fail, fix the issue before claiming completion.
+
+## Skills & Subagents
+You have access to the `skill` tool which loads structured methodology workflows. \
+Use skills BEFORE starting work that matches their trigger:
+- **brainstorming** — BEFORE any new feature or creative work. Explores design options.
+- **writing-plans** — BEFORE multi-step tasks. Creates bite-sized implementation plans.
+- **test-driven-development** — BEFORE writing implementation. RED → GREEN → REFACTOR.
+- **systematic-debugging** — BEFORE fixing any bug. Root cause first, then fix.
+- **verification-before-completion** — BEFORE claiming work is done.
+
+You also have the `subagent` tool to dispatch independent workers for parallel tasks. \
+Use it when you have 2+ independent components to implement simultaneously. Each \
+subagent gets a fresh context and shares the workspace.
 """
 
 # Extended methodology injected only for complex/planning tasks
