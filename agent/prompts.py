@@ -65,6 +65,30 @@ Description: {description}
 - Validate inputs at system boundaries.
 - No SQL injection, XSS, or command injection vulnerabilities.
 
+### Architecture Decision Records (ADRs)
+For any non-trivial change — new components, new patterns, dependency additions, \
+significant design trade-offs, API changes — create an ADR in `docs/decisions/`. \
+If the directory doesn't exist, create it. Use this format:
+
+```
+# NNN — Short title of the decision
+
+## Status
+Accepted
+
+## Context
+What prompted this decision? What problem were you solving?
+
+## Decision
+What did you decide and why?
+
+## Consequences
+What trade-offs does this introduce? What are the alternatives you rejected?
+```
+
+Number sequentially (check existing files). Skip ADRs for trivial changes \
+(typo fixes, version bumps, config tweaks).
+
 ## After implementation
 {ci_checks_section}
 1. Review your own diff — look for: off-by-one errors, missing edge cases, accidental debug code, incomplete error handling.
@@ -92,6 +116,10 @@ REVIEW_PROMPT = """\
 10. **Style**: Does the code follow the repo's existing patterns and naming conventions?
 11. **Performance**: N+1 queries, unbounded loops, unnecessary allocations?
 12. **Error handling**: Are errors propagated or silently swallowed? Is recovery appropriate?
+
+### Documentation
+13. **ADR**: If this change introduces new components, patterns, dependencies, or significant \
+design trade-offs, is there an Architecture Decision Record in `docs/decisions/`? If not, create one.
 
 Run `git diff {base_branch}..HEAD` to see all changes.
 Run the test suite.
@@ -135,6 +163,8 @@ Base branch: {base_branch}
    - **Style**: Does the code follow the repo's existing patterns and naming?
    - **Performance**: N+1 queries, unbounded loops, missing pagination?
    - **Completeness**: Does the PR fully address the task description?
+   - **ADR**: Does the change introduce new components, patterns, dependencies, or design
+     trade-offs? If yes, is there an ADR in `docs/decisions/`? If missing, request one.
 
 4. Post your review on the PR using `gh pr review`:
    - If everything looks good: `gh pr review --approve -b "LGTM: <brief summary>"`
