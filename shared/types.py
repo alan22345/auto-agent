@@ -46,6 +46,7 @@ class TaskData(BaseModel):
     plan: str | None = None
     error: str | None = None
     freeform_mode: bool = False
+    priority: int = 100
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
     created_at: str | None = None

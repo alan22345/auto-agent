@@ -93,6 +93,9 @@ class Task(Base):
     plan = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     freeform_mode = Column(Boolean, default=False)
+    # Queue priority — lower number = picked up first. Default 100 (normal).
+    # Set to 0 to jump to front. Freeform PO tasks default to 100.
+    priority = Column(Integer, default=100, nullable=False)
     subtasks = Column(JSONB, nullable=True)  # [{title, status, output_preview}]
     current_subtask = Column(Integer, nullable=True)  # 0-indexed, null = not started
     created_at = Column(DateTime(timezone=True), default=_utcnow)

@@ -44,11 +44,15 @@ async def can_start(session: AsyncSession, complexity: TaskComplexity) -> bool:
 
 
 async def next_queued_task(session: AsyncSession, complexity: TaskComplexity) -> Task | None:
-    """Get the oldest queued task of the given complexity."""
+    """Get the highest-priority queued task of the given complexity.
+
+    Ordered by priority (lower = first) then created_at (FIFO for same priority).
+    Default priority is 100. Set priority=0 to jump to front of queue.
+    """
     result = await session.execute(
         select(Task)
         .where(Task.complexity == complexity, Task.status == TaskStatus.QUEUED)
-        .order_by(Task.created_at.asc())
+        .order_by(Task.priority.asc(), Task.created_at.asc())
         .limit(1)
     )
     return result.scalar_one_or_none()

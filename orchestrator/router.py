@@ -218,6 +218,30 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     return {"deleted": task_id}
 
 
+class PriorityRequest(BaseModel):
+    priority: int = Field(ge=0, le=999)
+
+
+@router.post("/tasks/{task_id}/priority", response_model=TaskData)
+async def set_task_priority(
+    task_id: int,
+    req: PriorityRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    """Set a task's queue priority. Lower number = picked up first.
+
+    0 = jump to front, 100 = normal (default), 999 = lowest.
+    Only affects QUEUED tasks — tasks already in progress are unaffected.
+    """
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.priority = req.priority
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 @router.post("/tasks/{task_id}/cancel", response_model=TaskData)
 async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
     task = await get_task(session, task_id)
@@ -1066,6 +1090,7 @@ def _task_to_response(task: Task) -> TaskData:
         plan=task.plan,
         error=task.error,
         freeform_mode=task.freeform_mode or False,
+        priority=task.priority if task.priority is not None else 100,
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,
         created_at=task.created_at.isoformat() if task.created_at else None,
