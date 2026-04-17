@@ -853,7 +853,18 @@ async def handle_plan_independent_review(task_id: int) -> None:
     if task.status != "awaiting_approval":
         log.info(f"Plan auto-review skipped for task #{task_id}: status is '{task.status}'")
         return
-    if not task.freeform_mode or not task.plan:
+    if not task.freeform_mode:
+        return
+    if not task.plan:
+        # Plan is missing (likely due to the DB-save bug — plan was passed in the
+        # transition API body but not persisted). Can't review an empty plan —
+        # auto-approve so the task doesn't get stuck forever at AWAITING_APPROVAL.
+        log.warning(f"Task #{task_id}: plan is empty, auto-approving without review")
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
+                json={"approved": True, "message": "Plan auto-approved (plan text was empty — review skipped)"},
+            )
         return
 
     log.info(f"Running independent plan review for freeform task #{task_id}")
