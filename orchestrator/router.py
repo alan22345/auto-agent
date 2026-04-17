@@ -86,6 +86,7 @@ class CreateTaskRequest(BaseModel):
 class TransitionRequest(BaseModel):
     status: TaskStatus
     message: str = Field(default="", max_length=2000)
+    plan: str | None = Field(default=None, max_length=50000)
 
 
 class ApprovalRequest(BaseModel):
@@ -257,9 +258,9 @@ async def transition_task(
     if not task:
         raise HTTPException(404, "Task not found")
     try:
-        # Save plan text when transitioning to awaiting_approval
-        if req.status == TaskStatus.AWAITING_APPROVAL and req.message.startswith("Plan:\n"):
-            task.plan = req.message[len("Plan:\n") :]
+        # Save plan if provided (agent sends it when transitioning to awaiting_approval)
+        if req.plan is not None:
+            task.plan = req.plan
         task = await transition(session, task, req.status, req.message)
         await session.commit()
     except InvalidTransition as e:

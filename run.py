@@ -1284,10 +1284,10 @@ async def _recover_stuck_tasks() -> None:
             elif task.status == TaskStatus.CODING:
                 log.info(f"Recovering task #{task.id}: re-emitting start_coding")
                 await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
-            elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode and task.plan:
+            elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
                 log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
                 await publish_event(
-                    r, Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan}).to_redis()
+                    r, Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan or ""}).to_redis()
                 )
         await r.aclose()
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
