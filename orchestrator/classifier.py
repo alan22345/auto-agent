@@ -16,14 +16,26 @@ log = logging.getLogger(__name__)
 
 # Keywords that suggest a complex task
 COMPLEX_KEYWORDS = {
+    # Architecture / big changes
     "redesign", "rewrite", "refactor", "migrate", "architecture",
-    "overhaul", "rebuild", "rearchitect", "new feature", "schema change",
-    "database migration", "auth", "authentication", "authorization",
-    "performance", "optimize", "security", "breaking change",
+    "overhaul", "rebuild", "rearchitect", "schema change",
+    "database migration", "breaking change",
+    # Feature work
+    "new feature", "configurable", "configuration", "rule set",
+    "randomise", "randomize", "implement", "build a", "create a",
+    "add support for", "multiple", "workflow", "pipeline",
+    # Domain-specific
+    "auth", "authentication", "authorization",
+    "performance", "optimize", "security",
     "pricing", "subscription", "stripe", "payment", "billing",
     "admin panel", "dashboard", "anonymise", "anonymize",
-    "come up with a plan", "plan first", "multiple",
+    # Planning / scope
+    "come up with a plan", "plan first",
+    # Integration
     "integration", "api", "webhook", "rate limit",
+    # Multi-component
+    "must also", "in addition", "as well as",
+    "should be able to", "must be able to",
 }
 
 # Keywords that suggest a simple task
