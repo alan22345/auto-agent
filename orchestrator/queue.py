@@ -34,8 +34,10 @@ async def count_active(session: AsyncSession, complexity: TaskComplexity) -> int
 
 async def can_start(session: AsyncSession, complexity: TaskComplexity) -> bool:
     """Check if there's a slot available for this complexity."""
+    # No-code queries are lightweight — always allow, no slot needed
+    if complexity == TaskComplexity.SIMPLE_NO_CODE:
+        return True
     if complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
-        # Complex-large shares the complex slot
         complex_active = await count_active(session, TaskComplexity.COMPLEX)
         large_active = await count_active(session, TaskComplexity.COMPLEX_LARGE)
         return (complex_active + large_active) < settings.max_concurrent_complex

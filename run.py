@@ -192,26 +192,40 @@ async def on_task_created(event: Event) -> None:
         if not task:
             return
 
-        # Auto-match repo from task text if not already set
-        if not task.repo_id:
-            repo = await match_repo(session, f"{task.title} {task.description}")
-            if repo:
-                task.repo_id = repo.id
-                log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
-
         task = await transition(session, task, TaskStatus.CLASSIFYING, "Auto-classifying")
         await session.commit()
 
-        # If complexity was pre-set at task creation (e.g. scaffold tasks from
-        # the create-repo flow), trust it and skip the keyword classifier.
+        # Classify the task (unless pre-set at creation)
         if task.complexity is None:
             complexity, classification = classify_task(task.title, task.description)
             task.complexity = complexity
             await session.commit()
             payload = {"complexity": complexity.value, **classification.model_dump()}
         else:
-            log.info(f"Task #{task.id} pre-classified as {task.complexity.value}, skipping classifier")
-            payload = {"complexity": task.complexity.value, "reasoning": "Pre-classified at creation"}
+            complexity = task.complexity
+            log.info(f"Task #{task.id} pre-classified as {complexity.value}, skipping classifier")
+            payload = {"complexity": complexity.value, "reasoning": "Pre-classified at creation"}
+
+        # SIMPLE_NO_CODE tasks don't need a repo — skip matching and go
+        # directly to the query handler.
+        if complexity == TaskComplexity.SIMPLE_NO_CODE:
+            log.info(f"Task #{task.id} classified as simple_no_code — skipping repo match")
+            r = await get_redis()
+            await publish_event(r, Event(
+                type="task.classified",
+                task_id=task.id,
+                payload=payload,
+            ).to_redis())
+            await r.aclose()
+            return
+
+        # Auto-match repo from task text if not already set
+        if not task.repo_id:
+            repo = await match_repo(session, f"{task.title} {task.description}")
+            if repo:
+                task.repo_id = repo.id
+                await session.commit()
+                log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
 
         r = await get_redis()
         await publish_event(r, Event(
@@ -226,6 +240,20 @@ async def on_task_classified(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
+            return
+
+        # SIMPLE_NO_CODE: query/research tasks bypass the coding pipeline.
+        # They don't need a repo, don't need a slot — just run a single LLM
+        # call and complete immediately.
+        if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
+            task = await transition(session, task, TaskStatus.QUEUED)
+            task = await transition(session, task, TaskStatus.CODING, "Answering query (no code)")
+            await session.commit()
+            r = await get_redis()
+            await publish_event(
+                r, Event(type="task.query", task_id=task.id).to_redis()
+            )
+            await r.aclose()
             return
 
         # Freeform tasks with auto_start_tasks bypass the concurrency queue

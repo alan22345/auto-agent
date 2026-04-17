@@ -24,6 +24,8 @@ class TaskComplexity(str, enum.Enum):
     SIMPLE = "simple"
     COMPLEX = "complex"
     COMPLEX_LARGE = "complex_large"
+    # Query/research tasks — no repo needed, no coding tools, just an LLM answer.
+    SIMPLE_NO_CODE = "simple_no_code"
 
 
 class TaskStatus(str, enum.Enum):

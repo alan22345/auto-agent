@@ -1290,6 +1290,55 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
             pass
 
 
+async def handle_query(task_id: int) -> None:
+    """Handle a SIMPLE_NO_CODE task — just answer the question via a single LLM call.
+
+    No repo, no git, no tools — just send the task description to the LLM and
+    return the response. The answer goes into the task's chat via transition message.
+    """
+    task = await get_task(task_id)
+    if not task:
+        return
+
+    log.info(f"Handling query task #{task_id}: {task.title[:100]}")
+
+    try:
+        provider = get_provider(model_override="standard")
+
+        from agent.llm.types import Message as Msg
+        response = await provider.complete(
+            messages=[
+                Msg(
+                    role="user",
+                    content=(
+                        f"{task.title}\n\n{task.description or ''}\n\n"
+                        "Answer this question thoroughly and concisely. "
+                        "If you need to browse a URL, say so — but give the best answer you can from your knowledge."
+                    ),
+                ),
+            ],
+            max_tokens=4096,
+        )
+        answer = response.message.content
+
+        # Close the async client before transitioning
+        if hasattr(provider, '_client'):
+            try:
+                if hasattr(provider._client, '_client') and hasattr(provider._client._client, 'aclose'):
+                    await provider._client._client.aclose()
+                elif hasattr(provider._client, 'close'):
+                    provider._client.close()
+            except Exception:
+                pass
+
+        await transition_task(task_id, "done", f"Answer:\n\n{answer}")
+        log.info(f"Query task #{task_id} completed ({len(answer)} chars)")
+
+    except Exception as e:
+        log.exception(f"Query task #{task_id} failed")
+        await transition_task(task_id, "failed", str(e))
+
+
 async def handle_task_cleanup(task_id: int) -> None:
     """Clean up workspace and session for a finished task."""
     log.info(f"Cleaning up workspace for task #{task_id}")
@@ -1370,6 +1419,8 @@ async def event_loop() -> None:
                         await handle_coding(event.task_id, retry_reason=retry_reason)
                     elif event.type == "task.deploy_preview" and event.task_id:
                         await handle_deploy_preview(event.task_id)
+                    elif event.type == "task.query" and event.task_id:
+                        await handle_query(event.task_id)
                     elif event.type == "task.cleanup" and event.task_id:
                         await handle_task_cleanup(event.task_id)
                     elif event.type == "task.clarification_response" and event.task_id:
