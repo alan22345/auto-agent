@@ -794,14 +794,37 @@ async def orchestrator_event_loop() -> None:
 # Task timeout watchdog — fail tasks stuck too long in active states
 # ---------------------------------------------------------------------------
 
-TASK_TIMEOUT_SECONDS = 3600  # 1 hour
-WATCHDOG_INTERVAL = 120  # Check every 2 minutes
+# Timeout thresholds
+PLANNING_TIMEOUT = 1200     # 20 minutes for planning
+CODING_TIMEOUT_SOFT = 3600  # 1 hour — try recovery first
+CODING_TIMEOUT_HARD = 7200  # 2 hours — fail the task
+WATCHDOG_INTERVAL = 120     # Check every 2 minutes
 
 TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 
+# Track which tasks have already had a recovery attempt (avoid infinite retries)
+_recovery_attempted: set[int] = set()
+
+
+async def _task_has_heartbeat(task_id: int) -> bool:
+    """Check if the agent is actively sending heartbeat signals for this task."""
+    try:
+        r = await get_redis()
+        result = await r.exists(f"task:{task_id}:heartbeat")
+        await r.aclose()
+        return bool(result)
+    except Exception:
+        return False
+
 
 async def task_timeout_watchdog() -> None:
-    """Periodically check for tasks stuck in active states and fail them."""
+    """Progress-aware watchdog. Checks heartbeat before killing tasks.
+
+    Flow for each active task:
+    1. If agent heartbeat exists → task is alive, skip.
+    2. If no heartbeat AND past soft timeout → attempt recovery (re-emit event).
+    3. If no heartbeat AND past hard timeout → fail the task.
+    """
     log.info("Task timeout watchdog started")
     while True:
         try:
@@ -815,27 +838,68 @@ async def task_timeout_watchdog() -> None:
                     updated = task.updated_at
                     if updated and updated.tzinfo is None:
                         updated = updated.replace(tzinfo=timezone.utc)
-                    if updated and (now - updated).total_seconds() > TASK_TIMEOUT_SECONDS:
+                    if not updated:
+                        continue
+
+                    age_s = (now - updated).total_seconds()
+
+                    # Choose timeout based on status
+                    soft_timeout = PLANNING_TIMEOUT if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_SOFT
+                    hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
+
+                    # If agent is actively sending heartbeats, it's alive — skip
+                    if await _task_has_heartbeat(task.id):
+                        if age_s > soft_timeout:
+                            log.debug(
+                                f"Task #{task.id} past soft timeout ({age_s:.0f}s) "
+                                f"but heartbeat is alive — skipping"
+                            )
+                        continue
+
+                    # No heartbeat — check timeouts
+                    if age_s > hard_timeout:
+                        # Hard timeout: fail the task
                         log.warning(
-                            f"Task #{task.id} timed out in {task.status.value} "
-                            f"(stuck for {(now - updated).total_seconds():.0f}s)"
+                            f"Task #{task.id} hard timeout in {task.status.value} "
+                            f"({age_s:.0f}s, no heartbeat)"
                         )
                         task = await transition(
                             session, task, TaskStatus.FAILED,
-                            f"Timed out after {TASK_TIMEOUT_SECONDS}s in {task.status.value}",
+                            f"Timed out after {age_s:.0f}s in {task.status.value} "
+                            f"(no agent heartbeat detected)",
                         )
                         await session.commit()
+                        _recovery_attempted.discard(task.id)
 
                         r = await get_redis()
                         await publish_event(
                             r, Event(type="task.failed", task_id=task.id, payload={
-                                "error": f"Timed out in {task.status.value}",
+                                "error": f"Hard timeout in {task.status.value}",
                             }).to_redis()
                         )
                         await publish_event(
                             r, Event(type="task.cleanup", task_id=task.id).to_redis()
                         )
                         await r.aclose()
+
+                    elif age_s > soft_timeout and task.id not in _recovery_attempted:
+                        # Soft timeout: try recovery once
+                        _recovery_attempted.add(task.id)
+                        log.warning(
+                            f"Task #{task.id} soft timeout in {task.status.value} "
+                            f"({age_s:.0f}s, no heartbeat) — attempting recovery"
+                        )
+                        r = await get_redis()
+                        if task.status == TaskStatus.PLANNING:
+                            await publish_event(
+                                r, Event(type="task.start_planning", task_id=task.id).to_redis()
+                            )
+                        elif task.status == TaskStatus.CODING:
+                            await publish_event(
+                                r, Event(type="task.start_coding", task_id=task.id).to_redis()
+                            )
+                        await r.aclose()
+
         except Exception:
             log.exception("Watchdog error")
         await asyncio.sleep(WATCHDOG_INTERVAL)

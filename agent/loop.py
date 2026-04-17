@@ -7,7 +7,7 @@ Supports pass-through mode for CLI providers that manage their own tools.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Awaitable
 
 import structlog
 
@@ -82,6 +82,7 @@ class AgentLoop:
         max_turns: int = 50,
         workspace: str = ".",
         include_methodology: bool = False,
+        heartbeat: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -90,6 +91,7 @@ class AgentLoop:
         self._max_turns = max_turns
         self._workspace = workspace
         self._include_methodology = include_methodology
+        self._heartbeat = heartbeat  # Called every few turns to signal progress
 
     async def run(
         self,
@@ -173,6 +175,14 @@ class AgentLoop:
 
         for turn in range(self._max_turns):
             ws_state.advance_turn()
+
+            # Heartbeat every 5 turns — signals to the watchdog that the
+            # agent is making progress and shouldn't be timed out.
+            if self._heartbeat and turn > 0 and turn % 5 == 0:
+                try:
+                    await self._heartbeat()
+                except Exception:
+                    pass  # Heartbeat failure shouldn't abort the agent
 
             # Run context compaction pipeline
             api_messages = await self._context.prepare(api_messages, system, tool_defs)

@@ -148,6 +148,20 @@ def _extract_clarification(output: str) -> str | None:
 # Agent factory — creates an AgentLoop with the right config
 # ---------------------------------------------------------------------------
 
+async def _heartbeat_for_task(task_id: int) -> None:
+    """Update a Redis key to signal the agent is alive and making progress.
+
+    The timeout watchdog checks this key. If it exists, the task is alive
+    regardless of how long ago `updated_at` was set. TTL=15 minutes.
+    """
+    try:
+        r = await get_redis()
+        await r.set(f"task:{task_id}:heartbeat", "1", ex=900)  # 15-min TTL
+        await r.aclose()
+    except Exception:
+        pass  # Best-effort
+
+
 def _create_agent(
     workspace: str,
     session_id: str | None = None,
@@ -155,17 +169,26 @@ def _create_agent(
     max_turns: int = 50,
     include_methodology: bool = False,
     model_tier: str | None = None,
+    task_id: int | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
     Args:
         model_tier: Override model selection. Use "fast" for mechanical tasks,
                    "standard" for normal work, "capable" for complex architecture.
+        task_id: If set, the agent sends heartbeat signals via Redis so the
+                timeout watchdog knows it's making progress.
     """
     provider = get_provider(model_override=model_tier)
     tools = create_default_registry(readonly=readonly)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
+
+    heartbeat = None
+    if task_id:
+        async def heartbeat():
+            await _heartbeat_for_task(task_id)
+
     return AgentLoop(
         provider=provider,
         tools=tools,
@@ -174,6 +197,7 @@ def _create_agent(
         max_turns=max_turns,
         workspace=workspace,
         include_methodology=include_methodology,
+        heartbeat=heartbeat,
     )
 
 
@@ -550,7 +574,7 @@ async def _handle_coding_single(
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=50)
+    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id)
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
@@ -695,7 +719,7 @@ async def _finish_coding(
     """Self-review, push, create PR, and trigger independent review."""
     for attempt in range(MAX_REVIEW_RETRIES):
         review_prompt = build_review_prompt(base_branch)
-        agent = _create_agent(workspace, session_id=session_id, max_turns=20)
+        agent = _create_agent(workspace, session_id=session_id, max_turns=20, task_id=task_id)
         result = await agent.run(review_prompt, resume=True)
         review_output = result.output
         log.info(f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}...")
