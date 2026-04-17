@@ -119,6 +119,8 @@
     .message.user .message-bubble { background: var(--accent); color: #fff; }
     .message.system .message-bubble { background: var(--surface); border: 1px solid var(--border); }
     .message.event .message-bubble { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); font-size: 12px; }
+    .message.stream { margin-right: auto; }
+    .message.stream .message-bubble { background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.15); font-size: 12px; color: var(--text-muted); padding: 4px 10px; }
     .message.error .message-bubble { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); color: var(--red); }
     .message-time { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
@@ -1601,6 +1603,28 @@
             updatePoAnalysisUI(data.payload.repo_name);
           }
           break;
+        case "agent_stream": {
+          // Live pair-programming feed — tool calls and thinking from the agent
+          const tid = data.task_id;
+          if (data.type === "agent_stream") {
+            const streamType = data.tool ? "tool" : (data.text ? "thinking" : "");
+            if (data.tool) {
+              const icon = {
+                file_read: "📖", file_write: "✏️", file_edit: "✏️",
+                grep: "🔍", glob: "📂", bash: "⚡", git: "📦",
+                test_runner: "🧪",
+              }[data.tool] || "🔧";
+              addChat(tid, "stream", `${icon} **${data.tool}** ${escHtml(data.args_preview || "")}`);
+            } else if (data.text) {
+              const preview = data.text.length > 300 ? data.text.slice(0, 300) + "..." : data.text;
+              addChat(tid, "stream", `💭 ${escHtml(preview)}`);
+            }
+          }
+          break;
+        }
+        case "guidance_sent":
+          addChat(data.task_id, "user", `[Guidance]: ${data.message}`);
+          break;
         case "system":
           addChat(selectedTaskId, "system", data.message);
           break;
@@ -1677,6 +1701,13 @@
         (selected && selected.status === "awaiting_review" && !isFreeform) ? "flex" : "none";
       document.getElementById("task-actions").style.display =
         selected ? "flex" : "none";
+
+      // Dynamic input placeholder — shows guidance hint when task is active
+      const msgInput = document.getElementById("msg-input");
+      const isActive = selected && ["coding", "planning"].includes(selected.status);
+      msgInput.placeholder = isActive
+        ? "Send guidance to the agent (pair-programming)..."
+        : "Describe a task or send a message...";
 
       // Priority controls — only show for queued tasks
       const showPriority = selected && selected.status === "queued";
@@ -1820,7 +1851,17 @@
       const text = input.value.trim();
       if (!text) return;
 
-      ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      // If the selected task is actively running (coding/planning), send as
+      // guidance that gets injected into the agent's conversation. Otherwise
+      // send as a normal message (creates a new task or answers clarification).
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      const isActive = selected && ["coding", "planning"].includes(selected.status);
+
+      if (isActive && selectedTaskId) {
+        ws.send(JSON.stringify({ type: "send_guidance", message: text, task_id: selectedTaskId }));
+      } else {
+        ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      }
       input.value = "";
     }
 

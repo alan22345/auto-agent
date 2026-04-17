@@ -115,6 +115,21 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                             await ws.send_json(
                                 {"type": "history", "task_id": task_id, "entries": resp.json()}
                             )
+            elif msg_type == "send_guidance":
+                # Pair-programming: user sends guidance to a running agent
+                task_id = data.get("task_id")
+                message = data.get("message", "").strip()
+                if task_id and message:
+                    from shared.redis_client import get_redis
+                    r = await get_redis()
+                    await r.rpush(f"task:{task_id}:guidance", message)
+                    await r.aclose()
+                    # Echo back to all clients so they see their own message
+                    await broadcast({
+                        "type": "guidance_sent",
+                        "task_id": task_id,
+                        "message": message,
+                    })
             elif msg_type == "refresh":
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
@@ -527,9 +542,57 @@ async def event_listener() -> None:
             await asyncio.sleep(2)
 
 
+async def agent_stream_listener() -> None:
+    """Subscribe to agent live-stream channels via Redis pub/sub.
+
+    The agent publishes tool calls and thinking to `task:{id}:stream`.
+    We forward these to WebSocket clients so the UI shows real-time
+    agent activity — the pair-programming feed.
+    """
+    import json as _json
+    r = await get_redis()
+    pubsub = r.pubsub()
+    await pubsub.psubscribe("task:*:stream")
+    log.info("Agent stream listener started (pub/sub)")
+
+    while True:
+        try:
+            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if msg and msg["type"] == "pmessage":
+                channel = msg["channel"]
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                # Extract task_id from channel name "task:123:stream"
+                parts = channel.split(":")
+                task_id = int(parts[1]) if len(parts) >= 3 else 0
+
+                data = msg["data"]
+                if isinstance(data, bytes):
+                    data = data.decode()
+                payload = _json.loads(data)
+
+                await broadcast({
+                    "type": "agent_stream",
+                    "task_id": task_id,
+                    **payload,
+                })
+            else:
+                await asyncio.sleep(0.05)  # Small sleep when no messages
+        except Exception:
+            log.exception("Agent stream listener error")
+            await asyncio.sleep(2)
+            try:
+                r = await get_redis()
+                pubsub = r.pubsub()
+                await pubsub.psubscribe("task:*:stream")
+            except Exception:
+                pass
+
+
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(event_listener())
+    asyncio.create_task(agent_stream_listener())
 
 
 if __name__ == "__main__":

@@ -148,6 +148,60 @@ def _extract_clarification(output: str) -> str | None:
 # Agent factory — creates an AgentLoop with the right config
 # ---------------------------------------------------------------------------
 
+def _format_tool_args(tool_name: str, args: dict) -> str:
+    """Format tool args into a human-readable preview for the streaming UI."""
+    if tool_name == "file_read":
+        return args.get("file_path", "?")
+    elif tool_name == "file_write":
+        return args.get("file_path", "?")
+    elif tool_name == "file_edit":
+        return args.get("file_path", "?")
+    elif tool_name == "grep":
+        path = args.get("path", "")
+        return f'"{args.get("pattern", "?")}"' + (f" in {path}" if path else "")
+    elif tool_name == "glob":
+        return args.get("pattern", "?")
+    elif tool_name == "bash":
+        return args.get("command", "?")[:100]
+    elif tool_name == "git":
+        return args.get("command", "?")[:80]
+    elif tool_name == "test_runner":
+        return args.get("target", "") or "full suite"
+    return str(args)[:100]
+
+
+async def _stream_to_task(task_id: int, event_type: str, payload: dict) -> None:
+    """Publish a live-stream event for a task. The web UI picks these up
+    via WebSocket and renders them in the task's chat feed."""
+    try:
+        r = await get_redis()
+        import json
+        await r.publish(f"task:{task_id}:stream", json.dumps({
+            "type": event_type,
+            **payload,
+        }))
+        await r.aclose()
+    except Exception:
+        pass  # Best-effort — don't break the agent if streaming fails
+
+
+async def _check_guidance(task_id: int) -> str | None:
+    """Check for a user guidance message sent via the UI.
+
+    The web UI pushes guidance to a Redis list. We LPOP one message per
+    check (one per turn). Returns None if no guidance is pending.
+    """
+    try:
+        r = await get_redis()
+        msg = await r.lpop(f"task:{task_id}:guidance")
+        await r.aclose()
+        if msg:
+            return msg.decode() if isinstance(msg, bytes) else str(msg)
+    except Exception:
+        pass
+    return None
+
+
 async def _heartbeat_for_task(task_id: int) -> None:
     """Update a Redis key to signal the agent is alive and making progress.
 
@@ -185,9 +239,34 @@ def _create_agent(
     session = Session(session_id) if session_id else None
 
     heartbeat = None
+    on_tool_call = None
+    on_thinking = None
+    get_guidance = None
+
     if task_id:
         async def heartbeat():
             await _heartbeat_for_task(task_id)
+
+        async def on_tool_call(tool_name: str, args: dict, result_preview: str, turn: int):
+            """Stream tool calls to the UI via Redis → WebSocket."""
+            await _stream_to_task(task_id, "tool", {
+                "tool": tool_name,
+                "args_preview": _format_tool_args(tool_name, args),
+                "result_preview": result_preview[:150],
+                "turn": turn,
+            })
+
+        async def on_thinking(text: str, turn: int):
+            """Stream assistant thinking/reasoning to the UI."""
+            if len(text) > 20:  # Skip trivial empty responses
+                await _stream_to_task(task_id, "thinking", {
+                    "text": text[:500],
+                    "turn": turn,
+                })
+
+        async def get_guidance() -> str | None:
+            """Check for user guidance messages sent via the UI."""
+            return await _check_guidance(task_id)
 
     return AgentLoop(
         provider=provider,
@@ -198,6 +277,9 @@ def _create_agent(
         workspace=workspace,
         include_methodology=include_methodology,
         heartbeat=heartbeat,
+        on_tool_call=on_tool_call,
+        on_thinking=on_thinking,
+        get_guidance=get_guidance,
     )
 
 

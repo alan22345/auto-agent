@@ -7,7 +7,7 @@ Supports pass-through mode for CLI providers that manage their own tools.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Awaitable
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 import structlog
 
@@ -83,6 +83,9 @@ class AgentLoop:
         workspace: str = ".",
         include_methodology: bool = False,
         heartbeat: Callable[[], Awaitable[None]] | None = None,
+        on_tool_call: Callable[[str, dict, str, int], Awaitable[None]] | None = None,
+        on_thinking: Callable[[str, int], Awaitable[None]] | None = None,
+        get_guidance: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -92,6 +95,10 @@ class AgentLoop:
         self._workspace = workspace
         self._include_methodology = include_methodology
         self._heartbeat = heartbeat  # Called every few turns to signal progress
+        # Pair-programming callbacks:
+        self._on_tool_call = on_tool_call   # (tool_name, args, result_preview, turn) → stream to UI
+        self._on_thinking = on_thinking     # (text, turn) → stream assistant thinking to UI
+        self._get_guidance = get_guidance    # () → check for user guidance messages (None = no message)
 
     async def run(
         self,
@@ -226,6 +233,28 @@ class AgentLoop:
             messages.append(response.message)
             api_messages.append(response.message)
 
+            # Stream assistant thinking to UI (the text part of the response)
+            if self._on_thinking and response.message.content:
+                try:
+                    await self._on_thinking(response.message.content, turn)
+                except Exception:
+                    pass
+
+            # Check for user guidance messages injected via the UI.
+            # This enables pair-programming: the user can send messages
+            # while the agent is working, and they appear as user messages
+            # in the conversation on the next turn.
+            if self._get_guidance:
+                try:
+                    guidance = await self._get_guidance()
+                    if guidance:
+                        guidance_msg = Message(role="user", content=f"[User guidance]: {guidance}")
+                        messages.append(guidance_msg)
+                        api_messages.append(guidance_msg)
+                        logger.info("user_guidance_injected", turn=turn, preview=guidance[:100])
+                except Exception:
+                    pass
+
             # Check stop reason
             if response.stop_reason == "end_turn":
                 # Verification gate: if agent wrote files but never ran tests,
@@ -322,6 +351,14 @@ class AgentLoop:
                         is_error=result.is_error,
                         turn=turn,
                     )
+
+                    # Stream tool call to UI for pair-programming visibility
+                    if self._on_tool_call:
+                        try:
+                            preview = result.output[:200] if result.output else ""
+                            await self._on_tool_call(tc.name, tc.arguments, preview, turn)
+                        except Exception:
+                            pass
 
                     if tc.name in _WRITE_TOOLS:
                         turn_has_write = True
