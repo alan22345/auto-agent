@@ -230,6 +230,45 @@ class AgentLoop:
                 break
 
             if response.stop_reason == "max_tokens":
+                # If the truncated response still emitted a complete tool_use
+                # block, we MUST execute it — otherwise the next API call will
+                # have an orphan tool_use followed by a user message, which
+                # Bedrock rejects with 400 "tool_use ids were found without
+                # tool_result blocks immediately after". See task 51.
+                if response.message.tool_calls:
+                    for tc in response.message.tool_calls:
+                        cached = tool_cache.get(tc.name, tc.arguments)
+                        if cached is not None:
+                            result = cached
+                        else:
+                            result = await self._execute_tool(tc, tool_context)
+                            tool_cache.put(tc.name, tc.arguments, result)
+                        tool_cache.invalidate_on_write(tc.name)
+                        total_tool_calls += 1
+                        tool_msg = Message(
+                            role="tool",
+                            content=result.output,
+                            tool_call_id=tc.id,
+                            tool_name=tc.name,
+                            token_estimate=result.token_estimate,
+                        )
+                        messages.append(tool_msg)
+                        api_messages.append(tool_msg)
+                        ws_state.process_tool_call(tc.name, tc.arguments)
+                        if tc.name in ("file_write", "file_edit"):
+                            has_written = True
+                        if tc.name == "test_runner":
+                            has_verified = True
+                        elif tc.name == "bash":
+                            cmd = tc.arguments.get("command", "")
+                            if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
+                                has_verified = True
+                    logger.warning(
+                        "max_tokens_with_tool_use_executed_tools",
+                        tool_count=len(response.message.tool_calls),
+                        turn=turn,
+                    )
+
                 # Inject continuation message
                 continuation = Message(
                     role="user",

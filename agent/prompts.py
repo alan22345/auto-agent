@@ -73,12 +73,25 @@ Description: {description}
 
 REVIEW_PROMPT = """\
 ## Review checklist
+
+### Correctness & root cause
 1. **Root cause**: If this is a bug fix, does it fix the root cause or just mask the symptom?
-2. **Correctness**: Does the logic handle all edge cases? Any off-by-one errors?
-3. **Security**: Any injection vulnerabilities, hardcoded secrets, or auth bypasses?
-4. **Tests**: Are new behaviors covered by tests? Do existing tests still pass?
-5. **Style**: Does the code follow the repo's existing patterns?
-6. **Performance**: Any obvious performance issues (N+1 queries, unbounded loops)?
+2. **Correctness**: Does the logic handle all edge cases? Off-by-one, null/empty, concurrency?
+3. **Tests**: Are new behaviors covered by tests? Do existing tests still pass? Run them.
+
+### Design principles
+4. **SRP (Single Responsibility)**: Does each function/class do one thing? Any god functions?
+5. **DRY (Don't Repeat Yourself)**: Is there duplicated logic that should be extracted?
+6. **YAGNI (You Ain't Gonna Need It)**: Was anything added that the task didn't ask for?
+   Do not add unused abstractions, speculative features, or unnecessary flexibility.
+7. **Open/Closed**: Can the change be extended without modifying existing code? (where applicable)
+8. **Dependency Inversion**: Are high-level modules depending on low-level implementation details?
+
+### Quality & security
+9. **Security**: Any injection vulnerabilities, hardcoded secrets, or auth bypasses?
+10. **Style**: Does the code follow the repo's existing patterns and naming conventions?
+11. **Performance**: N+1 queries, unbounded loops, unnecessary allocations?
+12. **Error handling**: Are errors propagated or silently swallowed? Is recovery appropriate?
 
 Run `git diff {base_branch}..HEAD` to see all changes.
 Run the test suite.
@@ -101,19 +114,35 @@ Base branch: {base_branch}
 1. Run `git diff {base_branch}..HEAD` to see all changes.
 2. Read every changed file carefully.
 3. Review against this checklist:
-   - **Correctness**: Does the logic handle edge cases? Off-by-one errors? Race conditions?
-   - **Root cause**: If this is a bug fix, does it fix the root cause or just the symptom?
-   - **Security**: Injection vulnerabilities, hardcoded secrets, auth bypasses, XSS?
-   - **Tests**: Are new behaviors covered? Do existing tests still pass? Run the test suite.
-   - **Style**: Does the code follow the repo's existing patterns and conventions?
+
+### Correctness
+   - Does the logic handle edge cases? Off-by-one? Null/empty? Race conditions?
+   - If this is a bug fix, does it fix the root cause or just the symptom?
+   - Do existing tests still pass? Run the test suite.
+
+### Design principles (SOLID / DRY / YAGNI)
+   - **SRP**: Each function/class should have a single responsibility. Flag god functions.
+   - **DRY**: Is there duplicated logic that should be extracted into a shared helper?
+   - **YAGNI**: Was anything added that the task didn't ask for? Speculative features?
+     Unnecessary abstractions or config options? If yes, request removal.
+   - **Open/Closed**: Can the design be extended without modifying the changed code?
+   - **Liskov / Interface Segregation**: If new classes/interfaces were added, are they
+     properly substitutable and focused?
+
+### Quality
+   - **Security**: Injection, hardcoded secrets, auth bypasses, XSS?
+   - **Tests**: Are new behaviors covered by tests? Are tests meaningful (not just "exists")?
+   - **Style**: Does the code follow the repo's existing patterns and naming?
    - **Performance**: N+1 queries, unbounded loops, missing pagination?
    - **Completeness**: Does the PR fully address the task description?
+
 4. Post your review on the PR using `gh pr review`:
    - If everything looks good: `gh pr review --approve -b "LGTM: <brief summary>"`
    - If changes needed: `gh pr review --request-changes -b "<detailed feedback>"`
    - For inline comments use: `gh pr review --comment -b "<feedback>"`
 
-Be thorough but fair. Focus on real issues, not style nitpicks.
+Be thorough but fair. Focus on real issues, not style nitpicks. Enforce DRY and YAGNI strictly —
+over-engineering is as bad as under-engineering.
 """
 
 PR_REVIEW_RESPONSE_PROMPT = """\

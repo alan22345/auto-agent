@@ -232,8 +232,54 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
         await r.aclose()
 
 
+async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
+    """Return the URL of an existing open PR for `head_branch`, or None.
+
+    Uses `gh pr list --head <branch> --state open --json url,state`. If gh
+    fails or returns no results, returns None so the caller falls through to
+    `gh pr create` normally.
+
+    Rationale: when a task goes back to CODING after a deploy/review failure,
+    `_finish_coding` is called again. The branch already has an open PR, so
+    `gh pr create` fails with "pull request for branch X already exists".
+    Checking first makes the path idempotent — re-entry just pushes new
+    commits to the same PR.
+    """
+    env = os.environ.copy()
+    env["GH_TOKEN"] = settings.github_token
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "list",
+        "--head", head_branch,
+        "--state", "open",
+        "--json", "url,state",
+        cwd=workspace,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    try:
+        import json as _json
+        prs = _json.loads((stdout or b"").decode())
+        for pr in prs:
+            if pr.get("state") == "OPEN" and pr.get("url"):
+                return pr["url"]
+    except Exception:
+        return None
+    return None
+
+
 async def create_pr(workspace: str, title: str, body: str, base_branch: str, head_branch: str) -> str:
-    """Create a PR using the gh CLI. Returns PR URL."""
+    """Create a PR using the gh CLI, or return the existing one if the branch
+    already has an open PR. Idempotent — safe to call after pushing new
+    commits to a branch with an existing PR."""
+    existing = await find_existing_pr_url(workspace, head_branch)
+    if existing:
+        log.info(f"PR already exists for {head_branch}, reusing: {existing}")
+        return existing
+
     env = os.environ.copy()
     env["GH_TOKEN"] = settings.github_token
     proc = await asyncio.create_subprocess_exec(
