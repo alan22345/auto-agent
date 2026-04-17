@@ -236,7 +236,7 @@ async def on_task_classified(event: Event) -> None:
                 _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
             )
             cfg = cfg_result.scalar_one_or_none()
-            if cfg and cfg.auto_start_tasks:
+            if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
         if force_start or await can_start(session, task.complexity):
@@ -678,17 +678,35 @@ async def _try_start_queued(session) -> None:
     for complexity in TaskComplexity:
         if await can_start(session, complexity):
             task = await next_queued_task(session, complexity)
-            if task:
-                if complexity == TaskComplexity.COMPLEX:
-                    task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
-                else:
-                    task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
-                await session.commit()
+            if not task:
+                continue
 
-                r = await get_redis()
-                evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
-                await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
-                await r.aclose()
+            # Respect freeform toggle: if the task is freeform but the repo's
+            # freeform config is now disabled, skip it — the user turned it off
+            # and expects no more freeform tasks to run. The task stays QUEUED
+            # and will start if freeform is re-enabled later.
+            if task.freeform_mode and task.repo_id:
+                from sqlalchemy import select as _sel
+                cfg_result = await session.execute(
+                    _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+                )
+                cfg = cfg_result.scalar_one_or_none()
+                if not cfg or not cfg.enabled:
+                    log.info(
+                        f"Skipping freeform task #{task.id}: repo freeform is disabled"
+                    )
+                    continue
+
+            if complexity == TaskComplexity.COMPLEX:
+                task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
+            else:
+                task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
+            await session.commit()
+
+            r = await get_redis()
+            evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
+            await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
+            await r.aclose()
 
 
 async def _auto_merge_pr(task: Task) -> bool:
