@@ -1331,13 +1331,16 @@ async def handle_query(task_id: int) -> None:
             except Exception:
                 pass
 
-        # Save the answer to the task's plan field so it's visible in the UI
-        # (no-code tasks don't use plan for anything else)
+        # Save answer: plan field holds the full response (50K limit), message
+        # field gets a truncated preview (2K limit on TransitionRequest.message).
+        msg_preview = answer[:1900] + "..." if len(answer) > 1900 else answer
         async with httpx.AsyncClient() as client:
-            await client.post(
+            resp = await client.post(
                 f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
-                json={"status": "done", "message": f"Answer:\n\n{answer}", "plan": answer},
+                json={"status": "done", "message": f"Answer:\n\n{msg_preview}", "plan": answer},
             )
+            if resp.status_code >= 400:
+                log.error(f"Query task #{task_id}: transition to done failed ({resp.status_code}): {resp.text[:200]}")
         log.info(f"Query task #{task_id} completed ({len(answer)} chars)")
 
     except Exception as e:
