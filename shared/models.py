@@ -1,4 +1,5 @@
 import enum
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -98,6 +100,8 @@ class Task(Base):
     # Queue priority — lower number = picked up first. Default 100 (normal).
     # Set to 0 to jump to front. Freeform PO tasks default to 100.
     priority = Column(Integer, default=100, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by_user = relationship("User", foreign_keys=[created_by_user_id])
     subtasks = Column(JSONB, nullable=True)  # [{title, status, output_preview}]
     current_subtask = Column(Integer, nullable=True)  # 0-indexed, null = not started
     created_at = Column(DateTime(timezone=True), default=_utcnow)
@@ -197,3 +201,45 @@ class FreeformConfig(Base):
 
     repo = relationship("Repo")
 
+
+class User(Base):
+    """Authenticated team member."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(100), nullable=False, unique=True)
+    password_hash = Column(String(255), nullable=False)
+    display_name = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    last_login = Column(DateTime(timezone=True), nullable=True)
+
+
+class MemoryNode(Base):
+    """A node in the shared graph memory."""
+    __tablename__ = "memory_nodes"
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    node_type = Column(String(100), nullable=False)
+    content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    created_by_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
+
+    created_by_task = relationship("Task", foreign_keys=[created_by_task_id])
+    outgoing_edges = relationship("MemoryEdge", foreign_keys="MemoryEdge.source_id", back_populates="source", cascade="all, delete-orphan")
+    incoming_edges = relationship("MemoryEdge", foreign_keys="MemoryEdge.target_id", back_populates="target", cascade="all, delete-orphan")
+
+
+class MemoryEdge(Base):
+    """A directed edge between two memory nodes."""
+    __tablename__ = "memory_edges"
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id = Column(PG_UUID(as_uuid=True), ForeignKey("memory_nodes.id", ondelete="CASCADE"), nullable=False)
+    target_id = Column(PG_UUID(as_uuid=True), ForeignKey("memory_nodes.id", ondelete="CASCADE"), nullable=False)
+    relation = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    source = relationship("MemoryNode", foreign_keys=[source_id], back_populates="outgoing_edges")
+    target = relationship("MemoryNode", foreign_keys=[target_id], back_populates="incoming_edges")

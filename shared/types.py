@@ -203,3 +203,60 @@ class LinearIssue(BaseModel):
     description: str = ""
     state: dict[str, str] = Field(default_factory=dict)
     url: str = ""
+
+
+# --- Auth types ---
+
+
+class UserData(BaseModel):
+    """Typed representation of a user."""
+    id: int
+    username: str
+    display_name: str
+    created_at: str | None = None
+    last_login: str | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user: UserData
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str
+
+
+# --- Graph memory types ---
+
+
+class MemoryNodeData(BaseModel):
+    """Typed representation of a memory node."""
+    id: str
+    name: str
+    node_type: str
+    content: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+    created_by_task_id: int | None = None
+
+
+class MemoryEdgeData(BaseModel):
+    """Typed representation of a memory edge."""
+    id: str
+    source_id: str
+    target_id: str
+    relation: str
+    created_at: str | None = None
+
+
+class MemoryNodeWithEdges(BaseModel):
+    """A node with its immediate edges for search results."""
+    node: MemoryNodeData
+    edges: list[MemoryEdgeData] = []
