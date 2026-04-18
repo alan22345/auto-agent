@@ -2,9 +2,7 @@
 
 from shared.models import MemoryEdge, MemoryNode, User
 from shared.types import (
-    CreateUserRequest,
     LoginRequest,
-    LoginResponse,
     MemoryEdgeData,
     MemoryNodeData,
     MemoryNodeWithEdges,

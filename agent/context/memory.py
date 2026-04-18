@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import structlog
 
-from agent.tools.memory_read import _list_root_nodes, _search_nodes
+from agent.tools.memory_read import _search_nodes
 
 logger = structlog.get_logger()
 

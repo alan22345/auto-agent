@@ -14,9 +14,7 @@ Starts on port 2020:
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import secrets
 from pathlib import Path
 
 import httpx
@@ -84,29 +82,28 @@ app = FastAPI(title="Auto-Agent", version="0.1.0")
 
 
 # ---------------------------------------------------------------------------
-# HTTP Basic auth middleware
+# Auth middleware
 #
-# Protects the web UI and API from random visitors. Stays out of the way of:
-#   - /health (so the deploy script's health check still works)
-#   - /api/webhooks/* (GitHub/Linear webhooks need to be reachable)
-#   - Loopback requests from inside the same container (web -> orchestrator)
-#
-# Set WEB_AUTH_PASSWORD in .env to enable. Empty = disabled.
+# JWT-based auth for protected endpoints. Exempts:
+#   - /health (deploy health check)
+#   - /api/webhooks/* (GitHub/Linear webhooks)
+#   - /api/auth/login (login endpoint)
+#   - / and /static/* (served to browser, login happens client-side)
+#   - Loopback requests from inside the same container
 # ---------------------------------------------------------------------------
 
-_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/")
+_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/static/")
+_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login")
 
 
 def _is_auth_exempt(path: str) -> bool:
-    return any(path == p or path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES)
+    if path in _AUTH_EXEMPT_EXACT:
+        return True
+    return any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES)
 
 
 @app.middleware("http")
-async def basic_auth_middleware(request, call_next):
-    password = settings.web_auth_password
-    if not password:
-        return await call_next(request)
-
+async def jwt_auth_middleware(request, call_next):
     if _is_auth_exempt(request.url.path):
         return await call_next(request)
 
@@ -115,20 +112,18 @@ async def basic_auth_middleware(request, call_next):
     if client_host in ("127.0.0.1", "::1"):
         return await call_next(request)
 
+    # Check for Bearer token
+    from orchestrator.auth import verify_token
+
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
-            user, _, supplied = decoded.partition(":")
-            if user == "admin" and secrets.compare_digest(supplied, password):
-                return await call_next(request)
-        except Exception:
-            pass
+    if auth.startswith("Bearer "):
+        payload = verify_token(auth[7:])
+        if payload:
+            return await call_next(request)
 
     return Response(
         status_code=401,
         content="Authentication required",
-        headers={"WWW-Authenticate": 'Basic realm="auto-agent"'},
     )
 
 
@@ -150,29 +145,9 @@ async def root() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text())
 
 
-def _websocket_authorized(ws: WebSocket) -> bool:
-    password = settings.web_auth_password
-    if not password:
-        return True
-    client_host = ws.client.host if ws.client else ""
-    if client_host in ("127.0.0.1", "::1"):
-        return True
-    auth = ws.headers.get("authorization", "")
-    if not auth.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
-        user, _, supplied = decoded.partition(":")
-        return user == "admin" and secrets.compare_digest(supplied, password)
-    except Exception:
-        return False
-
-
 @app.websocket("/ws")
 async def ws_proxy(ws: WebSocket) -> None:
-    if not _websocket_authorized(ws):
-        await ws.close(code=1008)
-        return
+    # JWT auth is handled inside websocket_endpoint (via ?token= query param)
     await websocket_endpoint(ws)
 
 
@@ -1416,6 +1391,10 @@ async def _recover_stuck_tasks() -> None:
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Seed admin user if no users exist
+    from orchestrator.router import seed_admin_user
+    await seed_admin_user()
 
     # Auto-discover repos from GitHub
     async with async_session() as session:

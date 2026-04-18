@@ -34,10 +34,6 @@ class Settings(BaseSettings):
     # the token's user from GET /user.
     github_owner: str = ""
 
-    # Web UI auth (HTTP Basic). Empty password disables auth.
-    # Username is always "admin".
-    web_auth_password: str = ""
-
     # Auth — seed admin user on first boot
     admin_username: str = "admin"
     admin_password: str = ""  # Must be set for first boot
