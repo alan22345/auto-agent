@@ -50,6 +50,7 @@ class TaskData(BaseModel):
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
     created_at: str | None = None
+    created_by_user_id: int | None = None
 
 
 class RepoData(BaseModel):

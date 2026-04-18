@@ -87,6 +87,7 @@ class CreateTaskRequest(BaseModel):
     source: TaskSource = TaskSource.MANUAL
     source_id: str = Field(default="", max_length=512)
     repo_name: str | None = Field(default=None, max_length=256)
+    created_by_user_id: int | None = None
 
 
 class TransitionRequest(BaseModel):
@@ -272,6 +273,7 @@ async def create_task(
         source=req.source,
         source_id=req.source_id,
         repo_id=repo.id if repo else None,
+        created_by_user_id=req.created_by_user_id,
     )
     session.add(task)
     await session.commit()
@@ -1200,6 +1202,7 @@ def _task_to_response(task: Task) -> TaskData:
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,
         created_at=task.created_at.isoformat() if task.created_at else None,
+        created_by_user_id=task.created_by_user_id,
     )
 
 
