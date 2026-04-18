@@ -286,6 +286,23 @@ Do NOT output anything else. No markdown fences, no preamble.
 """
 
 
+MEMORY_REFLECTION_PROMPT = """\
+Task is complete. Before finishing, reflect on what was learned:
+
+1. Were any architectural or tooling DECISIONS made? (e.g., chose library X over Y, adopted pattern Z)
+2. Were any new CAPABILITIES created? (e.g., this project now produces/exposes X)
+3. Were any existing team PREFERENCES applied or discovered? (e.g., the team prefers X approach)
+
+For each item:
+- Use memory_read to check if related knowledge already exists in the graph
+- Use memory_write to record new decisions (append_decision for evolving existing ones, create_node + create_edge for new knowledge)
+
+If nothing notable was learned, that's fine — skip writing.
+
+Keep node names descriptive and consistent with existing graph vocabulary.
+"""
+
+
 def _repo_context(repo_summary: str | None) -> str:
     if not repo_summary:
         return ""
