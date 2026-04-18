@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # Username is always "admin".
     web_auth_password: str = ""
 
+    # Auth — seed admin user on first boot
+    admin_username: str = "admin"
+    admin_password: str = ""  # Must be set for first boot
+    jwt_secret: str = "auto-agent-jwt-secret-change-me"
+
     # LLM provider: "anthropic", "bedrock", or "claude_cli"
     llm_provider: str = "anthropic"
     llm_model: str = "claude-sonnet-4-6"

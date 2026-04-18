@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from orchestrator.auth import create_token, hash_password, verify_password, verify_token
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
@@ -30,17 +31,22 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    User,
 )
 from shared.redis_client import get_redis, publish_event
 from shared.types import (
+    CreateUserRequest,
     FeedbackSummary,
     FreeformConfigData,
+    LoginRequest,
+    LoginResponse,
     OutcomeResponse,
     RepoData,
     RepoResponse,
     ScheduleResponse,
     SuggestionData,
     TaskData,
+    UserData,
 )
 
 router = APIRouter()
@@ -135,6 +141,108 @@ class ToggleResponse(BaseModel):
 
 class PatternsResponse(BaseModel):
     analysis: str
+
+
+# --- Auth helpers ---
+
+
+def _verify_auth_header(authorization: str | None) -> dict:
+    """Extract and verify JWT from Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    payload = verify_token(authorization[7:])
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload
+
+
+# --- Auth endpoints ---
+
+
+@router.post("/auth/login")
+async def login(req: LoginRequest, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(select(User).where(User.username == req.username))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user.last_login = datetime.now(UTC)
+    await session.commit()
+    token = create_token(user_id=user.id, username=user.username)
+    return LoginResponse(
+        token=token,
+        user=UserData(
+            id=user.id,
+            username=user.username,
+            display_name=user.display_name,
+            created_at=user.created_at.isoformat() if user.created_at else None,
+            last_login=user.last_login.isoformat() if user.last_login else None,
+        ),
+    )
+
+
+@router.get("/auth/me")
+async def get_me(
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    payload = _verify_auth_header(authorization)
+    result = await session.execute(select(User).where(User.id == payload["user_id"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return UserData(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        created_at=user.created_at.isoformat() if user.created_at else None,
+        last_login=user.last_login.isoformat() if user.last_login else None,
+    )
+
+
+@router.post("/auth/users")
+async def create_user(
+    req: CreateUserRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    _verify_auth_header(authorization)
+    existing = await session.execute(select(User).where(User.username == req.username))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = User(
+        username=req.username,
+        password_hash=hash_password(req.password),
+        display_name=req.display_name,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return UserData(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        created_at=user.created_at.isoformat() if user.created_at else None,
+    )
+
+
+@router.get("/auth/users")
+async def list_users(
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    _verify_auth_header(authorization)
+    result = await session.execute(select(User).order_by(User.created_at))
+    users = result.scalars().all()
+    return [
+        UserData(
+            id=u.id,
+            username=u.username,
+            display_name=u.display_name,
+            created_at=u.created_at.isoformat() if u.created_at else None,
+            last_login=u.last_login.isoformat() if u.last_login else None,
+        )
+        for u in users
+    ]
 
 
 # --- Task endpoints ---
@@ -692,8 +800,6 @@ async def update_repo_summary(
     if not repo:
         raise HTTPException(404, "Repo not found")
     repo.summary = req.get("summary", "")
-    from datetime import datetime
-
     repo.summary_updated_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
@@ -1106,3 +1212,30 @@ def _schedule_to_response(s: ScheduledTask) -> ScheduleResponse:
         enabled=s.enabled,
         last_run_at=s.last_run_at.isoformat() if s.last_run_at else None,
     )
+
+
+async def seed_admin_user() -> None:
+    """Create the admin user if no users exist."""
+    import structlog
+
+    from shared.config import settings
+    from shared.database import async_session
+
+    log = structlog.get_logger()
+
+    async with async_session() as session:
+        result = await session.execute(select(User).limit(1))
+        if result.scalar_one_or_none() is None:
+            if not settings.admin_password:
+                log.warning(
+                    "No admin_password set and no users exist — set ADMIN_PASSWORD env var"
+                )
+                return
+            admin = User(
+                username=settings.admin_username,
+                password_hash=hash_password(settings.admin_password),
+                display_name=settings.admin_username.title(),
+            )
+            session.add(admin)
+            await session.commit()
+            log.info("admin_user_created", username=settings.admin_username)
