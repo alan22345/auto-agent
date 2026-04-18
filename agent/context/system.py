@@ -133,6 +133,7 @@ class SystemPromptBuilder:
         repo_summary: str | None = None,
         extra_instructions: str | None = None,
         include_methodology: bool = False,
+        memory_context: str | None = None,
     ) -> str:
         """Build the full system prompt.
 
@@ -169,6 +170,10 @@ class SystemPromptBuilder:
         # Repo summary
         if repo_summary:
             parts.append(f"## Repo summary\n{repo_summary}")
+
+        # Graph memory (team knowledge relevant to this task)
+        if memory_context:
+            parts.append(memory_context)
 
         # Extra instructions (e.g., from task-specific prompts)
         if extra_instructions:
