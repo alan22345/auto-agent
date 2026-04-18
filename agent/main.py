@@ -31,6 +31,7 @@ from agent.llm import get_provider
 from agent.loop import AgentLoop
 from agent.prompts import (
     CLARIFICATION_MARKER,
+    MEMORY_REFLECTION_PROMPT,
     build_coding_prompt,
     build_plan_independent_review_prompt,
     build_planning_prompt,
@@ -224,6 +225,7 @@ def _create_agent(
     include_methodology: bool = False,
     model_tier: str | None = None,
     task_id: int | None = None,
+    task_description: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -276,6 +278,7 @@ def _create_agent(
         max_turns=max_turns,
         workspace=workspace,
         include_methodology=include_methodology,
+        task_description=task_description,
         heartbeat=heartbeat,
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
@@ -656,7 +659,7 @@ async def _handle_coding_single(
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id)
+    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description)
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
@@ -677,6 +680,14 @@ async def _handle_coding_single(
         )
         await r.aclose()
         return
+
+    # Post-task memory reflection — agent writes learnings into the graph
+    try:
+        reflection_agent = _create_agent(workspace, session_id=session_id, max_turns=5, task_id=task_id)
+        await reflection_agent.run(MEMORY_REFLECTION_PROMPT, resume=True)
+        log.info(f"Task #{task_id}: memory reflection complete")
+    except Exception:
+        log.warning(f"Task #{task_id}: memory reflection failed (non-fatal)")
 
     await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
 

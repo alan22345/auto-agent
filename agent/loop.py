@@ -82,6 +82,7 @@ class AgentLoop:
         max_turns: int = 50,
         workspace: str = ".",
         include_methodology: bool = False,
+        task_description: str | None = None,
         heartbeat: Callable[[], Awaitable[None]] | None = None,
         on_tool_call: Callable[[str, dict, str, int], Awaitable[None]] | None = None,
         on_thinking: Callable[[str, int], Awaitable[None]] | None = None,
@@ -94,6 +95,7 @@ class AgentLoop:
         self._max_turns = max_turns
         self._workspace = workspace
         self._include_methodology = include_methodology
+        self._task_description = task_description
         self._heartbeat = heartbeat  # Called every few turns to signal progress
         # Pair-programming callbacks:
         self._on_tool_call = on_tool_call   # (tool_name, args, result_preview, turn) → stream to UI
@@ -152,6 +154,7 @@ class AgentLoop:
         if system is None:
             system = await self._context.build_system_prompt(
                 include_methodology=self._include_methodology,
+                task_description=self._task_description,
             )
 
         # Load or initialize conversation

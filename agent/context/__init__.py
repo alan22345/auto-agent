@@ -9,6 +9,7 @@ import structlog
 from agent.context.attachments import AttachmentRestorer
 from agent.context.autocompact import AutocompactEngine
 from agent.context.context_collapse import ContextCollapseEngine
+from agent.context.memory import query_relevant_memory
 from agent.context.microcompact import MicrocompactEngine
 from agent.context.reactive_compact import PromptTooLongError, ReactiveCompactEngine
 from agent.context.system import SystemPromptBuilder
@@ -50,13 +51,22 @@ class ContextManager:
         repo_summary: str | None = None,
         extra_instructions: str | None = None,
         include_methodology: bool = False,
+        task_description: str | None = None,
     ) -> str:
         """Build the full system prompt for this workspace."""
+        memory_context = None
+        if task_description:
+            try:
+                memory_context = await query_relevant_memory(task_description)
+            except Exception:
+                logger.warning("memory_context_query_failed")
+
         return await self.system.build(
             self._workspace,
             repo_summary=repo_summary,
             extra_instructions=extra_instructions,
             include_methodology=include_methodology,
+            memory_context=memory_context,
         )
 
     async def prepare(
