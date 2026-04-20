@@ -28,6 +28,7 @@ writing, editing files, searching code, and running shell commands.
 - For bug fixes, identify and fix the ROOT CAUSE, not just the symptom.
 - No hardcoded secrets, tokens, or credentials.
 - Validate inputs at system boundaries.
+- Do not abbreviate names — write the full name out. Abbreviations make it harder for others to read.
 
 ## Efficiency
 - Go straight to implementation. Try the simplest approach first.
