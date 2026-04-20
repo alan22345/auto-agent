@@ -1872,17 +1872,29 @@
 
       renderSubtaskBar();
 
-      // Show query answer for SIMPLE_NO_CODE tasks
+      // Show plan or query answer at the top of the chat area
       const selected = tasks.find(t => t.id === selectedTaskId);
       let answerHtml = "";
-      if (selected && selected.complexity === "simple_no_code" && selected.plan) {
-        answerHtml = `
-          <div class="message system" style="margin-bottom:12px;">
-            <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
-              <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
-              ${renderMarkdown(selected.plan)}
-            </div>
-          </div>`;
+      if (selected && selected.plan) {
+        if (selected.complexity === "simple_no_code") {
+          answerHtml = `
+            <div class="message system" style="margin-bottom:12px;">
+              <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
+                <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
+                ${renderMarkdown(selected.plan)}
+              </div>
+            </div>`;
+        } else if (selected.complexity !== "simple") {
+          // Show the plan for complex/complex_large tasks
+          const planLabel = selected.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
+          answerHtml = `
+            <div class="message system" style="margin-bottom:12px;">
+              <div class="message-bubble" style="background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.2);max-width:100%;max-height:500px;overflow-y:auto;">
+                <div style="font-size:11px;color:var(--yellow);margin-bottom:6px;font-weight:600;">${planLabel}</div>
+                ${renderMarkdown(selected.plan)}
+              </div>
+            </div>`;
+        }
       }
 
       if (msgs.length === 0 && !answerHtml) {
