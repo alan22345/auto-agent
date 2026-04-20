@@ -46,10 +46,10 @@ writing, editing files, searching code, and running shell commands.
 - Reserve `bash` for commands that need shell execution (install deps, build, custom scripts).
 
 ## Verification (MANDATORY before completion)
-- Before claiming work is done, RUN the test suite or linter.
+- Before claiming work is done, RUN the test suite and linter.
 - Read the output and confirm it passes.
 - Do NOT say "should work" or "looks correct" — show actual test output as evidence.
-- If tests fail, fix the issue before claiming completion.
+- If tests or linter fail, fix the issue before claiming completion.
 
 ## Skills & Subagents
 You have access to the `skill` tool which loads structured methodology workflows. \
