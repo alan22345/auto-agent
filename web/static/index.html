@@ -1043,7 +1043,7 @@
     async function confirmDeleteRepo(repoName) {
       if (!confirm(`Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`)) return;
       try {
-        const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
+        const res = await authFetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
         if (res.status === 409) {
           const data = await res.json();
           alert(data.detail || "Cannot delete: active tasks reference this repo.");
@@ -1335,6 +1335,12 @@
     }
 
     /* ----- Utility helpers ----- */
+
+    function authFetch(url, opts = {}) {
+      opts.headers = opts.headers || {};
+      if (authToken) opts.headers["Authorization"] = "Bearer " + authToken;
+      return fetch(url, opts);
+    }
 
     function showToast(message, type = "success") {
       const container = document.getElementById("toast-container");
@@ -1925,7 +1931,7 @@
       } else {
         // Fallback to REST API
         try {
-          const resp = await fetch("/api/tasks", {
+          const resp = await authFetch("/api/tasks", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
@@ -2014,7 +2020,7 @@
     async function setPriority(priority) {
       if (!selectedTaskId) return;
       try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}/priority`, {
+        const resp = await authFetch(`/api/tasks/${selectedTaskId}/priority`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ priority }),
@@ -2046,7 +2052,7 @@
         async onConfirm() {
           setButtonLoading(btn, true);
           try {
-            const resp = await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+            const resp = await authFetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
             if (resp.ok) {
               addChat(taskId, "system", "Task cancelled.");
               showToast("Task cancelled", "success");
@@ -2066,7 +2072,7 @@
       const btn = document.getElementById("mark-done-btn");
       setButtonLoading(btn, true);
       try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
+        const resp = await authFetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
         if (resp.ok) {
           addChat(selectedTaskId, "system", "Task marked as done.");
           showToast("Task marked as done", "success");
@@ -2090,7 +2096,7 @@
         async onConfirm() {
           setButtonLoading(btn, true);
           try {
-            const resp = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+            const resp = await authFetch(`/api/tasks/${taskId}`, { method: "DELETE" });
             if (resp.ok) {
               delete chatMessages[taskId];
               selectedTaskId = null;

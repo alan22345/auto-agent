@@ -1560,6 +1560,15 @@ async def event_loop() -> None:
                                 await handle_blocked_response(task_id, task, comments)
                             elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
                                 await handle_pr_review_comments(task_id, comments)
+                            elif task.status == "queued":
+                                # User wants to kick a queued task — ask orchestrator to start it
+                                log.info(f"Message for queued task #{task_id} — attempting to start")
+                                r2 = await get_redis()
+                                await publish_event(
+                                    r2,
+                                    Event(type="task.start_queued", task_id=task_id).to_redis(),
+                                )
+                                await r2.aclose()
                             else:
                                 log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")
                                 if task.plan:

@@ -712,6 +712,30 @@ async def _try_start_queued(session) -> None:
             await r.aclose()
 
 
+async def on_start_queued_task(event: Event) -> None:
+    """User requested a queued task to start. Try to start it if a slot is available."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task or task.status != TaskStatus.QUEUED:
+            return
+
+        if not await can_start(session, task.complexity):
+            log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
+            return
+
+        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+            task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
+        else:
+            task = await transition(session, task, TaskStatus.CODING, "Starting coding")
+        await session.commit()
+
+        r = await get_redis()
+        evt = "task.start_planning" if task.status == TaskStatus.PLANNING else "task.start_coding"
+        await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
+        await r.aclose()
+        log.info(f"Started queued task #{task.id}")
+
+
 async def _auto_merge_pr(task: Task) -> bool:
     """Merge a PR via GitHub API (squash merge). Returns True on success."""
     from shared.config import settings as _settings
@@ -757,6 +781,7 @@ bus.on("task.ci_failed", on_ci_failed)
 bus.on("task.review_approved", on_review_approved)
 bus.on("task.dev_deploy_failed", on_dev_deploy_failed)
 bus.on("po.suggestions_ready", on_po_suggestions_ready)
+bus.on("task.start_queued", on_start_queued_task)
 bus.on("task.done", on_task_finished)
 bus.on("task.failed", on_task_finished)
 
