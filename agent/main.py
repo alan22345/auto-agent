@@ -1094,6 +1094,10 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         await transition_task(task_id, "blocked", f"Failed to address review: {e}")
 
 
+# Track which tasks have an active plan conversation running
+_active_plan_conversations: set[int] = set()
+
+
 async def handle_plan_conversation(task_id: int, message: str) -> None:
     """Resume the planning session so the user can discuss the plan with the agent.
 
@@ -1102,6 +1106,13 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
     (detected by a markdown heading), the plan is updated. Otherwise the response
     is streamed as a chat message.
     """
+    if task_id in _active_plan_conversations:
+        log.info(f"Task #{task_id} plan conversation already active — pushing as guidance")
+        r = await get_redis()
+        await r.rpush(f"task:{task_id}:guidance", message)
+        await r.aclose()
+        return
+
     task = await get_task(task_id)
     if not task or not task.repo_name:
         return
@@ -1115,49 +1126,64 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
 
     log.info(f"Plan conversation for task #{task_id}: {message[:100]}...")
 
-    agent = _create_agent(
-        workspace, session_id=session_id, max_turns=10,
-        task_id=task_id, readonly=True, repo_name=repo.name,
-    )
-    result = await agent.run(message, resume=True)
-    output = result.output
+    _active_plan_conversations.add(task_id)
+    try:
+        agent = _create_agent(
+            workspace, session_id=session_id, max_turns=10,
+            task_id=task_id, readonly=True, repo_name=repo.name,
+        )
+        result = await agent.run(message, resume=True)
+        output = result.output
 
-    # If the agent revised the plan (contains markdown headings like ## Task),
-    # update the stored plan
-    if output and _re.search(r"^#{1,3} ", output, _re.MULTILINE):
-        # Collect full output across continuations
-        full_output = "\n".join(
-            msg.content for msg in result.messages
-            if msg.role == "assistant" and msg.content
-        ) or output
+        # If the agent revised the plan (contains markdown headings like ## Task),
+        # update the stored plan
+        if output and _re.search(r"^#{1,3} ", output, _re.MULTILINE):
+            full_output = "\n".join(
+                msg.content for msg in result.messages
+                if msg.role == "assistant" and msg.content
+            ) or output
 
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
-                json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                    json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
+                )
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output}).to_redis(),
             )
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output}).to_redis(),
-        )
-        await r.aclose()
-    else:
-        # Just a conversational response — stream it to the UI
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="task.status_changed", task_id=task_id, payload={
-                "status": task.status, "message": output[:2000],
-            }).to_redis(),
-        )
-        await r.aclose()
+            await r.aclose()
+        else:
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(type="task.status_changed", task_id=task_id, payload={
+                    "status": task.status, "message": output[:2000],
+                }).to_redis(),
+            )
+            await r.aclose()
 
-    log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
+        log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
+    finally:
+        _active_plan_conversations.discard(task_id)
+
+
+# Track which tasks have an active clarification resume running
+_active_clarification_tasks: set[int] = set()
 
 
 async def handle_clarification_response(task_id: int, answer: str) -> None:
     """Resume a task after the user answered a clarification question."""
+    # Guard against concurrent resumes — if the agent is already running from
+    # a previous clarification answer, push this message as guidance instead
+    if task_id in _active_clarification_tasks:
+        log.info(f"Task #{task_id} already resuming — pushing as guidance")
+        r = await get_redis()
+        await r.rpush(f"task:{task_id}:guidance", answer)
+        await r.aclose()
+        return
+
     task = await get_task(task_id)
     if not task or not task.repo_name:
         return
@@ -1171,11 +1197,15 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
 
     log.info(f"Resuming task #{task_id} with clarification answer (session={session_id})")
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=40)
-    result = await agent.run(
-        f"The user answered your clarification question:\n\n{answer}\n\nPlease continue with the task.",
-        resume=True,
-    )
+    _active_clarification_tasks.add(task_id)
+    try:
+        agent = _create_agent(workspace, session_id=session_id, max_turns=40, task_id=task_id, repo_name=repo.name)
+        result = await agent.run(
+            f"The user answered your clarification question:\n\n{answer}\n\nPlease continue with the task.",
+            resume=True,
+        )
+    finally:
+        _active_clarification_tasks.discard(task_id)
 
     follow_up = _extract_clarification(result.output)
     if follow_up:
