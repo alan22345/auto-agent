@@ -1,8 +1,8 @@
 # Setup
 
-Auto-agent is a single-user system — each person runs their own instance with their own credentials. Two people cannot share one instance (there is no per-user isolation in the database, GitHub token, LLM auth, etc).
+Auto-agent is a **team collaboration platform** — multiple people share one instance with per-user authentication. Everyone sees all tasks, messages, and agent activity. A shared graph memory persists project knowledge across tasks.
 
-This guide walks you through standing up your own instance. It covers the **recommended Bedrock deployment path**. See the end for alternatives (direct Anthropic API, Claude CLI pass-through).
+This guide walks you through standing up an instance for your team. It covers the **recommended Bedrock deployment path**. See the end for alternatives (direct Anthropic API, Claude CLI pass-through).
 
 ## Prerequisites
 
@@ -84,8 +84,10 @@ GITHUB_OWNER=
 TELEGRAM_BOT_TOKEN=<from step 4>
 TELEGRAM_CHAT_ID=<from step 4>
 
-# Web UI auth (REQUIRED if you expose this on the internet — see step 8)
-WEB_AUTH_PASSWORD=
+# Auth — admin user is created on first boot if no users exist
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<pick-a-strong-password>
+JWT_SECRET=<generate with: openssl rand -base64 32>
 
 # Concurrency (tune per your Bedrock quota)
 MAX_CONCURRENT_SIMPLE=1
@@ -131,9 +133,13 @@ curl http://localhost:2020/health
 docker compose logs -f auto-agent
 ```
 
-Open http://localhost:2020 — you should see the web UI.
+Open http://localhost:2020 — you should see the login screen. Log in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` you set in `.env`.
 
-## 7. Add a repo and send a task
+## 7. Add team members
+
+After logging in as admin, create accounts for your teammates from the web UI. Any logged-in user can create new users. All users have equal access — everyone sees all tasks, messages, and can approve/reject/guide any task.
+
+## 8. Add a repo and send a task
 
 1. Open the web UI → **Repos** tab → add a repo by `owner/name`
 2. Type a task in the task box, or message your Telegram bot
@@ -141,28 +147,28 @@ Open http://localhost:2020 — you should see the web UI.
 
 Telegram commands: `/status`, `/done`, `/cancel`, `/delete`, `/answer`, `/branch`, `/freeform`, `/newrepo`, `/help`.
 
-## 8. Securing the web UI (required for remote deploys)
+## 9. Securing the web UI (required for remote deploys)
 
-The web UI has no per-user accounts. It's protected by HTTP Basic auth using `WEB_AUTH_PASSWORD`. Username is always `admin`.
+The web UI uses JWT-based authentication — every user needs to log in. API endpoints require a Bearer token. WebSocket connections authenticate via a token query parameter.
 
-- **Local-only** (running on your laptop, only accessing via `localhost`): leave `WEB_AUTH_PASSWORD` empty
-- **Remote** (VM, cloud, anything with a public IP): **you must set `WEB_AUTH_PASSWORD`**. With it empty, anyone who finds your IP can create tasks, approve them, see your repos, and run code on your branches
+- **Local-only**: the login screen still protects the UI, but you can use a simple password
+- **Remote** (VM, cloud, anything with a public IP): **set a strong `JWT_SECRET`** and strong user passwords. Without this, anyone who guesses a password can access the system
 
 GitHub/Linear webhooks (`/api/webhooks/*`) and `/health` stay publicly reachable so external services and the deploy script keep working.
 
-Pick a strong password:
+Generate a strong JWT secret:
 
 ```bash
-openssl rand -base64 24
+openssl rand -base64 32
 ```
 
-Paste as `WEB_AUTH_PASSWORD=...` in `.env` and restart:
+Paste as `JWT_SECRET=...` in `.env` and restart:
 
 ```bash
 docker compose up -d --build auto-agent
 ```
 
-## 9. Freeform mode (autonomous improvements)
+## 10. Freeform mode (autonomous improvements)
 
 The PO (Product Owner) agent periodically analyzes a repo and proposes improvement tasks. Approved suggestions run through the pipeline and auto-merge to a dev branch after CI passes. You promote good changes to main or revert from dev.
 
@@ -176,7 +182,7 @@ curl -X POST http://localhost:2020/api/freeform/config \
   -d '{"repo_name": "org/repo", "enabled": true, "dev_branch": "dev", "cron": "0 */4 * * *"}'
 ```
 
-## 10. Build something new from a description
+## 11. Build something new from a description
 
 Auto-agent can create a brand-new GitHub repo from a natural-language description, scaffold it, and keep improving it autonomously via freeform mode.
 
@@ -217,7 +223,7 @@ docker compose up -d
 docker compose exec auto-agent alembic upgrade head
 ```
 
-Set `WEB_AUTH_PASSWORD` on any remote deployment.
+Set a strong `JWT_SECRET` and user passwords on any remote deployment.
 
 ## Manual operations on a running deploy
 
@@ -238,9 +244,9 @@ docker compose exec postgres psql -U autoagent -d autoagent
 docker compose exec redis redis-cli
 ```
 
-## What's NOT shared between teammates
+## What IS shared between teammates
 
-Two people following this guide end up with two independent instances. Tasks, repos, suggestions, freeform configs, and history live in each person's local postgres. No sync.
+All team members on the same instance share: tasks, repos, suggestions, freeform configs, task history, and graph memory. Everyone sees everything and can interact with any task. User actions are attributed (who created/messaged/approved what).
 
 ## Common issues
 
