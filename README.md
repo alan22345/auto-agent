@@ -65,7 +65,7 @@ Tasks arrive from Slack, Telegram, Linear, GitHub webhooks, or the web UI. Long-
 - **Post-task reflection** — after completing work, the agent records decisions, capabilities, and preferences to the graph
 
 ### Agent runtime
-- **Repo map** injected into the system prompt — AST-based file/class/function index so the agent knows the codebase shape before exploring
+- **Persistent repo map** — AST-based file/class/function index stored in graph memory, built once per repo and incrementally updated via `git diff` on subsequent tasks (no full rebuild unless history is rewritten)
 - **Verification gate** — detects when the agent finishes without running tests, injects a nudge to verify before claiming completion
 - **Exploration budget** — if the agent spends too many turns reading without writing, a nudge prompts it to start implementing
 - **Workspace state tracker** — flags redundant re-reads of the same file
