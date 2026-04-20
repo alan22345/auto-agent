@@ -500,7 +500,12 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             prompt = build_planning_prompt(task.title, task.description, repo.summary)
             result = await agent.run(prompt)
 
-        output = result.output
+        # Plans can span multiple turns if they hit max_tokens and get
+        # continuation prompts. Collect ALL assistant text to get the full plan.
+        output = "\n".join(
+            msg.content for msg in result.messages
+            if msg.role == "assistant" and msg.content
+        ) or result.output
 
         # Check if agent needs clarification
         question = _extract_clarification(output)
