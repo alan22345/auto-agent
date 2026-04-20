@@ -875,7 +875,7 @@
       <button class="approve-btn" onclick="sendClarification()">Answer</button>
     </div>
     <div class="approval-bar" id="done-bar" style="display:none;">
-      <span>PR merged? Mark this task as complete:</span>
+      <span>Mark this task as complete:</span>
       <button id="mark-done-btn" class="approve-btn" onclick="markDone()">Mark Done</button>
     </div>
     <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;flex-wrap:wrap;">
@@ -1796,8 +1796,8 @@
       }
       document.getElementById("clarification-bar").style.display =
         (selected && selected.status === "awaiting_clarification" && !isFreeform) ? "flex" : "none";
-      document.getElementById("done-bar").style.display =
-        (selected && selected.status === "awaiting_review" && !isFreeform) ? "flex" : "none";
+      const showDoneBar = selected && !isFreeform && ["awaiting_review", "queued", "blocked", "failed"].includes(selected.status);
+      document.getElementById("done-bar").style.display = showDoneBar ? "flex" : "none";
       document.getElementById("task-actions").style.display =
         selected ? "flex" : "none";
 
