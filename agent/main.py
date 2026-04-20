@@ -226,6 +226,7 @@ def _create_agent(
     model_tier: str | None = None,
     task_id: int | None = None,
     task_description: str | None = None,
+    repo_name: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -283,6 +284,7 @@ def _create_agent(
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
         get_guidance=get_guidance,
+        repo_name=repo_name,
     )
 
 
@@ -659,7 +661,7 @@ async def _handle_coding_single(
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description)
+    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description, repo_name=repo.name)
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")

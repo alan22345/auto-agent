@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 
 import structlog
 
-from agent.context.repo_map import build_repo_map
+from agent.context.repo_map import (
+    build_repo_map,
+    format_map_with_commit,
+    parse_stored_map,
+    patch_map,
+)
 
 logger = structlog.get_logger()
 
@@ -135,6 +140,7 @@ class SystemPromptBuilder:
         extra_instructions: str | None = None,
         include_methodology: bool = False,
         memory_context: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         """Build the full system prompt.
 
@@ -159,8 +165,8 @@ class SystemPromptBuilder:
         if git_context:
             parts.append(f"## Current git state\n{git_context}")
 
-        # Repo map (AST-based codebase index)
-        repo_map = self._build_repo_map(workspace)
+        # Repo map (AST-based codebase index, persisted in graph memory)
+        repo_map = await self._build_repo_map(workspace, repo_name)
         if repo_map:
             parts.append(
                 "## Repo map (file structure with classes/functions)\n"
@@ -189,19 +195,145 @@ class SystemPromptBuilder:
         """Clear cached values (call at the start of each new agent run)."""
         self._cache.clear()
 
-    def _build_repo_map(self, workspace: str) -> str | None:
-        """Build an AST-based repo map for the workspace (cached)."""
+    async def _build_repo_map(self, workspace: str, repo_name: str | None = None) -> str | None:
+        """Build or load an AST-based repo map, persisted in graph memory.
+
+        1. Check in-memory cache (same session)
+        2. Check graph memory for a stored map with commit SHA
+        3. If found, diff against HEAD to detect staleness
+        4. If stale, incrementally update; if missing, full rebuild
+        5. Store result back to graph memory
+        """
         cache_key = f"repo_map:{workspace}"
         if cache_key in self._cache:
             return self._cache[cache_key] or None
 
         try:
-            result = build_repo_map(workspace)
-            self._cache[cache_key] = result or ""
-            return result
+            map_text = await self._load_or_build_repo_map(workspace, repo_name)
+            self._cache[cache_key] = map_text or ""
+            return map_text
         except Exception as e:
             logger.warning("repo_map_failed", error=str(e))
             self._cache[cache_key] = ""
+            return None
+
+    async def _load_or_build_repo_map(self, workspace: str, repo_name: str | None) -> str | None:
+        """Try to load from graph memory, falling back to full build."""
+        if not repo_name:
+            # No repo name — can't use graph memory, just build directly
+            return build_repo_map(workspace)
+
+        # Try loading from graph memory
+        stored_map = await self._load_repo_map_from_memory(repo_name)
+        head_sha = await self._get_head_sha(workspace)
+
+        if stored_map and head_sha:
+            stored_sha, map_text = parse_stored_map(stored_map)
+
+            if stored_sha == head_sha:
+                # Map is up to date
+                logger.info("repo_map_from_memory", repo=repo_name, status="fresh")
+                return map_text
+
+            if stored_sha:
+                # Try incremental update
+                changed_files = await self._get_changed_files(workspace, stored_sha, head_sha)
+                if changed_files is not None:
+                    logger.info(
+                        "repo_map_incremental_update",
+                        repo=repo_name,
+                        changed_count=len(changed_files),
+                    )
+                    updated_map = patch_map(map_text, workspace, changed_files)
+                    await self._store_repo_map_to_memory(
+                        repo_name, format_map_with_commit(updated_map, head_sha)
+                    )
+                    return updated_map
+
+        # Full rebuild (first time or SHA not in history)
+        logger.info("repo_map_full_rebuild", repo=repo_name)
+        map_text = build_repo_map(workspace)
+        if map_text and head_sha:
+            await self._store_repo_map_to_memory(
+                repo_name, format_map_with_commit(map_text, head_sha)
+            )
+        return map_text
+
+    async def _load_repo_map_from_memory(self, repo_name: str) -> str | None:
+        """Load the repo map from graph memory."""
+        try:
+            from agent.tools.memory_read import _search_nodes
+
+            nodes = await _search_nodes(f"repo-map:{repo_name}", limit=1)
+            for node in nodes:
+                if node.name == f"repo-map:{repo_name}" and node.node_type == "repo-map":
+                    return node.content
+        except Exception as e:
+            logger.warning("repo_map_memory_load_failed", error=str(e))
+        return None
+
+    async def _store_repo_map_to_memory(self, repo_name: str, content: str) -> None:
+        """Store or update the repo map in graph memory."""
+        try:
+            from sqlalchemy import select
+
+            from shared.database import async_session
+            from shared.models import MemoryNode
+
+            async with async_session() as session:
+                result = await session.execute(
+                    select(MemoryNode).where(
+                        MemoryNode.name == f"repo-map:{repo_name}",
+                        MemoryNode.node_type == "repo-map",
+                    )
+                )
+                node = result.scalar_one_or_none()
+                if node:
+                    node.content = content
+                else:
+                    node = MemoryNode(
+                        name=f"repo-map:{repo_name}",
+                        node_type="repo-map",
+                        content=content,
+                    )
+                    session.add(node)
+                await session.commit()
+        except Exception as e:
+            logger.warning("repo_map_memory_store_failed", error=str(e))
+
+    @staticmethod
+    async def _get_head_sha(workspace: str) -> str | None:
+        """Get the HEAD commit SHA."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "HEAD",
+                cwd=workspace,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            sha = (stdout or b"").decode().strip()
+            return sha if sha else None
+        except Exception:
+            return None
+
+    @staticmethod
+    async def _get_changed_files(workspace: str, from_sha: str, to_sha: str) -> list[str] | None:
+        """Get list of files changed between two commits. Returns None if the diff fails."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--name-only", f"{from_sha}..{to_sha}",
+                cwd=workspace,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode != 0:
+                # SHA not in history (force push, rebase, etc.)
+                return None
+            output = (stdout or b"").decode().strip()
+            return output.splitlines() if output else []
+        except Exception:
             return None
 
     async def _read_claude_md(self, workspace: str) -> str | None:
