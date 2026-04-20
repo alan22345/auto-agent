@@ -101,7 +101,9 @@
     .chat-area {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 16px;
+      min-width: 0;
     }
     .message {
       margin-bottom: 12px;
@@ -115,7 +117,11 @@
       font-size: 13px;
       line-height: 1.5;
       word-break: break-word;
+      overflow-x: auto;
     }
+    .message-bubble pre { overflow-x: auto; max-width: 100%; }
+    .message-bubble code { word-break: break-all; }
+    .message-bubble pre code { word-break: normal; }
     .message.user .message-bubble { background: var(--accent); color: #fff; }
     .message.system .message-bubble { background: var(--surface); border: 1px solid var(--border); }
     .message.event .message-bubble { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); font-size: 12px; }
@@ -1888,8 +1894,8 @@
           // Show the plan for complex/complex_large tasks
           const planLabel = selected.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
           answerHtml = `
-            <div class="message system" style="margin-bottom:12px;">
-              <div class="message-bubble" style="background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.2);max-width:100%;max-height:500px;overflow-y:auto;">
+            <div class="message system" style="margin-bottom:12px;max-width:100%;">
+              <div class="message-bubble" style="background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.2);max-height:500px;overflow-y:auto;">
                 <div style="font-size:11px;color:var(--yellow);margin-bottom:6px;font-weight:600;">${planLabel}</div>
                 ${renderMarkdown(selected.plan)}
               </div>
