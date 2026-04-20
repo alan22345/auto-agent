@@ -1676,11 +1676,23 @@
         case "history":
           // Load persisted history for a task
           const key = data.task_id;
-          chatMessages[key] = (data.entries || []).map(e => ({
-            type: "event",
-            message: e.message ? `[${e.to_status}] ${e.message}` : `[${e.to_status}]`,
-            time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "",
-          }));
+          chatMessages[key] = (data.entries || []).map(e => {
+            // Human messages are stored as "[username] message text"
+            const userMatch = (e.message || "").match(/^\[([^\]]+)\] (.+)$/s);
+            if (userMatch && e.from_status === e.to_status) {
+              return {
+                type: "user",
+                sender: userMatch[1],
+                message: userMatch[2],
+                time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "",
+              };
+            }
+            return {
+              type: "event",
+              message: e.message ? `[${e.to_status}] ${e.message}` : `[${e.to_status}]`,
+              time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "",
+            };
+          });
           if (selectedTaskId === data.task_id) renderChat();
           break;
         case "event":
@@ -1735,7 +1747,7 @@
           break;
         case "user": {
           const userSender = data.display_name || data.username || (currentUser && (currentUser.display_name || currentUser.username)) || null;
-          addChat(selectedTaskId, "user", data.message, userSender);
+          addChat(data.task_id || selectedTaskId, "user", data.message, userSender);
           break;
         }
         case "error":
@@ -1988,11 +2000,9 @@
       const selected = tasks.find(t => t.id === selectedTaskId);
       const isActive = selected && ["coding", "planning"].includes(selected.status);
 
-      const senderName = currentUser ? (currentUser.display_name || currentUser.username) : null;
       if (isActive && selectedTaskId) {
         ws.send(JSON.stringify({ type: "send_guidance", message: text, task_id: selectedTaskId }));
       } else {
-        addChat(selectedTaskId, "user", text, senderName);
         ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
       }
       input.value = "";

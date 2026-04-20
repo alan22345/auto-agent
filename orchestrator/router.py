@@ -472,16 +472,47 @@ async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(404, "Task not found")
     if task.status == TaskStatus.DONE:
         return _task_to_response(task)
-    if task.status != TaskStatus.AWAITING_REVIEW:
-        raise HTTPException(400, f"Task is in {task.status.value}, not awaiting_review")
 
-    r = await get_redis()
-    await publish_event(r, Event(type="task.review_approved", task_id=task.id).to_redis())
-    await r.aclose()
+    # Allow marking done from any state that has DONE as a valid transition
+    from orchestrator.state_machine import TRANSITIONS
+    if TaskStatus.DONE not in TRANSITIONS.get(task.status, set()):
+        raise HTTPException(400, f"Cannot mark done from {task.status.value}")
+
+    if task.status == TaskStatus.AWAITING_REVIEW:
+        r = await get_redis()
+        await publish_event(r, Event(type="task.review_approved", task_id=task.id).to_redis())
+        await r.aclose()
 
     task = await transition(session, task, TaskStatus.DONE, "Marked done by user")
     await session.commit()
     return _task_to_response(task)
+
+
+class TaskMessageRequest(BaseModel):
+    message: str = Field(max_length=5000)
+    username: str = Field(max_length=255)
+
+
+@router.post("/tasks/{task_id}/message")
+async def add_task_message(
+    task_id: int,
+    req: TaskMessageRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Persist a human message in the task's history."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    session.add(
+        TaskHistory(
+            task_id=task.id,
+            from_status=task.status,
+            to_status=task.status,  # No transition — just a message log
+            message=f"[{req.username}] {req.message}",
+        )
+    )
+    await session.commit()
+    return {"ok": True}
 
 
 @router.post("/tasks/{task_id}/approve", response_model=TaskData)
