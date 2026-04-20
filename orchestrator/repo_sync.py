@@ -123,16 +123,43 @@ async def sync_repos(session: AsyncSession) -> int:
 
 
 async def match_repo(session: AsyncSession, text: str) -> Repo | None:
-    """Try to find a repo name mentioned in the text."""
+    """Try to find a repo name mentioned in the text.
+
+    Uses two passes:
+    1. Exact substring match (e.g. text contains "cardamon" → matches repo "cardamon")
+    2. Fuzzy match on hyphenated segments — handles cases where the user says
+       "iot-apartment-generator" but the repo is "iot-apartment-simulator".
+       Requires at least 2 matching segments and >50% overlap.
+    """
     text_lower = text.lower()
 
     result = await session.execute(select(Repo).order_by(Repo.name))
     repos = result.scalars().all()
 
-    # Try longest names first to prefer "Ergodic/cardamon" over "cardamon"
+    # Pass 1: exact substring match (longest names first)
     repos_sorted = sorted(repos, key=lambda r: len(r.name), reverse=True)
     for repo in repos_sorted:
         if repo.name.lower() in text_lower:
             return repo
+
+    # Pass 2: fuzzy match on hyphenated segments
+    text_words = set(text_lower.replace("/", " ").replace("-", " ").split())
+    best_repo = None
+    best_score = 0
+    for repo in repos_sorted:
+        # Get the short name (after the last /)
+        short_name = repo.name.split("/")[-1].lower()
+        segments = set(short_name.replace("-", " ").split())
+        if len(segments) < 2:
+            continue  # Skip single-word repos for fuzzy (too ambiguous)
+        overlap = segments & text_words
+        score = len(overlap) / len(segments) if segments else 0
+        if len(overlap) >= 2 and score > best_score:
+            best_score = score
+            best_repo = repo
+
+    # Require >50% segment overlap to avoid false matches
+    if best_repo and best_score > 0.5:
+        return best_repo
 
     return None

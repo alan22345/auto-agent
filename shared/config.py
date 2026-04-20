@@ -34,9 +34,24 @@ class Settings(BaseSettings):
     # the token's user from GET /user.
     github_owner: str = ""
 
-    # Web UI auth (HTTP Basic). Empty password disables auth.
-    # Username is always "admin".
-    web_auth_password: str = ""
+    # Auth — seed admin user on first boot
+    admin_username: str = "admin"
+    admin_password: str = ""  # Must be set for first boot
+    jwt_secret: str = "auto-agent-jwt-secret-change-me"
+
+    # LLM provider: "anthropic", "bedrock", or "claude_cli"
+    llm_provider: str = "anthropic"
+    llm_model: str = "claude-sonnet-4-6"
+    anthropic_api_key: str = ""
+    # Bedrock — explicit credentials for VM deployment (optional).
+    # Preferred: AWS Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) — simpler, no IAM setup.
+    # Alternative: IAM access keys (aws_access_key_id + aws_secret_access_key).
+    # Fallback: AWS credential chain (~/.aws/credentials, SSO, instance role).
+    bedrock_region: str = "us-east-1"
+    aws_bearer_token_bedrock: str = ""  # Preferred: Bedrock API key
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""  # Optional, for temporary credentials
 
     # Concurrency
     max_concurrent_simple: int = 1

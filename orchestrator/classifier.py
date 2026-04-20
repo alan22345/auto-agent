@@ -16,14 +16,26 @@ log = logging.getLogger(__name__)
 
 # Keywords that suggest a complex task
 COMPLEX_KEYWORDS = {
+    # Architecture / big changes
     "redesign", "rewrite", "refactor", "migrate", "architecture",
-    "overhaul", "rebuild", "rearchitect", "new feature", "schema change",
-    "database migration", "auth", "authentication", "authorization",
-    "performance", "optimize", "security", "breaking change",
+    "overhaul", "rebuild", "rearchitect", "schema change",
+    "database migration", "breaking change",
+    # Feature work
+    "new feature", "configurable", "configuration", "rule set",
+    "randomise", "randomize", "implement", "build a", "create a",
+    "add support for", "multiple", "workflow", "pipeline",
+    # Domain-specific
+    "auth", "authentication", "authorization",
+    "performance", "optimize", "security",
     "pricing", "subscription", "stripe", "payment", "billing",
     "admin panel", "dashboard", "anonymise", "anonymize",
-    "come up with a plan", "plan first", "multiple",
+    # Planning / scope
+    "come up with a plan", "plan first",
+    # Integration
     "integration", "api", "webhook", "rate limit",
+    # Multi-component
+    "must also", "in addition", "as well as",
+    "should be able to", "must be able to",
 }
 
 # Keywords that suggest a simple task
@@ -32,6 +44,24 @@ SIMPLE_KEYWORDS = {
     "config", "env", "readme", "comment", "log", "lint", "format",
 }
 
+# Patterns that indicate a query/research task — no code needed
+NO_CODE_PATTERNS = [
+    r"\bsort\b.*\bwhich\b",
+    r"\blist\b.*\bfree\b",
+    r"\bcompare\b",
+    r"\bexplain\b",
+    r"\bsummar(y|ize|ise)\b",
+    r"\bwhat (is|are|does)\b",
+    r"\bhow (do|does|to|can)\b",
+    r"\bwhy (is|are|does|do)\b",
+    r"\brecommend\b",
+    r"\bfind\b.*\b(cheapest|best|top|free)\b",
+    r"\bresearch\b",
+    r"\banalyze\b.*\b(market|competitor|trend)\b",
+    r"\bwhich\b.*\b(should|better|best)\b",
+    r"\bpros and cons\b",
+]
+
 # Threshold: if description has this many complex keyword matches AND
 # is long, classify as complex-large (needs subtask decomposition)
 COMPLEX_LARGE_KEYWORD_THRESHOLD = 3
@@ -39,9 +69,21 @@ COMPLEX_LARGE_WORD_THRESHOLD = 60
 
 
 def classify_task(title: str, description: str) -> tuple[TaskComplexity, ClassificationResult]:
-    """Classify a task as simple, complex, or complex-large using keyword heuristics."""
+    """Classify a task as simple, complex, complex-large, or simple-no-code."""
     text = f"{title} {description}".lower()
     word_count = len(text.split())
+
+    # Check for query/research tasks first — no code needed
+    for pattern in NO_CODE_PATTERNS:
+        if re.search(pattern, text):
+            result = ClassificationResult(
+                classification="simple_no_code",
+                reasoning=f"Query/research task: matched pattern '{pattern}'",
+                estimated_files=0,
+                risk=RiskLevel.LOW,
+            )
+            log.info(f"Classified as simple_no_code: matched '{pattern}'")
+            return TaskComplexity.SIMPLE_NO_CODE, result
 
     # Count complex keyword matches
     complex_matches = []

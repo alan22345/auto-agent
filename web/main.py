@@ -35,8 +35,8 @@ app = FastAPI(title="Auto-Agent Chat")
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Connected websocket clients
-connected_clients: set[WebSocket] = set()
+# Connected websocket clients: ws -> {"user_id": int, "username": str}
+connected_clients: dict[WebSocket, dict] = {}
 
 
 async def broadcast(message: dict) -> None:
@@ -47,7 +47,8 @@ async def broadcast(message: dict) -> None:
             await ws.send_json(message)
         except Exception:
             dead.add(ws)
-    connected_clients.difference_update(dead)
+    for ws in dead:
+        connected_clients.pop(ws, None)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -59,7 +60,24 @@ async def index() -> HTMLResponse:
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    connected_clients.add(ws)
+
+    # Authenticate via token query param
+    token = ws.query_params.get("token")
+    if not token:
+        await ws.send_json({"type": "error", "message": "Authentication required"})
+        await ws.close(code=4001)
+        return
+
+    from orchestrator.auth import verify_token
+    payload = verify_token(token)
+    if not payload:
+        await ws.send_json({"type": "error", "message": "Invalid or expired token"})
+        await ws.close(code=4001)
+        return
+
+    user_id = payload["user_id"]
+    username = payload["username"]
+    connected_clients[ws] = {"user_id": user_id, "username": username}
 
     # Send current task list on connect
     try:
@@ -77,9 +95,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             msg_type = data.get("type", "")
 
             if msg_type == "send_task":
-                await _handle_create_task(ws, data)
+                await _handle_create_task(ws, data, user_id)
             elif msg_type == "send_message":
-                await _handle_send_message(ws, data)
+                await _handle_send_message(ws, data, user_id, username)
             elif msg_type == "approve":
                 await _handle_approve(ws, data)
             elif msg_type == "reject":
@@ -115,6 +133,22 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                             await ws.send_json(
                                 {"type": "history", "task_id": task_id, "entries": resp.json()}
                             )
+            elif msg_type == "send_guidance":
+                # Pair-programming: user sends guidance to a running agent
+                task_id = data.get("task_id")
+                message = data.get("message", "").strip()
+                if task_id and message:
+                    from shared.redis_client import get_redis
+                    r = await get_redis()
+                    await r.rpush(f"task:{task_id}:guidance", message)
+                    await r.aclose()
+                    # Echo back to all clients so they see their own message
+                    await broadcast({
+                        "type": "guidance_sent",
+                        "task_id": task_id,
+                        "message": message,
+                        "username": username,
+                    })
             elif msg_type == "refresh":
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
@@ -123,10 +157,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         await ws.send_json({"type": "task_list", "tasks": tasks})
 
     except WebSocketDisconnect:
-        connected_clients.discard(ws)
+        connected_clients.pop(ws, None)
 
 
-async def _handle_create_task(ws: WebSocket, data: dict) -> None:
+async def _handle_create_task(ws: WebSocket, data: dict, user_id: int | None = None) -> None:
     title = data.get("title", "").strip()
     description = data.get("description", "").strip()
     repo_name = data.get("repo_name", "").strip() or None
@@ -145,15 +179,19 @@ async def _handle_create_task(ws: WebSocket, data: dict) -> None:
         )
         return
 
+    task_payload: dict = {
+        "title": title,
+        "description": description,
+        "source": "manual",
+        "repo_name": repo_name,
+    }
+    if user_id is not None:
+        task_payload["created_by_user_id"] = user_id
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks",
-            json={
-                "title": title,
-                "description": description,
-                "source": "manual",
-                "repo_name": repo_name,
-            },
+            json=task_payload,
         )
         if resp.status_code == 200:
             task = TaskData.model_validate(resp.json())
@@ -162,7 +200,9 @@ async def _handle_create_task(ws: WebSocket, data: dict) -> None:
             await ws.send_json({"type": "error", "message": f"Failed to create task: {resp.text}"})
 
 
-async def _handle_send_message(ws: WebSocket, data: dict) -> None:
+async def _handle_send_message(
+    ws: WebSocket, data: dict, user_id: int | None = None, username: str = ""
+) -> None:
     text = data.get("message", "").strip()
     task_id = data.get("task_id")
 
@@ -205,14 +245,17 @@ async def _handle_send_message(ws: WebSocket, data: dict) -> None:
 
     # If no task is selected, auto-create a task from the message
     if not task_id:
+        auto_payload: dict = {
+            "title": text[:120],
+            "description": text,
+            "source": "manual",
+        }
+        if user_id is not None:
+            auto_payload["created_by_user_id"] = user_id
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/tasks",
-                json={
-                    "title": text[:120],
-                    "description": text,
-                    "source": "manual",
-                },
+                json=auto_payload,
             )
             if resp.status_code == 200:
                 task = TaskData.model_validate(resp.json())
@@ -234,7 +277,7 @@ async def _handle_send_message(ws: WebSocket, data: dict) -> None:
     await publish_event(r, event.to_redis())
     await r.aclose()
 
-    await broadcast({"type": "user", "message": text})
+    await broadcast({"type": "user", "message": text, "username": username})
 
 
 async def _handle_approve(ws: WebSocket, data: dict) -> None:
@@ -527,9 +570,57 @@ async def event_listener() -> None:
             await asyncio.sleep(2)
 
 
+async def agent_stream_listener() -> None:
+    """Subscribe to agent live-stream channels via Redis pub/sub.
+
+    The agent publishes tool calls and thinking to `task:{id}:stream`.
+    We forward these to WebSocket clients so the UI shows real-time
+    agent activity — the pair-programming feed.
+    """
+    import json as _json
+    r = await get_redis()
+    pubsub = r.pubsub()
+    await pubsub.psubscribe("task:*:stream")
+    log.info("Agent stream listener started (pub/sub)")
+
+    while True:
+        try:
+            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if msg and msg["type"] == "pmessage":
+                channel = msg["channel"]
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                # Extract task_id from channel name "task:123:stream"
+                parts = channel.split(":")
+                task_id = int(parts[1]) if len(parts) >= 3 else 0
+
+                data = msg["data"]
+                if isinstance(data, bytes):
+                    data = data.decode()
+                payload = _json.loads(data)
+
+                await broadcast({
+                    "type": "agent_stream",
+                    "task_id": task_id,
+                    **payload,
+                })
+            else:
+                await asyncio.sleep(0.05)  # Small sleep when no messages
+        except Exception:
+            log.exception("Agent stream listener error")
+            await asyncio.sleep(2)
+            try:
+                r = await get_redis()
+                pubsub = r.pubsub()
+                await pubsub.psubscribe("task:*:stream")
+            except Exception:
+                pass
+
+
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(event_listener())
+    asyncio.create_task(agent_stream_listener())
 
 
 if __name__ == "__main__":

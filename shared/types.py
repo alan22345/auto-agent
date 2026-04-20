@@ -23,7 +23,7 @@ class RiskLevel(str, Enum):
 
 
 class ClassificationResult(BaseModel):
-    classification: Literal["simple", "complex"]
+    classification: Literal["simple", "complex", "simple_no_code"]
     reasoning: str = ""
     estimated_files: int = 0
     risk: RiskLevel = RiskLevel.LOW
@@ -46,9 +46,11 @@ class TaskData(BaseModel):
     plan: str | None = None
     error: str | None = None
     freeform_mode: bool = False
+    priority: int = 100
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
     created_at: str | None = None
+    created_by_user_id: int | None = None
 
 
 class RepoData(BaseModel):
@@ -182,6 +184,7 @@ class FreeformConfigData(BaseModel):
     id: int
     repo_name: str | None = None
     enabled: bool = False
+    prod_branch: str = "main"
     dev_branch: str = "dev"
     analysis_cron: str = "0 9 * * 1"
     auto_approve_suggestions: bool = False
@@ -201,3 +204,60 @@ class LinearIssue(BaseModel):
     description: str = ""
     state: dict[str, str] = Field(default_factory=dict)
     url: str = ""
+
+
+# --- Auth types ---
+
+
+class UserData(BaseModel):
+    """Typed representation of a user."""
+    id: int
+    username: str
+    display_name: str
+    created_at: str | None = None
+    last_login: str | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user: UserData
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str
+
+
+# --- Graph memory types ---
+
+
+class MemoryNodeData(BaseModel):
+    """Typed representation of a memory node."""
+    id: str
+    name: str
+    node_type: str
+    content: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+    created_by_task_id: int | None = None
+
+
+class MemoryEdgeData(BaseModel):
+    """Typed representation of a memory edge."""
+    id: str
+    source_id: str
+    target_id: str
+    relation: str
+    created_at: str | None = None
+
+
+class MemoryNodeWithEdges(BaseModel):
+    """A node with its immediate edges for search results."""
+    node: MemoryNodeData
+    edges: list[MemoryEdgeData] = []

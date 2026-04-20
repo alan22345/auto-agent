@@ -15,7 +15,7 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PLANNING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED},
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
     TaskStatus.AWAITING_CLARIFICATION: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},  # user replied
-    TaskStatus.CODING: {TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED},
+    TaskStatus.CODING: {TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE},
     TaskStatus.PR_CREATED: {TaskStatus.AWAITING_CI},
     TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED},  # CI pass/fail
     TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING},  # approved or request changes

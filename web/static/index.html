@@ -119,6 +119,8 @@
     .message.user .message-bubble { background: var(--accent); color: #fff; }
     .message.system .message-bubble { background: var(--surface); border: 1px solid var(--border); }
     .message.event .message-bubble { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); font-size: 12px; }
+    .message.stream { margin-right: auto; }
+    .message.stream .message-bubble { background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.15); font-size: 12px; color: var(--text-muted); padding: 4px 10px; }
     .message.error .message-bubble { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); color: var(--red); }
     .message-time { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
@@ -704,6 +706,73 @@
       to { opacity: 0; }
     }
 
+    /* Login screen */
+    #login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #1a1a2e;
+    }
+    .login-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 2rem;
+      border-radius: 8px;
+      width: 300px;
+    }
+    .login-box h2 { color: var(--text); margin-top: 0; margin-bottom: 1.2rem; font-size: 18px; }
+    .login-box input {
+      width: 100%;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      background: #0f3460;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+    .login-box input:focus { outline: none; border-color: var(--accent); }
+    .login-box button[type="submit"] {
+      width: 100%;
+      padding: 8px;
+      background: #533483;
+      border: none;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .login-box button[type="submit"]:hover { opacity: 0.9; }
+    #login-error { color: var(--red); margin-top: 8px; font-size: 0.9em; min-height: 1em; }
+
+    /* User info bar */
+    #user-info {
+      position: fixed;
+      top: 10px;
+      right: 16px;
+      z-index: 200;
+      color: var(--text-muted);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #user-info button {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    #user-info button:hover { border-color: var(--accent); color: var(--accent); }
+
     /* Connection status banner */
     #conn-status {
       display: none;
@@ -730,6 +799,25 @@
   </style>
 </head>
 <body>
+  <!-- Login screen — visible until authenticated -->
+  <div id="login-screen">
+    <div class="login-box">
+      <h2>Auto-Agent Login</h2>
+      <form id="login-form">
+        <input type="text" id="login-username" placeholder="Username" required autocomplete="username">
+        <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password">
+        <button type="submit">Log In</button>
+        <div id="login-error"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main app — hidden until authenticated -->
+  <div id="main-app" style="display:none;width:100%;height:100vh;flex-direction:row;">
+  <div id="user-info">
+    <span id="current-user-display"></span>
+    <button onclick="logout()">Logout</button>
+  </div>
   <div id="conn-status"></div>
   <div class="toast-container" id="toast-container"></div>
   <div class="sidebar">
@@ -790,9 +878,17 @@
       <span>PR merged? Mark this task as complete:</span>
       <button id="mark-done-btn" class="approve-btn" onclick="markDone()">Mark Done</button>
     </div>
-    <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;">
+    <div class="task-actions" id="task-actions" style="display:none;padding:6px 16px;border-top:1px solid var(--border);gap:6px;flex-wrap:wrap;">
       <button id="cancel-task-btn" onclick="cancelTask()" style="background:var(--yellow);color:#000;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Cancel</button>
       <button id="delete-task-btn" onclick="deleteTask()" style="background:var(--red);color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">Delete</button>
+      <span id="priority-controls" style="display:none;margin-left:auto;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+        Priority:
+        <button onclick="setPriority(0)" title="Jump to front" style="background:var(--green);color:#fff;border:none;padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;">⬆ Front</button>
+        <button onclick="setPriority(50)" title="High priority" style="background:var(--accent);color:#fff;border:none;padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;">High</button>
+        <button onclick="setPriority(100)" title="Normal priority" style="background:var(--border);color:var(--text);border:none;padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;">Normal</button>
+        <button onclick="setPriority(200)" title="Low priority" style="background:var(--border);color:var(--text-muted);border:none;padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;">Low</button>
+        <span id="current-priority" style="margin-left:4px;"></span>
+      </span>
     </div>
     <div class="input-area">
       <input type="text" id="msg-input" placeholder="Describe a task or send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
@@ -807,6 +903,7 @@
       </div>
     </div>
   </div>
+  </div><!-- /#main-app -->
 
   <script>
     let ws;
@@ -832,8 +929,10 @@
       connStatusTimer = null;
     }
 
-    function connect() {
-      ws = new WebSocket(`ws://${location.host}/ws`);
+    function connectWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
+      ws = new WebSocket(`${protocol}//${window.location.host}/ws${tokenParam}`);
       ws.onopen = () => {
         if (hasConnectedOnce) {
           showConnStatus('connected');
@@ -852,7 +951,7 @@
         const base = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
         const jitter = Math.random() * base * 0.3;
         reconnectAttempts++;
-        reconnectTimer = setTimeout(connect, base + jitter);
+        reconnectTimer = setTimeout(connectWebSocket, base + jitter);
       };
       ws.onerror = () => {
         showConnStatus('disconnected');
@@ -944,7 +1043,7 @@
     async function confirmDeleteRepo(repoName) {
       if (!confirm(`Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`)) return;
       try {
-        const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
+        const res = await authFetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
         if (res.status === 409) {
           const data = await res.json();
           alert(data.detail || "Cannot delete: active tasks reference this repo.");
@@ -1237,6 +1336,12 @@
 
     /* ----- Utility helpers ----- */
 
+    function authFetch(url, opts = {}) {
+      opts.headers = opts.headers || {};
+      if (authToken) opts.headers["Authorization"] = "Bearer " + authToken;
+      return fetch(url, opts);
+    }
+
     function showToast(message, type = "success") {
       const container = document.getElementById("toast-container");
       const toast = document.createElement("div");
@@ -1443,35 +1548,6 @@
       document.body.appendChild(overlay);
     }
 
-    function approveSuggestion(id) {
-      const sug = suggestions.find(s => s.id === id);
-      const title = sug ? escHtml(sug.title) : "this suggestion";
-      showConfirmModal({
-        title: "Approve suggestion?",
-        message: `"${title}" &mdash; This will create a new task. Continue?`,
-        confirmText: "Approve", confirmColor: "var(--green)",
-        onConfirm() {
-          ws.send(JSON.stringify({ type: "approve_suggestion", suggestion_id: id }));
-          suggestions = suggestions.filter(s => s.id !== id);
-          renderRepoDetailSuggestions();
-        }
-      });
-    }
-
-    function rejectSuggestion(id) {
-      const sug = suggestions.find(s => s.id === id);
-      const title = sug ? escHtml(sug.title) : "this suggestion";
-      showConfirmModal({
-        title: "Reject suggestion?",
-        message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
-        confirmText: "Reject", confirmColor: "var(--red)",
-        onConfirm() {
-          ws.send(JSON.stringify({ type: "reject_suggestion", suggestion_id: id }));
-          suggestions = suggestions.filter(s => s.id !== id);
-          renderRepoDetailSuggestions();
-        }
-      });
-    }
     function handleSuggestionAction(id, action) {
       const label = action === "approve" ? "approved" : "rejected";
       if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1497,8 +1573,27 @@
       ws.send(JSON.stringify({ type: `${action}_suggestion`, suggestion_id: id }));
     }
 
-    function approveSuggestion(id) { handleSuggestionAction(id, "approve"); }
-    function rejectSuggestion(id)  { handleSuggestionAction(id, "reject"); }
+    function approveSuggestion(id) {
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
+      showConfirmModal({
+        title: "Approve suggestion?",
+        message: `"${title}" &mdash; This will create a new task. Continue?`,
+        confirmText: "Approve", confirmColor: "var(--green)",
+        onConfirm() { handleSuggestionAction(id, "approve"); }
+      });
+    }
+
+    function rejectSuggestion(id) {
+      const sug = suggestions.find(s => s.id === id);
+      const title = sug ? escHtml(sug.title) : "this suggestion";
+      showConfirmModal({
+        title: "Reject suggestion?",
+        message: `"${title}" &mdash; This will permanently reject this suggestion. This cannot be undone.`,
+        confirmText: "Reject", confirmColor: "var(--red)",
+        onConfirm() { handleSuggestionAction(id, "reject"); }
+      });
+    }
 
     function promoteTask(id) {
       showConfirmModal({
@@ -1603,22 +1698,48 @@
             updatePoAnalysisUI(data.payload.repo_name);
           }
           break;
+        case "agent_stream": {
+          // Live pair-programming feed — tool calls and thinking from the agent
+          const tid = data.task_id;
+          if (data.type === "agent_stream") {
+            const streamType = data.tool ? "tool" : (data.text ? "thinking" : "");
+            if (data.tool) {
+              const icon = {
+                file_read: "📖", file_write: "✏️", file_edit: "✏️",
+                grep: "🔍", glob: "📂", bash: "⚡", git: "📦",
+                test_runner: "🧪",
+              }[data.tool] || "🔧";
+              addChat(tid, "stream", `${icon} **${data.tool}** ${escHtml(data.args_preview || "")}`);
+            } else if (data.text) {
+              const preview = data.text.length > 300 ? data.text.slice(0, 300) + "..." : data.text;
+              addChat(tid, "stream", `💭 ${escHtml(preview)}`);
+            }
+          }
+          break;
+        }
+        case "guidance_sent": {
+          const guidanceSender = data.display_name || data.username || (currentUser && (currentUser.display_name || currentUser.username)) || null;
+          addChat(data.task_id, "user", `[Guidance]: ${data.message}`, guidanceSender);
+          break;
+        }
         case "system":
           addChat(selectedTaskId, "system", data.message);
           break;
-        case "user":
-          addChat(selectedTaskId, "user", data.message);
+        case "user": {
+          const userSender = data.display_name || data.username || (currentUser && (currentUser.display_name || currentUser.username)) || null;
+          addChat(selectedTaskId, "user", data.message, userSender);
           break;
+        }
         case "error":
           addChat(selectedTaskId, "error", data.message);
           break;
       }
     }
 
-    function addChat(taskId, type, message) {
+    function addChat(taskId, type, message, sender) {
       const key = taskId || "_global";
       if (!chatMessages[key]) chatMessages[key] = [];
-      chatMessages[key].push({ type, message, time: new Date().toLocaleTimeString() });
+      chatMessages[key].push({ type, message, time: new Date().toLocaleTimeString(), sender: sender || null });
       if (key === "_global" || taskId === selectedTaskId) {
         renderChat();
       }
@@ -1643,16 +1764,23 @@
         return b.id - a.id;
       });
 
-      el.innerHTML = sorted.map(t => `
+      el.innerHTML = sorted.map(t => {
+        const priorityLabel = t.status === "queued" && t.priority !== undefined && t.priority !== 100
+          ? `<span style="color:${t.priority < 100 ? 'var(--green)' : 'var(--text-muted)'};margin-left:4px;font-size:10px;">P${t.priority}</span>`
+          : '';
+        const complexityLabel = t.complexity === "simple_no_code"
+          ? '<span style="color:var(--accent);margin-left:4px;">query</span>'
+          : (t.complexity ? `<span style="color:var(--text-muted);margin-left:4px;">${t.complexity}</span>` : '');
+        return `
         <div class="task-item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask(${t.id})">
           <div class="task-id">#${t.id} ${t.repo_name ? '(' + t.repo_name + ')' : ''}</div>
           <div class="task-title">${escHtml(t.title)}</div>
           <div class="task-status">
             <span class="status-badge status-${t.status}">${t.status}</span>
-            ${t.complexity ? `<span style="color:var(--text-muted);margin-left:4px;">${t.complexity}</span>` : ''}
+            ${complexityLabel}${priorityLabel}
           </div>
-        </div>
-      `).join("");
+        </div>`;
+      }).join("");
 
       // Show/hide approval and clarification bars.
       // Freeform tasks are fully autonomous: their plan is auto-reviewed and
@@ -1672,6 +1800,23 @@
         (selected && selected.status === "awaiting_review" && !isFreeform) ? "flex" : "none";
       document.getElementById("task-actions").style.display =
         selected ? "flex" : "none";
+
+      // Dynamic input placeholder — shows guidance hint when task is active
+      const msgInput = document.getElementById("msg-input");
+      const isActive = selected && ["coding", "planning"].includes(selected.status);
+      msgInput.placeholder = isActive
+        ? "Send guidance to the agent (pair-programming)..."
+        : "Describe a task or send a message...";
+
+      // Priority controls — only show for queued tasks
+      const showPriority = selected && selected.status === "queued";
+      const priorityEl = document.getElementById("priority-controls");
+      priorityEl.style.display = showPriority ? "flex" : "none";
+      if (showPriority) {
+        const p = selected.priority ?? 100;
+        const label = p === 0 ? "Front" : p < 100 ? "High" : p === 100 ? "Normal" : "Low";
+        document.getElementById("current-priority").textContent = `(${label} — ${p})`;
+      }
     }
 
     function selectTask(id) {
@@ -1727,17 +1872,36 @@
 
       renderSubtaskBar();
 
-      if (msgs.length === 0) {
+      // Show query answer for SIMPLE_NO_CODE tasks
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      let answerHtml = "";
+      if (selected && selected.complexity === "simple_no_code" && selected.plan) {
+        answerHtml = `
+          <div class="message system" style="margin-bottom:12px;">
+            <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
+              <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
+              ${renderMarkdown(selected.plan)}
+            </div>
+          </div>`;
+      }
+
+      if (msgs.length === 0 && !answerHtml) {
         el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
         return;
       }
 
-      el.innerHTML = msgs.map(m => `
+      el.innerHTML = answerHtml + msgs.map(m => {
+        const senderLabel = m.type === 'user' && m.sender
+          ? `<div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;text-align:right;">${escHtml(m.sender)}</div>`
+          : '';
+        return `
         <div class="message ${m.type}">
+          ${senderLabel}
           <div class="message-bubble">${renderMarkdown(m.message)}</div>
           <div class="message-time">${m.time}</div>
         </div>
-      `).join("");
+        `;
+      }).join("");
 
       el.scrollTop = el.scrollHeight;
     }
@@ -1767,7 +1931,7 @@
       } else {
         // Fallback to REST API
         try {
-          const resp = await fetch("/api/tasks", {
+          const resp = await authFetch("/api/tasks", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title, description, source: "manual", repo_name: repo_name || null }),
@@ -1792,7 +1956,19 @@
       const text = input.value.trim();
       if (!text) return;
 
-      ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      // If the selected task is actively running (coding/planning), send as
+      // guidance that gets injected into the agent's conversation. Otherwise
+      // send as a normal message (creates a new task or answers clarification).
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      const isActive = selected && ["coding", "planning"].includes(selected.status);
+
+      const senderName = currentUser ? (currentUser.display_name || currentUser.username) : null;
+      if (isActive && selectedTaskId) {
+        ws.send(JSON.stringify({ type: "send_guidance", message: text, task_id: selectedTaskId }));
+      } else {
+        addChat(selectedTaskId, "user", text, senderName);
+        ws.send(JSON.stringify({ type: "send_message", message: text, task_id: selectedTaskId }));
+      }
       input.value = "";
     }
 
@@ -1841,35 +2017,54 @@
       input.value = "";
     }
 
+    async function setPriority(priority) {
+      if (!selectedTaskId) return;
+      try {
+        const resp = await authFetch(`/api/tasks/${selectedTaskId}/priority`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ priority }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          // Update local task data
+          const task = tasks.find(t => t.id === selectedTaskId);
+          if (task) task.priority = data.priority;
+          const label = priority === 0 ? "front" : priority < 100 ? "high" : priority === 100 ? "normal" : "low";
+          showToast(`Priority set to ${label} (${priority})`, "success");
+          renderTasks();
+        } else {
+          showToast("Failed to set priority", "error");
+        }
+      } catch (e) {
+        showToast("Error setting priority", "error");
+      }
+    }
+
     function cancelTask() {
       if (!selectedTaskId) return;
       const taskId = selectedTaskId;
+      const btn = document.getElementById("cancel-task-btn");
       showConfirmModal({
         title: "Cancel this task?",
         message: "The task will be stopped and marked as cancelled.",
         confirmText: "Cancel Task", confirmColor: "var(--red)",
         async onConfirm() {
-          const resp = await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
-          if (resp.ok) addChat(taskId, "system", "Task cancelled.");
-          else addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
+          setButtonLoading(btn, true);
+          try {
+            const resp = await authFetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+            if (resp.ok) {
+              addChat(taskId, "system", "Task cancelled.");
+              showToast("Task cancelled", "success");
+            } else {
+              addChat(taskId, "error", `Failed to cancel: ${await resp.text()}`);
+              showToast("Failed to cancel task", "error");
+            }
+          } finally {
+            setButtonLoading(btn, false);
+          }
         }
       });
-    async function cancelTask() {
-      if (!selectedTaskId || !confirm("Cancel this task?")) return;
-      const btn = document.getElementById("cancel-task-btn");
-      setButtonLoading(btn, true);
-      try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}/cancel`, { method: "POST" });
-        if (resp.ok) {
-          addChat(selectedTaskId, "system", "Task cancelled.");
-          showToast("Task cancelled", "success");
-        } else {
-          addChat(selectedTaskId, "error", `Failed to cancel: ${await resp.text()}`);
-          showToast("Failed to cancel task", "error");
-        }
-      } finally {
-        setButtonLoading(btn, false);
-      }
     }
 
     async function markDone() {
@@ -1877,7 +2072,7 @@
       const btn = document.getElementById("mark-done-btn");
       setButtonLoading(btn, true);
       try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
+        const resp = await authFetch(`/api/tasks/${selectedTaskId}/done`, { method: "POST" });
         if (resp.ok) {
           addChat(selectedTaskId, "system", "Task marked as done.");
           showToast("Task marked as done", "success");
@@ -1893,43 +2088,31 @@
     function deleteTask() {
       if (!selectedTaskId) return;
       const taskId = selectedTaskId;
+      const btn = document.getElementById("delete-task-btn");
       showConfirmModal({
         title: "Delete task permanently?",
         message: "This task will be permanently deleted. This cannot be undone.",
         confirmText: "Delete", confirmColor: "var(--red)",
         async onConfirm() {
-          const resp = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
-          if (resp.ok) {
-            delete chatMessages[taskId];
-            selectedTaskId = null;
-            document.getElementById("main-header").textContent = "Select a task or create one";
-            renderChat();
-            ws.send(JSON.stringify({ type: "refresh" }));
-          } else {
-            addChat(taskId, "error", `Failed to delete: ${await resp.text()}`);
+          setButtonLoading(btn, true);
+          try {
+            const resp = await authFetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+            if (resp.ok) {
+              delete chatMessages[taskId];
+              selectedTaskId = null;
+              document.getElementById("main-header").textContent = "Select a task or create one";
+              renderChat();
+              ws.send(JSON.stringify({ type: "refresh" }));
+              showToast("Task deleted", "success");
+            } else {
+              addChat(taskId, "error", `Failed to delete: ${await resp.text()}`);
+              showToast("Failed to delete task", "error");
+            }
+          } finally {
+            setButtonLoading(btn, false);
           }
         }
       });
-    async function deleteTask() {
-      if (!selectedTaskId || !confirm("Delete this task permanently?")) return;
-      const btn = document.getElementById("delete-task-btn");
-      setButtonLoading(btn, true);
-      try {
-        const resp = await fetch(`/api/tasks/${selectedTaskId}`, { method: "DELETE" });
-        if (resp.ok) {
-          delete chatMessages[selectedTaskId];
-          selectedTaskId = null;
-          document.getElementById("main-header").textContent = "Select a task or create one";
-          renderChat();
-          ws.send(JSON.stringify({ type: "refresh" }));
-          showToast("Task deleted", "success");
-        } else {
-          addChat(selectedTaskId, "error", `Failed to delete: ${await resp.text()}`);
-          showToast("Failed to delete task", "error");
-        }
-      } finally {
-        setButtonLoading(btn, false);
-      }
     }
 
     function renderMarkdown(s) {
@@ -2052,7 +2235,87 @@
       return d.innerHTML;
     }
 
-    connect();
+    // ---- Auth ----
+
+    let authToken = localStorage.getItem('auth_token');
+    let currentUser = JSON.parse(localStorage.getItem('current_user') || 'null');
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('login-username').value;
+      const password = document.getElementById('login-password').value;
+      const errEl = document.getElementById('login-error');
+      errEl.textContent = '';
+
+      try {
+        const resp = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password}),
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          authToken = data.token;
+          currentUser = data.user;
+          localStorage.setItem('auth_token', data.token);
+          localStorage.setItem('current_user', JSON.stringify(data.user));
+          showMainApp();
+        } else {
+          errEl.textContent = 'Invalid credentials';
+        }
+      } catch (err) {
+        document.getElementById('login-error').textContent = 'Connection error';
+      }
+    });
+
+    function showMainApp() {
+      document.getElementById('login-screen').style.display = 'none';
+      const app = document.getElementById('main-app');
+      app.style.display = 'flex';
+      if (currentUser) {
+        document.getElementById('current-user-display').textContent =
+          currentUser.display_name || currentUser.username || '';
+      }
+      connectWebSocket();
+    }
+
+    function logout() {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('current_user');
+      authToken = null;
+      currentUser = null;
+      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      document.getElementById('login-screen').style.display = 'flex';
+      document.getElementById('main-app').style.display = 'none';
+      document.getElementById('login-username').value = '';
+      document.getElementById('login-password').value = '';
+      document.getElementById('login-error').textContent = '';
+    }
+
+    // On page load: try stored token; fall back to login screen
+    window.addEventListener('DOMContentLoaded', async () => {
+      if (authToken) {
+        try {
+          const resp = await fetch('/api/auth/me', {
+            headers: {'Authorization': `Bearer ${authToken}`}
+          });
+          if (resp.ok) {
+            currentUser = await resp.json();
+            localStorage.setItem('current_user', JSON.stringify(currentUser));
+            showMainApp();
+            return;
+          }
+        } catch (e) { /* fall through */ }
+        // Token invalid — clear and show login
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('current_user');
+        authToken = null;
+        currentUser = null;
+      }
+      // Show login screen (already visible by default)
+    });
   </script>
 </body>
 </html>

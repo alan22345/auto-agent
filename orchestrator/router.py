@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from orchestrator.auth import create_token, hash_password, verify_password, verify_token
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
@@ -30,17 +31,22 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    User,
 )
 from shared.redis_client import get_redis, publish_event
 from shared.types import (
+    CreateUserRequest,
     FeedbackSummary,
     FreeformConfigData,
+    LoginRequest,
+    LoginResponse,
     OutcomeResponse,
     RepoData,
     RepoResponse,
     ScheduleResponse,
     SuggestionData,
     TaskData,
+    UserData,
 )
 
 router = APIRouter()
@@ -81,11 +87,13 @@ class CreateTaskRequest(BaseModel):
     source: TaskSource = TaskSource.MANUAL
     source_id: str = Field(default="", max_length=512)
     repo_name: str | None = Field(default=None, max_length=256)
+    created_by_user_id: int | None = None
 
 
 class TransitionRequest(BaseModel):
     status: TaskStatus
     message: str = Field(default="", max_length=2000)
+    plan: str | None = Field(default=None, max_length=50000)
 
 
 class ApprovalRequest(BaseModel):
@@ -136,6 +144,108 @@ class PatternsResponse(BaseModel):
     analysis: str
 
 
+# --- Auth helpers ---
+
+
+def _verify_auth_header(authorization: str | None) -> dict:
+    """Extract and verify JWT from Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    payload = verify_token(authorization[7:])
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload
+
+
+# --- Auth endpoints ---
+
+
+@router.post("/auth/login")
+async def login(req: LoginRequest, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(select(User).where(User.username == req.username))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user.last_login = datetime.now(UTC)
+    await session.commit()
+    token = create_token(user_id=user.id, username=user.username)
+    return LoginResponse(
+        token=token,
+        user=UserData(
+            id=user.id,
+            username=user.username,
+            display_name=user.display_name,
+            created_at=user.created_at.isoformat() if user.created_at else None,
+            last_login=user.last_login.isoformat() if user.last_login else None,
+        ),
+    )
+
+
+@router.get("/auth/me")
+async def get_me(
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    payload = _verify_auth_header(authorization)
+    result = await session.execute(select(User).where(User.id == payload["user_id"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return UserData(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        created_at=user.created_at.isoformat() if user.created_at else None,
+        last_login=user.last_login.isoformat() if user.last_login else None,
+    )
+
+
+@router.post("/auth/users")
+async def create_user(
+    req: CreateUserRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    _verify_auth_header(authorization)
+    existing = await session.execute(select(User).where(User.username == req.username))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = User(
+        username=req.username,
+        password_hash=hash_password(req.password),
+        display_name=req.display_name,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return UserData(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        created_at=user.created_at.isoformat() if user.created_at else None,
+    )
+
+
+@router.get("/auth/users")
+async def list_users(
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+):
+    _verify_auth_header(authorization)
+    result = await session.execute(select(User).order_by(User.created_at))
+    users = result.scalars().all()
+    return [
+        UserData(
+            id=u.id,
+            username=u.username,
+            display_name=u.display_name,
+            created_at=u.created_at.isoformat() if u.created_at else None,
+            last_login=u.last_login.isoformat() if u.last_login else None,
+        )
+        for u in users
+    ]
+
+
 # --- Task endpoints ---
 
 
@@ -163,6 +273,7 @@ async def create_task(
         source=req.source,
         source_id=req.source_id,
         repo_id=repo.id if repo else None,
+        created_by_user_id=req.created_by_user_id,
     )
     session.add(task)
     await session.commit()
@@ -217,6 +328,30 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     return {"deleted": task_id}
 
 
+class PriorityRequest(BaseModel):
+    priority: int = Field(ge=0, le=999)
+
+
+@router.post("/tasks/{task_id}/priority", response_model=TaskData)
+async def set_task_priority(
+    task_id: int,
+    req: PriorityRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    """Set a task's queue priority. Lower number = picked up first.
+
+    0 = jump to front, 100 = normal (default), 999 = lowest.
+    Only affects QUEUED tasks — tasks already in progress are unaffected.
+    """
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.priority = req.priority
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 @router.post("/tasks/{task_id}/cancel", response_model=TaskData)
 async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
     task = await get_task(session, task_id)
@@ -257,9 +392,9 @@ async def transition_task(
     if not task:
         raise HTTPException(404, "Task not found")
     try:
-        # Save plan text when transitioning to awaiting_approval
-        if req.status == TaskStatus.AWAITING_APPROVAL and req.message.startswith("Plan:\n"):
-            task.plan = req.message[len("Plan:\n") :]
+        # Save plan if provided (agent sends it when transitioning to awaiting_approval)
+        if req.plan is not None:
+            task.plan = req.plan
         task = await transition(session, task, req.status, req.message)
         await session.commit()
     except InvalidTransition as e:
@@ -667,8 +802,6 @@ async def update_repo_summary(
     if not repo:
         raise HTTPException(404, "Repo not found")
     repo.summary = req.get("summary", "")
-    from datetime import datetime
-
     repo.summary_updated_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
@@ -726,15 +859,20 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
 
 class FreeformConfigRequest(BaseModel):
     repo_name: str = Field(max_length=256)
+    # `prod_branch` is optional — if omitted, server fills it with the repo's
+    # default_branch. This lets existing clients keep working unchanged.
+    prod_branch: str | None = Field(default=None, max_length=256)
     dev_branch: str = Field(default="dev", max_length=256)
     analysis_cron: str = Field(default="0 9 * * 1", max_length=128)
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
 
-    @field_validator("dev_branch")
+    @field_validator("prod_branch", "dev_branch")
     @classmethod
-    def validate_branch(cls, v: str) -> str:
+    def validate_branch(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not BRANCH_NAME_RE.match(v):
             raise ValueError(
                 "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
@@ -759,10 +897,14 @@ async def upsert_freeform_config(
     if not repo:
         raise HTTPException(404, f"Repo '{req.repo_name}' not found")
 
+    # Default prod_branch to the repo's default branch if caller didn't specify
+    prod_branch = req.prod_branch or repo.default_branch or "main"
+
     result = await session.execute(select(FreeformConfig).where(FreeformConfig.repo_id == repo.id))
     config = result.scalar_one_or_none()
     if config:
         config.enabled = req.enabled
+        config.prod_branch = prod_branch
         config.dev_branch = req.dev_branch
         config.analysis_cron = req.analysis_cron
         config.auto_approve_suggestions = req.auto_approve_suggestions
@@ -771,6 +913,7 @@ async def upsert_freeform_config(
         config = FreeformConfig(
             repo_id=repo.id,
             enabled=req.enabled,
+            prod_branch=prod_branch,
             dev_branch=req.dev_branch,
             analysis_cron=req.analysis_cron,
             auto_approve_suggestions=req.auto_approve_suggestions,
@@ -1031,6 +1174,7 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         id=c.id,
         repo_name=repo_name,
         enabled=c.enabled or False,
+        prod_branch=c.prod_branch or "main",
         dev_branch=c.dev_branch or "dev",
         analysis_cron=c.analysis_cron or "0 9 * * 1",
         auto_approve_suggestions=c.auto_approve_suggestions or False,
@@ -1054,9 +1198,11 @@ def _task_to_response(task: Task) -> TaskData:
         plan=task.plan,
         error=task.error,
         freeform_mode=task.freeform_mode or False,
+        priority=task.priority if task.priority is not None else 100,
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,
         created_at=task.created_at.isoformat() if task.created_at else None,
+        created_by_user_id=task.created_by_user_id,
     )
 
 
@@ -1069,3 +1215,30 @@ def _schedule_to_response(s: ScheduledTask) -> ScheduleResponse:
         enabled=s.enabled,
         last_run_at=s.last_run_at.isoformat() if s.last_run_at else None,
     )
+
+
+async def seed_admin_user() -> None:
+    """Create the admin user if no users exist."""
+    import structlog
+
+    from shared.config import settings
+    from shared.database import async_session
+
+    log = structlog.get_logger()
+
+    async with async_session() as session:
+        result = await session.execute(select(User).limit(1))
+        if result.scalar_one_or_none() is None:
+            if not settings.admin_password:
+                log.warning(
+                    "No admin_password set and no users exist — set ADMIN_PASSWORD env var"
+                )
+                return
+            admin = User(
+                username=settings.admin_username,
+                password_hash=hash_password(settings.admin_password),
+                display_name=settings.admin_username.title(),
+            )
+            session.add(admin)
+            await session.commit()
+            log.info("admin_user_created", username=settings.admin_username)

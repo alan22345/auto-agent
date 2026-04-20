@@ -14,9 +14,7 @@ Starts on port 2020:
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import secrets
 from pathlib import Path
 
 import httpx
@@ -70,8 +68,8 @@ from integrations.telegram.main import (
     inbound_loop as telegram_inbound_loop,
     notification_loop as telegram_notification_loop,
 )
-from claude_runner.main import event_loop as claude_runner_loop
-from claude_runner.po_analyzer import run_po_analysis_loop
+from agent.main import event_loop as claude_runner_loop
+from agent.po_analyzer import run_po_analysis_loop
 
 log = setup_logging("auto-agent")
 
@@ -84,29 +82,28 @@ app = FastAPI(title="Auto-Agent", version="0.1.0")
 
 
 # ---------------------------------------------------------------------------
-# HTTP Basic auth middleware
+# Auth middleware
 #
-# Protects the web UI and API from random visitors. Stays out of the way of:
-#   - /health (so the deploy script's health check still works)
-#   - /api/webhooks/* (GitHub/Linear webhooks need to be reachable)
-#   - Loopback requests from inside the same container (web -> orchestrator)
-#
-# Set WEB_AUTH_PASSWORD in .env to enable. Empty = disabled.
+# JWT-based auth for protected endpoints. Exempts:
+#   - /health (deploy health check)
+#   - /api/webhooks/* (GitHub/Linear webhooks)
+#   - /api/auth/login (login endpoint)
+#   - / and /static/* (served to browser, login happens client-side)
+#   - Loopback requests from inside the same container
 # ---------------------------------------------------------------------------
 
-_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/")
+_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/static/")
+_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login")
 
 
 def _is_auth_exempt(path: str) -> bool:
-    return any(path == p or path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES)
+    if path in _AUTH_EXEMPT_EXACT:
+        return True
+    return any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES)
 
 
 @app.middleware("http")
-async def basic_auth_middleware(request, call_next):
-    password = settings.web_auth_password
-    if not password:
-        return await call_next(request)
-
+async def jwt_auth_middleware(request, call_next):
     if _is_auth_exempt(request.url.path):
         return await call_next(request)
 
@@ -115,20 +112,18 @@ async def basic_auth_middleware(request, call_next):
     if client_host in ("127.0.0.1", "::1"):
         return await call_next(request)
 
+    # Check for Bearer token
+    from orchestrator.auth import verify_token
+
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
-            user, _, supplied = decoded.partition(":")
-            if user == "admin" and secrets.compare_digest(supplied, password):
-                return await call_next(request)
-        except Exception:
-            pass
+    if auth.startswith("Bearer "):
+        payload = verify_token(auth[7:])
+        if payload:
+            return await call_next(request)
 
     return Response(
         status_code=401,
         content="Authentication required",
-        headers={"WWW-Authenticate": 'Basic realm="auto-agent"'},
     )
 
 
@@ -150,29 +145,9 @@ async def root() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text())
 
 
-def _websocket_authorized(ws: WebSocket) -> bool:
-    password = settings.web_auth_password
-    if not password:
-        return True
-    client_host = ws.client.host if ws.client else ""
-    if client_host in ("127.0.0.1", "::1"):
-        return True
-    auth = ws.headers.get("authorization", "")
-    if not auth.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="ignore")
-        user, _, supplied = decoded.partition(":")
-        return user == "admin" and secrets.compare_digest(supplied, password)
-    except Exception:
-        return False
-
-
 @app.websocket("/ws")
 async def ws_proxy(ws: WebSocket) -> None:
-    if not _websocket_authorized(ws):
-        await ws.close(code=1008)
-        return
+    # JWT auth is handled inside websocket_endpoint (via ?token= query param)
     await websocket_endpoint(ws)
 
 
@@ -192,26 +167,40 @@ async def on_task_created(event: Event) -> None:
         if not task:
             return
 
-        # Auto-match repo from task text if not already set
-        if not task.repo_id:
-            repo = await match_repo(session, f"{task.title} {task.description}")
-            if repo:
-                task.repo_id = repo.id
-                log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
-
         task = await transition(session, task, TaskStatus.CLASSIFYING, "Auto-classifying")
         await session.commit()
 
-        # If complexity was pre-set at task creation (e.g. scaffold tasks from
-        # the create-repo flow), trust it and skip the keyword classifier.
+        # Classify the task (unless pre-set at creation)
         if task.complexity is None:
             complexity, classification = classify_task(task.title, task.description)
             task.complexity = complexity
             await session.commit()
             payload = {"complexity": complexity.value, **classification.model_dump()}
         else:
-            log.info(f"Task #{task.id} pre-classified as {task.complexity.value}, skipping classifier")
-            payload = {"complexity": task.complexity.value, "reasoning": "Pre-classified at creation"}
+            complexity = task.complexity
+            log.info(f"Task #{task.id} pre-classified as {complexity.value}, skipping classifier")
+            payload = {"complexity": complexity.value, "reasoning": "Pre-classified at creation"}
+
+        # SIMPLE_NO_CODE tasks don't need a repo — skip matching and go
+        # directly to the query handler.
+        if complexity == TaskComplexity.SIMPLE_NO_CODE:
+            log.info(f"Task #{task.id} classified as simple_no_code — skipping repo match")
+            r = await get_redis()
+            await publish_event(r, Event(
+                type="task.classified",
+                task_id=task.id,
+                payload=payload,
+            ).to_redis())
+            await r.aclose()
+            return
+
+        # Auto-match repo from task text if not already set
+        if not task.repo_id:
+            repo = await match_repo(session, f"{task.title} {task.description}")
+            if repo:
+                task.repo_id = repo.id
+                await session.commit()
+                log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
 
         r = await get_redis()
         await publish_event(r, Event(
@@ -228,6 +217,20 @@ async def on_task_classified(event: Event) -> None:
         if not task:
             return
 
+        # SIMPLE_NO_CODE: query/research tasks bypass the coding pipeline.
+        # They don't need a repo, don't need a slot — just run a single LLM
+        # call and complete immediately.
+        if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
+            task = await transition(session, task, TaskStatus.QUEUED)
+            task = await transition(session, task, TaskStatus.CODING, "Processing query...")
+            await session.commit()
+            r = await get_redis()
+            await publish_event(
+                r, Event(type="task.query", task_id=task.id).to_redis()
+            )
+            await r.aclose()
+            return
+
         # Freeform tasks with auto_start_tasks bypass the concurrency queue
         force_start = False
         if task.freeform_mode and task.repo_id:
@@ -236,7 +239,7 @@ async def on_task_classified(event: Event) -> None:
                 _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
             )
             cfg = cfg_result.scalar_one_or_none()
-            if cfg and cfg.auto_start_tasks:
+            if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
         if force_start or await can_start(session, task.complexity):
@@ -320,13 +323,42 @@ async def on_review_comments_addressed(event: Event) -> None:
         await session.commit()
 
 
+def _should_auto_merge(task, repo_freeform_config) -> bool:
+    """Decide whether a task with passing CI is allowed to auto-merge.
+
+    Safety gate — requires BOTH:
+      - task.freeform_mode is True (task was routed through freeform pipeline), AND
+      - repo_freeform_config exists and repo_freeform_config.enabled is True
+        (the repo is currently opted-in to auto-merge)
+
+    If either is False/None, fall through to human review. This prevents the
+    task-50 incident where a task's freeform flag alone triggered an unreviewed
+    merge to prod on a repo whose freeform config was disabled.
+    """
+    if not getattr(task, "freeform_mode", False):
+        return False
+    if repo_freeform_config is None:
+        return False
+    return bool(getattr(repo_freeform_config, "enabled", False))
+
+
 async def on_ci_passed(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
 
-        if task.freeform_mode:
+        # Look up the repo's current freeform config (not the task's snapshot flag)
+        repo_freeform_config = None
+        if task.repo_id:
+            from sqlalchemy import select as _sel
+            from shared.models import FreeformConfig as _FC
+            result = await session.execute(
+                _sel(_FC).where(_FC.repo_id == task.repo_id)
+            )
+            repo_freeform_config = result.scalar_one_or_none()
+
+        if _should_auto_merge(task, repo_freeform_config):
             # Freeform mode: auto-merge to dev, skip human review
             merge_ok = await _auto_merge_pr(task)
             if merge_ok:
@@ -338,6 +370,14 @@ async def on_ci_passed(event: Event) -> None:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merge failed — awaiting manual review")
                 await session.commit()
             return
+
+        # Either the task isn't freeform OR the repo's freeform config is
+        # disabled. Fall through to human review — this is the safety path.
+        if task.freeform_mode and not (repo_freeform_config and repo_freeform_config.enabled):
+            log.warning(
+                f"Task #{task.id} has freeform_mode=True but repo freeform is disabled — "
+                f"falling through to human review (safety gate)"
+            )
 
         task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review")
         await session.commit()
@@ -641,17 +681,59 @@ async def _try_start_queued(session) -> None:
     for complexity in TaskComplexity:
         if await can_start(session, complexity):
             task = await next_queued_task(session, complexity)
-            if task:
-                if complexity == TaskComplexity.COMPLEX:
-                    task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
-                else:
-                    task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
-                await session.commit()
+            if not task:
+                continue
 
-                r = await get_redis()
-                evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
-                await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
-                await r.aclose()
+            # Respect freeform toggle: if the task is freeform but the repo's
+            # freeform config is now disabled, skip it — the user turned it off
+            # and expects no more freeform tasks to run. The task stays QUEUED
+            # and will start if freeform is re-enabled later.
+            if task.freeform_mode and task.repo_id:
+                from sqlalchemy import select as _sel
+                cfg_result = await session.execute(
+                    _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+                )
+                cfg = cfg_result.scalar_one_or_none()
+                if not cfg or not cfg.enabled:
+                    log.info(
+                        f"Skipping freeform task #{task.id}: repo freeform is disabled"
+                    )
+                    continue
+
+            if complexity == TaskComplexity.COMPLEX:
+                task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
+            else:
+                task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
+            await session.commit()
+
+            r = await get_redis()
+            evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
+            await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
+            await r.aclose()
+
+
+async def on_start_queued_task(event: Event) -> None:
+    """User requested a queued task to start. Try to start it if a slot is available."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task or task.status != TaskStatus.QUEUED:
+            return
+
+        if not await can_start(session, task.complexity):
+            log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
+            return
+
+        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+            task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
+        else:
+            task = await transition(session, task, TaskStatus.CODING, "Starting coding")
+        await session.commit()
+
+        r = await get_redis()
+        evt = "task.start_planning" if task.status == TaskStatus.PLANNING else "task.start_coding"
+        await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
+        await r.aclose()
+        log.info(f"Started queued task #{task.id}")
 
 
 async def _auto_merge_pr(task: Task) -> bool:
@@ -699,6 +781,7 @@ bus.on("task.ci_failed", on_ci_failed)
 bus.on("task.review_approved", on_review_approved)
 bus.on("task.dev_deploy_failed", on_dev_deploy_failed)
 bus.on("po.suggestions_ready", on_po_suggestions_ready)
+bus.on("task.start_queued", on_start_queued_task)
 bus.on("task.done", on_task_finished)
 bus.on("task.failed", on_task_finished)
 
@@ -739,14 +822,37 @@ async def orchestrator_event_loop() -> None:
 # Task timeout watchdog — fail tasks stuck too long in active states
 # ---------------------------------------------------------------------------
 
-TASK_TIMEOUT_SECONDS = 3600  # 1 hour
-WATCHDOG_INTERVAL = 120  # Check every 2 minutes
+# Timeout thresholds
+PLANNING_TIMEOUT = 1200     # 20 minutes for planning
+CODING_TIMEOUT_SOFT = 3600  # 1 hour — try recovery first
+CODING_TIMEOUT_HARD = 7200  # 2 hours — fail the task
+WATCHDOG_INTERVAL = 120     # Check every 2 minutes
 
 TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 
+# Track which tasks have already had a recovery attempt (avoid infinite retries)
+_recovery_attempted: set[int] = set()
+
+
+async def _task_has_heartbeat(task_id: int) -> bool:
+    """Check if the agent is actively sending heartbeat signals for this task."""
+    try:
+        r = await get_redis()
+        result = await r.exists(f"task:{task_id}:heartbeat")
+        await r.aclose()
+        return bool(result)
+    except Exception:
+        return False
+
 
 async def task_timeout_watchdog() -> None:
-    """Periodically check for tasks stuck in active states and fail them."""
+    """Progress-aware watchdog. Checks heartbeat before killing tasks.
+
+    Flow for each active task:
+    1. If agent heartbeat exists → task is alive, skip.
+    2. If no heartbeat AND past soft timeout → attempt recovery (re-emit event).
+    3. If no heartbeat AND past hard timeout → fail the task.
+    """
     log.info("Task timeout watchdog started")
     while True:
         try:
@@ -760,27 +866,68 @@ async def task_timeout_watchdog() -> None:
                     updated = task.updated_at
                     if updated and updated.tzinfo is None:
                         updated = updated.replace(tzinfo=timezone.utc)
-                    if updated and (now - updated).total_seconds() > TASK_TIMEOUT_SECONDS:
+                    if not updated:
+                        continue
+
+                    age_s = (now - updated).total_seconds()
+
+                    # Choose timeout based on status
+                    soft_timeout = PLANNING_TIMEOUT if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_SOFT
+                    hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
+
+                    # If agent is actively sending heartbeats, it's alive — skip
+                    if await _task_has_heartbeat(task.id):
+                        if age_s > soft_timeout:
+                            log.debug(
+                                f"Task #{task.id} past soft timeout ({age_s:.0f}s) "
+                                f"but heartbeat is alive — skipping"
+                            )
+                        continue
+
+                    # No heartbeat — check timeouts
+                    if age_s > hard_timeout:
+                        # Hard timeout: fail the task
                         log.warning(
-                            f"Task #{task.id} timed out in {task.status.value} "
-                            f"(stuck for {(now - updated).total_seconds():.0f}s)"
+                            f"Task #{task.id} hard timeout in {task.status.value} "
+                            f"({age_s:.0f}s, no heartbeat)"
                         )
                         task = await transition(
                             session, task, TaskStatus.FAILED,
-                            f"Timed out after {TASK_TIMEOUT_SECONDS}s in {task.status.value}",
+                            f"Timed out after {age_s:.0f}s in {task.status.value} "
+                            f"(no agent heartbeat detected)",
                         )
                         await session.commit()
+                        _recovery_attempted.discard(task.id)
 
                         r = await get_redis()
                         await publish_event(
                             r, Event(type="task.failed", task_id=task.id, payload={
-                                "error": f"Timed out in {task.status.value}",
+                                "error": f"Hard timeout in {task.status.value}",
                             }).to_redis()
                         )
                         await publish_event(
                             r, Event(type="task.cleanup", task_id=task.id).to_redis()
                         )
                         await r.aclose()
+
+                    elif age_s > soft_timeout and task.id not in _recovery_attempted:
+                        # Soft timeout: try recovery once
+                        _recovery_attempted.add(task.id)
+                        log.warning(
+                            f"Task #{task.id} soft timeout in {task.status.value} "
+                            f"({age_s:.0f}s, no heartbeat) — attempting recovery"
+                        )
+                        r = await get_redis()
+                        if task.status == TaskStatus.PLANNING:
+                            await publish_event(
+                                r, Event(type="task.start_planning", task_id=task.id).to_redis()
+                            )
+                        elif task.status == TaskStatus.CODING:
+                            await publish_event(
+                                r, Event(type="task.start_coding", task_id=task.id).to_redis()
+                            )
+                        await r.aclose()
+
         except Exception:
             log.exception("Watchdog error")
         await asyncio.sleep(WATCHDOG_INTERVAL)
@@ -1211,15 +1358,28 @@ async def start_slack_if_configured() -> None:
 
 
 async def _recover_stuck_tasks() -> None:
-    """On startup, find tasks stuck in PLANNING or CODING and re-emit their events.
+    """On startup, find tasks stuck in active states and re-emit their events.
 
     This handles the case where the container restarted mid-task and the
     original event was already acknowledged.
+
+    Covers:
+    - PLANNING → re-emit start_planning
+    - CODING → re-emit start_coding
+    - AWAITING_APPROVAL (freeform + has plan) → re-emit plan_ready so
+      the independent plan reviewer triggers. Without this, freeform
+      scaffold tasks get stuck after a restart (see task 52 incident).
     """
     from sqlalchemy import select as sa_select
     async with async_session() as session:
         result = await session.execute(
-            sa_select(Task).where(Task.status.in_({TaskStatus.PLANNING, TaskStatus.CODING}))
+            sa_select(Task).where(
+                Task.status.in_({
+                    TaskStatus.PLANNING,
+                    TaskStatus.CODING,
+                    TaskStatus.AWAITING_APPROVAL,
+                })
+            )
         )
         stuck_tasks = result.scalars().all()
 
@@ -1232,10 +1392,23 @@ async def _recover_stuck_tasks() -> None:
                 log.info(f"Recovering task #{task.id}: re-emitting start_planning")
                 await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
             elif task.status == TaskStatus.CODING:
-                log.info(f"Recovering task #{task.id}: re-emitting start_coding")
-                await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+                if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
+                    log.info(f"Recovering query task #{task.id}: re-emitting task.query")
+                    await publish_event(r, Event(type="task.query", task_id=task.id).to_redis())
+                else:
+                    log.info(f"Recovering task #{task.id}: re-emitting start_coding")
+                    await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+            elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
+                log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
+                await publish_event(
+                    r, Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan or ""}).to_redis()
+                )
         await r.aclose()
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
+
+    # Also try starting any queued tasks that may have been left behind
+    async with async_session() as session:
+        await _try_start_queued(session)
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1420,10 @@ async def _recover_stuck_tasks() -> None:
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Seed admin user if no users exist
+    from orchestrator.router import seed_admin_user
+    await seed_admin_user()
 
     # Auto-discover repos from GitHub
     async with async_session() as session:

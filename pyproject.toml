@@ -18,13 +18,21 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.48",
     "structlog>=25.5.0",
     "uvicorn[standard]>=0.42.0",
+    "passlib[bcrypt]>=1.7.4",
+    "PyJWT>=2.8.0",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.11.0",
     "pre-commit>=4.0.0",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"
