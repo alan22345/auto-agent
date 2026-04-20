@@ -1381,6 +1381,10 @@ async def _recover_stuck_tasks() -> None:
         await r.aclose()
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
 
+    # Also try starting any queued tasks that may have been left behind
+    async with async_session() as session:
+        await _try_start_queued(session)
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — one place to start everything
