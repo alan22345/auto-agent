@@ -1094,6 +1094,68 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         await transition_task(task_id, "blocked", f"Failed to address review: {e}")
 
 
+async def handle_plan_conversation(task_id: int, message: str) -> None:
+    """Resume the planning session so the user can discuss the plan with the agent.
+
+    The agent retains full context from planning — the user's message is injected
+    as a continuation and the agent responds. If the agent produces a revised plan
+    (detected by a markdown heading), the plan is updated. Otherwise the response
+    is streamed as a chat message.
+    """
+    task = await get_task(task_id)
+    if not task or not task.repo_name:
+        return
+
+    repo = await get_repo(task.repo_name)
+    if not repo:
+        return
+
+    session_id = _session_id(task_id, task.created_at)
+    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+
+    log.info(f"Plan conversation for task #{task_id}: {message[:100]}...")
+
+    agent = _create_agent(
+        workspace, session_id=session_id, max_turns=10,
+        task_id=task_id, readonly=True, repo_name=repo.name,
+    )
+    result = await agent.run(message, resume=True)
+    output = result.output
+
+    # If the agent revised the plan (contains markdown headings like ## Task),
+    # update the stored plan
+    if output and _re.search(r"^#{1,3} ", output, _re.MULTILINE):
+        # Collect full output across continuations
+        full_output = "\n".join(
+            msg.content for msg in result.messages
+            if msg.role == "assistant" and msg.content
+        ) or output
+
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
+            )
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output}).to_redis(),
+        )
+        await r.aclose()
+    else:
+        # Just a conversational response — stream it to the UI
+        r = await get_redis()
+        await publish_event(
+            r,
+            Event(type="task.status_changed", task_id=task_id, payload={
+                "status": task.status, "message": output[:2000],
+            }).to_redis(),
+        )
+        await r.aclose()
+
+    log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
+
+
 async def handle_clarification_response(task_id: int, answer: str) -> None:
     """Resume a task after the user answered a clarification question."""
     task = await get_task(task_id)
@@ -1567,6 +1629,15 @@ async def event_loop() -> None:
                                 await handle_blocked_response(task_id, task, comments)
                             elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
                                 await handle_pr_review_comments(task_id, comments)
+                            elif task.status == "coding" and not task.pr_url:
+                                # Agent is actively coding — push as guidance for next turn
+                                r2 = await get_redis()
+                                await r2.rpush(f"task:{task_id}:guidance", comments)
+                                await r2.aclose()
+                                log.info(f"Pushed guidance to coding task #{task_id}")
+                            elif task.status in ("awaiting_approval", "planning"):
+                                # Resume the planning agent session so the user can discuss the plan
+                                await handle_plan_conversation(task_id, comments)
                             elif task.status == "queued":
                                 # User wants to kick a queued task — ask orchestrator to start it
                                 log.info(f"Message for queued task #{task_id} — attempting to start")
@@ -1578,13 +1649,6 @@ async def event_loop() -> None:
                                 await r2.aclose()
                             else:
                                 log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")
-                                if task.plan:
-                                    r2 = await get_redis()
-                                    await publish_event(
-                                        r2,
-                                        Event(type="task.plan_ready", task_id=task_id, payload={"plan": task.plan}).to_redis(),
-                                    )
-                                    await r2.aclose()
                 except Exception:
                     log.exception("Error handling event")
                 finally:
