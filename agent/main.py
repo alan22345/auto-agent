@@ -608,14 +608,14 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     base_branch = repo.default_branch
     fallback_branch: str | None = None
 
-    # Freeform mode: target the dev branch; if it doesn't exist, clone_repo
-    # will create it from prod_branch.
-    if task.freeform_mode and task.repo_name:
+    # If the repo has a dev branch configured, ALL tasks target it.
+    # Code deploys to dev after CI passes; promotion to prod is manual.
+    if task.repo_name:
         freeform_cfg = await get_freeform_config(task.repo_name)
-        if freeform_cfg:
+        if freeform_cfg and freeform_cfg.dev_branch:
             base_branch = freeform_cfg.dev_branch
             fallback_branch = freeform_cfg.prod_branch or repo.default_branch
-            log.info(f"Freeform mode: targeting dev branch '{base_branch}' for task #{task_id}")
+            log.info(f"Targeting dev branch '{base_branch}' for task #{task_id}")
 
     is_continuation = task.plan is not None or retry_reason is not None
     log.info(f"Coding task #{task_id} in {task.repo_name} (session={session_id}, resume={is_continuation})")
