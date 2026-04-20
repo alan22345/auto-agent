@@ -87,6 +87,7 @@ class AgentLoop:
         on_tool_call: Callable[[str, dict, str, int], Awaitable[None]] | None = None,
         on_thinking: Callable[[str, int], Awaitable[None]] | None = None,
         get_guidance: Callable[[], Awaitable[str | None]] | None = None,
+        repo_name: str | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -96,6 +97,7 @@ class AgentLoop:
         self._workspace = workspace
         self._include_methodology = include_methodology
         self._task_description = task_description
+        self._repo_name = repo_name
         self._heartbeat = heartbeat  # Called every few turns to signal progress
         # Pair-programming callbacks:
         self._on_tool_call = on_tool_call   # (tool_name, args, result_preview, turn) → stream to UI
@@ -155,6 +157,7 @@ class AgentLoop:
             system = await self._context.build_system_prompt(
                 include_methodology=self._include_methodology,
                 task_description=self._task_description,
+                repo_name=self._repo_name,
             )
 
         # Load or initialize conversation

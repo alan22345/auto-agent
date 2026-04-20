@@ -52,6 +52,7 @@ class ContextManager:
         extra_instructions: str | None = None,
         include_methodology: bool = False,
         task_description: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         """Build the full system prompt for this workspace."""
         memory_context = None
@@ -67,6 +68,7 @@ class ContextManager:
             extra_instructions=extra_instructions,
             include_methodology=include_methodology,
             memory_context=memory_context,
+            repo_name=repo_name,
         )
 
     async def prepare(

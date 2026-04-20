@@ -195,6 +195,122 @@ def _parse_js_simple(path: Path, entry: FileEntry) -> None:
         entry.imports.append(m.group(1))
 
 
+# --- Persistence helpers (graph memory integration) ---
+
+_MAP_HEADER_SEPARATOR = "\n---\n"
+
+
+def format_map_with_commit(map_text: str, commit_sha: str) -> str:
+    """Wrap a repo map with the commit SHA it was built from."""
+    return f"commit:{commit_sha}{_MAP_HEADER_SEPARATOR}{map_text}"
+
+
+def parse_stored_map(stored: str) -> tuple[str | None, str]:
+    """Parse a stored map into (commit_sha, map_text).
+
+    Returns (None, stored) if no header is found.
+    """
+    if _MAP_HEADER_SEPARATOR in stored:
+        header, map_text = stored.split(_MAP_HEADER_SEPARATOR, 1)
+        if header.startswith("commit:"):
+            return header[7:].strip(), map_text
+    return None, stored
+
+
+def parse_single_file(workspace: str, relative_path: str) -> FileEntry:
+    """Parse a single file and return its FileEntry."""
+    entry = FileEntry(path=relative_path)
+    full_path = Path(workspace) / relative_path
+    if not full_path.is_file():
+        return entry
+    ext = full_path.suffix
+    if ext in _PYTHON_EXTS:
+        _parse_python(full_path, entry)
+    elif ext in _JS_EXTS:
+        _parse_js_simple(full_path, entry)
+    return entry
+
+
+def patch_map(
+    existing_map_text: str,
+    workspace: str,
+    changed_files: list[str],
+) -> str:
+    """Incrementally update a repo map by re-parsing only changed files.
+
+    Parses the existing map text, replaces entries for changed files
+    (or removes them if deleted), and re-formats.
+    """
+    # Parse existing map into entries
+    entries_by_path = _parse_map_text(existing_map_text)
+
+    for file_path in changed_files:
+        full_path = Path(workspace) / file_path
+        ext = Path(file_path).suffix
+        if ext not in _LIST_EXTS:
+            continue
+
+        if full_path.is_file():
+            # File exists — re-parse it
+            new_entry = parse_single_file(workspace, file_path)
+            entries_by_path[file_path] = new_entry
+        else:
+            # File was deleted
+            entries_by_path.pop(file_path, None)
+
+    entries = sorted(entries_by_path.values(), key=lambda e: e.path)
+    return _format_map(entries)
+
+
+def _parse_map_text(map_text: str) -> dict[str, FileEntry]:
+    """Parse a formatted map string back into FileEntry objects.
+
+    This is a best-effort reverse of _format_map. We extract file paths
+    and their symbols from the indented text format.
+    """
+    entries: dict[str, FileEntry] = {}
+    current_entry: FileEntry | None = None
+
+    for line in map_text.splitlines():
+        if not line.strip():
+            continue
+
+        # File path lines have 2-space indent, no deeper
+        if line.startswith("  ") and not line.startswith("    "):
+            path = line.strip()
+            current_entry = FileEntry(path=path)
+            entries[path] = current_entry
+
+        elif line.startswith("    ") and current_entry is not None:
+            # Symbol line — we don't need to fully reconstruct symbols
+            # since we'll re-parse changed files anyway. Just preserve
+            # the entry so unchanged files keep their structure.
+            text = line.strip()
+            if text.startswith("class "):
+                parts = text[6:].split(": ", 1)
+                name = parts[0]
+                children = []
+                if len(parts) > 1:
+                    children = [
+                        FileSymbol(name=m.strip(), kind="method", line=0)
+                        for m in parts[1].split(", ")
+                        if m.strip()
+                    ]
+                current_entry.symbols.append(
+                    FileSymbol(name=name, kind="class", line=0, children=children)
+                )
+            elif text.startswith("function "):
+                current_entry.symbols.append(
+                    FileSymbol(name=text[9:], kind="function", line=0)
+                )
+            elif text.startswith("export "):
+                current_entry.symbols.append(
+                    FileSymbol(name=text[7:], kind="export", line=0)
+                )
+
+    return entries
+
+
 def _format_map(entries: list[FileEntry]) -> str:
     """Format entries into a compact, readable repo map string."""
     parts: list[str] = []
