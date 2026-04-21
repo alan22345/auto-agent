@@ -161,3 +161,15 @@ class TestStructuredPlanningPrompt:
         from agent.prompts import build_planning_prompt
         prompt = build_planning_prompt("Add dark mode", "Support dark mode toggle in settings")
         assert "files" in prompt.lower() and "modify" in prompt.lower()
+
+
+class TestSubtaskHandoff:
+    def test_output_preview_length_at_least_1000(self):
+        """Subtask output_preview should capture at least 1000 chars, not just 200."""
+        import inspect
+
+        from agent import main as agent_main
+
+        source = inspect.getsource(agent_main._handle_coding_with_subtasks)
+        assert "output[:200]" not in source, "output_preview should be longer than 200 chars"
+        assert "output[:1500]" in source
