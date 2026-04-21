@@ -145,6 +145,24 @@ def _extract_clarification(output: str) -> str | None:
     return None
 
 
+_PLAN_MAX_LENGTH = 50_000  # Must match TransitionRequest.plan max_length
+
+
+def _trim_plan_text(text: str) -> str:
+    """Strip agent preamble from plan text and enforce the API size limit.
+
+    The agent joins ALL assistant messages (including exploration/reasoning)
+    which can exceed the 50KB API limit.  Strip everything before the first
+    markdown heading, then hard-truncate if still too long.
+    """
+    heading = _re.search(r"^(#{1,3} )", text, _re.MULTILINE)
+    if heading:
+        text = text[heading.start():]
+    if len(text) > _PLAN_MAX_LENGTH:
+        text = text[:_PLAN_MAX_LENGTH - 20] + "\n\n*(plan truncated)*"
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Agent factory — creates an AgentLoop with the right config
 # ---------------------------------------------------------------------------
@@ -432,8 +450,15 @@ async def generate_repo_summary(repo_url: str, repo_name: str, default_branch: s
 # Planning
 # ---------------------------------------------------------------------------
 
+_active_planning: set[int] = set()
+
+
 async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     """Run the agent in planning mode (readonly tools) for complex tasks."""
+    if task_id in _active_planning:
+        log.info(f"Task #{task_id} planning already active — skipping duplicate")
+        return
+
     task = await get_task(task_id)
     if not task:
         return
@@ -487,6 +512,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     log.info(f"Planning task #{task_id} in {task.repo_name} (session={session_id})")
     workspace = await clone_repo(repo.url, task_id, repo.default_branch)
 
+    _active_planning.add(task_id)
     try:
         agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
@@ -524,11 +550,14 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             await r.aclose()
             return
 
+        output = _trim_plan_text(output)
+
         async with httpx.AsyncClient() as client:
-            await client.post(
+            resp = await client.post(
                 f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
                 json={"status": "awaiting_approval", "message": "Plan ready for review", "plan": output},
             )
+            resp.raise_for_status()
 
         r = await get_redis()
         await publish_event(
@@ -541,6 +570,8 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         log.exception(f"Planning failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
         cleanup_workspace(task_id)
+    finally:
+        _active_planning.discard(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1142,12 +1173,14 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
                 msg.content for msg in result.messages
                 if msg.role == "assistant" and msg.content
             ) or output
+            full_output = _trim_plan_text(full_output)
 
             async with httpx.AsyncClient() as client:
-                await client.post(
+                resp = await client.post(
                     f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
                     json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
                 )
+                resp.raise_for_status()
             r = await get_redis()
             await publish_event(
                 r,
@@ -1290,7 +1323,7 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
 # Deploy preview (unchanged — no CLI dependency)
 # ---------------------------------------------------------------------------
 
-DEPLOY_WORKFLOW_NAMES = ["deploy.yml", "deploy-dev.yml"]
+DEPLOY_WORKFLOW_NAMES = ["deploy-dev.yml"]
 DEPLOY_SCRIPT_CANDIDATES = [
     "scripts/deploy-dev.sh", "scripts/deploy-dev", "scripts/deploy_dev.sh",
     "scripts/deploy.sh", "deploy-dev.sh", "deploy.sh",

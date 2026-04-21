@@ -326,15 +326,15 @@ async def on_review_comments_addressed(event: Event) -> None:
 def _should_auto_merge(task, repo_freeform_config) -> bool:
     """Decide whether a task with passing CI should auto-merge to dev.
 
-    All tasks auto-merge after CI passes if the repo has a dev branch
-    configured (via freeform config). This gets code deployed to dev
-    quickly — promotion to prod is a separate manual step.
+    Only freeform tasks auto-merge after CI passes. Non-freeform tasks
+    always go through human review, even if the repo has a dev branch.
 
     If no freeform config exists for the repo, fall through to human review.
     """
     if repo_freeform_config is None:
         return False
-    # As long as the repo has a dev branch configured, auto-merge
+    if not task.freeform_mode:
+        return False
     return bool(getattr(repo_freeform_config, "dev_branch", ""))
 
 

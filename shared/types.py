@@ -51,6 +51,11 @@ class TaskData(BaseModel):
     current_subtask: int | None = None
     created_at: str | None = None
     created_by_user_id: int | None = None
+    # Structured intent (extracted by LLM after classification)
+    change_type: str | None = None          # "bugfix", "feature", "refactor", "config", "docs"
+    target_areas: str | None = None         # comma-separated file paths or module areas
+    acceptance_criteria: str | None = None   # what "done" looks like
+    constraints: str | None = None          # what NOT to do
 
 
 class RepoData(BaseModel):
