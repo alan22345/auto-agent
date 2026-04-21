@@ -32,3 +32,6 @@ structlog==24.4.0
 # LLM providers — Anthropic SDK with Bedrock + native Anthropic support
 anthropic[bedrock]>=0.88.0
 botocore[crt]>=1.35.99
+
+# MCP server for graph memory (used by Claude Code CLI)
+mcp[cli]>=1.0.0

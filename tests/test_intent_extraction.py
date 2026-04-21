@@ -54,7 +54,9 @@ class TestExtractIntent:
         mock_provider = AsyncMock()
         mock_provider.complete.return_value = mock_response
 
-        with patch("agent.main.get_provider", return_value=mock_provider):
+        with patch("agent.main.settings") as mock_settings, \
+             patch("agent.main.get_provider", return_value=mock_provider):
+            mock_settings.llm_provider = "anthropic"
             result = await extract_intent("Fix login bug", "Login fails on mobile devices")
 
         assert result["change_type"] == "bugfix"
