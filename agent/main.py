@@ -196,6 +196,10 @@ async def extract_intent(title: str, description: str) -> dict:
     Returns a dict with keys: change_type, target_areas, acceptance_criteria, constraints.
     Returns empty dict on any failure (non-blocking — the pipeline continues without it).
     """
+    # Intent extraction is redundant when using Claude CLI — it understands
+    # the task natively. Only useful for API providers where we control the loop.
+    if settings.llm_provider == "claude_cli":
+        return {}
     import json as _json
     try:
         provider = get_provider(model_override="fast")

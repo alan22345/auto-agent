@@ -173,3 +173,16 @@ class TestSubtaskHandoff:
         source = inspect.getsource(agent_main._handle_coding_with_subtasks)
         assert "output[:200]" not in source, "output_preview should be longer than 200 chars"
         assert "output[:1500]" in source
+
+
+class TestIntentExtractionSkipsForCLI:
+    @pytest.mark.asyncio
+    async def test_extract_intent_skips_for_cli_provider(self):
+        """extract_intent should return empty dict when provider is claude_cli."""
+        from agent.main import extract_intent
+
+        with patch("agent.main.settings") as mock_settings:
+            mock_settings.llm_provider = "claude_cli"
+            result = await extract_intent("Fix bug", "Something broken")
+
+        assert result == {}
