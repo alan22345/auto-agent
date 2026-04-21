@@ -146,8 +146,10 @@ class AgentLoop:
         """Send prompt to CLI provider, return raw output."""
         from agent.llm.claude_cli import ClaudeCLIProvider
 
-        if isinstance(self._provider, ClaudeCLIProvider) and self._session:
-            self._provider.set_session(self._session.session_id, resume=resume)
+        if isinstance(self._provider, ClaudeCLIProvider):
+            self._provider.set_cwd(self._workspace)
+            if self._session:
+                self._provider.set_session(self._session.session_id, resume=resume)
 
         response = await self._provider.complete(
             messages=[Message(role="user", content=prompt)],
