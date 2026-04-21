@@ -24,7 +24,7 @@ rsync -avz \
   --exclude='.env' \
   --exclude='.git' \
   --exclude='node_modules' \
-  --exclude='.claude' \
+  --exclude='.claude/settings.local.json' \
   "$SCRIPT_DIR/" "$VM:$REMOTE_DIR/"
 
 if [[ "${1:-}" == "migrate" ]]; then
