@@ -164,6 +164,63 @@ def _trim_plan_text(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Intent extraction — structured understanding of what the user wants
+# ---------------------------------------------------------------------------
+
+INTENT_EXTRACTION_PROMPT = """\
+Analyze this task and extract structured intent. Output ONLY a JSON object, no other text.
+
+Task title: {title}
+Task description: {description}
+
+JSON format:
+{{
+  "change_type": "bugfix|feature|refactor|config|docs|test|performance",
+  "target_areas": "comma-separated file paths or module areas likely involved",
+  "acceptance_criteria": "what must be true when the task is done (1-2 sentences)",
+  "constraints": "what should NOT be changed or any restrictions (1 sentence, or empty string)"
+}}
+
+Rules:
+- change_type: pick the single best category
+- target_areas: infer from the description — name specific files/modules if mentioned, otherwise name the likely area (e.g. "authentication", "database layer")
+- acceptance_criteria: concrete, testable conditions — not vague ("works correctly")
+- constraints: only include if the description implies restrictions; empty string otherwise
+- Output ONLY the JSON. No markdown fences, no explanation.
+"""
+
+
+async def extract_intent(title: str, description: str) -> dict:
+    """Extract structured intent from a task title and description.
+
+    Returns a dict with keys: change_type, target_areas, acceptance_criteria, constraints.
+    Returns empty dict on any failure (non-blocking — the pipeline continues without it).
+    """
+    import json as _json
+    try:
+        provider = get_provider(model_override="fast")
+        from agent.llm.types import Message
+        response = await provider.complete(
+            messages=[Message(
+                role="user",
+                content=INTENT_EXTRACTION_PROMPT.format(title=title, description=description),
+            )],
+            max_tokens=300,
+        )
+        text = response.message.content.strip()
+        # Strip markdown fences if the LLM wraps the JSON
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        return _json.loads(text)
+    except Exception:
+        log.warning("intent_extraction_failed", title=title[:80])
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Agent factory — creates an AgentLoop with the right config
 # ---------------------------------------------------------------------------
 
