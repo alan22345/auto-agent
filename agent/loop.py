@@ -36,6 +36,19 @@ _EXPLORATION_NUDGE = (
     "Start implementing now. Only read more files if you are genuinely blocked."
 )
 
+_COMPLEXITY_BUDGETS = {
+    "simple": 5,
+    "complex": 15,
+    "complex_large": 25,
+}
+
+
+def get_exploration_budget(complexity: str | None) -> int:
+    """Return the exploration budget for a given task complexity."""
+    if complexity is None:
+        return _EXPLORATION_BUDGET
+    return _COMPLEXITY_BUDGETS.get(complexity, _EXPLORATION_BUDGET)
+
 # Verification gate: patterns in bash commands that count as "ran tests/verification"
 _VERIFICATION_PATTERNS = frozenset({
     "pytest", "python -m pytest", "npm test", "npx jest", "yarn test",
@@ -88,6 +101,7 @@ class AgentLoop:
         on_thinking: Callable[[str, int], Awaitable[None]] | None = None,
         get_guidance: Callable[[], Awaitable[str | None]] | None = None,
         repo_name: str | None = None,
+        complexity: str | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -98,6 +112,7 @@ class AgentLoop:
         self._include_methodology = include_methodology
         self._task_description = task_description
         self._repo_name = repo_name
+        self._complexity = complexity
         self._heartbeat = heartbeat  # Called every few turns to signal progress
         # Pair-programming callbacks:
         self._on_tool_call = on_tool_call   # (tool_name, args, result_preview, turn) → stream to UI
@@ -393,7 +408,8 @@ class AgentLoop:
                         consecutive_reads += 1
 
                 # Inject nudge if budget exceeded (once)
-                if consecutive_reads >= _EXPLORATION_BUDGET and not nudge_injected:
+                budget = get_exploration_budget(self._complexity)
+                if consecutive_reads >= budget and not nudge_injected:
                     nudge_msg = Message(role="user", content=_EXPLORATION_NUDGE)
                     messages.append(nudge_msg)
                     api_messages.append(nudge_msg)

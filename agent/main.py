@@ -302,6 +302,7 @@ def _create_agent(
     task_id: int | None = None,
     task_description: str | None = None,
     repo_name: str | None = None,
+    complexity: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -360,6 +361,7 @@ def _create_agent(
         on_thinking=on_thinking,
         get_guidance=get_guidance,
         repo_name=repo_name,
+        complexity=complexity,
     )
 
 
@@ -760,7 +762,7 @@ async def _handle_coding_single(
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description, repo_name=repo.name)
+    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description, repo_name=repo.name, complexity=task.complexity)
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
@@ -858,10 +860,12 @@ async def _handle_coding_with_subtasks(
             for j in range(i):
                 title = phases[j].get("title", f"Phase {j + 1}")
                 preview = phases[j].get("output_preview", "completed")
-                prev_summaries.append(f"  - Phase {j + 1} ({title}): {preview}")
-            prev_context = "\n".join(prev_summaries)
+                prev_summaries.append(f"### Phase {j + 1}: {title}\n{preview}")
+            prev_context = "\n\n".join(prev_summaries)
+
             prompt += (
                 f"## Previous phases (already implemented — do NOT redo)\n{prev_context}\n\n"
+                "Run `git log --oneline -10` and `git diff --stat HEAD~5` to see what previous phases changed.\n\n"
                 "Implement ONLY the current phase. Commit your changes before stopping.\n"
             )
 
@@ -893,7 +897,7 @@ async def _handle_coding_with_subtasks(
             return
 
         phases[i]["status"] = "done"
-        phases[i]["output_preview"] = output[:200]
+        phases[i]["output_preview"] = output[:1500]
         await _update_subtasks(task_id, phases, i)
 
         r = await get_redis()
