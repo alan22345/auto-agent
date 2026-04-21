@@ -722,6 +722,11 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
     await create_branch(workspace, branch_name)
 
+    # Extract structured intent (fast LLM call — non-blocking on failure)
+    intent = await extract_intent(task.title, task.description)
+    if intent:
+        log.info(f"Intent extracted for task #{task_id}: {intent.get('change_type', '?')}")
+
     try:
         phases = []
         if task.complexity == "complex_large" and task.plan and not retry_reason:
@@ -731,12 +736,13 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
             await _handle_coding_with_subtasks(
                 task_id, task, phases, workspace, session_id,
                 base_branch, branch_name, is_continuation, repo,
+                intent=intent,
             )
         else:
             await _handle_coding_single(
                 task_id, task, workspace, session_id,
                 base_branch, branch_name, is_continuation, repo,
-                retry_reason,
+                retry_reason, intent=intent,
             )
     except Exception as e:
         log.exception(f"Coding failed for task #{task_id}")
@@ -747,10 +753,10 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 async def _handle_coding_single(
     task_id: int, task, workspace: str, session_id: str,
     base_branch: str, branch_name: str, is_continuation: bool, repo,
-    retry_reason: str | None = None,
+    retry_reason: str | None = None, intent: dict | None = None,
 ) -> None:
     """Standard coding path — single implementation pass."""
-    coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks)
+    coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks, intent=intent)
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
@@ -790,6 +796,7 @@ async def _handle_coding_single(
 async def _handle_coding_with_subtasks(
     task_id: int, task, phases: list[dict], workspace: str, session_id: str,
     base_branch: str, branch_name: str, is_continuation: bool, repo,
+    intent: dict | None = None,
 ) -> None:
     """Complex-large coding path — implement each phase as a subtask."""
     total = len(phases)
@@ -831,9 +838,13 @@ async def _handle_coding_with_subtasks(
         )
         await r.aclose()
 
+        from agent.prompts import _intent_section
+        intent_block = _intent_section(intent)
+        intent_text = f"\n{intent_block}\n\n" if intent_block else ""
         prompt = (
             f"You are implementing a large task in phases. This is phase {i + 1} of {total}.\n\n"
-            f"## Overall task\n{task.title}\n\n{task.description}\n\n"
+            f"## Overall task\n{task.title}\n\n{task.description}\n"
+            f"{intent_text}"
             f"## Current phase to implement\n{phase['content']}\n\n"
         )
         if i == 0:

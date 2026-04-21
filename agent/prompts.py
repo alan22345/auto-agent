@@ -28,7 +28,8 @@ Description: {description}
 Do NOT write any code. Plan only. Output the plan as text.
 """
 
-CODING_PROMPT = """\
+# Coding prompt when a plan exists — implement immediately
+CODING_PROMPT_WITH_PLAN = """\
 ## Instructions
 Implement the task below IMMEDIATELY. Do NOT explore the codebase broadly — only \
 read files directly relevant to the change. If the task specifies which file(s) to \
@@ -41,8 +42,35 @@ modify, go straight to editing. If unclear, do ONE targeted search then start co
 ## Task
 Title: {title}
 Description: {description}
+{intent_section}
 {plan_section}
 
+{critical_rules}
+"""
+
+# Coding prompt when NO plan exists — understand first, then code
+CODING_PROMPT_NO_PLAN = """\
+## Instructions
+Before writing any code, briefly summarize what you are about to do in 2-3 sentences. \
+State which files you expect to modify and what the end result should look like. \
+Then implement.
+
+1. Restate the task: what are you changing, where, and what does "done" look like?
+2. Do ONE targeted search to find the relevant code.
+3. Implement following the repo's existing patterns and style.
+4. Run the test suite and fix any failures you introduce.
+5. Self-review your changes before committing.
+{clarification_instructions}
+## Task
+Title: {title}
+Description: {description}
+{intent_section}
+
+{critical_rules}
+"""
+
+# Shared critical rules (used by both coding prompt variants)
+_CRITICAL_RULES = """\
 ## Critical rules
 
 ### Root-cause analysis (MANDATORY for bug fixes)
@@ -92,8 +120,7 @@ Number sequentially (check existing files). Skip ADRs for trivial changes \
 ## After implementation
 {ci_checks_section}
 1. Review your own diff — look for: off-by-one errors, missing edge cases, accidental debug code, incomplete error handling.
-2. Commit with a clear message: what changed, why, and (for bug fixes) what the root cause was.
-"""
+2. Commit with a clear message: what changed, why, and (for bug fixes) what the root cause was."""
 
 REVIEW_PROMPT = """\
 ## Review checklist
@@ -332,21 +359,51 @@ def _ci_checks_section(ci_checks: str | None) -> str:
     )
 
 
+def _intent_section(intent: dict | None) -> str:
+    if not intent:
+        return ""
+    parts = ["## Structured intent"]
+    if intent.get("change_type"):
+        parts.append(f"- **Type:** {intent['change_type']}")
+    if intent.get("target_areas"):
+        parts.append(f"- **Target areas:** {intent['target_areas']}")
+    if intent.get("acceptance_criteria"):
+        parts.append(f"- **Done when:** {intent['acceptance_criteria']}")
+    if intent.get("constraints"):
+        parts.append(f"- **Constraints:** {intent['constraints']}")
+    return "\n".join(parts)
+
+
 def build_coding_prompt(
     title: str,
     description: str,
     plan: str | None = None,
     repo_summary: str | None = None,
     ci_checks: str | None = None,
+    intent: dict | None = None,
 ) -> str:
-    plan_section = f"\n## Approved plan\n{plan}\n" if plan else ""
-    return CODING_PROMPT.format(
-        title=title,
-        description=description,
-        plan_section=plan_section,
-        clarification_instructions=CLARIFICATION_INSTRUCTIONS,
-        ci_checks_section=_ci_checks_section(ci_checks),
-    ) + _repo_context(repo_summary)
+    intent_section = _intent_section(intent)
+    critical_rules = _CRITICAL_RULES.format(ci_checks_section=_ci_checks_section(ci_checks))
+
+    if plan:
+        plan_section = f"\n## Approved plan\n{plan}\n"
+        result = CODING_PROMPT_WITH_PLAN.format(
+            title=title,
+            description=description,
+            plan_section=plan_section,
+            intent_section=intent_section,
+            clarification_instructions=CLARIFICATION_INSTRUCTIONS,
+            critical_rules=critical_rules,
+        )
+    else:
+        result = CODING_PROMPT_NO_PLAN.format(
+            title=title,
+            description=description,
+            intent_section=intent_section,
+            clarification_instructions=CLARIFICATION_INSTRUCTIONS,
+            critical_rules=critical_rules,
+        )
+    return result + _repo_context(repo_summary)
 
 
 def build_review_prompt(base_branch: str = "main") -> str:
