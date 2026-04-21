@@ -17,13 +17,34 @@ PLANNING_PROMPT = """\
 ## Instructions
 1. Read the README and CLAUDE.md (if they exist) to understand repo conventions, tech stack, and patterns.
 2. Explore the codebase to understand the relevant areas.
-3. Create a detailed implementation plan.
+3. Create a detailed implementation plan using the structure below.
 
 IMPORTANT: Output the plan as plain text in your response. Do NOT write to any files. Just print the plan directly.
 {clarification_instructions}
 ## Task
 Title: {title}
 Description: {description}
+
+## Required plan structure
+Your plan MUST include these sections in this order:
+
+### Goal
+Restate what this task accomplishes in 2-3 concrete sentences. Prove you understand the user's intent.
+
+### Acceptance Criteria
+Bullet list of testable conditions that must be true when the task is done. Be specific — \
+"works correctly" is not a criterion; "login succeeds on mobile Safari with valid credentials" is.
+
+### Files to Modify
+List every file you expect to create or modify, with a one-line note on what changes:
+- `path/to/file.py` — add new endpoint for X
+- `path/to/test.py` — add test coverage for X
+
+### Implementation Phases
+Break the work into sequential phases (## Phase 1, ## Phase 2, etc.). Each phase should:
+- Have a clear, descriptive title
+- List the specific changes to make
+- Be independently committable
 
 Do NOT write any code. Plan only. Output the plan as text.
 """

@@ -141,3 +141,23 @@ class TestCodingPromptWithIntent:
             plan="## Phase 1\nDo the thing",
         )
         assert "IMMEDIATELY" in prompt
+
+
+class TestStructuredPlanningPrompt:
+    def test_planning_prompt_requires_goal_section(self):
+        """Planning prompt should instruct agent to include a Goal section."""
+        from agent.prompts import build_planning_prompt
+        prompt = build_planning_prompt("Add dark mode", "Support dark mode toggle in settings")
+        assert "## Goal" in prompt or "### Goal" in prompt
+
+    def test_planning_prompt_requires_acceptance_criteria(self):
+        """Planning prompt should instruct agent to include acceptance criteria."""
+        from agent.prompts import build_planning_prompt
+        prompt = build_planning_prompt("Add dark mode", "Support dark mode toggle in settings")
+        assert "acceptance criteria" in prompt.lower() or "Acceptance Criteria" in prompt
+
+    def test_planning_prompt_requires_files_to_modify(self):
+        """Planning prompt should instruct agent to list files to modify."""
+        from agent.prompts import build_planning_prompt
+        prompt = build_planning_prompt("Add dark mode", "Support dark mode toggle in settings")
+        assert "files" in prompt.lower() and "modify" in prompt.lower()
