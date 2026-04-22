@@ -14,6 +14,8 @@ from agent.context.repo_map import (
     parse_stored_map,
     patch_map,
 )
+from shared.database import async_session
+from team_memory.graph import GraphEngine
 
 logger = structlog.get_logger()
 
@@ -260,43 +262,47 @@ class SystemPromptBuilder:
         return map_text
 
     async def _load_repo_map_from_memory(self, repo_name: str) -> str | None:
-        """Load the repo map from graph memory."""
+        """Load the repo map from team-memory."""
         try:
-            from agent.tools.memory_read import _search_nodes
-
-            nodes = await _search_nodes(f"repo-map:{repo_name}", limit=1)
-            for node in nodes:
-                if node.name == f"repo-map:{repo_name}" and node.node_type == "repo-map":
-                    return node.content
+            entity_name = f"repo-map:{repo_name}"
+            async with async_session() as session:
+                engine = GraphEngine(session)
+                matches = await engine.resolve(entity_name)
+                if not matches:
+                    return None
+                entity = matches[0].entity
+                facts = await engine._facts_for(entity.id)
+                if facts:
+                    return facts[0].content
         except Exception as e:
             logger.warning("repo_map_memory_load_failed", error=str(e))
         return None
 
     async def _store_repo_map_to_memory(self, repo_name: str, content: str) -> None:
-        """Store or update the repo map in graph memory."""
+        """Store or update the repo map in team-memory."""
         try:
-            from sqlalchemy import select
-
-            from shared.database import async_session
-            from shared.models import MemoryNode
-
+            entity_name = f"repo-map:{repo_name}"
             async with async_session() as session:
-                result = await session.execute(
-                    select(MemoryNode).where(
-                        MemoryNode.name == f"repo-map:{repo_name}",
-                        MemoryNode.node_type == "repo-map",
+                engine = GraphEngine(session)
+                matches = await engine.resolve(entity_name)
+                existing_facts = []
+                if matches:
+                    entity = matches[0].entity
+                    existing_facts = await engine._facts_for(entity.id)
+
+                if existing_facts:
+                    await engine.correct(
+                        fact_id=str(existing_facts[0].id),
+                        new_content=content,
+                        reason="repo updated",
                     )
-                )
-                node = result.scalar_one_or_none()
-                if node:
-                    node.content = content
                 else:
-                    node = MemoryNode(
-                        name=f"repo-map:{repo_name}",
-                        node_type="repo-map",
+                    await engine.remember(
                         content=content,
+                        entity=entity_name,
+                        entity_type="repo-map",
+                        kind="config",
                     )
-                    session.add(node)
                 await session.commit()
         except Exception as e:
             logger.warning("repo_map_memory_store_failed", error=str(e))
