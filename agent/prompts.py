@@ -342,12 +342,14 @@ Task is complete. Before finishing, reflect on what was learned:
 3. Were any existing team PREFERENCES applied or discovered? (e.g., the team prefers X approach)
 
 For each item:
-- Use memory_read to check if related knowledge already exists in the graph
-- Use memory_write to record new decisions (append_decision for evolving existing ones, create_node + create_edge for new knowledge)
+- Use recall to check if related knowledge already exists in the graph
+- Use remember to record new decisions or capabilities as facts on a named entity
+- Use correct to update an existing fact when the situation has evolved (this preserves history)
+- Use relate to link related entities together
 
 If nothing notable was learned, that's fine — skip writing.
 
-Keep node names descriptive and consistent with existing graph vocabulary.
+Keep entity names descriptive and consistent with existing graph vocabulary.
 """
 
 
