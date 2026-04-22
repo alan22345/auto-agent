@@ -20,6 +20,8 @@ dependencies = [
     "uvicorn[standard]>=0.42.0",
     "passlib[bcrypt]>=1.7.4",
     "PyJWT>=2.8.0",
+    "team-memory",
+    "psycopg2-binary>=2.9.12",
 ]
 
 [dependency-groups]
@@ -28,6 +30,7 @@ dev = [
     "pre-commit>=4.0.0",
     "pytest>=9.0",
     "pytest-asyncio>=1.0",
+    "testcontainers[postgres]>=4.7",
 ]
 
 [tool.pytest.ini_options]
@@ -63,3 +66,6 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/**/*.py" = ["E", "F", "I", "N", "UP"]  # Auto-generated migration files
+
+[tool.uv.sources]
+team-memory = { path = "../team-memory", editable = true }

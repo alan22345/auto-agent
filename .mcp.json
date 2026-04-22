@@ -1,8 +1,11 @@
 {
   "mcpServers": {
-    "graph-memory": {
-      "command": ".venv/bin/python3",
-      "args": ["-m", "agent.mcp_memory_server"]
+    "team-memory": {
+      "command": ".venv/bin/team-memory",
+      "args": ["serve"],
+      "env": {
+        "TEAM_MEMORY_DATABASE_URL": "postgresql+asyncpg://alanyeginchibayev@localhost:5432/autoagent"
+      }
     }
   }
 }
