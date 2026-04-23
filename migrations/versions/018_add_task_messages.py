@@ -3,16 +3,16 @@
 Users can post messages to a task while it's running. The agent reads
 unread messages between turns and injects them as user input.
 
-Revision ID: 017
-Revises: 016
+Revision ID: 018
+Revises: 017
 Create Date: 2026-04-23
 """
 from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "017"
-down_revision: Union[str, None] = "016"
+revision: str = "018"
+down_revision: Union[str, None] = "017"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
