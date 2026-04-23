@@ -53,6 +53,20 @@ class TaskData(BaseModel):
     created_by_user_id: int | None = None
 
 
+class TaskMessageData(BaseModel):
+    """A user-posted feedback message on a task."""
+    id: int
+    task_id: int
+    sender: str
+    content: str
+    created_at: str | None = None
+
+
+class TaskMessagePost(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/messages."""
+    content: str
+
+
 class RepoData(BaseModel):
     """Typed representation of a repo from the orchestrator API."""
     id: int

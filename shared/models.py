@@ -124,6 +124,19 @@ class TaskHistory(Base):
     task = relationship("Task", back_populates="history")
 
 
+class TaskMessage(Base):
+    """User-posted feedback on a running task. The agent reads unread
+    messages between turns and injects them into the conversation."""
+    __tablename__ = "task_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    sender = Column(String(128), nullable=False)  # user display_name, or "telegram:<chat_id>"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    read_by_agent_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class TaskOutcome(Base):
     """Tracks PR outcomes for the learning/feedback loop."""
     __tablename__ = "task_outcomes"
