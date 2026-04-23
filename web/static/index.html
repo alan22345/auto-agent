@@ -1665,16 +1665,25 @@
             renderChat();
           }
           break;
-        case "history":
-          // Load persisted history for a task
+        case "history": {
+          // Load persisted history + chat messages for a task, merged by time.
           const key = data.task_id;
-          chatMessages[key] = (data.entries || []).map(e => ({
+          const events = (data.entries || []).map(e => ({
             type: "event",
             message: e.message ? `[${e.to_status}] ${e.message}` : `[${e.to_status}]`,
             time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "",
+            _ts: e.timestamp || "",
           }));
+          const msgs = (data.messages || []).map(m => ({
+            type: "user",
+            message: `[${escHtml(m.sender)}]: ${escHtml(m.content)}`,
+            time: m.created_at ? new Date(m.created_at).toLocaleTimeString() : "",
+            _ts: m.created_at || "",
+          }));
+          chatMessages[key] = [...events, ...msgs].sort((a, b) => (a._ts || "").localeCompare(b._ts || ""));
           if (selectedTaskId === data.task_id) renderChat();
           break;
+        }
         case "event":
           addChat(data.task_id, "event", formatEvent(data.event_type, data.payload || {}));
           // Refresh subtask bar on subtask progress events

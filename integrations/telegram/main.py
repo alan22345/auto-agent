@@ -29,6 +29,34 @@ TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 ORCHESTRATOR_URL = settings.orchestrator_url
 
 
+async def _task_id_for_message(telegram_message_id: int) -> int | None:
+    """Look up the task a previously-sent Telegram notification belongs to."""
+    try:
+        r = await get_redis()
+        raw = await r.get(f"telegram:msg:{telegram_message_id}")
+        await r.aclose()
+        if raw is None:
+            return None
+        decoded = raw.decode() if isinstance(raw, bytes) else str(raw)
+        return int(decoded)
+    except Exception:
+        log.exception("Error looking up telegram→task mapping")
+        return None
+
+
+async def _post_task_feedback(task_id: int, content: str, sender: str) -> None:
+    """POST a user message to the task's chat stream via the orchestrator API."""
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages",
+                json={"content": content},
+                headers={"X-Sender": sender},
+            )
+    except Exception:
+        log.exception("Failed to post task feedback via Telegram reply")
+
+
 # ---------------------------------------------------------------------------
 # Inbound: poll Telegram for new messages
 # ---------------------------------------------------------------------------
@@ -86,6 +114,18 @@ async def _handle_update(update: dict[str, Any]) -> None:
         return
 
     log.info(f"Telegram message: {text[:80]}...")
+
+    # Reply-threading: if the user replied to a notification we sent, and
+    # that notification was tagged with a task_id, route the reply into
+    # the task's message stream as user feedback.
+    reply_to = message.get("reply_to_message") or {}
+    reply_msg_id = reply_to.get("message_id")
+    if reply_msg_id and not text.startswith("/"):
+        task_id = await _task_id_for_message(reply_msg_id)
+        if task_id is not None:
+            await _post_task_feedback(task_id, text, sender=f"telegram:{chat_id}")
+            await send_telegram_async(f"✉️ Sent to task #{task_id}.")
+            return
 
     if text.startswith("/"):
         await _handle_command(text)
@@ -424,23 +464,29 @@ async def _notify_user(event: Event) -> None:
         except Exception:
             pass
 
+    # All task-scoped notifications in this function thread back to the
+    # task's chat stream via reply. Bind task_id once so every send records
+    # the message_id → task_id mapping used by _handle_update.
+    async def send(message: str) -> None:
+        await send_telegram_async(message, task_id=event.task_id)
+
     if event.type == "task.created":
-        await send_telegram_async(f"📋 *New task created*\n{task_info}")
+        await send(f"📋 *New task created*\n{task_info}")
     elif event.type == "task.start_planning":
         feedback = event.payload.get("feedback") if event.payload else None
         if feedback:
-            await send_telegram_async(f"✏️ *Revising plan* based on your feedback\n{task_info}")
+            await send(f"✏️ *Revising plan* based on your feedback\n{task_info}")
         else:
-            await send_telegram_async(f"🔍 *Planning started*\n{task_info}")
+            await send(f"🔍 *Planning started*\n{task_info}")
     elif event.type == "task.rejected":
-        await send_telegram_async(f"↩️ *Plan rejected* — revising\n{task_info}")
+        await send(f"↩️ *Plan rejected* — revising\n{task_info}")
     elif event.type == "task.done":
-        await send_telegram_async(f"🎉 *Task done*\n{task_info}")
+        await send(f"🎉 *Task done*\n{task_info}")
     elif event.type == "task.ci_failed":
         reason = event.payload.get("reason", "")
-        await send_telegram_async(f"❌ *CI failed* — retrying\n{task_info}\n{reason}")
+        await send(f"❌ *CI failed* — retrying\n{task_info}\n{reason}")
     elif event.type == "task.start_coding":
-        await send_telegram_async(f"⚡ *Coding started*\n{task_info}")
+        await send(f"⚡ *Coding started*\n{task_info}")
     elif event.type == "task.review_complete":
         pr_url = event.payload.get("pr_url", "")
         review = event.payload.get("review", "")
@@ -448,18 +494,18 @@ async def _notify_user(event: Event) -> None:
         review_preview = review[:800] if review else ""
         if is_freeform:
             # Freeform tasks auto-merge — no human review needed.
-            await send_telegram_async(
+            await send(
                 f"🤖 *Independent review complete (freeform — auto-merging)*\n{task_info}\n{pr_url}\n\n"
                 f"{review_preview}"
             )
         elif approved:
-            await send_telegram_async(
+            await send(
                 f"✅ *PR ready for your review*\n{task_info}\n{pr_url}\n\n"
                 f"Independent review passed.\n{review_preview}"
             )
         else:
             fixes = event.payload.get("fixes", "")
-            await send_telegram_async(
+            await send(
                 f"🔧 *Review comments addressed — PR ready*\n{task_info}\n{pr_url}\n\n"
                 f"Reviewer found issues, they've been fixed and pushed.\n{review_preview}"
             )
@@ -468,36 +514,36 @@ async def _notify_user(event: Event) -> None:
         plan_preview = plan[:1500] if plan else "No plan details available."
         if is_freeform:
             # Freeform tasks have their plan auto-reviewed — no human action needed.
-            await send_telegram_async(
+            await send(
                 f"📝 *Plan ready (freeform — auto-reviewing)*\n{task_info}\n\n{plan_preview}"
             )
         else:
-            await send_telegram_async(
+            await send(
                 f"*Plan ready for review.*\n{task_info}\n\n{plan_preview}\n\n"
                 f"Reply to approve or provide feedback."
             )
     elif event.type == "task.clarification_needed":
         question = event.payload.get("question", "")
-        await send_telegram_async(
+        await send(
             f"*Clarification needed*\n{task_info}\n\n❓ {question}\n\n"
             f"Reply with `/answer {event.task_id} <your answer>` to respond."
         )
     elif event.type == "task.blocked":
         reason = event.payload.get("error", "")
         reason_text = f"\nReason: {reason}" if reason else ""
-        await send_telegram_async(
+        await send(
             f"*Task blocked* — needs your input.\n{task_info}{reason_text}\n\n"
             f"Reply with `/answer {event.task_id} <your response>` to unblock."
         )
     elif event.type == "task.failed":
         error = event.payload.get("error", "unknown")
-        await send_telegram_async(f"*Task failed.*\n{task_info}\nError: {error}")
+        await send(f"*Task failed.*\n{task_info}\nError: {error}")
     elif event.type == "task.dev_deployed":
         pr_url = event.payload.get("pr_url", "")
         branch = event.payload.get("branch", "")
         deploy_output = event.payload.get("output", "")
         output_preview = deploy_output[-500:] if deploy_output else ""
-        await send_telegram_async(
+        await send(
             f"🚀 *Dev deployment complete*\n{task_info}\n"
             f"Branch `{branch}` deployed to dev.\n"
             f"{pr_url}\n\n"
@@ -507,14 +553,14 @@ async def _notify_user(event: Event) -> None:
     elif event.type == "task.dev_deploy_failed":
         pr_url = event.payload.get("pr_url", "")
         output = event.payload.get("output", "")
-        await send_telegram_async(
+        await send(
             f"❌ *Dev deployment failed*\n{task_info}\n{pr_url}\n\n{output}"
         )
     elif event.type == "task.review_comments_addressed":
         pr_url = event.payload.get("pr_url", "")
         output = event.payload.get("output", "")
         output_preview = output[:500] if output else ""
-        await send_telegram_async(
+        await send(
             f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}"
             + (f"\n\n{output_preview}" if output_preview else "")
         )
@@ -524,24 +570,24 @@ async def _notify_user(event: Event) -> None:
         title = event.payload.get("title", "")
         status = event.payload.get("status", "")
         icon = "✅" if status == "done" else "⚙️"
-        await send_telegram_async(f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}")
+        await send(f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}")
     elif event.type == "task.ci_passed":
-        await send_telegram_async(f"*CI passed* — ready for your review.\n{task_info}")
+        await send(f"*CI passed* — ready for your review.\n{task_info}")
     elif event.type == "po.analysis_queued":
         repo_name = event.payload.get("repo_name", "unknown")
         position = event.payload.get("position", "?")
-        await send_telegram_async(f"⏳ *PO analysis queued* for `{repo_name}` (position {position})")
+        await send(f"⏳ *PO analysis queued* for `{repo_name}` (position {position})")
     elif event.type == "po.analysis_started":
         repo_name = event.payload.get("repo_name", "unknown")
-        await send_telegram_async(f"🔄 *PO analysis started* for `{repo_name}`")
+        await send(f"🔄 *PO analysis started* for `{repo_name}`")
     elif event.type == "po.suggestions_ready":
         repo_name = event.payload.get("repo_name", "unknown")
         count = event.payload.get("count", 0)
-        await send_telegram_async(f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`")
+        await send(f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`")
     elif event.type == "po.analysis_failed":
         repo_name = event.payload.get("repo_name", "unknown")
         reason = event.payload.get("reason", "")
-        await send_telegram_async(
+        await send(
             f"❌ *PO analysis failed* for `{repo_name}`"
             + (f"\nReason: {reason}" if reason else "")
         )

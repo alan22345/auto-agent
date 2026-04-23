@@ -128,11 +128,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 task_id = data.get("task_id")
                 if task_id:
                     async with httpx.AsyncClient() as client:
-                        resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/history")
-                        if resp.status_code == 200:
-                            await ws.send_json(
-                                {"type": "history", "task_id": task_id, "entries": resp.json()}
-                            )
+                        hist_resp, msg_resp = await asyncio.gather(
+                            client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/history"),
+                            client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages"),
+                        )
+                        entries = hist_resp.json() if hist_resp.status_code == 200 else []
+                        messages = msg_resp.json() if msg_resp.status_code == 200 else []
+                        await ws.send_json(
+                            {
+                                "type": "history",
+                                "task_id": task_id,
+                                "entries": entries,
+                                "messages": messages,
+                            }
+                        )
             elif msg_type == "send_guidance":
                 # Pair-programming: user sends guidance to a running agent.
                 # Persist via the HTTP API (which also pushes to Redis for
