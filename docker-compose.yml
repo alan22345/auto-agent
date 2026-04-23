@@ -30,13 +30,17 @@ services:
       retries: 5
 
   auto-agent:
-    build: .
+    build:
+      context: .
+      args:
+        GITHUB_TOKEN: ${GITHUB_TOKEN}
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://autoagent:changeme@postgres:5432/autoagent
       REDIS_URL: redis://redis:6379/0
       WORKSPACES_DIR: /workspaces
+      TEAM_MEMORY_DATABASE_URL: ${TEAM_MEMORY_DATABASE_URL}
     depends_on:
       postgres:
         condition: service_healthy

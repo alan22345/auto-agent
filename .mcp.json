@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "team-memory": {
-      "command": ".venv/bin/team-memory",
+      "command": "team-memory",
       "args": ["serve"],
       "env": {
-        "TEAM_MEMORY_DATABASE_URL": "postgresql+asyncpg://alanyeginchibayev@localhost:5432/autoagent"
+        "TEAM_MEMORY_DATABASE_URL": "${TEAM_MEMORY_DATABASE_URL}"
       }
     }
   }

@@ -68,4 +68,4 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 "migrations/**/*.py" = ["E", "F", "I", "N", "UP"]  # Auto-generated migration files
 
 [tool.uv.sources]
-team-memory = { path = "../team-memory", editable = true }
+team-memory = { git = "https://github.com/ergodic-ai/team-memory.git", branch = "main" }
