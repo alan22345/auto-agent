@@ -28,7 +28,7 @@ class TestRepoMapLoad:
         mock_engine = AsyncMock(spec=GraphEngine)
         mock_engine.resolve = AsyncMock(return_value=[])
 
-        with patch("agent.context.system.async_session", return_value=_make_session_cm(mock_session)):
+        with patch("agent.context.system.team_memory_session", return_value=_make_session_cm(mock_session)):
             with patch("agent.context.system.GraphEngine", return_value=mock_engine):
                 ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
                 result = await ctx._load_repo_map_from_memory("my-repo")
@@ -54,7 +54,7 @@ class TestRepoMapLoad:
         mock_engine.resolve = AsyncMock(return_value=[match])
         mock_engine._facts_for = AsyncMock(return_value=[fact])
 
-        with patch("agent.context.system.async_session", return_value=_make_session_cm(mock_session)):
+        with patch("agent.context.system.team_memory_session", return_value=_make_session_cm(mock_session)):
             with patch("agent.context.system.GraphEngine", return_value=mock_engine):
                 ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
                 result = await ctx._load_repo_map_from_memory("my-repo")
@@ -69,7 +69,7 @@ class TestRepoMapLoad:
         mock_session.__aenter__ = AsyncMock(side_effect=RuntimeError("DB gone"))
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.system.async_session", return_value=mock_session):
+        with patch("agent.context.system.team_memory_session", return_value=mock_session):
             ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
             result = await ctx._load_repo_map_from_memory("my-repo")
 
@@ -87,7 +87,7 @@ class TestRepoMapStore:
         mock_engine.resolve = AsyncMock(return_value=[])
         mock_engine.remember = AsyncMock(return_value={"entity_id": "x", "fact_id": "y"})
 
-        with patch("agent.context.system.async_session", return_value=_make_session_cm(mock_session)):
+        with patch("agent.context.system.team_memory_session", return_value=_make_session_cm(mock_session)):
             with patch("agent.context.system.GraphEngine", return_value=mock_engine):
                 ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
                 await ctx._store_repo_map_to_memory("new-repo", "some content")
@@ -123,7 +123,7 @@ class TestRepoMapStore:
         mock_engine._facts_for = AsyncMock(return_value=[existing_fact])
         mock_engine.correct = AsyncMock(return_value={"old_fact_id": fact_id, "new_fact_id": "nf"})
 
-        with patch("agent.context.system.async_session", return_value=_make_session_cm(mock_session)):
+        with patch("agent.context.system.team_memory_session", return_value=_make_session_cm(mock_session)):
             with patch("agent.context.system.GraphEngine", return_value=mock_engine):
                 ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
                 await ctx._store_repo_map_to_memory("existing-repo", "updated content")
@@ -142,7 +142,7 @@ class TestRepoMapStore:
         mock_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("DB gone"))
         mock_cm.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.system.async_session", return_value=mock_cm):
+        with patch("agent.context.system.team_memory_session", return_value=mock_cm):
             ctx = SystemPromptBuilder.__new__(SystemPromptBuilder)
             # Should not raise
             await ctx._store_repo_map_to_memory("bad-repo", "content")

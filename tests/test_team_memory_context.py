@@ -45,7 +45,7 @@ class TestQueryRelevantMemory:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.memory.async_session", return_value=mock_session):
+        with patch("agent.context.memory.team_memory_session", return_value=mock_session):
             with patch("agent.context.memory.GraphEngine", return_value=mock_engine):
                 result = await query_relevant_memory("update gemini provider")
 
@@ -67,7 +67,7 @@ class TestQueryRelevantMemory:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.memory.async_session", return_value=mock_session):
+        with patch("agent.context.memory.team_memory_session", return_value=mock_session):
             with patch("agent.context.memory.GraphEngine", return_value=mock_engine):
                 result = await query_relevant_memory("update gemini provider")
 
@@ -100,7 +100,7 @@ class TestQueryRelevantMemory:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.memory.async_session", return_value=mock_session):
+        with patch("agent.context.memory.team_memory_session", return_value=mock_session):
             with patch("agent.context.memory.GraphEngine", return_value=mock_engine):
                 result = await query_relevant_memory("provider")
 
@@ -113,7 +113,7 @@ class TestQueryRelevantMemory:
         mock_session.__aenter__ = AsyncMock(side_effect=RuntimeError("DB unreachable"))
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent.context.memory.async_session", return_value=mock_session):
+        with patch("agent.context.memory.team_memory_session", return_value=mock_session):
             result = await query_relevant_memory("some task")
 
         assert result == ""

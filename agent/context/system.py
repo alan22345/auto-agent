@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 
 import structlog
+from team_memory.graph import GraphEngine
 
 from agent.context.repo_map import (
     build_repo_map,
@@ -14,8 +15,7 @@ from agent.context.repo_map import (
     parse_stored_map,
     patch_map,
 )
-from shared.database import async_session
-from team_memory.graph import GraphEngine
+from shared.database import team_memory_session
 
 logger = structlog.get_logger()
 
@@ -263,9 +263,11 @@ class SystemPromptBuilder:
 
     async def _load_repo_map_from_memory(self, repo_name: str) -> str | None:
         """Load the repo map from team-memory."""
+        if team_memory_session is None:
+            return None
         try:
             entity_name = f"repo-map:{repo_name}"
-            async with async_session() as session:
+            async with team_memory_session() as session:
                 engine = GraphEngine(session)
                 matches = await engine.resolve(entity_name)
                 if not matches:
@@ -280,9 +282,11 @@ class SystemPromptBuilder:
 
     async def _store_repo_map_to_memory(self, repo_name: str, content: str) -> None:
         """Store or update the repo map in team-memory."""
+        if team_memory_session is None:
+            return
         try:
             entity_name = f"repo-map:{repo_name}"
-            async with async_session() as session:
+            async with team_memory_session() as session:
                 engine = GraphEngine(session)
                 matches = await engine.resolve(entity_name)
                 existing_facts = []

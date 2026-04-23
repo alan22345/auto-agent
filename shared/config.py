@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     postgres_password: str = "changeme"
     postgres_db: str = "autoagent"
 
+    # Shared team-memory DB (atlas) — separate from the orchestrator's local DB.
+    # Empty string disables the memory integration (recall returns "").
+    team_memory_database_url: str = ""
+
     # Redis
     redis_url: str = "redis://redis:6379/0"
 

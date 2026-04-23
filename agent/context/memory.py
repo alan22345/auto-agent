@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import structlog
-
-from shared.database import async_session
 from team_memory.graph import GraphEngine
+
+from shared.database import team_memory_session
 
 logger = structlog.get_logger()
 
@@ -18,8 +18,11 @@ async def query_relevant_memory(task_description: str) -> str:
     if not task_description:
         return ""
 
+    if team_memory_session is None:
+        return ""
+
     try:
-        async with async_session() as session:
+        async with team_memory_session() as session:
             engine = GraphEngine(session)
             result = await engine.recall(query=task_description)
 
