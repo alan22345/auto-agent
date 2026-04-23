@@ -324,22 +324,18 @@ async def on_review_comments_addressed(event: Event) -> None:
 
 
 def _should_auto_merge(task, repo_freeform_config) -> bool:
-    """Decide whether a task with passing CI is allowed to auto-merge.
+    """Decide whether a task with passing CI should auto-merge to dev.
 
-    Safety gate — requires BOTH:
-      - task.freeform_mode is True (task was routed through freeform pipeline), AND
-      - repo_freeform_config exists and repo_freeform_config.enabled is True
-        (the repo is currently opted-in to auto-merge)
+    Only freeform tasks auto-merge after CI passes. Non-freeform tasks
+    always go through human review, even if the repo has a dev branch.
 
-    If either is False/None, fall through to human review. This prevents the
-    task-50 incident where a task's freeform flag alone triggered an unreviewed
-    merge to prod on a repo whose freeform config was disabled.
+    If no freeform config exists for the repo, fall through to human review.
     """
-    if not getattr(task, "freeform_mode", False):
-        return False
     if repo_freeform_config is None:
         return False
-    return bool(getattr(repo_freeform_config, "enabled", False))
+    if not task.freeform_mode:
+        return False
+    return bool(getattr(repo_freeform_config, "dev_branch", ""))
 
 
 async def on_ci_passed(event: Event) -> None:

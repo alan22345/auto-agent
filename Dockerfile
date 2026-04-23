@@ -26,6 +26,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
+# Install team-memory (private repo). Pass GITHUB_TOKEN as a build arg:
+#   docker build --build-arg GITHUB_TOKEN=$(gh auth token) ...
+# The deploy.sh script wires this up automatically.
+ARG GITHUB_TOKEN
+RUN test -n "$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN build-arg required to install team-memory"; exit 1) && \
+    pip install --no-cache-dir --break-system-packages \
+      "git+https://${GITHUB_TOKEN}@github.com/ergodic-ai/team-memory.git@main"
+
 COPY . .
 RUN chown -R node:node /app
 

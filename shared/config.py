@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     postgres_password: str = "changeme"
     postgres_db: str = "autoagent"
 
+    # Shared team-memory DB (atlas) — separate from the orchestrator's local DB.
+    # Empty string disables the memory integration (recall returns "").
+    team_memory_database_url: str = ""
+
     # Redis
     redis_url: str = "redis://redis:6379/0"
 
@@ -39,8 +43,8 @@ class Settings(BaseSettings):
     admin_password: str = ""  # Must be set for first boot
     jwt_secret: str = "auto-agent-jwt-secret-change-me"
 
-    # LLM provider: "anthropic", "bedrock", or "claude_cli"
-    llm_provider: str = "anthropic"
+    # LLM provider: "claude_cli" (default), "anthropic", or "bedrock"
+    llm_provider: str = "claude_cli"
     llm_model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
     # Bedrock — explicit credentials for VM deployment (optional).

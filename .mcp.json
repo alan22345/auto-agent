@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "team-memory": {
+      "command": "team-memory",
+      "args": ["serve"],
+      "env": {
+        "TEAM_MEMORY_DATABASE_URL": "${TEAM_MEMORY_DATABASE_URL}"
+      }
+    }
+  }
+}

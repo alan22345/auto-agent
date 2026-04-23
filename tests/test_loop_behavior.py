@@ -170,3 +170,30 @@ class TestVerificationGateLogic:
         if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
             has_verified = True
         assert has_verified
+
+
+class TestComplexityAwareExplorationBudget:
+    def test_default_budget_unchanged(self):
+        """Default budget (no complexity) should be 8."""
+        from agent.loop import _EXPLORATION_BUDGET
+        assert _EXPLORATION_BUDGET == 8
+
+    def test_get_exploration_budget_simple(self):
+        from agent.loop import get_exploration_budget
+        assert get_exploration_budget("simple") == 5
+
+    def test_get_exploration_budget_complex(self):
+        from agent.loop import get_exploration_budget
+        assert get_exploration_budget("complex") == 15
+
+    def test_get_exploration_budget_complex_large(self):
+        from agent.loop import get_exploration_budget
+        assert get_exploration_budget("complex_large") == 25
+
+    def test_get_exploration_budget_none_returns_default(self):
+        from agent.loop import get_exploration_budget
+        assert get_exploration_budget(None) == 8
+
+    def test_get_exploration_budget_unknown_returns_default(self):
+        from agent.loop import get_exploration_budget
+        assert get_exploration_budget("unknown") == 8

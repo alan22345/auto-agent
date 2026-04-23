@@ -71,18 +71,22 @@ COMPLEX_LARGE_WORD_THRESHOLD = 60
 def classify_task(title: str, description: str) -> tuple[TaskComplexity, ClassificationResult]:
     """Classify a task as simple, complex, complex-large, or simple-no-code."""
     text = f"{title} {description}".lower()
+    title_text = title.lower()
     word_count = len(text.split())
 
-    # Check for query/research tasks first — no code needed
+    # Check for query/research tasks first — no code needed.
+    # Only scan the TITLE: query intent lives there. Scanning the description
+    # matches copy-deck text (e.g. "news research", "compare metrics") and
+    # misroutes coding tasks into the query handler.
     for pattern in NO_CODE_PATTERNS:
-        if re.search(pattern, text):
+        if re.search(pattern, title_text):
             result = ClassificationResult(
                 classification="simple_no_code",
-                reasoning=f"Query/research task: matched pattern '{pattern}'",
+                reasoning=f"Query/research task: title matched pattern '{pattern}'",
                 estimated_files=0,
                 risk=RiskLevel.LOW,
             )
-            log.info(f"Classified as simple_no_code: matched '{pattern}'")
+            log.info(f"Classified as simple_no_code: title matched '{pattern}'")
             return TaskComplexity.SIMPLE_NO_CODE, result
 
     # Count complex keyword matches

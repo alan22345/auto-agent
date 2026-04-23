@@ -29,6 +29,11 @@ class ClaudeCLIProvider(LLMProvider):
     def __init__(self, timeout: int = 1200):
         self._timeout = timeout
         self._session_id: str | None = None
+        self._cwd: str | None = None
+
+    def set_cwd(self, cwd: str) -> None:
+        """Set the working directory for CLI invocations."""
+        self._cwd = cwd
 
     def set_session(self, session_id: str, resume: bool = False) -> None:
         """Configure session for multi-phase tasks."""
@@ -86,6 +91,7 @@ class ClaudeCLIProvider(LLMProvider):
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            cwd=self._cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

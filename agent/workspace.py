@@ -151,10 +151,25 @@ async def commit_pending_changes(workspace: str, task_id: int, title: str) -> bo
 
     Returns True if a commit was made, False if there was nothing to commit.
     """
+    import structlog
+    _log = structlog.get_logger()
+
     # `git status --porcelain` lists both unstaged + untracked files
     status, _, _ = await _run_git("status", "--porcelain", cwd=workspace)
     if not status.strip():
+        # Log workspace state for debugging empty-branch failures
+        log_out, _, _ = await _run_git("log", "--oneline", "-5", cwd=workspace)
+        _log.info(
+            "commit_safety_net_nothing_to_commit",
+            task_id=task_id,
+            recent_commits=log_out.strip()[:200],
+        )
         return False
+    _log.info(
+        "commit_safety_net_found_uncommitted",
+        task_id=task_id,
+        status=status.strip()[:500],
+    )
 
     await _run_git("add", "-A", cwd=workspace, check=True)
 

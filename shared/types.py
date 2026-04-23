@@ -50,6 +50,11 @@ class TaskData(BaseModel):
     current_subtask: int | None = None
     created_at: str | None = None
     created_by_user_id: int | None = None
+    # Structured intent (extracted by LLM after classification)
+    change_type: str | None = None          # "bugfix", "feature", "refactor", "config", "docs"
+    target_areas: str | None = None         # comma-separated file paths or module areas
+    acceptance_criteria: str | None = None   # what "done" looks like
+    constraints: str | None = None          # what NOT to do
 
 
 class TaskMessageData(BaseModel):
@@ -247,30 +252,3 @@ class CreateUserRequest(BaseModel):
     display_name: str
 
 
-# --- Graph memory types ---
-
-
-class MemoryNodeData(BaseModel):
-    """Typed representation of a memory node."""
-    id: str
-    name: str
-    node_type: str
-    content: str = ""
-    created_at: str | None = None
-    updated_at: str | None = None
-    created_by_task_id: int | None = None
-
-
-class MemoryEdgeData(BaseModel):
-    """Typed representation of a memory edge."""
-    id: str
-    source_id: str
-    target_id: str
-    relation: str
-    created_at: str | None = None
-
-
-class MemoryNodeWithEdges(BaseModel):
-    """A node with its immediate edges for search results."""
-    node: MemoryNodeData
-    edges: list[MemoryEdgeData] = []

@@ -145,6 +145,85 @@ def _extract_clarification(output: str) -> str | None:
     return None
 
 
+_PLAN_MAX_LENGTH = 50_000  # Must match TransitionRequest.plan max_length
+
+
+def _trim_plan_text(text: str) -> str:
+    """Strip agent preamble from plan text and enforce the API size limit.
+
+    The agent joins ALL assistant messages (including exploration/reasoning)
+    which can exceed the 50KB API limit.  Strip everything before the first
+    markdown heading, then hard-truncate if still too long.
+    """
+    heading = _re.search(r"^(#{1,3} )", text, _re.MULTILINE)
+    if heading:
+        text = text[heading.start():]
+    if len(text) > _PLAN_MAX_LENGTH:
+        text = text[:_PLAN_MAX_LENGTH - 20] + "\n\n*(plan truncated)*"
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Intent extraction — structured understanding of what the user wants
+# ---------------------------------------------------------------------------
+
+INTENT_EXTRACTION_PROMPT = """\
+Analyze this task and extract structured intent. Output ONLY a JSON object, no other text.
+
+Task title: {title}
+Task description: {description}
+
+JSON format:
+{{
+  "change_type": "bugfix|feature|refactor|config|docs|test|performance",
+  "target_areas": "comma-separated file paths or module areas likely involved",
+  "acceptance_criteria": "what must be true when the task is done (1-2 sentences)",
+  "constraints": "what should NOT be changed or any restrictions (1 sentence, or empty string)"
+}}
+
+Rules:
+- change_type: pick the single best category
+- target_areas: infer from the description — name specific files/modules if mentioned, otherwise name the likely area (e.g. "authentication", "database layer")
+- acceptance_criteria: concrete, testable conditions — not vague ("works correctly")
+- constraints: only include if the description implies restrictions; empty string otherwise
+- Output ONLY the JSON. No markdown fences, no explanation.
+"""
+
+
+async def extract_intent(title: str, description: str) -> dict:
+    """Extract structured intent from a task title and description.
+
+    Returns a dict with keys: change_type, target_areas, acceptance_criteria, constraints.
+    Returns empty dict on any failure (non-blocking — the pipeline continues without it).
+    """
+    # Intent extraction is redundant when using Claude CLI — it understands
+    # the task natively. Only useful for API providers where we control the loop.
+    if settings.llm_provider == "claude_cli":
+        return {}
+    import json as _json
+    try:
+        provider = get_provider(model_override="fast")
+        from agent.llm.types import Message
+        response = await provider.complete(
+            messages=[Message(
+                role="user",
+                content=INTENT_EXTRACTION_PROMPT.format(title=title, description=description),
+            )],
+            max_tokens=300,
+        )
+        text = response.message.content.strip()
+        # Strip markdown fences if the LLM wraps the JSON
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        return _json.loads(text)
+    except Exception:
+        log.warning("intent_extraction_failed", title=title[:80])
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Agent factory — creates an AgentLoop with the right config
 # ---------------------------------------------------------------------------
@@ -227,6 +306,7 @@ def _create_agent(
     task_id: int | None = None,
     task_description: str | None = None,
     repo_name: str | None = None,
+    complexity: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -285,6 +365,7 @@ def _create_agent(
         on_thinking=on_thinking,
         get_guidance=get_guidance,
         repo_name=repo_name,
+        complexity=complexity,
     )
 
 
@@ -432,8 +513,15 @@ async def generate_repo_summary(repo_url: str, repo_name: str, default_branch: s
 # Planning
 # ---------------------------------------------------------------------------
 
+_active_planning: set[int] = set()
+
+
 async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     """Run the agent in planning mode (readonly tools) for complex tasks."""
+    if task_id in _active_planning:
+        log.info(f"Task #{task_id} planning already active — skipping duplicate")
+        return
+
     task = await get_task(task_id)
     if not task:
         return
@@ -487,6 +575,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     log.info(f"Planning task #{task_id} in {task.repo_name} (session={session_id})")
     workspace = await clone_repo(repo.url, task_id, repo.default_branch)
 
+    _active_planning.add(task_id)
     try:
         agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
@@ -500,7 +589,12 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             prompt = build_planning_prompt(task.title, task.description, repo.summary)
             result = await agent.run(prompt)
 
-        output = result.output
+        # Plans can span multiple turns if they hit max_tokens and get
+        # continuation prompts. Collect ALL assistant text to get the full plan.
+        output = "\n".join(
+            msg.content for msg in result.messages
+            if msg.role == "assistant" and msg.content
+        ) or result.output
 
         # Check if agent needs clarification
         question = _extract_clarification(output)
@@ -519,11 +613,14 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             await r.aclose()
             return
 
+        output = _trim_plan_text(output)
+
         async with httpx.AsyncClient() as client:
-            await client.post(
+            resp = await client.post(
                 f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
                 json={"status": "awaiting_approval", "message": "Plan ready for review", "plan": output},
             )
+            resp.raise_for_status()
 
         r = await get_redis()
         await publish_event(
@@ -536,6 +633,8 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         log.exception(f"Planning failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
         cleanup_workspace(task_id)
+    finally:
+        _active_planning.discard(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -603,14 +702,14 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     base_branch = repo.default_branch
     fallback_branch: str | None = None
 
-    # Freeform mode: target the dev branch; if it doesn't exist, clone_repo
-    # will create it from prod_branch.
-    if task.freeform_mode and task.repo_name:
+    # If the repo has a dev branch configured, ALL tasks target it.
+    # Code deploys to dev after CI passes; promotion to prod is manual.
+    if task.repo_name:
         freeform_cfg = await get_freeform_config(task.repo_name)
-        if freeform_cfg:
+        if freeform_cfg and freeform_cfg.dev_branch:
             base_branch = freeform_cfg.dev_branch
             fallback_branch = freeform_cfg.prod_branch or repo.default_branch
-            log.info(f"Freeform mode: targeting dev branch '{base_branch}' for task #{task_id}")
+            log.info(f"Targeting dev branch '{base_branch}' for task #{task_id}")
 
     is_continuation = task.plan is not None or retry_reason is not None
     log.info(f"Coding task #{task_id} in {task.repo_name} (session={session_id}, resume={is_continuation})")
@@ -629,6 +728,11 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
     await create_branch(workspace, branch_name)
 
+    # Extract structured intent (fast LLM call — non-blocking on failure)
+    intent = await extract_intent(task.title, task.description)
+    if intent:
+        log.info(f"Intent extracted for task #{task_id}: {intent.get('change_type', '?')}")
+
     try:
         phases = []
         if task.complexity == "complex_large" and task.plan and not retry_reason:
@@ -638,12 +742,13 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
             await _handle_coding_with_subtasks(
                 task_id, task, phases, workspace, session_id,
                 base_branch, branch_name, is_continuation, repo,
+                intent=intent,
             )
         else:
             await _handle_coding_single(
                 task_id, task, workspace, session_id,
                 base_branch, branch_name, is_continuation, repo,
-                retry_reason,
+                retry_reason, intent=intent,
             )
     except Exception as e:
         log.exception(f"Coding failed for task #{task_id}")
@@ -654,14 +759,14 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 async def _handle_coding_single(
     task_id: int, task, workspace: str, session_id: str,
     base_branch: str, branch_name: str, is_continuation: bool, repo,
-    retry_reason: str | None = None,
+    retry_reason: str | None = None, intent: dict | None = None,
 ) -> None:
     """Standard coding path — single implementation pass."""
-    coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks)
+    coding_prompt = build_coding_prompt(task.title, task.description, task.plan, repo.summary, repo.ci_checks, intent=intent)
     if retry_reason:
         coding_prompt += f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description, repo_name=repo.name)
+    agent = _create_agent(workspace, session_id=session_id, max_turns=50, task_id=task_id, task_description=task.description, repo_name=repo.name, complexity=task.complexity)
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
@@ -697,6 +802,7 @@ async def _handle_coding_single(
 async def _handle_coding_with_subtasks(
     task_id: int, task, phases: list[dict], workspace: str, session_id: str,
     base_branch: str, branch_name: str, is_continuation: bool, repo,
+    intent: dict | None = None,
 ) -> None:
     """Complex-large coding path — implement each phase as a subtask."""
     total = len(phases)
@@ -738,9 +844,13 @@ async def _handle_coding_with_subtasks(
         )
         await r.aclose()
 
+        from agent.prompts import _intent_section
+        intent_block = _intent_section(intent)
+        intent_text = f"\n{intent_block}\n\n" if intent_block else ""
         prompt = (
             f"You are implementing a large task in phases. This is phase {i + 1} of {total}.\n\n"
-            f"## Overall task\n{task.title}\n\n{task.description}\n\n"
+            f"## Overall task\n{task.title}\n\n{task.description}\n"
+            f"{intent_text}"
             f"## Current phase to implement\n{phase['content']}\n\n"
         )
         if i == 0:
@@ -754,10 +864,12 @@ async def _handle_coding_with_subtasks(
             for j in range(i):
                 title = phases[j].get("title", f"Phase {j + 1}")
                 preview = phases[j].get("output_preview", "completed")
-                prev_summaries.append(f"  - Phase {j + 1} ({title}): {preview}")
-            prev_context = "\n".join(prev_summaries)
+                prev_summaries.append(f"### Phase {j + 1}: {title}\n{preview}")
+            prev_context = "\n\n".join(prev_summaries)
+
             prompt += (
                 f"## Previous phases (already implemented — do NOT redo)\n{prev_context}\n\n"
+                "Run `git log --oneline -10` and `git diff --stat HEAD~5` to see what previous phases changed.\n\n"
                 "Implement ONLY the current phase. Commit your changes before stopping.\n"
             )
 
@@ -789,7 +901,7 @@ async def _handle_coding_with_subtasks(
             return
 
         phases[i]["status"] = "done"
-        phases[i]["output_preview"] = output[:200]
+        phases[i]["output_preview"] = output[:1500]
         await _update_subtasks(task_id, phases, i)
 
         r = await get_redis()
@@ -1089,8 +1201,98 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         await transition_task(task_id, "blocked", f"Failed to address review: {e}")
 
 
+# Track which tasks have an active plan conversation running
+_active_plan_conversations: set[int] = set()
+
+
+async def handle_plan_conversation(task_id: int, message: str) -> None:
+    """Resume the planning session so the user can discuss the plan with the agent.
+
+    The agent retains full context from planning — the user's message is injected
+    as a continuation and the agent responds. If the agent produces a revised plan
+    (detected by a markdown heading), the plan is updated. Otherwise the response
+    is streamed as a chat message.
+    """
+    if task_id in _active_plan_conversations:
+        log.info(f"Task #{task_id} plan conversation already active — pushing as guidance")
+        r = await get_redis()
+        await r.rpush(f"task:{task_id}:guidance", message)
+        await r.aclose()
+        return
+
+    task = await get_task(task_id)
+    if not task or not task.repo_name:
+        return
+
+    repo = await get_repo(task.repo_name)
+    if not repo:
+        return
+
+    session_id = _session_id(task_id, task.created_at)
+    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+
+    log.info(f"Plan conversation for task #{task_id}: {message[:100]}...")
+
+    _active_plan_conversations.add(task_id)
+    try:
+        agent = _create_agent(
+            workspace, session_id=session_id, max_turns=10,
+            task_id=task_id, readonly=True, repo_name=repo.name,
+        )
+        result = await agent.run(message, resume=True)
+        output = result.output
+
+        # If the agent revised the plan (contains markdown headings like ## Task),
+        # update the stored plan
+        if output and _re.search(r"^#{1,3} ", output, _re.MULTILINE):
+            full_output = "\n".join(
+                msg.content for msg in result.messages
+                if msg.role == "assistant" and msg.content
+            ) or output
+            full_output = _trim_plan_text(full_output)
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                    json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
+                )
+                resp.raise_for_status()
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output}).to_redis(),
+            )
+            await r.aclose()
+        else:
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(type="task.status_changed", task_id=task_id, payload={
+                    "status": task.status, "message": output[:2000],
+                }).to_redis(),
+            )
+            await r.aclose()
+
+        log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
+    finally:
+        _active_plan_conversations.discard(task_id)
+
+
+# Track which tasks have an active clarification resume running
+_active_clarification_tasks: set[int] = set()
+
+
 async def handle_clarification_response(task_id: int, answer: str) -> None:
     """Resume a task after the user answered a clarification question."""
+    # Guard against concurrent resumes — if the agent is already running from
+    # a previous clarification answer, push this message as guidance instead
+    if task_id in _active_clarification_tasks:
+        log.info(f"Task #{task_id} already resuming — pushing as guidance")
+        r = await get_redis()
+        await r.rpush(f"task:{task_id}:guidance", answer)
+        await r.aclose()
+        return
+
     task = await get_task(task_id)
     if not task or not task.repo_name:
         return
@@ -1104,11 +1306,15 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
 
     log.info(f"Resuming task #{task_id} with clarification answer (session={session_id})")
 
-    agent = _create_agent(workspace, session_id=session_id, max_turns=40)
-    result = await agent.run(
-        f"The user answered your clarification question:\n\n{answer}\n\nPlease continue with the task.",
-        resume=True,
-    )
+    _active_clarification_tasks.add(task_id)
+    try:
+        agent = _create_agent(workspace, session_id=session_id, max_turns=40, task_id=task_id, repo_name=repo.name)
+        result = await agent.run(
+            f"The user answered your clarification question:\n\n{answer}\n\nPlease continue with the task.",
+            resume=True,
+        )
+    finally:
+        _active_clarification_tasks.discard(task_id)
 
     follow_up = _extract_clarification(result.output)
     if follow_up:
@@ -1193,7 +1399,7 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
 # Deploy preview (unchanged — no CLI dependency)
 # ---------------------------------------------------------------------------
 
-DEPLOY_WORKFLOW_NAMES = ["deploy.yml", "deploy-dev.yml"]
+DEPLOY_WORKFLOW_NAMES = ["deploy-dev.yml"]
 DEPLOY_SCRIPT_CANDIDATES = [
     "scripts/deploy-dev.sh", "scripts/deploy-dev", "scripts/deploy_dev.sh",
     "scripts/deploy.sh", "deploy-dev.sh", "deploy.sh",
@@ -1562,6 +1768,15 @@ async def event_loop() -> None:
                                 await handle_blocked_response(task_id, task, comments)
                             elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
                                 await handle_pr_review_comments(task_id, comments)
+                            elif task.status == "coding" and not task.pr_url:
+                                # Agent is actively coding — push as guidance for next turn
+                                r2 = await get_redis()
+                                await r2.rpush(f"task:{task_id}:guidance", comments)
+                                await r2.aclose()
+                                log.info(f"Pushed guidance to coding task #{task_id}")
+                            elif task.status in ("awaiting_approval", "planning"):
+                                # Resume the planning agent session so the user can discuss the plan
+                                await handle_plan_conversation(task_id, comments)
                             elif task.status == "queued":
                                 # User wants to kick a queued task — ask orchestrator to start it
                                 log.info(f"Message for queued task #{task_id} — attempting to start")
@@ -1573,13 +1788,6 @@ async def event_loop() -> None:
                                 await r2.aclose()
                             else:
                                 log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")
-                                if task.plan:
-                                    r2 = await get_redis()
-                                    await publish_event(
-                                        r2,
-                                        Event(type="task.plan_ready", task_id=task_id, payload={"plan": task.plan}).to_redis(),
-                                    )
-                                    await r2.aclose()
                 except Exception:
                     log.exception("Error handling event")
                 finally:

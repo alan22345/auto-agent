@@ -24,7 +24,7 @@ rsync -avz \
   --exclude='.env' \
   --exclude='.git' \
   --exclude='node_modules' \
-  --exclude='.claude' \
+  --exclude='.claude/settings.local.json' \
   "$SCRIPT_DIR/" "$VM:$REMOTE_DIR/"
 
 if [[ "${1:-}" == "migrate" ]]; then
@@ -33,7 +33,10 @@ if [[ "${1:-}" == "migrate" ]]; then
 fi
 
 echo "==> Rebuilding and restarting container..."
-ssh "$VM" "cd $REMOTE_DIR && docker compose up -d --build auto-agent"
+# Pass GITHUB_TOKEN through so the build can install the private team-memory
+# package. The VM's .env GITHUB_TOKEN is reused here — `docker compose build`
+# reads the build args from compose.yml, which references ${GITHUB_TOKEN}.
+ssh "$VM" "cd $REMOTE_DIR && set -a && . .env && set +a && docker compose up -d --build auto-agent"
 
 echo "==> Waiting for health check..."
 sleep 6

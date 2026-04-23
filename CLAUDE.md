@@ -151,6 +151,61 @@ These are load-bearing — changing them has broken the agent before:
 - Static web assets → `web/static/`
 - Max file size guideline: ~500 lines. If a module exceeds this, split by concern.
 
+## Methodology (MANDATORY)
+
+Follow this process for every task. Do not skip steps. Do not jump to coding.
+
+### Step 1: Understand the task
+- Read the task title and description carefully.
+- If anything is ambiguous, output `CLARIFICATION_NEEDED:` followed by your question, then STOP.
+- If the task is clear, proceed.
+
+### Step 2: Explore and plan
+- Read the relevant files. Use the repo map above to find them — do not explore broadly.
+- Think through 2-3 approaches. Pick the simplest one that fully solves the task.
+- Write a brief plan before touching any code:
+  - **Goal**: What this task accomplishes (2-3 sentences).
+  - **Acceptance criteria**: Testable conditions that must be true when done.
+  - **Files to modify**: Every file you will create or change, with a one-line note.
+  - **Steps**: Numbered list of what you will do, in order.
+
+### Step 3: Implement with TDD
+For each change:
+1. **Write a failing test** that captures the expected behavior.
+2. **Run the test** — confirm it fails for the right reason.
+3. **Write the minimal code** to make the test pass.
+4. **Run the test** — confirm it passes.
+5. **Commit** with a clear message.
+
+If the repo has no test suite, skip TDD but still verify manually (run the app, check output).
+
+### Step 4: Verify before claiming done
+Before saying you are done:
+1. Run the full test suite: `.venv/bin/python3 -m pytest tests/ -q`
+2. Run the linter: `ruff check .`
+3. Read the actual output. Confirm it passes.
+4. If anything fails, fix it and re-run.
+
+Do NOT say "should work" or "looks correct". Show the test/lint output as evidence.
+
+### Step 5: Self-review
+Run `git diff` and review your own changes:
+- Off-by-one errors, missing edge cases, accidental debug code?
+- Did you follow existing code style and patterns?
+- Did you add anything the task didn't ask for? Remove it.
+- For bug fixes: did you fix the root cause, not just the symptom?
+
+### Step 6: Commit and report
+- Commit with a message explaining what changed and why.
+- For bug fixes, include the root cause in the commit message.
+
+### Graph memory
+After completing a task, check if anything notable was learned:
+- Use `memory_search` to see if related knowledge exists.
+- Use `memory_create_node` to record new decisions, capabilities, or preferences.
+- Use `memory_append_decision` to update existing decisions (preserves history).
+- If nothing notable was learned, skip this step.
+
 ## ADR process
 
 Architectural decisions live in `docs/decisions/` as ADRs (Architecture Decision Records). Use `docs/decisions/000-template.md` as a template when making a non-obvious design choice. Examples in `docs/decisions/001-harness-engineering.md`.

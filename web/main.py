@@ -282,6 +282,13 @@ async def _handle_send_message(
                 )
         return
 
+    # Persist the message in task history so it survives page refresh
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/message",
+            json={"message": text, "username": username or "unknown"},
+        )
+
     r = await get_redis()
     event = Event(
         type="human.message",
@@ -291,7 +298,7 @@ async def _handle_send_message(
     await publish_event(r, event.to_redis())
     await r.aclose()
 
-    await broadcast({"type": "user", "message": text, "username": username})
+    await broadcast({"type": "user", "message": text, "task_id": task_id, "username": username})
 
 
 async def _handle_approve(ws: WebSocket, data: dict) -> None:

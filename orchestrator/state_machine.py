@@ -11,7 +11,7 @@ from shared.models import Task, TaskComplexity, TaskHistory, TaskStatus
 TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.INTAKE: {TaskStatus.CLASSIFYING},
     TaskStatus.CLASSIFYING: {TaskStatus.QUEUED, TaskStatus.FAILED},
-    TaskStatus.QUEUED: {TaskStatus.PLANNING, TaskStatus.CODING},
+    TaskStatus.QUEUED: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.DONE},
     TaskStatus.PLANNING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED},
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
     TaskStatus.AWAITING_CLARIFICATION: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},  # user replied
@@ -19,9 +19,9 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PR_CREATED: {TaskStatus.AWAITING_CI},
     TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED},  # CI pass/fail
     TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING},  # approved or request changes
-    TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED},
+    TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},
     TaskStatus.DONE: set(),
-    TaskStatus.FAILED: set(),
+    TaskStatus.FAILED: {TaskStatus.DONE},
 }
 
 
