@@ -134,14 +134,19 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                                 {"type": "history", "task_id": task_id, "entries": resp.json()}
                             )
             elif msg_type == "send_guidance":
-                # Pair-programming: user sends guidance to a running agent
+                # Pair-programming: user sends guidance to a running agent.
+                # Persist via the HTTP API (which also pushes to Redis for
+                # real-time delivery) so the message survives UI reloads.
                 task_id = data.get("task_id")
                 message = data.get("message", "").strip()
                 if task_id and message:
-                    from shared.redis_client import get_redis
-                    r = await get_redis()
-                    await r.rpush(f"task:{task_id}:guidance", message)
-                    await r.aclose()
+                    headers = {"X-Sender": username} if username else {}
+                    async with httpx.AsyncClient() as client:
+                        await client.post(
+                            f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages",
+                            json={"content": message},
+                            headers=headers,
+                        )
                     # Echo back to all clients so they see their own message
                     await broadcast({
                         "type": "guidance_sent",

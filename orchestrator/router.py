@@ -29,6 +29,7 @@ from shared.models import (
     SuggestionStatus,
     Task,
     TaskHistory,
+    TaskMessage,
     TaskSource,
     TaskStatus,
     User,
@@ -46,6 +47,8 @@ from shared.types import (
     ScheduleResponse,
     SuggestionData,
     TaskData,
+    TaskMessageData,
+    TaskMessagePost,
     UserData,
 )
 
@@ -463,6 +466,101 @@ async def update_subtasks(
     await session.commit()
     await session.refresh(task)
     return _task_to_response(task)
+
+
+@router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
+async def list_task_messages(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> list[TaskMessageData]:
+    """Return all user-posted messages for a task, oldest first."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    result = await session.execute(
+        select(TaskMessage)
+        .where(TaskMessage.task_id == task_id)
+        .order_by(TaskMessage.created_at.asc())
+    )
+    rows = result.scalars().all()
+    return [
+        TaskMessageData(
+            id=m.id,
+            task_id=m.task_id,
+            sender=m.sender,
+            content=m.content,
+            created_at=m.created_at.isoformat() if m.created_at else None,
+        )
+        for m in rows
+    ]
+
+
+@router.post("/tasks/{task_id}/messages", response_model=TaskMessageData)
+async def post_task_message(
+    task_id: int,
+    req: TaskMessagePost,
+    session: AsyncSession = Depends(get_session),
+    authorization: str = Header(None),
+    x_sender: str = Header(None),
+) -> TaskMessageData:
+    """Post a feedback message to a task.
+
+    Sender resolution order:
+    1. Authenticated user's display_name (if Authorization header present).
+    2. `X-Sender` header (used by internal callers like the Telegram bridge).
+    3. Falls back to "anonymous".
+    """
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(400, "content must not be empty")
+
+    sender = "anonymous"
+    if authorization:
+        try:
+            payload = _verify_auth_header(authorization)
+            user_result = await session.execute(
+                select(User).where(User.id == payload["user_id"])
+            )
+            user = user_result.scalar_one_or_none()
+            if user:
+                sender = user.display_name
+        except HTTPException:
+            if x_sender:
+                sender = x_sender
+    elif x_sender:
+        sender = x_sender
+
+    msg = TaskMessage(task_id=task_id, sender=sender, content=content)
+    session.add(msg)
+    await session.commit()
+    await session.refresh(msg)
+
+    # Push onto the agent's guidance queue so the loop picks it up on its
+    # next turn, and publish an event for any other subscribers.
+    formatted = f"{sender}: {content}" if sender not in ("anonymous",) else content
+    r = await get_redis()
+    await r.rpush(f"task:{task_id}:guidance", formatted)
+    await publish_event(
+        r,
+        Event(
+            type="task.feedback",
+            task_id=task_id,
+            payload={"message_id": msg.id, "sender": sender},
+        ).to_redis(),
+    )
+    await r.aclose()
+
+    return TaskMessageData(
+        id=msg.id,
+        task_id=msg.task_id,
+        sender=msg.sender,
+        content=msg.content,
+        created_at=msg.created_at.isoformat() if msg.created_at else None,
+    )
 
 
 @router.post("/tasks/{task_id}/done", response_model=TaskData)
