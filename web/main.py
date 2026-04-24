@@ -15,9 +15,11 @@ from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSock
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from agent.memory_extractor import extract
 from shared.config import settings
 from shared.events import Event
 from shared.logging import setup_logging
+from shared.memory_io import correct_fact, recall_entity, remember_row
 from shared.redis_client import (
     ack_event,
     ensure_stream_group,
@@ -25,7 +27,7 @@ from shared.redis_client import (
     publish_event,
     read_events,
 )
-from shared.types import TaskData
+from shared.types import MemorySaveResult, ProposedFact, TaskData
 
 log = setup_logging("web-ui")
 
@@ -225,6 +227,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     if resp.status_code == 200:
                         tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
                         await ws.send_json({"type": "task_list", "tasks": tasks})
+            elif msg_type == "memory_extract":
+                await _handle_memory_extract(ws, data)
+            elif msg_type == "memory_reextract":
+                await _handle_memory_reextract(ws, data)
+            elif msg_type == "memory_save":
+                await _handle_memory_save(ws, data)
 
     except WebSocketDisconnect:
         connected_clients.pop(ws, None)
@@ -584,6 +592,142 @@ async def _handle_load_freeform_config(ws: WebSocket, data: dict) -> None:
         resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
         if resp.status_code == 200:
             await ws.send_json({"type": "freeform_config_list", "configs": resp.json()})
+
+
+# --- Memory tab websocket handlers ---
+
+
+async def _send_memory_error(ws, message: str) -> None:
+    await ws.send_json({"type": "memory_error", "message": message})
+
+
+async def _run_memory_extract(
+    ws, text: str, hint: str | None, source_id: str | None,
+) -> None:
+    """Shared core for extract + reextract."""
+    if len(text) > MEMORY_MAX_CHARS:
+        await _send_memory_error(ws, f"input too large: {len(text)} chars (cap {MEMORY_MAX_CHARS})")
+        return
+
+    # First pass: extract with NO existing-facts context (we need entity names first).
+    try:
+        first_pass = await extract(text=text, hint=hint, existing_facts_by_entity={})
+    except ValueError as e:
+        await _send_memory_error(ws, f"extraction failed: {e}")
+        return
+
+    # Look up existing facts for each proposed entity.
+    existing_by_entity: dict[str, list[dict]] = {}
+    entity_match: dict[str, dict] = {}
+    for row in first_pass:
+        if row.entity in existing_by_entity:
+            continue
+        match = await recall_entity(row.entity)
+        if match:
+            entity_match[row.entity] = match
+            existing_by_entity[row.entity] = match.get("facts", [])
+
+    # Second pass if we found existing entities — lets the LLM tag conflicts.
+    if existing_by_entity:
+        try:
+            rows = await extract(text=text, hint=hint, existing_facts_by_entity=existing_by_entity)
+        except ValueError as e:
+            await _send_memory_error(ws, f"extraction failed: {e}")
+            return
+    else:
+        rows = first_pass
+
+    # Annotate each row with entity_status + score.
+    for row in rows:
+        if row.entity in entity_match:
+            row.entity_status = "exists"
+            row.entity_match_score = entity_match[row.entity].get("score")
+        else:
+            row.entity_status = "new"
+
+    await ws.send_json({
+        "type": "memory_rows",
+        "source_id": source_id,
+        "rows": [r.model_dump() for r in rows],
+    })
+
+
+async def _handle_memory_extract(ws, data: dict) -> None:
+    source_id = data.get("source_id")
+    pasted = data.get("pasted_text")
+    hint = (data.get("context_hint") or "").strip() or None
+
+    if bool(source_id) == bool(pasted):
+        await _send_memory_error(ws, "provide exactly one of source_id or pasted_text")
+        return
+
+    if source_id:
+        sess = memory_sessions.get(source_id)
+        if not sess:
+            await _send_memory_error(ws, f"unknown source_id: {source_id}")
+            return
+        text = sess.text
+    else:
+        text = pasted
+
+    await _run_memory_extract(ws, text=text, hint=hint, source_id=source_id)
+
+
+async def _handle_memory_reextract(ws, data: dict) -> None:
+    source_id = data.get("source_id")
+    note = (data.get("note") or "").strip()
+    sess = memory_sessions.get(source_id) if source_id else None
+    if not sess:
+        await _send_memory_error(ws, "no source in session; re-upload or re-paste")
+        return
+    hint = f"User correction note: {note}" if note else None
+    await _run_memory_extract(ws, text=sess.text, hint=hint, source_id=source_id)
+
+
+async def _handle_memory_save(ws, data: dict) -> None:
+    rows_raw = data.get("rows") or []
+    rows: list[ProposedFact] = []
+    for r in rows_raw:
+        try:
+            rows.append(ProposedFact.model_validate(r))
+        except Exception as e:
+            await _send_memory_error(ws, f"invalid row: {e}")
+            return
+
+    # Guard: every conflict row needs a resolution.
+    for row in rows:
+        if row.conflicts and row.resolution is None:
+            await _send_memory_error(
+                ws,
+                f"row {row.row_id} has a conflict but no resolution chosen",
+            )
+            return
+
+    results: list[MemorySaveResult] = []
+    source_id = data.get("source_id")
+    for row in rows:
+        try:
+            if row.conflicts and row.resolution == "keep_existing":
+                results.append(MemorySaveResult(row_id=row.row_id, ok=True))
+                continue
+            if row.conflicts and row.resolution == "replace":
+                fact_id = None
+                for c in row.conflicts:
+                    fact_id = await correct_fact(c.fact_id, row.content)
+                results.append(MemorySaveResult(row_id=row.row_id, ok=True, fact_id=fact_id))
+                continue
+            fid = await remember_row(row)
+            results.append(MemorySaveResult(row_id=row.row_id, ok=True, fact_id=fid))
+        except Exception as e:
+            results.append(MemorySaveResult(row_id=row.row_id, ok=False, error=str(e)))
+
+    if source_id and all(r.ok for r in results):
+        memory_sessions.pop(source_id, None)
+
+    await ws.send_json({
+        "type": "memory_saved",
+        "results": [r.model_dump() for r in results],
+    })
 
 
 # --- Event listener: push task updates to the web UI ---
