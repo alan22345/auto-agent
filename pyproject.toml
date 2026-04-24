@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
+    "pypdf>=4.0",
     "python-dotenv>=1.2.2",
     "redis[hiredis]>=7.4.0",
     "slack-bolt>=1.27.0",
