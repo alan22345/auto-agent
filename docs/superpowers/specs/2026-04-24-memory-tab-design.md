@@ -50,11 +50,20 @@ Follows the strict layering in CLAUDE.md:
 - `agent/memory_extractor.py` uses `agent/llm/` + `shared/team_memory.py` for `recall` lookups.
 - `web/main.py` imports both (web is the top layer).
 
+### Input paths
+
+There are two first-class ways to submit source material:
+
+1. **File upload** — drag-drop or file picker, goes through `POST /memory/upload`, which parses to text and returns a `source_id`.
+2. **Pasted text** — the textarea in the drop zone bypasses upload entirely and ships the raw string directly in the `memory_extract` websocket message. This is the primary path for content that's already in the teammate's clipboard (Slack threads, meeting notes, email bodies) and avoids making them save a throwaway file first.
+
+Both paths converge at the same `memory_extract` handler and same review flow. The 200k-character cap applies to both; oversize paste is rejected with the same "split into smaller chunks" error as oversize upload.
+
 ### Data flow (happy path)
 
-1. Client sends `POST /memory/upload` (or skips upload for pasted text).
-2. Server parses: `.pdf` via `pypdf`, text files via UTF-8. File bytes are freed the moment parsing returns. Server holds only the extracted text on the websocket session, keyed by `source_id`.
-3. Client sends ws message `memory_extract {source_id | pasted_text, context_hint}`.
+1. Client either sends `POST /memory/upload` (file path) or skips straight to step 3 with the pasted string (paste path).
+2. Server parses upload: `.pdf` via `pypdf`, text files via UTF-8. File bytes are freed the moment parsing returns. Server holds only the extracted text on the websocket session, keyed by `source_id`.
+3. Client sends ws message `memory_extract {source_id | pasted_text, context_hint}`. Exactly one of `source_id` or `pasted_text` is set.
 4. Server calls `MemoryExtractor.extract(text, hint)` → structured LLM call returning `[{entity, kind, content}]`.
 5. For each distinct entity name, server calls `team_memory.recall(name)` to tag rows `exists` (with match confidence) vs `new`.
 6. Server returns `{rows: [...]}`.
@@ -127,9 +136,13 @@ Per CLAUDE.md TDD: write failing tests first.
 
 - `tests/test_memory_ws_handlers.py`
   - Fakes the team_memory client.
-  - `memory_extract`: returned rows have `exists`/`new` badges based on fake `recall` results.
+  - `memory_extract` via **pasted_text**: skips upload entirely, rows returned directly.
+  - `memory_extract` via **source_id**: uses previously uploaded text from session state.
+  - Rejects when both `source_id` and `pasted_text` are set, or neither.
+  - Returned rows have `exists`/`new` badges based on fake `recall` results.
   - `memory_save`: one `remember` call per row; partial failure surfaces per-row; success clears session state.
   - `memory_reextract`: reuses stored text, passes note into extractor.
+  - Oversize paste rejected the same way as oversize upload.
 
 - `tests/test_memory_upload.py`
   - POST a small UTF-8 file → parsed, bytes freed (assert no tempfile left).
