@@ -12,6 +12,18 @@ def _clear_sessions():
     memory_sessions.clear()
 
 
+@pytest.fixture(autouse=True)
+def _patch_auth():
+    from web.main import _require_user, app
+
+    async def _stub():
+        return 1
+
+    app.dependency_overrides[_require_user] = _stub
+    yield
+    app.dependency_overrides.clear()
+
+
 def test_upload_text_file_returns_source_id():
     client = TestClient(app)
     resp = client.post(

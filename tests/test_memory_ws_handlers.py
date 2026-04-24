@@ -1,13 +1,16 @@
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from shared.types import ConflictInfo, ProposedFact
 from web.main import (
+    MEMORY_SESSION_TTL_SEC,
     MemorySession,
     _handle_memory_extract,
     _handle_memory_reextract,
     _handle_memory_save,
+    _sweep_memory_sessions_once,
     memory_sessions,
 )
 
@@ -51,13 +54,13 @@ async def test_extract_from_pasted_text():
 
 
 async def test_extract_from_source_id():
-    memory_sessions["src-1"] = MemorySession(text="body text")
+    memory_sessions["src-1"] = MemorySession(text="body text", user_id=1)
     ws = FakeWS()
     with patch("web.main.extract", new=AsyncMock(return_value=[])) as ex, \
          patch("web.main.recall_entity", new=AsyncMock(return_value=None)):
         await _handle_memory_extract(ws, {
             "type": "memory_extract", "source_id": "src-1",
-        })
+        }, user_id=1)
     assert ex.await_args.kwargs["text"] == "body text"
     assert ws.sent[-1]["type"] == "memory_rows"
 
@@ -176,14 +179,14 @@ async def test_save_partial_failure():
 
 
 async def test_reextract_uses_stored_text():
-    memory_sessions["src-1"] = MemorySession(text="orig")
+    memory_sessions["src-1"] = MemorySession(text="orig", user_id=1)
     ws = FakeWS()
     with patch("web.main.extract", new=AsyncMock(return_value=[])) as ex, \
          patch("web.main.recall_entity", new=AsyncMock(return_value=None)):
         await _handle_memory_reextract(ws, {
             "type": "memory_reextract", "source_id": "src-1",
             "note": "these are about X",
-        })
+        }, user_id=1)
     assert ex.await_args.kwargs["text"] == "orig"
     assert "X" in ex.await_args.kwargs["hint"]
 
@@ -195,3 +198,25 @@ async def test_oversize_paste_rejected():
     })
     assert ws.sent[-1]["type"] == "memory_error"
     assert "too large" in ws.sent[-1]["message"].lower()
+
+
+async def test_extract_rejects_other_user_source_id():
+    """A session owned by user 2 must not be accessible by user 1."""
+    memory_sessions["src-other"] = MemorySession(text="secret", user_id=2)
+    ws = FakeWS()
+    await _handle_memory_extract(ws, {
+        "type": "memory_extract", "source_id": "src-other",
+    }, user_id=1)
+    assert ws.sent[-1]["type"] == "memory_error"
+    assert "access denied" in ws.sent[-1]["message"].lower()
+
+
+def test_sessions_sweeper_drops_stale():
+    """Sessions older than TTL must be removed by the sweeper."""
+    memory_sessions["old-1"] = MemorySession(
+        text="stale", user_id=1, created_at=time.time() - MEMORY_SESSION_TTL_SEC - 1
+    )
+    memory_sessions["new-1"] = MemorySession(text="fresh", user_id=1)
+    _sweep_memory_sessions_once()
+    assert "old-1" not in memory_sessions
+    assert "new-1" in memory_sessions

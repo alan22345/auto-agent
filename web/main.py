@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time as _time
 import uuid as _uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO as _BytesIO
 from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -51,18 +61,38 @@ MEMORY_MAX_CHARS = 200_000
 @dataclass
 class MemorySession:
     text: str
-    char_count: int = 0
+    user_id: int = 0
+    created_at: float = 0.0
+    char_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.char_count = len(self.text)
+        if self.created_at == 0.0:
+            self.created_at = _time.time()
 
 
-# keyed by source_id; cleared on save or websocket disconnect
+# keyed by source_id; cleared on save-success, ws disconnect, or TTL sweep
 memory_sessions: dict[str, MemorySession] = {}
+
+MEMORY_SESSION_TTL_SEC = 30 * 60  # 30 minutes
+
+
+async def _require_user(token: str | None = Query(default=None)) -> int:
+    """Accept token as ?token=... query param."""
+    from orchestrator.auth import verify_token
+    if not token:
+        raise HTTPException(status_code=401, detail="missing token")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return int(payload["user_id"])
 
 
 @app.post("/memory/upload")
-async def memory_upload(file: UploadFile = File(...)) -> dict:
+async def memory_upload(
+    file: UploadFile = File(...),
+    user_id: int = Depends(_require_user),
+) -> dict:
     """Parse an uploaded file to text, hold the text on the server, discard bytes."""
     name = (file.filename or "").lower()
     if name.endswith(".pdf"):
@@ -93,7 +123,7 @@ async def memory_upload(file: UploadFile = File(...)) -> dict:
         )
 
     source_id = f"src-{_uuid.uuid4().hex[:12]}"
-    memory_sessions[source_id] = MemorySession(text=text)
+    memory_sessions[source_id] = MemorySession(text=text, user_id=user_id)
     return {"source_id": source_id, "char_count": len(text)}
 
 
@@ -228,14 +258,18 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
                         await ws.send_json({"type": "task_list", "tasks": tasks})
             elif msg_type == "memory_extract":
-                await _handle_memory_extract(ws, data)
+                await _handle_memory_extract(ws, data, user_id)
             elif msg_type == "memory_reextract":
-                await _handle_memory_reextract(ws, data)
+                await _handle_memory_reextract(ws, data, user_id)
             elif msg_type == "memory_save":
-                await _handle_memory_save(ws, data)
+                await _handle_memory_save(ws, data, user_id)
 
     except WebSocketDisconnect:
         connected_clients.pop(ws, None)
+        # Clean up any memory sessions owned by this disconnecting user
+        stale = [sid for sid, s in memory_sessions.items() if s.user_id == user_id]
+        for sid in stale:
+            memory_sessions.pop(sid, None)
 
 
 async def _handle_create_task(ws: WebSocket, data: dict, user_id: int | None = None) -> None:
@@ -652,7 +686,7 @@ async def _run_memory_extract(
     })
 
 
-async def _handle_memory_extract(ws, data: dict) -> None:
+async def _handle_memory_extract(ws, data: dict, user_id: int = 0) -> None:
     source_id = data.get("source_id")
     pasted = data.get("pasted_text")
     hint = (data.get("context_hint") or "").strip() or None
@@ -666,6 +700,9 @@ async def _handle_memory_extract(ws, data: dict) -> None:
         if not sess:
             await _send_memory_error(ws, f"unknown source_id: {source_id}")
             return
+        if sess.user_id != user_id:
+            await _send_memory_error(ws, "access denied: session belongs to another user")
+            return
         text = sess.text
     else:
         text = pasted
@@ -673,18 +710,21 @@ async def _handle_memory_extract(ws, data: dict) -> None:
     await _run_memory_extract(ws, text=text, hint=hint, source_id=source_id)
 
 
-async def _handle_memory_reextract(ws, data: dict) -> None:
+async def _handle_memory_reextract(ws, data: dict, user_id: int = 0) -> None:
     source_id = data.get("source_id")
     note = (data.get("note") or "").strip()
     sess = memory_sessions.get(source_id) if source_id else None
     if not sess:
         await _send_memory_error(ws, "no source in session; re-upload or re-paste")
         return
+    if sess.user_id != user_id:
+        await _send_memory_error(ws, "access denied: session belongs to another user")
+        return
     hint = f"User correction note: {note}" if note else None
     await _run_memory_extract(ws, text=sess.text, hint=hint, source_id=source_id)
 
 
-async def _handle_memory_save(ws, data: dict) -> None:
+async def _handle_memory_save(ws, data: dict, user_id: int = 0) -> None:
     rows_raw = data.get("rows") or []
     rows: list[ProposedFact] = []
     for r in rows_raw:
@@ -705,6 +745,11 @@ async def _handle_memory_save(ws, data: dict) -> None:
 
     results: list[MemorySaveResult] = []
     source_id = data.get("source_id")
+    if source_id:
+        sess = memory_sessions.get(source_id)
+        if sess and sess.user_id != user_id:
+            await _send_memory_error(ws, "access denied: session belongs to another user")
+            return
     for row in rows:
         try:
             if row.conflicts and row.resolution == "keep_existing":
@@ -838,10 +883,26 @@ async def agent_stream_listener() -> None:
                 pass
 
 
+async def _memory_sessions_sweeper() -> None:
+    """Background task: remove memory sessions older than MEMORY_SESSION_TTL_SEC."""
+    while True:
+        await asyncio.sleep(60)
+        _sweep_memory_sessions_once()
+
+
+def _sweep_memory_sessions_once() -> None:
+    """Remove stale memory sessions (extracted so tests can call it directly)."""
+    now = _time.time()
+    stale = [sid for sid, s in memory_sessions.items() if now - s.created_at > MEMORY_SESSION_TTL_SEC]
+    for sid in stale:
+        memory_sessions.pop(sid, None)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(event_listener())
     asyncio.create_task(agent_stream_listener())
+    asyncio.create_task(_memory_sessions_sweeper())
 
 
 if __name__ == "__main__":

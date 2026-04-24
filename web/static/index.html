@@ -2395,7 +2395,8 @@
       memorySetStatus("Uploading…");
       const fd = new FormData();
       fd.append("file", file);
-      const resp = await fetch("/memory/upload", { method: "POST", body: fd });
+      const uploadUrl = "/memory/upload?token=" + encodeURIComponent(authToken || '');
+      const resp = await fetch(uploadUrl, { method: "POST", body: fd });
       if (!resp.ok) {
         memorySetStatus("Upload failed: " + await resp.text(), true);
         return null;
