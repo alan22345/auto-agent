@@ -17,8 +17,8 @@ Give teammates a UI in auto-agent to drop files, PDFs, or pasted text and have a
 - Per-row Save results that call `team-memory` `remember`.
 
 **Out (v1):**
-- Dedupe against existing facts on save.
-- Editing or deleting already-saved facts from this UI (use MCP `correct` instead).
+- Dedupe against identical existing facts on save (conflict *resolution* IS in — see Conflict detection below).
+- Editing or deleting already-saved facts unrelated to a pending extraction.
 - Images, audio, `.docx`, `.csv`.
 - Bulk / folder imports.
 - Persistence of in-flight extractions across page reloads.
@@ -65,8 +65,8 @@ Both paths converge at the same `memory_extract` handler and same review flow. T
 2. Server parses upload: `.pdf` via `pypdf`, text files via UTF-8. File bytes are freed the moment parsing returns. Server holds only the extracted text on the websocket session, keyed by `source_id`.
 3. Client sends ws message `memory_extract {source_id | pasted_text, context_hint}`. Exactly one of `source_id` or `pasted_text` is set.
 4. Server calls `MemoryExtractor.extract(text, hint)` → structured LLM call returning `[{entity, kind, content}]`.
-5. For each distinct entity name, server calls `team_memory.recall(name)` to tag rows `exists` (with match confidence) vs `new`.
-6. Server returns `{rows: [...]}`.
+5. For each distinct entity name, server calls `team_memory.recall(name)` to tag rows `exists` (with match confidence) vs `new`. For entities that exist, it also fetches the entity's current facts of the same `kind` and passes them into the extractor so each proposed row can carry a `conflicts_with: [fact_id, ...]` list (see Conflict detection).
+6. Server returns `{rows: [...]}` including any conflict annotations.
 7. User edits rows in the UI (entity name, kind, content), deletes, or adds. Can click "Re-extract with note…" to re-run step 4 with a correction hint; replaces the table.
 8. User clicks Save → ws `memory_save {rows}` → server loops `team_memory.remember(...)` once per row → returns `{results: [{ok, error?}, ...]}`.
 9. UI marks each row ✓/✕; clears table on all-green; leaves failed rows in place with error tooltip.
@@ -114,6 +114,21 @@ Proposed facts (N)                         [ Re-extract with note… ]
 - `+ Add row` appends a blank row (for facts the agent missed).
 - `Re-extract with note…` opens a one-line input; sends `memory_reextract {source_id, note}`; replaces the table on return.
 
+## Conflict detection
+
+When a proposed fact targets an existing entity and contradicts an existing fact, auto-agent must not silently double-write. Flow:
+
+1. After `recall` matches an entity, the server fetches that entity's current facts filtered to the proposed `kind`.
+2. These are passed into the extraction LLM call as context. The extractor returns each row with an optional `conflicts_with: [fact_id, ...]` field — populated only when the new content genuinely disagrees with an existing fact (e.g. "runs nightly" vs "runs hourly"), not when it's merely additional.
+3. Conflict rows are highlighted in the review table with a warning icon. Clicking expands the row to show the existing fact(s) side-by-side with the proposed new content.
+4. The user picks one action per conflict, rendered as a radio group on the expanded row:
+   - **Keep existing** — skip this row on save; existing fact untouched.
+   - **Replace with new** — on save, call `team_memory.correct(fact_id, new_content)` instead of `remember`.
+   - **Keep both** — on save, call `remember` normally; both facts live in the graph.
+5. Save is blocked while any conflict row has no choice selected. The "Save all" button shows a count like "Save all (2 conflicts need review)" and is disabled until resolved.
+
+The agent-made flag is a *suggestion* — the user can also toggle "conflict" off on a row if they disagree, in which case it saves as a plain `remember`.
+
 ## Error handling
 
 | Failure | Behavior |
@@ -141,8 +156,10 @@ Per CLAUDE.md TDD: write failing tests first.
   - Rejects when both `source_id` and `pasted_text` are set, or neither.
   - Returned rows have `exists`/`new` badges based on fake `recall` results.
   - `memory_save`: one `remember` call per row; partial failure surfaces per-row; success clears session state.
+  - `memory_save` with conflict rows: "Keep existing" → no call; "Replace" → `correct(fact_id, ...)`; "Keep both" → `remember`. Server rejects save payloads with unresolved conflicts.
   - `memory_reextract`: reuses stored text, passes note into extractor.
   - Oversize paste rejected the same way as oversize upload.
+  - Conflict detection: fake `recall` returns existing facts; extractor is fed them and marks a row `conflicts_with`; response carries conflict annotations through to the client.
 
 - `tests/test_memory_upload.py`
   - POST a small UTF-8 file → parsed, bytes freed (assert no tempfile left).
