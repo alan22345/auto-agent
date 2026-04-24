@@ -6,7 +6,6 @@ All API responses and parsed external data should go through these.
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import Enum
 from typing import Literal
 
@@ -252,3 +251,32 @@ class CreateUserRequest(BaseModel):
     display_name: str
 
 
+# --- Memory tab types ---
+
+KindLiteral = Literal["decision", "architecture", "gotcha", "status", "preference", "fact"]
+EntityStatus = Literal["new", "exists"]
+Resolution = Literal["keep_existing", "replace", "keep_both"]
+
+
+class ConflictInfo(BaseModel):
+    fact_id: str
+    existing_content: str
+
+
+class ProposedFact(BaseModel):
+    row_id: str
+    entity: str
+    entity_type: str = "concept"
+    entity_status: EntityStatus = "new"
+    entity_match_score: float | None = None
+    kind: KindLiteral = "fact"
+    content: str
+    conflicts: list[ConflictInfo] = Field(default_factory=list)
+    resolution: Resolution | None = None
+
+
+class MemorySaveResult(BaseModel):
+    row_id: str
+    ok: bool
+    error: str | None = None
+    fact_id: str | None = None
