@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from shared.types import ConflictInfo, ProposedFact
 from web.main import (
     MemorySession,
     _handle_memory_extract,
@@ -9,7 +10,6 @@ from web.main import (
     _handle_memory_save,
     memory_sessions,
 )
-from shared.types import ProposedFact, ConflictInfo
 
 
 class FakeWS:
