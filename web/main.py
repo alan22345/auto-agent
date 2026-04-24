@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid as _uuid
+from dataclasses import dataclass
+from io import BytesIO as _BytesIO
 from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -37,6 +40,59 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Connected websocket clients: ws -> {"user_id": int, "username": str}
 connected_clients: dict[WebSocket, dict] = {}
+
+# ─── Memory tab upload endpoint ──────────────────────────────────
+
+MEMORY_MAX_CHARS = 200_000
+
+
+@dataclass
+class MemorySession:
+    text: str
+    char_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.char_count = len(self.text)
+
+
+# keyed by source_id; cleared on save or websocket disconnect
+memory_sessions: dict[str, MemorySession] = {}
+
+
+@app.post("/memory/upload")
+async def memory_upload(file: UploadFile = File(...)) -> dict:
+    """Parse an uploaded file to text, hold the text on the server, discard bytes."""
+    name = (file.filename or "").lower()
+    if name.endswith(".pdf"):
+        raw = await file.read()
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(_BytesIO(raw))
+            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"could not parse pdf: {e}") from e
+        finally:
+            del raw
+    elif name.endswith((".txt", ".md", ".log")):
+        raw = await file.read()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"not utf-8: {e}") from e
+        finally:
+            del raw
+    else:
+        raise HTTPException(status_code=400, detail="only .txt, .md, .log, .pdf are supported")
+
+    if len(text) > MEMORY_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"file too large: {len(text)} chars (cap {MEMORY_MAX_CHARS})",
+        )
+
+    source_id = f"src-{_uuid.uuid4().hex[:12]}"
+    memory_sessions[source_id] = MemorySession(text=text)
+    return {"source_id": source_id, "char_count": len(text)}
 
 
 async def broadcast(message: dict) -> None:
