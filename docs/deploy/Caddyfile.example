@@ -1,0 +1,23 @@
+# Caddyfile for single-VM deployment of auto-agent.
+#
+# Replace {your.domain} with your actual hostname.
+# Caddy will obtain TLS certs automatically via Let's Encrypt.
+#
+# Routing:
+#   /ws, /api/*, /metrics → FastAPI  (auto-agent on :2020)
+#   everything else        → Next.js (web-next   on :3000)
+#
+# Both services are expected to run on the same host (docker-compose).
+
+{your.domain} {
+    encode gzip
+
+    @backend path /ws /api/* /metrics
+    handle @backend {
+        reverse_proxy localhost:2020
+    }
+
+    handle {
+        reverse_proxy localhost:3000
+    }
+}
