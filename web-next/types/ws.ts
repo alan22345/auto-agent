@@ -1,5 +1,19 @@
 import type { TaskData, TaskMessageData } from './api';
 
+export interface ChatEntry {
+  kind: 'user' | 'system' | 'event' | 'stream' | 'error';
+  message: string;
+  sender?: string | null;
+  ts?: string;
+}
+
+export interface TaskHistoryItem {
+  message?: string | null;
+  from_status?: string | null;
+  to_status: string;
+  timestamp?: string | null;
+}
+
 export interface MemoryRow {
   row_id: string;
   entity: string;
@@ -23,9 +37,27 @@ export interface FreeformConfig {
 
 export type WSEvent =
   | { type: 'task_list'; tasks: TaskData[] }
-  | { type: 'task_update'; task: TaskData }
-  | { type: 'task_deleted'; task_id: number }
-  | { type: 'message'; task_id: number; message: TaskMessageData }
+  | {
+      type: 'history';
+      task_id: number;
+      entries: TaskHistoryItem[];
+      messages: TaskMessageData[];
+    }
+  | {
+      type: 'event';
+      task_id?: number;
+      event_type: string;
+      payload?: Record<string, unknown>;
+    }
+  | {
+      type: 'agent_stream';
+      task_id: number;
+      tool?: string;
+      args_preview?: string;
+      text?: string;
+    }
+  | { type: 'user'; task_id?: number; message: string; username?: string; display_name?: string }
+  | { type: 'guidance_sent'; task_id: number; message: string; username?: string; display_name?: string }
   | { type: 'system'; message: string }
   | { type: 'error'; message: string }
   | { type: 'freeform_config_list'; configs: FreeformConfig[] }
@@ -36,6 +68,8 @@ export type WSEvent =
   | { type: 'memory_error'; message: string };
 
 export type WSCommand =
+  | { type: 'load_history'; task_id: number }
+  | { type: 'refresh' }
   | { type: 'send_message'; task_id: number; message: string }
   | { type: 'send_guidance'; task_id: number; message: string }
   | { type: 'approve'; task_id: number }
