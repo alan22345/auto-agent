@@ -15,6 +15,7 @@
 | Run one test file | `.venv/bin/python3 -m pytest tests/test_microcompact.py -v` |
 | Agent eval (vs CLI) | `cd eval && promptfoo eval --no-cache` |
 | View eval results | `promptfoo view` |
+| Regenerate TS types from Pydantic | `python3.12 scripts/gen_ts_types.py` |
 
 ## Architecture
 
