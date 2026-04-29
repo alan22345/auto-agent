@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import UTC, datetime
 
 from croniter import croniter
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
@@ -53,6 +54,11 @@ from shared.types import (
 )
 
 router = APIRouter()
+
+# --- Session cookie ---
+
+COOKIE_NAME = "auto_agent_session"
+COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 days — match JWT default expiry
 
 # Statuses that indicate a task is no longer actively running.
 TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}
@@ -160,11 +166,20 @@ def _verify_auth_header(authorization: str | None) -> dict:
     return payload
 
 
+def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> dict:
+    """Accept either the session cookie or Authorization: Bearer header."""
+    if cookie:
+        payload = verify_token(cookie)
+        if payload:
+            return payload
+    return _verify_auth_header(authorization)
+
+
 # --- Auth endpoints ---
 
 
 @router.post("/auth/login")
-async def login(req: LoginRequest, session: AsyncSession = Depends(get_session)):
+async def login(req: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(User).where(User.username == req.username))
     user = result.scalar_one_or_none()
     if not user or not verify_password(req.password, user.password_hash):
@@ -172,6 +187,15 @@ async def login(req: LoginRequest, session: AsyncSession = Depends(get_session))
     user.last_login = datetime.now(UTC)
     await session.commit()
     token = create_token(user_id=user.id, username=user.username)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("COOKIE_SECURE", "0") == "1",
+        path="/",
+    )
     return LoginResponse(
         token=token,
         user=UserData(
@@ -187,9 +211,10 @@ async def login(req: LoginRequest, session: AsyncSession = Depends(get_session))
 @router.get("/auth/me")
 async def get_me(
     session: AsyncSession = Depends(get_session),
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
 ):
-    payload = _verify_auth_header(authorization)
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
     result = await session.execute(select(User).where(User.id == payload["user_id"]))
     user = result.scalar_one_or_none()
     if not user:
@@ -201,6 +226,12 @@ async def get_me(
         created_at=user.created_at.isoformat() if user.created_at else None,
         last_login=user.last_login.isoformat() if user.last_login else None,
     )
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+    return {"ok": True}
 
 
 @router.post("/auth/users")

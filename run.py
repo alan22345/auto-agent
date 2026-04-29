@@ -92,8 +92,8 @@ app = FastAPI(title="Auto-Agent", version="0.1.0")
 #   - Loopback requests from inside the same container
 # ---------------------------------------------------------------------------
 
-_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/static/")
-_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login")
+_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/api/auth/logout", "/static/")
+_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login", "/api/auth/logout")
 
 
 def _is_auth_exempt(path: str) -> bool:
@@ -112,12 +112,20 @@ async def jwt_auth_middleware(request, call_next):
     if client_host in ("127.0.0.1", "::1"):
         return await call_next(request)
 
-    # Check for Bearer token
     from orchestrator.auth import verify_token
+    from orchestrator.router import COOKIE_NAME
 
+    # Check for Bearer token
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         payload = verify_token(auth[7:])
+        if payload:
+            return await call_next(request)
+
+    # Check for session cookie
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        payload = verify_token(cookie)
         if payload:
             return await call_next(request)
 
