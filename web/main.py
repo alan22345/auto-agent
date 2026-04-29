@@ -149,8 +149,8 @@ async def index() -> HTMLResponse:
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
 
-    # Authenticate via token query param
-    token = ws.query_params.get("token")
+    # Authenticate via cookie (preferred) or token query param (legacy fallback)
+    token = ws.cookies.get("auto_agent_session") or ws.query_params.get("token")
     if not token:
         await ws.send_json({"type": "error", "message": "Authentication required"})
         await ws.close(code=4001)
