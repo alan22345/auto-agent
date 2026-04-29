@@ -14,13 +14,20 @@ if ! command -v claude &>/dev/null; then
     npm install -g @anthropic-ai/claude-code@latest
 fi
 
-echo ""
-echo "Starting Claude Code auth..."
-echo "A URL will appear — open it in your browser to authorize."
-echo ""
+cat <<'EOF'
 
-claude auth login
+Claude Code auth must be done interactively in the REPL — `claude auth login`
+non-interactively swallows stdin and blocks paste of the verification code.
 
-echo ""
-echo "Auth complete. Tokens are stored in ~/.claude/"
-echo "The container will pick them up via bind mount — no further setup needed."
+Do this instead:
+
+  1. Run:  claude
+  2. In the REPL, type:  /login
+  3. A URL will be shown. Open it in your browser, authorize.
+  4. Copy the verification code from the browser back into the REPL.
+  5. Exit the REPL with Ctrl+D once "Logged in" is shown.
+
+Tokens are written to ~/.claude/ and bind-mounted into the auto-agent
+container — no rebuild or restart needed.
+
+EOF
