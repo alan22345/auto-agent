@@ -34,6 +34,15 @@ RUN test -n "$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN build-arg required to 
     pip install --no-cache-dir --break-system-packages \
       "git+https://${GITHUB_TOKEN}@github.com/ergodic-ai/team-memory.git@main"
 
+# Workaround for team-memory <=0.1.0: server.py uses `from __future__ import
+# annotations`, which makes its parameter type hints stringified. mcp 1.12.4's
+# Tool.from_function then calls issubclass(annotation, Context) on a string and
+# raises TypeError, preventing every tool from registering. Stripping the
+# import lets annotations resolve to real classes again. Remove this line once
+# team-memory ships a fixed release.
+RUN sed -i '1{/^from __future__ import annotations/d}' \
+      /usr/local/lib/python3.11/dist-packages/team_memory/server.py
+
 COPY . .
 RUN chown -R node:node /app
 
