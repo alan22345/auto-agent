@@ -52,6 +52,19 @@ services:
       - workspaces:/workspaces
       - ${HOME}/.claude:/home/node/.claude
 
+  web-next:
+    build:
+      context: ./web-next
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_URL: http://auto-agent:2020
+      NODE_ENV: production
+    depends_on:
+      - auto-agent
+    ports:
+      - "3000:3000"
+
 volumes:
   pgdata:
   redisdata:
