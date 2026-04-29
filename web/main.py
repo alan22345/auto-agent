@@ -89,6 +89,7 @@ async def _require_user(token: str | None = Query(default=None)) -> int:
 
 
 @app.post("/memory/upload")
+@app.post("/api/memory/upload")
 async def memory_upload(
     file: UploadFile = File(...),
     user_id: int = Depends(_require_user),
