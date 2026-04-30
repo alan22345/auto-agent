@@ -225,3 +225,42 @@ class User(Base):
     last_login = Column(DateTime(timezone=True), nullable=True)
 
 
+class SearchSession(Base):
+    """A multi-turn search/research conversation owned by a user."""
+    __tablename__ = "search_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(512), nullable=False, default="New search")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    user = relationship("User")
+
+
+class SearchMessage(Base):
+    """A single turn in a SearchSession.
+
+    For role='user': content is the raw user text, tool_events is empty.
+    For role='assistant': content is the final markdown answer; tool_events
+    is a list of {tool, args, result_summary, ts} captured during the turn,
+    plus 'sources' and 'memory_hits' arrays.
+    """
+    __tablename__ = "search_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        Integer, ForeignKey("search_sessions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    role = Column(String(16), nullable=False)  # "user" | "assistant"
+    content = Column(Text, nullable=False, default="")
+    tool_events = Column(JSONB, nullable=False, default=list)
+    truncated = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    session = relationship("SearchSession")
+
+
