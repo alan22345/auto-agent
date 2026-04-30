@@ -232,7 +232,7 @@ async def send_message(
 
     async def stream() -> AsyncIterator[bytes]:
         events_captured: list[dict] = []
-        answer = ""
+        final_answer: str | None = None
         truncated = False
         try:
             async for ev in run_search_turn(
@@ -242,8 +242,10 @@ async def send_message(
                 author=author,
             ):
                 events_captured.append(ev)
-                if ev["type"] == "text":
-                    answer += ev.get("delta", "")
+                if ev["type"] == "done":
+                    final_answer = ev.get("answer", "") or ""
+                elif ev["type"] == "error":
+                    truncated = True
                 yield (json.dumps(ev) + "\n").encode("utf-8")
         except Exception as e:
             truncated = True
@@ -251,12 +253,23 @@ async def send_message(
                 "utf-8"
             )
         finally:
+            # Persist only meaningful turns. An empty answer with no captured
+            # events means the client disconnected before anything happened —
+            # don't leave an orphan blank assistant row in the session.
+            persisted_events = [
+                e
+                for e in events_captured
+                if e.get("type") in ("source", "memory_hit")
+            ]
+            answer = final_answer or ""
+            if not answer and not persisted_events and not truncated:
+                return
             async with async_session() as s2:
                 msg = SearchMessage(
                     session_id=session_id,
                     role="assistant",
                     content=answer,
-                    tool_events=events_captured,
+                    tool_events=persisted_events,
                     truncated=truncated,
                 )
                 s2.add(msg)

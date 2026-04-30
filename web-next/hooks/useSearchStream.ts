@@ -92,9 +92,13 @@ function apply(s: StreamState, ev: SearchEvent): StreamState {
     case 'memory_hit':
       return { ...s, memoryHits: [...s.memoryHits, { entity: ev.entity, facts: ev.facts }] };
     case 'text':
-      return { ...s, answer: s.answer + ev.delta };
+      // 'text' events arrive as full assistant-turn snapshots from agent/loop.py,
+      // not streaming deltas. Replace rather than concatenate so the live answer
+      // matches the persisted final answer instead of accumulating intermediate
+      // tool-call narration ("Let me search…", "Now reading…", final answer).
+      return { ...s, answer: ev.delta };
     case 'done':
-      return { ...s, status: 'done', activeTool: null };
+      return { ...s, status: 'done', activeTool: null, answer: ev.answer };
     case 'error':
       return { ...s, status: 'error', error: ev.message, activeTool: null };
     default:
