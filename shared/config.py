@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     llm_provider: str = "claude_cli"
     llm_model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
+    # Search tab — Brave Search API key. /search endpoints return 503 if unset.
+    brave_api_key: str = ""
     # Bedrock — explicit credentials for VM deployment (optional).
     # Preferred: AWS Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) — simpler, no IAM setup.
     # Alternative: IAM access keys (aws_access_key_id + aws_secret_access_key).
