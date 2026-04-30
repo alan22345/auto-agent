@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re as _re
 from pathlib import Path
 
 import httpx
@@ -36,9 +37,11 @@ from shared.models import (
     SuggestionStatus,
     Task,
     TaskComplexity,
+    TaskHistory,
     TaskSource,
     TaskStatus,
 )
+from sqlalchemy import select as sa_select
 from shared.notifier import send_telegram
 from shared.redis_client import (
     ack_event,
@@ -56,6 +59,7 @@ from orchestrator.queue import can_start, next_queued_task
 from orchestrator.repo_sync import match_repo, sync_repos
 from orchestrator.router import router as api_router
 from orchestrator.scheduler import run_scheduler
+from orchestrator.search import router as search_router
 from orchestrator.state_machine import get_task, transition
 from orchestrator.webhooks.github import router as github_webhook_router
 from orchestrator.webhooks.linear import router as linear_webhook_router
@@ -138,6 +142,7 @@ async def jwt_auth_middleware(request, call_next):
 # API
 app.include_router(api_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(search_router, prefix="/api")
 
 # Webhooks
 app.include_router(github_webhook_router, prefix="/api")
@@ -531,13 +536,95 @@ async def on_ci_failed(event: Event) -> None:
         await r.aclose()
 
 
+# Cap on consecutive deploy failures before we stop retrying. Picked low
+# because deploy failures rarely fix themselves with another agent loop —
+# if two attempts haven't worked, a human needs to look. See task #116.
+DEPLOY_RETRY_LIMIT = 2
+
+# Patterns that signal an environmental deploy failure — one that can't be
+# fixed by editing code in the repo (billing, missing CLI on the runner,
+# expired credentials, quota). We block on the first occurrence so the agent
+# doesn't burn cycles "fixing" something it can't reach.
+_ENV_FAILURE_PATTERNS: list[tuple[_re.Pattern[str], str]] = [
+    (_re.compile(r"\bbilling\b.*\b(disabled|suspended|inactive|required|invalid)\b", _re.I), "billing disabled/required"),
+    (_re.compile(r"\b(payment|subscription)\b.*\b(required|suspended|inactive|past[- ]due|invalid|disabled)\b", _re.I), "payment/subscription problem"),
+    (_re.compile(r"\b402\s+payment\s+required\b", _re.I), "HTTP 402 payment required"),
+    (_re.compile(r"\binsufficient\s+(funds|balance|quota|credit)s?\b", _re.I), "insufficient funds/quota"),
+    (_re.compile(r"\bquota\s+(exceeded|exhausted)\b", _re.I), "quota exceeded"),
+    (_re.compile(r"\b(aws|gcloud|az|docker|kubectl|terraform)\s*:\s*command not found\b", _re.I), "deploy CLI missing on runner"),
+    (_re.compile(r"\bunable to locate credentials\b", _re.I), "missing cloud credentials on runner"),
+]
+
+
+def _classify_deploy_failure(output: str | None) -> str | None:
+    """If `output` matches a known environmental-failure pattern, return a short
+    reason. Otherwise return None and let the normal retry path run.
+    """
+    if not output:
+        return None
+    for pattern, label in _ENV_FAILURE_PATTERNS:
+        if pattern.search(output):
+            return label
+    return None
+
+
+def _should_block_after_repeated_failures(history) -> bool:
+    """Return True if this task has already accumulated `DEPLOY_RETRY_LIMIT`
+    'Deploy failed' history entries — i.e. the *next* failure should stop
+    retrying instead of re-queueing coding.
+
+    `history` is the task's history rows (only `.message` is read).
+    """
+    count = 0
+    for h in history:
+        msg = (getattr(h, "message", None) or "")
+        if msg.startswith("Deploy failed"):
+            count += 1
+            if count >= DEPLOY_RETRY_LIMIT:
+                return True
+    return False
+
+
 async def on_dev_deploy_failed(event: Event) -> None:
-    """When dev deployment fails, retry coding with the failure output so Claude can fix it."""
+    """When dev deployment fails, retry coding with the failure output so the
+    agent can fix it — unless the failure is environmental (billing, missing
+    CLI, etc.) or we've already retried too many times. In those cases, block
+    the task and notify the human."""
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
         output = event.payload.get("output", "")
+
+        env_reason = _classify_deploy_failure(output)
+
+        history_rows = (
+            await session.execute(
+                sa_select(TaskHistory)
+                .where(TaskHistory.task_id == task.id)
+                .order_by(TaskHistory.created_at.desc())
+            )
+        ).scalars().all()
+        repeated = _should_block_after_repeated_failures(history_rows)
+
+        if env_reason or repeated:
+            block_msg = (
+                f"Deploy blocked: {env_reason} — not retryable in repo"
+                if env_reason
+                else f"Deploy blocked: {DEPLOY_RETRY_LIMIT} consecutive failures, giving up"
+            )
+            task = await transition(session, task, TaskStatus.BLOCKED, block_msg)
+            await session.commit()
+
+            tail = (output or "")[-800:]
+            pr_link = f" ({task.pr_url})" if task.pr_url else ""
+            await asyncio.to_thread(
+                send_telegram,
+                f"🚧 Task #{task.id} blocked on dev deploy{pr_link}\n"
+                f"Reason: {env_reason or 'repeated deploy failures'}\n"
+                f"Last output:\n```\n{tail}\n```",
+            )
+            return
 
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
