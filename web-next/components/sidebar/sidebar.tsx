@@ -9,6 +9,7 @@ const tabs = [
   { href: '/tasks', label: 'Tasks' },
   { href: '/freeform', label: 'Freeform' },
   { href: '/memory', label: 'Memory' },
+  { href: '/search', label: 'Search' },
 ];
 
 export function Sidebar({ username }: { username: string }) {
