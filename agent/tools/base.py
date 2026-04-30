@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from agent.llm.types import ToolDefinition
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass
@@ -24,6 +27,9 @@ class ToolContext:
 
     workspace: str  # Absolute path to the repo root
     readonly: bool = False  # Planning mode — block writes
+    # Optional async sink for tools that emit progress events to a streaming
+    # caller (e.g. web_search emits 'source' events as Brave results arrive).
+    event_sink: Callable[[dict], Awaitable[None]] | None = None
 
 
 class Tool(ABC):
