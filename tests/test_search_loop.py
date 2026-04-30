@@ -1,9 +1,11 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.llm.types import Message, TokenUsage
+from agent.llm.types import LLMResponse, Message, TokenUsage
+from agent.llm.types import Message as LMessage
 from agent.search_loop import run_search_turn
+from agent.search_title import generate_title
 
 
 class _FakeAgentLoop:
@@ -66,3 +68,26 @@ async def test_run_search_turn_emits_error_on_exception():
             events.append(ev)
     assert events[-1]["type"] == "error"
     assert "boom" in events[-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_generate_title_returns_short_string():
+    fake_provider = MagicMock()
+    fake_provider.complete = AsyncMock(return_value=LLMResponse(
+        message=LMessage(role="assistant", content="Best CLI for git"),
+        usage=TokenUsage(),
+        stop_reason="end_turn",
+    ))
+    with patch("agent.search_title.get_provider", return_value=fake_provider):
+        title = await generate_title("what's the best CLI tool for git?")
+    assert title == "Best CLI for git"
+    fake_provider.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_title_falls_back_on_error():
+    fake_provider = MagicMock()
+    fake_provider.complete = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch("agent.search_title.get_provider", return_value=fake_provider):
+        title = await generate_title("what's the best CLI tool for git?")
+    assert title == "what's the best CLI tool for git?"[:80]
