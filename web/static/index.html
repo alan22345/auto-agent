@@ -100,6 +100,53 @@
       font-weight: 600;
       font-size: 14px;
     }
+    .task-detail-panel { padding: 0 16px; }
+    .task-detail-panel:not(:empty) {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .task-detail-block { font-size: 12px; line-height: 1.5; }
+    .task-detail-block.description {
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+    .task-detail-block.plan {
+      background: rgba(210,153,34,0.06);
+      border: 1px solid rgba(210,153,34,0.2);
+      border-radius: 6px;
+      padding: 8px 12px;
+    }
+    .task-detail-block.plan .plan-body {
+      margin-top: 8px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .task-detail-block.plan .plan-body.collapsed { display: none; }
+    .task-detail-block.error {
+      background: rgba(248,81,73,0.12);
+      border: 1px solid rgba(248,81,73,0.3);
+      color: var(--red);
+      border-radius: 6px;
+      padding: 8px 12px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 11px;
+    }
+    .task-detail-toggle {
+      background: none;
+      border: none;
+      color: var(--yellow);
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
     .chat-area {
       flex: 1;
       overflow-y: auto;
@@ -1126,6 +1173,7 @@
     <!-- Tasks-tab main content -->
     <div id="tasks-main" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
     <div class="main-header" id="main-header">Select a task or create one</div>
+    <div id="task-detail-panel" class="task-detail-panel"></div>
     <div id="subtask-bar" class="subtask-bar" style="display:none;"></div>
     <div class="chat-area" id="chat-area">
       <div class="empty-state">Messages and events will appear here</div>
@@ -1220,6 +1268,7 @@
     let taskFilter = { status: 'all', repo: 'all' };
     let selectedTaskId = null;
     let chatMessages = {}; // task_id -> [messages]
+    const taskDetailPlanExpanded = {}; // task_id -> bool (plan body expanded?)
     let reconnectAttempts = 0;
     let reconnectTimer = null;
     let connStatusTimer = null;
@@ -2247,6 +2296,8 @@
         const label = p === 0 ? "Front" : p < 100 ? "High" : p === 100 ? "Normal" : "Low";
         document.getElementById("current-priority").textContent = `(${label} — ${p})`;
       }
+
+      renderTaskDetailPanel();
     }
 
     function selectTask(id) {
@@ -2261,12 +2312,50 @@
         let header = `#${task.id} — ${escHtml(task.title)}`;
         if (task.pr_url) header += ` <a href="${task.pr_url}" target="_blank" style="color:var(--accent);font-size:12px;">PR</a>`;
         document.getElementById("main-header").innerHTML = header;
+        renderTaskDetailPanel();
       }
 
       // Load persisted history from server
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "load_history", task_id: id }));
       }
+    }
+
+    function renderTaskDetailPanel() {
+      const el = document.getElementById("task-detail-panel");
+      if (!el) return;
+      if (!selectedTaskId) { el.innerHTML = ""; return; }
+      const task = tasks.find(t => t.id === selectedTaskId);
+      if (!task) { el.innerHTML = ""; return; }
+
+      const parts = [];
+
+      if (task.description && task.description.trim()) {
+        parts.push(`<div class="task-detail-block description">${escHtml(task.description)}</div>`);
+      }
+
+      if (task.plan) {
+        const expanded = !!taskDetailPlanExpanded[task.id];
+        const arrow = expanded ? "&#9662;" : "&#9656;";
+        parts.push(`
+          <div class="task-detail-block plan">
+            <button type="button" class="task-detail-toggle" onclick="togglePlanDetail(${task.id})">
+              <span>${arrow}</span><span>Plan</span>
+            </button>
+            <div class="plan-body${expanded ? "" : " collapsed"}">${renderMarkdown(task.plan)}</div>
+          </div>`);
+      }
+
+      if (task.error && task.error.trim()) {
+        parts.push(`<div class="task-detail-block error">${escHtml(task.error)}</div>`);
+      }
+
+      el.innerHTML = parts.join("");
+    }
+
+    function togglePlanDetail(taskId) {
+      taskDetailPlanExpanded[taskId] = !taskDetailPlanExpanded[taskId];
+      renderTaskDetailPanel();
     }
 
     function renderSubtaskBar() {
@@ -2584,8 +2673,10 @@
             const resp = await authFetch(`/api/tasks/${taskId}`, { method: "DELETE" });
             if (resp.ok) {
               delete chatMessages[taskId];
+              delete taskDetailPlanExpanded[taskId];
               selectedTaskId = null;
               document.getElementById("main-header").textContent = "Select a task or create one";
+              renderTaskDetailPanel();
               renderChat();
               ws.send(JSON.stringify({ type: "refresh" }));
               showToast("Task deleted", "success");
