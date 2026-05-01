@@ -147,13 +147,37 @@
       align-items: center;
       gap: 4px;
     }
+    .chat-area-wrap {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
     .chat-area {
       flex: 1;
       overflow-y: auto;
       overflow-x: hidden;
       padding: 16px;
       min-width: 0;
+      min-height: 0;
     }
+    .new-msg-pill {
+      position: absolute;
+      right: 16px;
+      bottom: 16px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      z-index: 5;
+    }
+    .new-msg-pill[hidden] { display: none; }
+    .new-msg-pill:hover { filter: brightness(1.1); }
     .message {
       margin-bottom: 12px;
       max-width: 80%;
@@ -1219,8 +1243,11 @@
     <div class="main-header" id="main-header">Select a task or create one</div>
     <div id="task-detail-panel" class="task-detail-panel"></div>
     <div id="subtask-bar" class="subtask-bar" style="display:none;"></div>
-    <div class="chat-area" id="chat-area">
-      <div class="empty-state">Messages and events will appear here</div>
+    <div class="chat-area-wrap">
+      <div class="chat-area" id="chat-area">
+        <div class="empty-state">Messages and events will appear here</div>
+      </div>
+      <button class="new-msg-pill" id="new-msg-pill" type="button" hidden onclick="scrollChatToBottom()">&darr; <span id="new-msg-count">0</span> new messages</button>
     </div>
     <div class="approval-bar" id="approval-bar" style="display:none;">
       <span>Plan awaiting approval:</span>
@@ -1375,6 +1402,37 @@
     let selectedFreeformView = null; // 'build' | 'existing' | { repoName: '...' }
     let poAnalysisRunning = new Set(); // repo names with analysis actively running
     let poAnalysisQueued = new Set();  // repo names waiting in queue
+
+    // Chat scroll preservation: only auto-scroll renderChat when the user was
+    // already at (or near) the bottom; otherwise show a "N new messages" pill.
+    const SCROLL_BOTTOM_THRESHOLD_PX = 80;
+    let pendingNewMsgCount = 0;
+    let lastRenderedMsgCountByKey = {}; // key -> count from last renderChat
+    let lastRenderedTaskKey = null;     // detect task switches to force scroll
+
+    function isAtBottom(el, threshold = SCROLL_BOTTOM_THRESHOLD_PX) {
+      return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold;
+    }
+
+    function showNewMsgPill(n) {
+      const pill = document.getElementById("new-msg-pill");
+      const count = document.getElementById("new-msg-count");
+      if (!pill || !count) return;
+      count.textContent = n;
+      pill.hidden = false;
+    }
+
+    function clearNewMsgPill() {
+      pendingNewMsgCount = 0;
+      const pill = document.getElementById("new-msg-pill");
+      if (pill) pill.hidden = true;
+    }
+
+    function scrollChatToBottom() {
+      const el = document.getElementById("chat-area");
+      if (el) el.scrollTop = el.scrollHeight;
+      clearNewMsgPill();
+    }
 
     // Cron schedule presets shown in the dropdown.
     const CRON_PRESETS = [
@@ -2540,8 +2598,29 @@
       const selected = tasks.find(t => t.id === selectedTaskId);
       const prefixHtml = buildTaskContextPrefix(selected);
 
+      // Scroll-preservation bookkeeping: capture state BEFORE we rewrite
+      // innerHTML (which resets scrollTop). We only auto-scroll to the bottom
+      // when the user was already pinned there OR a forced-scroll case applies
+      // (task switch, first paint, user just sent their own message).
+      const wasAtBottom = isAtBottom(el);
+      const prevScrollTop = el.scrollTop;
+      const prevCount = lastRenderedMsgCountByKey[key] ?? 0;
+      const newDelta = Math.max(0, msgs.length - prevCount);
+      const taskChanged = key !== lastRenderedTaskKey;
+      const firstPaint = prevCount === 0 && msgs.length > 0;
+      // Heuristic: a single new tail message of type 'user' means the active
+      // user just sent something — match the desktop chat convention of
+      // snapping to the bottom on send regardless of prior scroll position.
+      const lastIsUser = msgs.length > 0 && msgs[msgs.length - 1].type === 'user';
+      const userJustSent = lastIsUser && newDelta === 1;
+      const forceScroll = taskChanged || firstPaint || userJustSent;
+
       if (msgs.length === 0 && !prefixHtml) {
         el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
+        lastRenderedMsgCountByKey[key] = 0;
+        // Nothing to count; clear any stale pill from a prior state.
+        clearNewMsgPill();
+        lastRenderedTaskKey = key;
         return;
       }
 
@@ -2558,7 +2637,24 @@
         `;
       }).join("");
 
-      el.scrollTop = el.scrollHeight;
+      if (taskChanged) clearNewMsgPill();
+
+      if (forceScroll || wasAtBottom) {
+        el.scrollTop = el.scrollHeight;
+        clearNewMsgPill();
+      } else if (newDelta > 0) {
+        // User is reading earlier history — keep their position and surface
+        // the pending count via the pill instead of yanking them down.
+        el.scrollTop = prevScrollTop;
+        pendingNewMsgCount += newDelta;
+        showNewMsgPill(pendingNewMsgCount);
+      } else {
+        // Re-render with no new messages (e.g. plan toggle, task list refresh).
+        el.scrollTop = prevScrollTop;
+      }
+
+      lastRenderedMsgCountByKey[key] = msgs.length;
+      lastRenderedTaskKey = key;
     }
 
     async function createTask() {
@@ -2753,6 +2849,7 @@
             if (resp.ok) {
               delete chatMessages[taskId];
               delete taskDetailPlanExpanded[taskId];
+              delete lastRenderedMsgCountByKey[taskId];
               selectedTaskId = null;
               document.getElementById("main-header").textContent = "Select a task or create one";
               renderTaskDetailPanel();
@@ -3308,6 +3405,14 @@
     // On page load: try stored token; fall back to login screen
     window.addEventListener('DOMContentLoaded', async () => {
       wireMemoryDrop();
+      // Clear the new-message pill when the user manually scrolls back to
+      // the bottom of the chat area.
+      const chatEl = document.getElementById("chat-area");
+      if (chatEl) {
+        chatEl.addEventListener("scroll", () => {
+          if (isAtBottom(chatEl)) clearNewMsgPill();
+        });
+      }
       if (authToken) {
         try {
           const resp = await fetch('/api/auth/me', {
