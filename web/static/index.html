@@ -930,8 +930,11 @@
       border-radius: 6px;
       margin-bottom: 8px;
       background: var(--bg);
+      cursor: pointer;
     }
-    .ff-suggestion .ff-sug-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .ff-suggestion .ff-sug-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    .ff-suggestion .ff-sug-toggle { color: var(--text-muted); font-size: 10px; width: 10px; flex: 0 0 10px; }
+    .ff-suggestion .ff-sug-title { font-weight: 600; font-size: 13px; }
     .ff-suggestion .ff-sug-rationale { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4; }
     .ff-suggestion .ff-sug-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
     .ff-suggestion .ff-sug-pill {
@@ -943,9 +946,31 @@
       background: rgba(210,153,34,0.15); color: var(--yellow);
       text-transform: uppercase; font-weight: 600;
     }
-    .ff-suggestion .ff-sug-actions { display: flex; gap: 6px; }
+    .ff-suggestion .ff-sug-actions { display: flex; gap: 6px; cursor: default; }
     .ff-suggestion .ff-sug-actions button {
       padding: 5px 12px; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 500;
+    }
+    .ff-suggestion .ff-sug-expanded {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      cursor: default;
+    }
+    .ff-suggestion .ff-sug-section-label {
+      font-size: 10px; text-transform: uppercase; color: var(--text-muted);
+      font-weight: 600; letter-spacing: 0.5px; margin-bottom: 4px;
+    }
+    .ff-suggestion .ff-sug-text {
+      white-space: pre-wrap; word-break: break-word;
+      font-size: 12px; line-height: 1.45; color: var(--text);
+      margin: 0; font-family: inherit;
+    }
+    .ff-suggestion .ff-sug-extra-meta {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      font-size: 11px; color: var(--text-muted);
     }
 
     /* Recent task entry in dashboard */
@@ -1343,6 +1368,7 @@
     }
 
     let suggestions = [];           // currently-displayed pending suggestions for the selected repo
+    let suggestionExpanded = new Set(); // suggestion ids whose detail block is expanded; survives WS-driven re-renders
     let freeformTasks = [];          // recent freeform tasks (across all repos)
     let freeformConfigs = [];        // all freeform configs (one per repo)
     let currentTab = "tasks";
@@ -1711,6 +1737,19 @@
       renderRepoDetailSuggestions();
     }
 
+    function toggleSuggestionExpanded(id) {
+      if (suggestionExpanded.has(id)) suggestionExpanded.delete(id);
+      else suggestionExpanded.add(id);
+      renderRepoDetailSuggestions();
+    }
+
+    function formatSuggestionTimestamp(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
+    }
+
     function renderRepoDetailSuggestions() {
       const el = document.getElementById("rd-suggestions");
       if (!el) return;
@@ -1718,20 +1757,49 @@
         el.innerHTML = '<div class="empty-state" style="height:60px;font-size:12px;">No pending suggestions</div>';
         return;
       }
-      el.innerHTML = suggestions.map(s => `
-        <div class="ff-suggestion">
-          <div class="ff-sug-title">${escHtml(s.title)}</div>
+      el.innerHTML = suggestions.map(s => {
+        const expanded = suggestionExpanded.has(s.id);
+        const chevron = expanded ? '▼' : '▶';
+        const expandedBlock = expanded ? `
+          <div class="ff-sug-expanded">
+            <div>
+              <div class="ff-sug-section-label">Description</div>
+              <pre class="ff-sug-text">${escHtml(s.description || '—')}</pre>
+            </div>
+            <div>
+              <div class="ff-sug-section-label">Rationale</div>
+              <pre class="ff-sug-text">${escHtml(s.rationale || '—')}</pre>
+            </div>
+            <div class="ff-sug-extra-meta">
+              <span title="${escAttr(s.created_at || '')}">Created: ${escHtml(formatSuggestionTimestamp(s.created_at))}</span>
+              <span>Status: ${escHtml(s.status || 'pending')}</span>
+              <span>ID: #${s.id}</span>
+              ${s.category ? `<span>Category: ${escHtml(s.category)}</span>` : ''}
+              <span>Priority: P${s.priority || 3}</span>
+              ${s.repo_name ? `<span>Repo: ${escHtml(s.repo_name)}</span>` : ''}
+              ${s.task_id ? `<span>Task: #${s.task_id}</span>` : ''}
+            </div>
+          </div>
+        ` : '';
+        return `
+        <div class="ff-suggestion" onclick="toggleSuggestionExpanded(${s.id})">
+          <div class="ff-sug-header">
+            <span class="ff-sug-toggle">${chevron}</span>
+            <div class="ff-sug-title">${escHtml(s.title)}</div>
+          </div>
           <div class="ff-sug-rationale">${escHtml(s.rationale || s.description || '')}</div>
           <div class="ff-sug-meta">
             ${s.category ? `<span class="ff-sug-pill">${escHtml(s.category)}</span>` : ''}
             <span class="ff-sug-priority">P${s.priority || 3}</span>
           </div>
-          <div class="ff-sug-actions">
-            <button id="sug-approve-${s.id}" style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
-            <button id="sug-reject-${s.id}" style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
+          <div class="ff-sug-actions" onclick="event.stopPropagation()">
+            <button style="background:var(--green);color:#fff;" onclick="approveSuggestion(${s.id})">Approve</button>
+            <button style="background:var(--red);color:#fff;" onclick="rejectSuggestion(${s.id})">Reject</button>
           </div>
+          ${expandedBlock}
         </div>
-      `).join("");
+        `;
+      }).join("");
     }
 
     /* ----- Utility helpers ----- */
