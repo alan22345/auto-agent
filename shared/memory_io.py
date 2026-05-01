@@ -6,6 +6,7 @@ Keeps web handlers slim and gives us a single seam to mock in tests.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -254,8 +255,11 @@ async def delete_fact(fact_id: str, *, author: str | None = None) -> bool:
         fact = (await session.execute(select(Fact).where(Fact.id == uid))).scalar_one_or_none()
         if fact is None:
             return False
-        fact.valid_until = func.now()
-        if author and not fact.source:
-            fact.source = f"deleted via memory tab by {author}"
+        fact.valid_until = datetime.now(UTC)
+        # Append the deleter to the source so the audit trail records who
+        # ended the fact. Facts always have a source from creation, so we
+        # concatenate rather than overwrite.
+        marker = f"deleted via memory tab by {author}" if author else "deleted via memory tab"
+        fact.source = f"{fact.source} | {marker}" if fact.source else marker
         await session.commit()
     return True

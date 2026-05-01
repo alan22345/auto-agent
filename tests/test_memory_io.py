@@ -276,13 +276,14 @@ async def test_get_entity_with_facts_returns_none_when_missing():
 
 
 async def test_delete_fact_marks_valid_until():
+    import datetime as dt
     import uuid as _uuid
 
     fact_id = "22222222-2222-2222-2222-222222222222"
     fact = SimpleNamespace(
         id=_uuid.UUID(fact_id),
         valid_until=None,
-        source=None,
+        source="memory-tab",
     )
     res = MagicMock()
     res.scalar_one_or_none.return_value = fact
@@ -292,8 +293,29 @@ async def test_delete_fact_marks_valid_until():
     with patch("shared.memory_io.team_memory_session", return_value=_SessionCtx(session)):
         ok = await delete_fact(fact_id, author="alan")
     assert ok is True
-    assert fact.valid_until is not None
+    assert isinstance(fact.valid_until, dt.datetime)
+    # Audit trail: deleter is appended to the existing source, original is preserved.
+    assert "alan" in fact.source
+    assert "memory-tab" in fact.source
     session.commit.assert_awaited_once()
+
+
+async def test_delete_fact_records_deleter_when_source_was_empty():
+    import uuid as _uuid
+
+    fact = SimpleNamespace(
+        id=_uuid.UUID("22222222-2222-2222-2222-222222222222"),
+        valid_until=None,
+        source=None,
+    )
+    res = MagicMock()
+    res.scalar_one_or_none.return_value = fact
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=res)
+    session.commit = AsyncMock()
+    with patch("shared.memory_io.team_memory_session", return_value=_SessionCtx(session)):
+        await delete_fact("22222222-2222-2222-2222-222222222222", author="alan")
+    assert "alan" in fact.source
 
 
 async def test_delete_fact_returns_false_when_unknown():

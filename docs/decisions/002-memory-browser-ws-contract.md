@@ -35,11 +35,14 @@ on a single transport. The handlers live next to the existing
 `recall_entity`/`remember_row`/`correct_fact` so all team-memory access stays
 behind one seam that tests can mock.
 
-`delete_fact` is implemented as a soft delete: it sets `valid_until = now()`
-on the existing `Fact` row without creating a successor. `GraphEngine` only
-exposes `correct` (which always creates a replacement) and we want a true
-"end this fact" primitive that keeps the audit trail without leaving a
-"(deleted)" placeholder current fact.
+`delete_fact` is implemented as a soft delete: it sets
+`valid_until = datetime.now(UTC)` on the existing `Fact` row without creating
+a successor and appends `| deleted via memory tab by <username>` to the
+existing `source` field so the audit trail records who ended the fact (the
+schema has no separate `deleted_by` column). `GraphEngine` only exposes
+`correct` (which always creates a replacement) and we want a true "end this
+fact" primitive that keeps the audit trail without leaving a "(deleted)"
+placeholder current fact.
 
 ## Consequences
 
