@@ -2618,7 +2618,8 @@
       if (msgs.length === 0 && !prefixHtml) {
         el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
         lastRenderedMsgCountByKey[key] = 0;
-        if (taskChanged) clearNewMsgPill();
+        // Nothing to count; clear any stale pill from a prior state.
+        clearNewMsgPill();
         lastRenderedTaskKey = key;
         return;
       }
