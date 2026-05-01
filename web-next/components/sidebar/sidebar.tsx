@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
+  BarChart3,
   Brain,
   ChevronLeft,
   ChevronRight,
@@ -23,6 +24,7 @@ const tabs: Tab[] = [
   { href: '/freeform', label: 'Freeform', icon: Sparkles },
   { href: '/memory', label: 'Memory', icon: Brain },
   { href: '/search', label: 'Search', icon: Search },
+  { href: '/metrics', label: 'Metrics', icon: BarChart3 },
 ];
 
 const STORAGE_KEY = 'auto-agent.sidebar.collapsed';
