@@ -400,6 +400,117 @@
     #memory-main.hidden,
     #memory-panel.hidden { display: none; }
 
+    /* Metrics tab */
+    #metrics-main.hidden,
+    #metrics-panel.hidden { display: none; }
+    #metrics-main { color: var(--text); max-width: 1200px; margin: 0 auto; }
+    .metrics-error {
+      background: rgba(248,81,73,0.1);
+      border: 1px solid var(--red);
+      color: var(--red);
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .metrics-error.hidden { display: none; }
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .kpi-card .kpi-label {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .kpi-card .kpi-value {
+      color: var(--text);
+      font-size: 24px;
+      font-weight: 600;
+    }
+    .kpi-card .kpi-sub {
+      color: var(--text-muted);
+      font-size: 11px;
+      margin-top: 4px;
+    }
+    .metrics-tables {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .metrics-table {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .metrics-table h3 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .metrics-table table { width: 100%; border-collapse: collapse; }
+    .metrics-table th, .metrics-table td {
+      text-align: left;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .metrics-table th {
+      font-weight: 600;
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .metrics-table tr:last-child td { border-bottom: none; }
+    .metrics-table td.num { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .metrics-table .empty-row { padding: 16px 12px; color: var(--text-muted); font-size: 13px; text-align: center; }
+    .recent-completed {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .recent-completed h3 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .recent-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .recent-row:last-child { border-bottom: none; }
+    .recent-row:hover { background: rgba(255,255,255,0.04); }
+    .recent-row .recent-id { color: var(--text-muted); font-size: 11px; min-width: 48px; }
+    .recent-row .recent-title { flex: 1; word-break: break-word; }
+    .recent-row .recent-duration { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+
     /* Memory tab */
     #memory-main { color: var(--text); }
     .memory-dropzone {
@@ -943,6 +1054,7 @@
       <button class="active" onclick="switchTab('tasks')" id="tab-tasks">Tasks</button>
       <button onclick="switchTab('freeform')" id="tab-freeform">Freeform</button>
       <button onclick="switchTab('memory')" id="tab-memory">Memory</button>
+      <button onclick="switchTab('metrics')" id="tab-metrics">Metrics</button>
     </div>
 
     <!-- Tasks tab -->
@@ -972,6 +1084,11 @@
     <!-- Memory tab sidebar (minimal — just a header, the real UI is in the main pane) -->
     <div id="memory-panel" class="hidden" style="padding: 12px; color: var(--dim); font-size: 12px;">
       Drop files, paste notes, or upload PDFs on the right. Extracted facts go to team-memory after review.
+    </div>
+
+    <!-- Metrics tab sidebar (minimal — dashboard renders in the main pane) -->
+    <div id="metrics-panel" class="hidden" style="padding: 12px; color: var(--text-muted); font-size: 12px;">
+      Live task &amp; PR metrics. Auto-refreshes every 60s.
     </div>
   </div>
 
@@ -1056,6 +1173,14 @@
         </div>
       </div>
     </div>
+
+    <!-- Metrics-tab main content -->
+    <div id="metrics-main" class="hidden" style="flex: 1; padding: 16px; overflow: auto;">
+      <div id="metrics-error" class="metrics-error hidden"></div>
+      <div id="metrics-kpis" class="kpi-row"></div>
+      <div id="metrics-breakdowns" class="metrics-tables"></div>
+      <div id="metrics-recent" class="recent-completed"></div>
+    </div>
   </div>
   </div><!-- /#main-app -->
 
@@ -1132,20 +1257,28 @@
 
     function switchTab(tab) {
       currentTab = tab;
-      for (const t of ["tasks", "freeform", "memory"]) {
+      for (const t of ["tasks", "freeform", "memory", "metrics"]) {
         document.getElementById("tab-" + t).classList.toggle("active", tab === t);
       }
       document.getElementById("tasks-panel").classList.toggle("hidden", tab !== "tasks");
       document.getElementById("freeform-panel").classList.toggle("visible", tab === "freeform");
       document.getElementById("memory-panel").classList.toggle("hidden", tab !== "memory");
+      document.getElementById("metrics-panel").classList.toggle("hidden", tab !== "metrics");
       // Swap the main area too
       document.getElementById("tasks-main").style.display = (tab === "tasks") ? "flex" : "none";
       document.getElementById("freeform-main").classList.toggle("hidden", tab !== "freeform");
       document.getElementById("memory-main").classList.toggle("hidden", tab !== "memory");
+      document.getElementById("metrics-main").classList.toggle("hidden", tab !== "metrics");
 
       if (tab === "freeform") {
         loadFreeformConfigs();
         loadFreeformTasks();
+      }
+      if (tab === "metrics") {
+        loadMetrics();
+        startMetricsAutoRefresh();
+      } else {
+        stopMetricsAutoRefresh();
       }
     }
 
@@ -2453,6 +2586,179 @@
       const d = document.createElement("div");
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    // ─── Metrics tab ──────────────────────────────────────────────────
+    let metricsRefreshTimer = null;
+
+    function startMetricsAutoRefresh() {
+      if (metricsRefreshTimer) return;
+      metricsRefreshTimer = setInterval(() => {
+        if (currentTab === "metrics") loadMetrics();
+      }, 60000);
+    }
+
+    function stopMetricsAutoRefresh() {
+      if (metricsRefreshTimer) {
+        clearInterval(metricsRefreshTimer);
+        metricsRefreshTimer = null;
+      }
+    }
+
+    function metricsShowError(msg) {
+      const el = document.getElementById("metrics-error");
+      if (!el) return;
+      if (msg) {
+        el.textContent = msg;
+        el.classList.remove("hidden");
+      } else {
+        el.textContent = "";
+        el.classList.add("hidden");
+      }
+    }
+
+    function formatDuration(seconds) {
+      if (seconds == null || isNaN(seconds)) return "—";
+      const s = Math.max(0, Number(seconds));
+      if (s < 60) return `${Math.round(s)}s`;
+      if (s < 3600) {
+        const m = Math.floor(s / 60);
+        const rs = Math.round(s % 60);
+        return `${m}m ${rs}s`;
+      }
+      const h = Math.floor(s / 3600);
+      const m = Math.round((s % 3600) / 60);
+      return `${h}h ${m}m`;
+    }
+
+    async function loadMetrics() {
+      try {
+        const res = await authFetch("/api/metrics");
+        if (!res.ok) throw new Error(`/api/metrics returned ${res.status}`);
+        const data = await res.json();
+        metricsShowError(null);
+        renderMetrics(data);
+
+        // Recently completed list — best-effort, separate try block
+        try {
+          const tasksRes = await authFetch("/api/tasks?status=done");
+          if (!tasksRes.ok) throw new Error(`/api/tasks returned ${tasksRes.status}`);
+          const allDone = await tasksRes.json();
+          const tasks = (Array.isArray(allDone) ? allDone : []).slice(0, 5);
+          const perTask = await Promise.all(tasks.map(t =>
+            authFetch(`/api/metrics/tasks/${t.id}`)
+              .then(r => r.ok ? r.json() : null)
+              .catch(() => null)
+          ));
+          renderRecentCompleted(tasks, perTask);
+        } catch (e) {
+          renderRecentCompleted([], []);
+        }
+      } catch (e) {
+        metricsShowError(`Failed to load metrics: ${e.message}`);
+      }
+    }
+
+    function renderMetrics(data) {
+      const kpiEl = document.getElementById("metrics-kpis");
+      const totalTasks = data.total_tasks ?? 0;
+      const successRate = (data.success_rate_pct ?? 0).toFixed(1) + "%";
+      const avgHours = data.avg_duration_hours == null
+        ? "—"
+        : `${Number(data.avg_duration_hours).toFixed(1)} h`;
+      const prRate = ((data.pr_outcomes && data.pr_outcomes.approval_rate_pct) ?? 0).toFixed(1) + "%";
+      const prTotal = (data.pr_outcomes && data.pr_outcomes.total) ?? 0;
+      const activeTasks = data.active_tasks ?? 0;
+      const periodDays = data.period_days ?? 30;
+
+      kpiEl.innerHTML = `
+        <div class="kpi-card">
+          <div class="kpi-label">Total tasks</div>
+          <div class="kpi-value">${totalTasks}</div>
+          <div class="kpi-sub">${activeTasks} active · last ${periodDays}d</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Success rate</div>
+          <div class="kpi-value">${successRate}</div>
+          <div class="kpi-sub">done vs. failed</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Avg completion</div>
+          <div class="kpi-value">${avgHours}</div>
+          <div class="kpi-sub">intake → done</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">PR approval rate</div>
+          <div class="kpi-value">${prRate}</div>
+          <div class="kpi-sub">${prTotal} PR outcome${prTotal === 1 ? "" : "s"}</div>
+        </div>
+      `;
+
+      const breakdownsEl = document.getElementById("metrics-breakdowns");
+      breakdownsEl.innerHTML =
+        renderBreakdownTable("Tasks by status", data.by_status || {}, totalTasks) +
+        renderBreakdownTable("Tasks by source", data.by_source || {}, totalTasks);
+    }
+
+    function renderBreakdownTable(title, map, total) {
+      const entries = Object.entries(map || {}).sort((a, b) => b[1] - a[1]);
+      if (entries.length === 0) {
+        return `
+          <div class="metrics-table">
+            <h3>${escHtml(title)}</h3>
+            <div class="empty-row">No data</div>
+          </div>
+        `;
+      }
+      const rows = entries.map(([key, count]) => {
+        const pct = total > 0 ? ((count / total) * 100).toFixed(1) + "%" : "—";
+        return `
+          <tr>
+            <td>${escHtml(key)}</td>
+            <td class="num">${count}</td>
+            <td class="num">${pct}</td>
+          </tr>
+        `;
+      }).join("");
+      return `
+        <div class="metrics-table">
+          <h3>${escHtml(title)}</h3>
+          <table>
+            <thead><tr><th>Key</th><th class="num">Count</th><th class="num">Share</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderRecentCompleted(tasks, perTask) {
+      const el = document.getElementById("metrics-recent");
+      if (!tasks || tasks.length === 0) {
+        el.innerHTML = `
+          <h3>Recently completed</h3>
+          <div class="empty-row" style="padding:16px 12px;color:var(--text-muted);font-size:13px;text-align:center;">No completed tasks yet</div>
+        `;
+        return;
+      }
+      const rows = tasks.map((t, i) => {
+        const m = perTask && perTask[i];
+        let duration = "—";
+        if (m && m.time_in_status_seconds) {
+          const total = Object.values(m.time_in_status_seconds).reduce((a, b) => a + (Number(b) || 0), 0);
+          duration = formatDuration(total);
+        }
+        return `
+          <div class="recent-row" onclick="switchTab('tasks');selectTask(${t.id})">
+            <span class="recent-id">#${t.id}</span>
+            <span class="recent-title">${escHtml(t.title || "(untitled)")}</span>
+            <span class="recent-duration">${escHtml(duration)}</span>
+          </div>
+        `;
+      }).join("");
+      el.innerHTML = `
+        <h3>Recently completed</h3>
+        ${rows}
+      `;
     }
 
     // ─── Memory tab ───────────────────────────────────────────────────
