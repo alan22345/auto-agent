@@ -149,7 +149,11 @@ async def test_send_message_streams_events_and_persists():
     async def _override():
         yield session
 
-    # Mock async_session() context manager used in the finally block
+    # Mock the async_session() context manager used by the persistence
+    # path. The endpoint opens this context twice: once to insert the
+    # assistant SearchMessage row + bump SearchSession.updated_at, and a
+    # second time to set the auto-generated title (separate transaction
+    # so a slow title call can't block persistence).
     s2_added: list[object] = []
     s2 = AsyncMock()
     s2.add = MagicMock(side_effect=lambda obj: s2_added.append(obj))
@@ -159,6 +163,7 @@ async def test_send_message_streams_events_and_persists():
     target_session.title = "New search"
     target_result = MagicMock()
     target_result.scalar_one.return_value = target_session
+    target_result.scalar_one_or_none.return_value = target_session
     s2.execute = AsyncMock(return_value=target_result)
 
     @asynccontextmanager

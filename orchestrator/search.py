@@ -217,12 +217,70 @@ async def send_message(
     is_first_user_message = sum(1 for h in history if h["role"] == "user") == 1
     content = user_content
 
+    async def _persist_assistant(
+        events_captured: list[dict],
+        final_answer: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        truncated: bool,
+    ) -> None:
+        # Persist only meaningful turns. An empty answer with no captured
+        # events means the stream ended before anything useful happened —
+        # don't leave an orphan blank assistant row in the session.
+        persisted_events = [
+            e
+            for e in events_captured
+            if e.get("type") in ("source", "memory_hit")
+        ]
+        answer = final_answer or ""
+        if not answer and not persisted_events and not truncated:
+            return
+        async with async_session() as s2:
+            msg = SearchMessage(
+                session_id=session_id,
+                role="assistant",
+                content=answer,
+                tool_events=persisted_events,
+                truncated=truncated,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            s2.add(msg)
+            target = (
+                await s2.execute(
+                    select(SearchSession).where(SearchSession.id == session_id)
+                )
+            ).scalar_one()
+            target.updated_at = datetime.now(UTC)
+            await s2.commit()
+
+    async def _maybe_set_title(content: str) -> None:
+        if not is_first_user_message:
+            return
+        try:
+            new_title = await generate_title(content)
+        except Exception:
+            return
+        async with async_session() as s3:
+            target = (
+                await s3.execute(
+                    select(SearchSession).where(
+                        SearchSession.id == session_id,
+                        SearchSession.title == "New search",
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is not None:
+                target.title = new_title
+                await s3.commit()
+
     async def stream() -> AsyncIterator[bytes]:
         events_captured: list[dict] = []
         final_answer: str | None = None
         input_tokens = 0
         output_tokens = 0
         truncated = False
+        persisted = False
         try:
             async for ev in run_search_turn(
                 user_message=content,
@@ -232,9 +290,18 @@ async def send_message(
             ):
                 events_captured.append(ev)
                 if ev["type"] == "done":
+                    # Capture totals, then commit the assistant row BEFORE
+                    # yielding `done` to the client. The client refetches
+                    # the session as soon as it sees `done`, so persistence
+                    # must happen first or the assistant message will be
+                    # invisible until the next reload.
                     final_answer = ev.get("answer", "") or ""
                     input_tokens = int(ev.get("input_tokens") or 0)
                     output_tokens = int(ev.get("output_tokens") or 0)
+                    await _persist_assistant(
+                        events_captured, final_answer, input_tokens, output_tokens, truncated,
+                    )
+                    persisted = True
                 elif ev["type"] == "error":
                     truncated = True
                 yield (json.dumps(ev) + "\n").encode("utf-8")
@@ -244,37 +311,13 @@ async def send_message(
                 "utf-8"
             )
         finally:
-            # Persist only meaningful turns. An empty answer with no captured
-            # events means the client disconnected before anything happened —
-            # don't leave an orphan blank assistant row in the session.
-            persisted_events = [
-                e
-                for e in events_captured
-                if e.get("type") in ("source", "memory_hit")
-            ]
-            answer = final_answer or ""
-            if not answer and not persisted_events and not truncated:
-                return
-            async with async_session() as s2:
-                msg = SearchMessage(
-                    session_id=session_id,
-                    role="assistant",
-                    content=answer,
-                    tool_events=persisted_events,
-                    truncated=truncated,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
+            # Catch-all: if we never reached the `done` branch (client
+            # disconnected mid-stream, error event, etc.), still persist
+            # whatever we captured.
+            if not persisted:
+                await _persist_assistant(
+                    events_captured, final_answer, input_tokens, output_tokens, truncated,
                 )
-                s2.add(msg)
-                target = (
-                    await s2.execute(
-                        select(SearchSession).where(SearchSession.id == session_id)
-                    )
-                ).scalar_one()
-                if is_first_user_message and target.title == "New search":
-                    target.title = await generate_title(content)
-                # Touch updated_at so the row's timestamp reflects this turn.
-                target.updated_at = datetime.now(UTC)
-                await s2.commit()
+            await _maybe_set_title(content)
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
