@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -17,6 +19,8 @@ from orchestrator.auth import current_user_id
 from shared.config import settings
 from shared.database import async_session, get_session
 from shared.models import SearchMessage, SearchSession, User
+
+logger = structlog.get_logger()
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -305,13 +309,20 @@ async def send_message(
                 target.title = new_title
                 await s3.commit()
 
-    async def stream() -> AsyncIterator[bytes]:
+    # The agent runs in a detached background task that owns persistence
+    # end-to-end. The streaming HTTP endpoint is just an observer that
+    # forwards events from a fan-out queue to the client. If the client
+    # disconnects (refresh, navigate away, idle proxy), the worker keeps
+    # running, finishes its turn, and persists. The next time the user
+    # opens the session, the answer is there.
+    fanout: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def worker() -> None:
         events_captured: list[dict] = []
         final_answer: str | None = None
         input_tokens = 0
         output_tokens = 0
         truncated = False
-        persisted = False
         try:
             async for ev in run_search_turn(
                 user_message=content,
@@ -321,34 +332,40 @@ async def send_message(
             ):
                 events_captured.append(ev)
                 if ev["type"] == "done":
-                    # Capture totals, then commit the assistant row BEFORE
-                    # yielding `done` to the client. The client refetches
-                    # the session as soon as it sees `done`, so persistence
-                    # must happen first or the assistant message will be
-                    # invisible until the next reload.
                     final_answer = ev.get("answer", "") or ""
                     input_tokens = int(ev.get("input_tokens") or 0)
                     output_tokens = int(ev.get("output_tokens") or 0)
-                    await _persist_assistant(
-                        events_captured, final_answer, input_tokens, output_tokens, truncated,
-                    )
-                    persisted = True
                 elif ev["type"] == "error":
                     truncated = True
-                yield (json.dumps(ev) + "\n").encode("utf-8")
+                await fanout.put(ev)
         except Exception as e:
+            logger.warning("search_worker_failed", error=str(e))
             truncated = True
-            yield (json.dumps({"type": "error", "message": str(e)}) + "\n").encode(
-                "utf-8"
-            )
+            await fanout.put({"type": "error", "message": str(e)})
         finally:
-            # Catch-all: if we never reached the `done` branch (client
-            # disconnected mid-stream, error event, etc.), still persist
-            # whatever we captured.
-            if not persisted:
-                await _persist_assistant(
+            # Persistence is shielded so a request-handler cancellation can't
+            # roll the assistant row back. The worker is detached from the
+            # request lifetime anyway, but shield is belt-and-suspenders for
+            # any future code path that might cancel us.
+            try:
+                await asyncio.shield(_persist_assistant(
                     events_captured, final_answer, input_tokens, output_tokens, truncated,
-                )
-            await _maybe_set_title(content)
+                ))
+            except Exception as e:
+                logger.warning("search_persist_failed", error=str(e))
+            try:
+                await asyncio.shield(_maybe_set_title(content))
+            except Exception as e:
+                logger.warning("search_title_failed", error=str(e))
+            await fanout.put(None)  # signal stream to close
+
+    asyncio.create_task(worker())
+
+    async def stream() -> AsyncIterator[bytes]:
+        while True:
+            ev = await fanout.get()
+            if ev is None:
+                break
+            yield (json.dumps(ev) + "\n").encode("utf-8")
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")

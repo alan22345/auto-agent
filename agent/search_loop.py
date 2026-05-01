@@ -56,7 +56,9 @@ Workflow for each user message:
    remember something, or has stated a durable preference about themselves
    or the project. Do NOT use it to save web research.
 
-BUDGET: At most ~6 web_search calls and ~4 fetch_url calls per question.
+BUDGET: For a thorough research question you may run up to ~15 web_search
+calls (yielding up to ~100 sources) and ~6 fetch_url calls. Stop searching
+sooner if simpler questions are clearly answered.
 Once you have enough material, STOP calling tools and write the answer.
 Don't chain queries indefinitely — partial coverage with a clear synthesis
 beats exhaustive coverage that never produces a report.
@@ -127,17 +129,18 @@ async def run_search_turn(
     prior_messages = _history_to_messages(history)
 
     # Wallclock cap so a runaway agent (large prompt context, slow Bedrock,
-    # or a research loop that won't synthesize) can't hang the user
-    # indefinitely. ~3 min is enough for a thorough answer; beyond that the
-    # user gets an explicit error event.
-    max_wallclock_seconds = 180
+    # or a research loop that won't synthesize) can't hang forever. Six
+    # minutes accommodates a thorough multi-search session; beyond that the
+    # user gets an explicit error event. Budget enforced in the system
+    # prompt; max_turns is the hard ceiling.
+    max_wallclock_seconds = 360
 
     loop = AgentLoop(
         provider=provider,
         tools=tools,
         context_manager=context_manager,
         session=None,
-        max_turns=8,
+        max_turns=20,
         workspace=".",
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
