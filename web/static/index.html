@@ -2590,6 +2590,14 @@
 
     // ─── Metrics tab ──────────────────────────────────────────────────
     let metricsRefreshTimer = null;
+    // Monotonic token: a fetch keeps its own copy and bails on render if a
+    // newer call has started, preventing stale renders on rapid tab switches.
+    let metricsRequestToken = 0;
+    // How many done tasks to consider as candidates before sorting by actual
+    // completion timestamp from the timeline. Bounded to keep the per-tick
+    // request count reasonable.
+    const RECENT_DONE_CANDIDATES = 15;
+    const RECENT_DONE_DISPLAY = 5;
 
     function startMetricsAutoRefresh() {
       if (metricsRefreshTimer) return;
@@ -2631,11 +2639,25 @@
       return `${h}h ${m}m`;
     }
 
+    function latestDoneTimestamp(taskMetrics) {
+      if (!taskMetrics || !Array.isArray(taskMetrics.timeline)) return null;
+      let latest = null;
+      for (const entry of taskMetrics.timeline) {
+        if (entry && entry.to === "done" && entry.timestamp) {
+          const ms = Date.parse(entry.timestamp);
+          if (!isNaN(ms) && (latest === null || ms > latest)) latest = ms;
+        }
+      }
+      return latest;
+    }
+
     async function loadMetrics() {
+      const myToken = ++metricsRequestToken;
       try {
         const res = await authFetch("/api/metrics");
         if (!res.ok) throw new Error(`/api/metrics returned ${res.status}`);
         const data = await res.json();
+        if (myToken !== metricsRequestToken) return;
         metricsShowError(null);
         renderMetrics(data);
 
@@ -2644,17 +2666,33 @@
           const tasksRes = await authFetch("/api/tasks?status=done");
           if (!tasksRes.ok) throw new Error(`/api/tasks returned ${tasksRes.status}`);
           const allDone = await tasksRes.json();
-          const tasks = (Array.isArray(allDone) ? allDone : []).slice(0, 5);
-          const perTask = await Promise.all(tasks.map(t =>
+          const candidates = (Array.isArray(allDone) ? allDone : []).slice(0, RECENT_DONE_CANDIDATES);
+          const perTask = await Promise.all(candidates.map(t =>
             authFetch(`/api/metrics/tasks/${t.id}`)
               .then(r => r.ok ? r.json() : null)
               .catch(() => null)
           ));
-          renderRecentCompleted(tasks, perTask);
+          if (myToken !== metricsRequestToken) return;
+
+          // Pair each candidate with its DONE-timestamp from the timeline,
+          // sort by that timestamp DESC, take the top N. Tasks with no
+          // resolvable DONE timestamp fall back to created_at so they still
+          // appear (just at the bottom of the candidate window).
+          const decorated = candidates.map((t, i) => {
+            const m = perTask[i];
+            const ts = latestDoneTimestamp(m);
+            const fallback = t.created_at ? Date.parse(t.created_at) : 0;
+            return { task: t, metrics: m, sortKey: ts != null ? ts : (isNaN(fallback) ? 0 : fallback) };
+          });
+          decorated.sort((a, b) => b.sortKey - a.sortKey);
+          const top = decorated.slice(0, RECENT_DONE_DISPLAY);
+          renderRecentCompleted(top.map(d => d.task), top.map(d => d.metrics));
         } catch (e) {
+          if (myToken !== metricsRequestToken) return;
           renderRecentCompleted([], []);
         }
       } catch (e) {
+        if (myToken !== metricsRequestToken) return;
         metricsShowError(`Failed to load metrics: ${e.message}`);
       }
     }
@@ -2662,12 +2700,22 @@
     function renderMetrics(data) {
       const kpiEl = document.getElementById("metrics-kpis");
       const totalTasks = data.total_tasks ?? 0;
-      const successRate = (data.success_rate_pct ?? 0).toFixed(1) + "%";
+
+      const finishedCount = ((data.by_status && data.by_status.done) || 0) +
+                            ((data.by_status && data.by_status.failed) || 0);
+      const successRate = finishedCount === 0
+        ? "—"
+        : (data.success_rate_pct ?? 0).toFixed(1) + "%";
+
       const avgHours = data.avg_duration_hours == null
         ? "—"
         : `${Number(data.avg_duration_hours).toFixed(1)} h`;
-      const prRate = ((data.pr_outcomes && data.pr_outcomes.approval_rate_pct) ?? 0).toFixed(1) + "%";
+
       const prTotal = (data.pr_outcomes && data.pr_outcomes.total) ?? 0;
+      const prRate = prTotal === 0
+        ? "—"
+        : ((data.pr_outcomes && data.pr_outcomes.approval_rate_pct) ?? 0).toFixed(1) + "%";
+
       const activeTasks = data.active_tasks ?? 0;
       const periodDays = data.period_days ?? 30;
 
