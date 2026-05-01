@@ -1274,9 +1274,9 @@
     <!-- Metrics-tab main content -->
     <div id="metrics-main" class="hidden" style="flex: 1; padding: 16px; overflow: auto;">
       <div class="metrics-period" role="tablist" aria-label="Metrics period">
-        <button type="button" id="metrics-period-7" onclick="setMetricsPeriod(7)">7d</button>
-        <button type="button" id="metrics-period-30" class="active" onclick="setMetricsPeriod(30)">30d</button>
-        <button type="button" id="metrics-period-90" onclick="setMetricsPeriod(90)">90d</button>
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-7" onclick="setMetricsPeriod(7)">7d</button>
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-30" onclick="setMetricsPeriod(30)">30d</button>
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-90" onclick="setMetricsPeriod(90)">90d</button>
       </div>
       <div id="metrics-error" class="metrics-error hidden"></div>
       <div id="metrics-kpis" class="kpi-row"></div>
@@ -1380,6 +1380,7 @@
         loadFreeformTasks();
       }
       if (tab === "metrics") {
+        applyMetricsPeriod(metricsPeriodDays);
         loadMetrics();
       }
     }
@@ -2024,7 +2025,7 @@
           tasks = data.tasks;
           renderTasks();
           renderSubtaskBar();
-          if (currentTab === "metrics") loadMetrics();
+          if (currentTab === "metrics") scheduleMetricsRefresh();
           break;
         case "suggestion_list":
           suggestions = data.suggestions || [];
@@ -2827,14 +2828,37 @@
     // or concurrent task_list-driven refreshes.
     let metricsRequestToken = 0;
     let metricsPeriodDays = 30;
+    const METRICS_PERIOD_OPTIONS = [7, 30, 90];
+
+    // Sync button UI to current `metricsPeriodDays`. Single source of truth
+    // for which tab looks/reads "selected".
+    function applyMetricsPeriod(days) {
+      for (const d of METRICS_PERIOD_OPTIONS) {
+        const btn = document.getElementById(`metrics-period-${d}`);
+        if (!btn) continue;
+        const isActive = d === days;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", String(isActive));
+      }
+    }
 
     function setMetricsPeriod(days) {
       metricsPeriodDays = days;
-      for (const d of [7, 30, 90]) {
-        const btn = document.getElementById(`metrics-period-${d}`);
-        if (btn) btn.classList.toggle("active", d === days);
-      }
+      applyMetricsPeriod(days);
       loadMetrics();
+    }
+
+    // Trailing debounce for WS-driven refreshes: collapses bursts of
+    // task_list pushes (e.g. during a long task.subtask_progress sequence)
+    // into a single /api/metrics call, since `_avg_completion_time` runs an
+    // N+1 over completed tasks server-side.
+    let metricsWsRefreshTimer = null;
+    function scheduleMetricsRefresh() {
+      if (metricsWsRefreshTimer) clearTimeout(metricsWsRefreshTimer);
+      metricsWsRefreshTimer = setTimeout(() => {
+        metricsWsRefreshTimer = null;
+        if (currentTab === "metrics") loadMetrics();
+      }, 1500);
     }
 
     function metricsShowError(msg) {
