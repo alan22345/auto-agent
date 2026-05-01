@@ -479,6 +479,27 @@
       margin-bottom: 16px;
     }
     .metrics-error.hidden { display: none; }
+    .metrics-period {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+    .metrics-period button {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .metrics-period button:hover { color: var(--text); }
+    .metrics-period button.active {
+      background: var(--accent, #2f81f7);
+      border-color: var(--accent, #2f81f7);
+      color: #fff;
+    }
     .kpi-row {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -508,19 +529,14 @@
       font-size: 11px;
       margin-top: 4px;
     }
-    .metrics-tables {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 16px;
-      margin-bottom: 20px;
-    }
-    .metrics-table {
+    .metrics-card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 6px;
       overflow: hidden;
+      margin-bottom: 16px;
     }
-    .metrics-table h3 {
+    .metrics-card h3 {
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
@@ -528,53 +544,58 @@
       color: var(--text-muted);
       padding: 10px 12px;
       border-bottom: 1px solid var(--border);
+      margin: 0;
     }
-    .metrics-table table { width: 100%; border-collapse: collapse; }
-    .metrics-table th, .metrics-table td {
-      text-align: left;
+    .metrics-card .empty-row {
+      padding: 16px 12px;
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
       padding: 8px 12px;
       border-bottom: 1px solid var(--border);
       font-size: 13px;
     }
-    .metrics-table th {
-      font-weight: 600;
+    .bar-row:last-child { border-bottom: none; }
+    .bar-row .bar-label {
+      width: 120px;
       color: var(--text-muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
+      font-size: 12px;
+      text-transform: capitalize;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .metrics-table tr:last-child td { border-bottom: none; }
-    .metrics-table td.num { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-    .metrics-table .empty-row { padding: 16px 12px; color: var(--text-muted); font-size: 13px; text-align: center; }
-    .recent-completed {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 6px;
+    .bar-row .bar-track {
+      flex: 1;
+      height: 10px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 4px;
       overflow: hidden;
     }
-    .recent-completed h3 {
+    .bar-row .bar-fill {
+      height: 100%;
+      background: var(--accent, #2f81f7);
+      border-radius: 4px;
+      min-width: 2px;
+    }
+    .bar-row .bar-count {
+      width: 80px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
       font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
       color: var(--text-muted);
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
     }
-    .recent-row {
-      display: flex;
-      align-items: center;
+    .pr-outcomes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
-      font-size: 13px;
-      cursor: pointer;
+      padding: 12px;
     }
-    .recent-row:last-child { border-bottom: none; }
-    .recent-row:hover { background: rgba(255,255,255,0.04); }
-    .recent-row .recent-id { color: var(--text-muted); font-size: 11px; min-width: 48px; }
-    .recent-row .recent-title { flex: 1; word-break: break-word; }
-    .recent-row .recent-duration { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 12px; }
 
     /* Memory tab */
     #memory-main { color: var(--text); }
@@ -1163,10 +1184,8 @@
       Drop files, paste notes, or upload PDFs on the right. Extracted facts go to team-memory after review.
     </div>
 
-    <!-- Metrics tab sidebar (minimal — dashboard renders in the main pane) -->
-    <div id="metrics-panel" class="hidden" style="padding: 12px; color: var(--text-muted); font-size: 12px;">
-      Live task &amp; PR metrics. Auto-refreshes every 60s.
-    </div>
+    <!-- Metrics tab sidebar (empty — dashboard renders in the main pane) -->
+    <div id="metrics-panel" class="hidden"></div>
   </div>
 
   <div class="main">
@@ -1254,10 +1273,16 @@
 
     <!-- Metrics-tab main content -->
     <div id="metrics-main" class="hidden" style="flex: 1; padding: 16px; overflow: auto;">
+      <div class="metrics-period" role="tablist" aria-label="Metrics period">
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-7" onclick="setMetricsPeriod(7)">7d</button>
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-30" onclick="setMetricsPeriod(30)">30d</button>
+        <button type="button" role="tab" aria-selected="false" id="metrics-period-90" onclick="setMetricsPeriod(90)">90d</button>
+      </div>
       <div id="metrics-error" class="metrics-error hidden"></div>
       <div id="metrics-kpis" class="kpi-row"></div>
-      <div id="metrics-breakdowns" class="metrics-tables"></div>
-      <div id="metrics-recent" class="recent-completed"></div>
+      <div id="metrics-by-status" class="metrics-card"></div>
+      <div id="metrics-by-source" class="metrics-card"></div>
+      <div id="metrics-pr-outcomes" class="metrics-card"></div>
     </div>
   </div>
   </div><!-- /#main-app -->
@@ -1355,10 +1380,8 @@
         loadFreeformTasks();
       }
       if (tab === "metrics") {
+        applyMetricsPeriod(metricsPeriodDays);
         loadMetrics();
-        startMetricsAutoRefresh();
-      } else {
-        stopMetricsAutoRefresh();
       }
     }
 
@@ -2002,6 +2025,7 @@
           tasks = data.tasks;
           renderTasks();
           renderSubtaskBar();
+          if (currentTab === "metrics") scheduleMetricsRefresh();
           break;
         case "suggestion_list":
           suggestions = data.suggestions || [];
@@ -2799,28 +2823,42 @@
     }
 
     // ─── Metrics tab ──────────────────────────────────────────────────
-    let metricsRefreshTimer = null;
     // Monotonic token: a fetch keeps its own copy and bails on render if a
-    // newer call has started, preventing stale renders on rapid tab switches.
+    // newer call has started, preventing stale renders on rapid tab switches
+    // or concurrent task_list-driven refreshes.
     let metricsRequestToken = 0;
-    // How many done tasks to consider as candidates before sorting by actual
-    // completion timestamp from the timeline. Bounded to keep the per-tick
-    // request count reasonable.
-    const RECENT_DONE_CANDIDATES = 15;
-    const RECENT_DONE_DISPLAY = 5;
+    let metricsPeriodDays = 30;
+    const METRICS_PERIOD_OPTIONS = [7, 30, 90];
 
-    function startMetricsAutoRefresh() {
-      if (metricsRefreshTimer) return;
-      metricsRefreshTimer = setInterval(() => {
-        if (currentTab === "metrics") loadMetrics();
-      }, 60000);
+    // Sync button UI to current `metricsPeriodDays`. Single source of truth
+    // for which tab looks/reads "selected".
+    function applyMetricsPeriod(days) {
+      for (const d of METRICS_PERIOD_OPTIONS) {
+        const btn = document.getElementById(`metrics-period-${d}`);
+        if (!btn) continue;
+        const isActive = d === days;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", String(isActive));
+      }
     }
 
-    function stopMetricsAutoRefresh() {
-      if (metricsRefreshTimer) {
-        clearInterval(metricsRefreshTimer);
-        metricsRefreshTimer = null;
-      }
+    function setMetricsPeriod(days) {
+      metricsPeriodDays = days;
+      applyMetricsPeriod(days);
+      loadMetrics();
+    }
+
+    // Trailing debounce for WS-driven refreshes: collapses bursts of
+    // task_list pushes (e.g. during a long task.subtask_progress sequence)
+    // into a single /api/metrics call, since `_avg_completion_time` runs an
+    // N+1 over completed tasks server-side.
+    let metricsWsRefreshTimer = null;
+    function scheduleMetricsRefresh() {
+      if (metricsWsRefreshTimer) clearTimeout(metricsWsRefreshTimer);
+      metricsWsRefreshTimer = setTimeout(() => {
+        metricsWsRefreshTimer = null;
+        if (currentTab === "metrics") loadMetrics();
+      }, 1500);
     }
 
     function metricsShowError(msg) {
@@ -2835,72 +2873,15 @@
       }
     }
 
-    function formatDuration(seconds) {
-      if (seconds == null || isNaN(seconds)) return "—";
-      const s = Math.max(0, Number(seconds));
-      if (s < 60) return `${Math.round(s)}s`;
-      if (s < 3600) {
-        const m = Math.floor(s / 60);
-        const rs = Math.round(s % 60);
-        return `${m}m ${rs}s`;
-      }
-      const h = Math.floor(s / 3600);
-      const m = Math.round((s % 3600) / 60);
-      return `${h}h ${m}m`;
-    }
-
-    function latestDoneTimestamp(taskMetrics) {
-      if (!taskMetrics || !Array.isArray(taskMetrics.timeline)) return null;
-      let latest = null;
-      for (const entry of taskMetrics.timeline) {
-        if (entry && entry.to === "done" && entry.timestamp) {
-          const ms = Date.parse(entry.timestamp);
-          if (!isNaN(ms) && (latest === null || ms > latest)) latest = ms;
-        }
-      }
-      return latest;
-    }
-
     async function loadMetrics() {
       const myToken = ++metricsRequestToken;
       try {
-        const res = await authFetch("/api/metrics");
+        const res = await authFetch(`/api/metrics?days=${metricsPeriodDays}`);
         if (!res.ok) throw new Error(`/api/metrics returned ${res.status}`);
         const data = await res.json();
         if (myToken !== metricsRequestToken) return;
         metricsShowError(null);
         renderMetrics(data);
-
-        // Recently completed list — best-effort, separate try block
-        try {
-          const tasksRes = await authFetch("/api/tasks?status=done");
-          if (!tasksRes.ok) throw new Error(`/api/tasks returned ${tasksRes.status}`);
-          const allDone = await tasksRes.json();
-          const candidates = (Array.isArray(allDone) ? allDone : []).slice(0, RECENT_DONE_CANDIDATES);
-          const perTask = await Promise.all(candidates.map(t =>
-            authFetch(`/api/metrics/tasks/${t.id}`)
-              .then(r => r.ok ? r.json() : null)
-              .catch(() => null)
-          ));
-          if (myToken !== metricsRequestToken) return;
-
-          // Pair each candidate with its DONE-timestamp from the timeline,
-          // sort by that timestamp DESC, take the top N. Tasks with no
-          // resolvable DONE timestamp fall back to created_at so they still
-          // appear (just at the bottom of the candidate window).
-          const decorated = candidates.map((t, i) => {
-            const m = perTask[i];
-            const ts = latestDoneTimestamp(m);
-            const fallback = t.created_at ? Date.parse(t.created_at) : 0;
-            return { task: t, metrics: m, sortKey: ts != null ? ts : (isNaN(fallback) ? 0 : fallback) };
-          });
-          decorated.sort((a, b) => b.sortKey - a.sortKey);
-          const top = decorated.slice(0, RECENT_DONE_DISPLAY);
-          renderRecentCompleted(top.map(d => d.task), top.map(d => d.metrics));
-        } catch (e) {
-          if (myToken !== metricsRequestToken) return;
-          renderRecentCompleted([], []);
-        }
       } catch (e) {
         if (myToken !== metricsRequestToken) return;
         metricsShowError(`Failed to load metrics: ${e.message}`);
@@ -2910,6 +2891,8 @@
     function renderMetrics(data) {
       const kpiEl = document.getElementById("metrics-kpis");
       const totalTasks = data.total_tasks ?? 0;
+      const activeTasks = data.active_tasks ?? 0;
+      const periodDays = data.period_days ?? metricsPeriodDays;
 
       const finishedCount = ((data.by_status && data.by_status.done) || 0) +
                             ((data.by_status && data.by_status.failed) || 0);
@@ -2921,19 +2904,16 @@
         ? "—"
         : `${Number(data.avg_duration_hours).toFixed(1)} h`;
 
-      const prTotal = (data.pr_outcomes && data.pr_outcomes.total) ?? 0;
-      const prRate = prTotal === 0
-        ? "—"
-        : ((data.pr_outcomes && data.pr_outcomes.approval_rate_pct) ?? 0).toFixed(1) + "%";
-
-      const activeTasks = data.active_tasks ?? 0;
-      const periodDays = data.period_days ?? 30;
-
       kpiEl.innerHTML = `
         <div class="kpi-card">
           <div class="kpi-label">Total tasks</div>
           <div class="kpi-value">${totalTasks}</div>
-          <div class="kpi-sub">${activeTasks} active · last ${periodDays}d</div>
+          <div class="kpi-sub">last ${periodDays}d</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Active tasks</div>
+          <div class="kpi-value">${activeTasks}</div>
+          <div class="kpi-sub">in flight right now</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Success rate</div>
@@ -2941,81 +2921,85 @@
           <div class="kpi-sub">done vs. failed</div>
         </div>
         <div class="kpi-card">
-          <div class="kpi-label">Avg completion</div>
+          <div class="kpi-label">Avg duration</div>
           <div class="kpi-value">${avgHours}</div>
           <div class="kpi-sub">intake → done</div>
         </div>
-        <div class="kpi-card">
-          <div class="kpi-label">PR approval rate</div>
-          <div class="kpi-value">${prRate}</div>
-          <div class="kpi-sub">${prTotal} PR outcome${prTotal === 1 ? "" : "s"}</div>
-        </div>
       `;
 
-      const breakdownsEl = document.getElementById("metrics-breakdowns");
-      breakdownsEl.innerHTML =
-        renderBreakdownTable("Tasks by status", data.by_status || {}, totalTasks) +
-        renderBreakdownTable("Tasks by source", data.by_source || {}, totalTasks);
+      renderBreakdownBars(
+        document.getElementById("metrics-by-status"),
+        "By status",
+        data.by_status || {},
+      );
+      renderBreakdownBars(
+        document.getElementById("metrics-by-source"),
+        "By source",
+        data.by_source || {},
+      );
+      renderPrOutcomes(data.pr_outcomes || {});
     }
 
-    function renderBreakdownTable(title, map, total) {
+    function renderBreakdownBars(targetEl, title, map) {
+      if (!targetEl) return;
       const entries = Object.entries(map || {}).sort((a, b) => b[1] - a[1]);
       if (entries.length === 0) {
-        return `
-          <div class="metrics-table">
-            <h3>${escHtml(title)}</h3>
-            <div class="empty-row">No data</div>
-          </div>
-        `;
-      }
-      const rows = entries.map(([key, count]) => {
-        const pct = total > 0 ? ((count / total) * 100).toFixed(1) + "%" : "—";
-        return `
-          <tr>
-            <td>${escHtml(key)}</td>
-            <td class="num">${count}</td>
-            <td class="num">${pct}</td>
-          </tr>
-        `;
-      }).join("");
-      return `
-        <div class="metrics-table">
+        targetEl.innerHTML = `
           <h3>${escHtml(title)}</h3>
-          <table>
-            <thead><tr><th>Key</th><th class="num">Count</th><th class="num">Share</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      `;
-    }
-
-    function renderRecentCompleted(tasks, perTask) {
-      const el = document.getElementById("metrics-recent");
-      if (!tasks || tasks.length === 0) {
-        el.innerHTML = `
-          <h3>Recently completed</h3>
-          <div class="empty-row" style="padding:16px 12px;color:var(--text-muted);font-size:13px;text-align:center;">No completed tasks yet</div>
+          <div class="empty-row">No data</div>
         `;
         return;
       }
-      const rows = tasks.map((t, i) => {
-        const m = perTask && perTask[i];
-        let duration = "—";
-        if (m && m.time_in_status_seconds) {
-          const total = Object.values(m.time_in_status_seconds).reduce((a, b) => a + (Number(b) || 0), 0);
-          duration = formatDuration(total);
-        }
+      // Bars scale relative to the max count in this breakdown so the
+      // largest bar is always full-width — small differences stay visible
+      // even when one bucket dominates.
+      const max = Math.max(...entries.map(([, c]) => c), 1);
+      const total = entries.reduce((a, [, c]) => a + c, 0);
+      const rows = entries.map(([key, count]) => {
+        const widthPct = (count / max) * 100;
+        const sharePct = total > 0 ? ((count / total) * 100).toFixed(1) + "%" : "—";
         return `
-          <div class="recent-row" onclick="switchTab('tasks');selectTask(${t.id})">
-            <span class="recent-id">#${t.id}</span>
-            <span class="recent-title">${escHtml(t.title || "(untitled)")}</span>
-            <span class="recent-duration">${escHtml(duration)}</span>
+          <div class="bar-row" title="${escHtml(key)}: ${count} (${sharePct})">
+            <span class="bar-label">${escHtml(key)}</span>
+            <span class="bar-track"><span class="bar-fill" style="width:${widthPct}%"></span></span>
+            <span class="bar-count">${count} · ${sharePct}</span>
           </div>
         `;
       }).join("");
-      el.innerHTML = `
-        <h3>Recently completed</h3>
+      targetEl.innerHTML = `
+        <h3>${escHtml(title)}</h3>
         ${rows}
+      `;
+    }
+
+    function renderPrOutcomes(pr) {
+      const el = document.getElementById("metrics-pr-outcomes");
+      if (!el) return;
+      const total = pr.total ?? 0;
+      if (total === 0) {
+        el.innerHTML = `
+          <h3>PR Outcomes</h3>
+          <div class="empty-row">No PR outcomes in this period yet.</div>
+        `;
+        return;
+      }
+      const approved = pr.approved ?? 0;
+      const approvalRate = (pr.approval_rate_pct ?? 0).toFixed(1) + "%";
+      const avgRounds = (pr.avg_review_rounds ?? 0).toFixed(1);
+      el.innerHTML = `
+        <h3>PR Outcomes</h3>
+        <div class="pr-outcomes-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Approval rate</div>
+            <div class="kpi-value">${approvalRate}</div>
+            <div class="kpi-sub">${approved}/${total} approved</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Avg review rounds</div>
+            <div class="kpi-value">${avgRounds}</div>
+            <div class="kpi-sub">across ${total} PR${total === 1 ? "" : "s"}</div>
+          </div>
+        </div>
       `;
     }
 
