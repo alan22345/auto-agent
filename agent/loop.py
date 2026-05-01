@@ -102,6 +102,7 @@ class AgentLoop:
         get_guidance: Callable[[], Awaitable[str | None]] | None = None,
         repo_name: str | None = None,
         complexity: str | None = None,
+        event_sink: Callable[[dict], Awaitable[None]] | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -118,6 +119,7 @@ class AgentLoop:
         self._on_tool_call = on_tool_call   # (tool_name, args, result_preview, turn) → stream to UI
         self._on_thinking = on_thinking     # (text, turn) → stream assistant thinking to UI
         self._get_guidance = get_guidance    # () → check for user guidance messages (None = no message)
+        self._event_sink = event_sink       # forwarded to ToolContext so tools can emit progress events
 
     async def run(
         self,
@@ -191,7 +193,11 @@ class AgentLoop:
         messages.append(user_msg)
         api_messages.append(user_msg)
 
-        tool_context = ToolContext(workspace=self._workspace, readonly=False)
+        tool_context = ToolContext(
+            workspace=self._workspace,
+            readonly=False,
+            event_sink=self._event_sink,
+        )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
         tool_defs = self._tools.definitions()

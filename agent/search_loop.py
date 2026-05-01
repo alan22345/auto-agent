@@ -15,6 +15,7 @@ This is a thin shell around `agent.loop.AgentLoop`:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -126,19 +127,8 @@ async def run_search_turn(
         workspace=".",
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
+        event_sink=event_sink,
     )
-
-    # Inject event_sink into ToolContext via execute-method patching.
-    # AgentLoop builds its own ToolContext internally; this is the cleanest
-    # way to plumb the sink without touching the loop.
-    for tool in [tools.get(n) for n in tools.names()]:
-        original = tool.execute
-
-        async def patched(args, ctx, _orig=original):
-            ctx.event_sink = event_sink
-            return await _orig(args, ctx)
-
-        tool.execute = patched  # type: ignore[assignment]
 
     async def runner() -> None:
         try:
@@ -168,3 +158,5 @@ async def run_search_turn(
     finally:
         if not task.done():
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task

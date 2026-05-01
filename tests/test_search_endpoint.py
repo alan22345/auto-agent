@@ -14,8 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from orchestrator.auth import create_token
-from orchestrator.search import _current_user_id
+from orchestrator.auth import create_token, current_user_id
 from orchestrator.search import router as search_router
 from shared.database import get_session
 from shared.models import SearchSession, User
@@ -188,7 +187,7 @@ async def test_send_message_streams_events_and_persists():
     app = _make_app()
     app.dependency_overrides[get_session] = _override
     # Pin user_id to 1 so session ownership matches sess_row.user_id
-    app.dependency_overrides[_current_user_id] = lambda: 1
+    app.dependency_overrides[current_user_id] = lambda: 1
 
     try:
         with (

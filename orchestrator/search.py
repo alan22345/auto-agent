@@ -6,44 +6,24 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
 from agent.search_loop import run_search_turn
+from agent.search_title import generate_title
+from orchestrator.auth import current_user_id
+from shared.config import settings
+from shared.database import async_session, get_session
+from shared.models import SearchMessage, SearchSession, User
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
-from agent.search_title import generate_title
-from orchestrator.auth import verify_token
-from shared.config import settings
-from shared.database import async_session, get_session
-from shared.models import SearchMessage, SearchSession, User
 
 router = APIRouter()
-_COOKIE_NAME = "auto_agent_session"
-
-
-def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> dict:
-    if cookie:
-        payload = verify_token(cookie)
-        if payload:
-            return payload
-    if authorization and authorization.startswith("Bearer "):
-        payload = verify_token(authorization[7:])
-        if payload:
-            return payload
-    raise HTTPException(status_code=401, detail="Not authenticated")
-
-
-def _current_user_id(
-    authorization: str | None = Header(None),
-    auto_agent_session: str | None = Cookie(default=None),
-) -> int:
-    return _verify_cookie_or_header(auto_agent_session, authorization)["user_id"]
 
 
 # ---------- Schemas ----------
@@ -74,7 +54,7 @@ class SessionDetail(SessionData):
 
 
 class SendMessageRequest(BaseModel):
-    content: str
+    content: str = Field(min_length=1)
 
 
 # ---------- Sessions CRUD ----------
@@ -92,7 +72,7 @@ def _serialize_session(s: SearchSession) -> SessionData:
 @router.post("/search/sessions", response_model=SessionData)
 async def create_session(
     _req: CreateSessionRequest,
-    user_id: int = Depends(_current_user_id),
+    user_id: int = Depends(current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> SessionData:
     s = SearchSession(user_id=user_id, title="New search")
@@ -104,7 +84,7 @@ async def create_session(
 
 @router.get("/search/sessions", response_model=list[SessionData])
 async def list_sessions(
-    user_id: int = Depends(_current_user_id),
+    user_id: int = Depends(current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> list[SessionData]:
     rows = (
@@ -120,7 +100,7 @@ async def list_sessions(
 @router.get("/search/sessions/{session_id}", response_model=SessionDetail)
 async def get_session_detail(
     session_id: int,
-    user_id: int = Depends(_current_user_id),
+    user_id: int = Depends(current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> SessionDetail:
     row = (
@@ -161,7 +141,7 @@ async def get_session_detail(
 @router.delete("/search/sessions/{session_id}")
 async def delete_session(
     session_id: int,
-    user_id: int = Depends(_current_user_id),
+    user_id: int = Depends(current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     row = (
@@ -197,9 +177,12 @@ async def _load_history(session: AsyncSession, session_id: int) -> list[dict]:
 async def send_message(
     session_id: int,
     req: SendMessageRequest,
-    user_id: int = Depends(_current_user_id),
+    user_id: int = Depends(current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
+    user_content = req.content.strip()
+    if not user_content:
+        raise HTTPException(status_code=422, detail="Message content is required.")
     if not settings.brave_api_key:
         raise HTTPException(
             status_code=503,
@@ -222,13 +205,13 @@ async def send_message(
     ).scalar_one()
     author = user_row.username
 
-    user_msg = SearchMessage(session_id=session_id, role="user", content=req.content)
+    user_msg = SearchMessage(session_id=session_id, role="user", content=user_content)
     session.add(user_msg)
     await session.commit()
 
     history = await _load_history(session, session_id)
     is_first_user_message = sum(1 for h in history if h["role"] == "user") == 1
-    content = req.content
+    content = user_content
 
     async def stream() -> AsyncIterator[bytes]:
         events_captured: list[dict] = []
