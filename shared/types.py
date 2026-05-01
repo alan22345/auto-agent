@@ -280,3 +280,32 @@ class MemorySaveResult(BaseModel):
     ok: bool
     error: str | None = None
     fact_id: str | None = None
+
+
+# --- Memory browser (read-side) types ---
+
+
+class MemoryEntitySummary(BaseModel):
+    """Lightweight entity card for search results / recent list."""
+    id: str
+    name: str
+    type: str
+    tags: list[str] = Field(default_factory=list)
+    fact_count: int = 0
+    latest_fact_at: str | None = None
+
+
+class MemoryFact(BaseModel):
+    """A fact row as seen in the browser detail view."""
+    id: str
+    content: str
+    kind: str
+    source: str | None = None
+    author: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+class MemoryEntityDetail(BaseModel):
+    entity: MemoryEntitySummary
+    facts: list[MemoryFact] = Field(default_factory=list)

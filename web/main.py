@@ -29,7 +29,15 @@ from agent.memory_extractor import extract
 from shared.config import settings
 from shared.events import Event
 from shared.logging import setup_logging
-from shared.memory_io import correct_fact, recall_entity, remember_row
+from shared.memory_io import (
+    correct_fact,
+    delete_fact,
+    get_entity_with_facts,
+    list_recent_entities,
+    recall_entity,
+    remember_row,
+    search_entities,
+)
 from shared.redis_client import (
     ack_event,
     ensure_stream_group,
@@ -264,6 +272,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await _handle_memory_reextract(ws, data, user_id)
             elif msg_type == "memory_save":
                 await _handle_memory_save(ws, data, user_id)
+            elif msg_type == "memory_search":
+                await _handle_memory_search(ws, data)
+            elif msg_type == "memory_get_entity":
+                await _handle_memory_get_entity(ws, data)
+            elif msg_type == "memory_correct_fact":
+                await _handle_memory_correct_fact(ws, data, username)
+            elif msg_type == "memory_delete_fact":
+                await _handle_memory_delete_fact(ws, data, username)
 
     except WebSocketDisconnect:
         connected_clients.pop(ws, None)
@@ -773,6 +789,87 @@ async def _handle_memory_save(ws, data: dict, user_id: int = 0) -> None:
     await ws.send_json({
         "type": "memory_saved",
         "results": [r.model_dump() for r in results],
+    })
+
+
+# --- Memory browser (read-side) websocket handlers ---
+
+
+MEMORY_SEARCH_LIMIT = 20
+
+
+async def _handle_memory_search(ws, data: dict) -> None:
+    """Search by query (>= 2 chars) or list recent entities when blank."""
+    query = (data.get("query") or "").strip()
+    limit = MEMORY_SEARCH_LIMIT
+    if query:
+        entities = await search_entities(query, limit=limit)
+    else:
+        entities = await list_recent_entities(limit=limit)
+    await ws.send_json({
+        "type": "memory_search_results",
+        "query": query,
+        "entities": [e.model_dump() for e in entities],
+    })
+
+
+async def _handle_memory_get_entity(ws, data: dict) -> None:
+    name_or_id = (data.get("entity") or "").strip()
+    if not name_or_id:
+        await _send_memory_error(ws, "entity name or id is required")
+        return
+    include_superseded = bool(data.get("include_superseded"))
+    detail = await get_entity_with_facts(name_or_id, include_superseded=include_superseded)
+    if detail is None:
+        await _send_memory_error(ws, f"entity not found: {name_or_id}")
+        return
+    await ws.send_json({
+        "type": "memory_entity",
+        "include_superseded": include_superseded,
+        "detail": detail.model_dump(),
+    })
+
+
+async def _handle_memory_correct_fact(ws, data: dict, username: str = "") -> None:
+    fact_id = (data.get("fact_id") or "").strip()
+    new_content = (data.get("content") or "").strip()
+    reason = (data.get("reason") or "").strip() or None
+    if not fact_id:
+        await _send_memory_error(ws, "fact_id is required")
+        return
+    if not new_content:
+        await _send_memory_error(ws, "content is required")
+        return
+    try:
+        new_fact_id = await correct_fact(
+            fact_id, new_content, reason=reason, author=username or None
+        )
+    except Exception as e:
+        await _send_memory_error(ws, f"correct failed: {e}")
+        return
+    await ws.send_json({
+        "type": "memory_fact_corrected",
+        "fact_id": fact_id,
+        "new_fact_id": new_fact_id,
+    })
+
+
+async def _handle_memory_delete_fact(ws, data: dict, username: str = "") -> None:
+    fact_id = (data.get("fact_id") or "").strip()
+    if not fact_id:
+        await _send_memory_error(ws, "fact_id is required")
+        return
+    try:
+        ok = await delete_fact(fact_id, author=username or None)
+    except Exception as e:
+        await _send_memory_error(ws, f"delete failed: {e}")
+        return
+    if not ok:
+        await _send_memory_error(ws, f"unknown fact_id: {fact_id}")
+        return
+    await ws.send_json({
+        "type": "memory_fact_deleted",
+        "fact_id": fact_id,
     })
 
 
