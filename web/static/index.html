@@ -1598,29 +1598,35 @@
       const branch = document.getElementById("rd-branch").value.trim() || "dev";
       const cron = document.getElementById("rd-cron").value;
       const payload = { type: "toggle_freeform", repo_name: repoName, enabled, dev_branch: branch, analysis_cron: cron, auto_approve_suggestions: auto, auto_start_tasks: autostart };
+      const sendAndAwait = () => {
+        ws.send(JSON.stringify(payload));
+        onNextWsMessage(
+          (data) => {
+            if (data.type === "freeform_config_list") return "done";
+            if (data.type === "error") return "error";
+          },
+          {
+            onDone()  { resetBtn(); showToast("Saved", "success"); },
+            onError(data) { resetBtn(); showToast(data.message || "Failed to save", "error"); },
+            onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
+          }
+        );
+      };
       const wasEnabled = (freeformConfigs.find(c => c.repo_name === repoName) || {}).enabled;
       if (wasEnabled && !enabled) {
         showConfirmModal({
           title: "Disable freeform mode?",
           message: "Scheduled PO analyses will stop running for this repo. You can re-enable it later.",
           confirmText: "Disable", confirmColor: "var(--red)",
-          onConfirm() { ws.send(JSON.stringify(payload)); },
-          onCancel() { document.getElementById("rd-enabled").checked = true; }
+          onConfirm() { sendAndAwait(); },
+          onCancel() {
+            document.getElementById("rd-enabled").checked = true;
+            resetBtn();
+          }
         });
       } else {
-        ws.send(JSON.stringify(payload));
+        sendAndAwait();
       }
-      onNextWsMessage(
-        (data) => {
-          if (data.type === "freeform_config_list") return "done";
-          if (data.type === "error") return "error";
-        },
-        {
-          onDone()  { resetBtn(); showToast("Saved", "success"); },
-          onError(data) { resetBtn(); showToast(data.message || "Failed to save", "error"); },
-          onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
-        }
-      );
     }
 
     function triggerAnalysisFor(repoName) {
