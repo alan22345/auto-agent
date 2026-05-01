@@ -57,3 +57,9 @@ export const getSession = (id: number) =>
 
 export const deleteSession = (id: number) =>
   api<{ ok: true }>(`/api/search/sessions/${id}`, { method: 'DELETE' });
+
+export const renameSession = (id: number, title: string) =>
+  api<SearchSession>(`/api/search/sessions/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  });

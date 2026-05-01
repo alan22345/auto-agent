@@ -59,6 +59,10 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
+class UpdateSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=512)
+
+
 # ---------- Sessions CRUD ----------
 
 
@@ -140,6 +144,33 @@ async def get_session_detail(
             for m in msgs
         ],
     )
+
+
+@router.patch("/search/sessions/{session_id}", response_model=SessionData)
+async def update_session(
+    session_id: int,
+    req: UpdateSessionRequest,
+    user_id: int = Depends(current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> SessionData:
+    new_title = req.title.strip()
+    if not new_title:
+        raise HTTPException(status_code=422, detail="Title is required.")
+    row = (
+        await session.execute(
+            select(SearchSession).where(
+                SearchSession.id == session_id,
+                SearchSession.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    row.title = new_title[:512]
+    row.updated_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(row)
+    return _serialize_session(row)
 
 
 @router.delete("/search/sessions/{session_id}")

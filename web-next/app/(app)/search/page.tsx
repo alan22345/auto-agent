@@ -35,6 +35,10 @@ export default function SearchPage() {
     setSessions((cur) => cur.map((s) => (s.id === activeId ? { ...s, title } : s)));
   };
 
+  const onRenamed = (id: number, title: string) => {
+    setSessions((cur) => cur.map((s) => (s.id === id ? { ...s, title } : s)));
+  };
+
   return (
     <div className="flex h-full">
       <SessionList
@@ -43,6 +47,7 @@ export default function SearchPage() {
         onSelect={setActiveId}
         onNew={onNew}
         onDeleted={onDeleted}
+        onRenamed={onRenamed}
       />
       <section className="flex-1 overflow-hidden">
         {activeId == null ? (

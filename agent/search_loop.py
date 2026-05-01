@@ -56,6 +56,11 @@ Workflow for each user message:
    remember something, or has stated a durable preference about themselves
    or the project. Do NOT use it to save web research.
 
+BUDGET: At most ~6 web_search calls and ~4 fetch_url calls per question.
+Once you have enough material, STOP calling tools and write the answer.
+Don't chain queries indefinitely — partial coverage with a clear synthesis
+beats exhaustive coverage that never produces a report.
+
 Be terse. Use bullet points and short paragraphs."""
 
 
@@ -121,12 +126,18 @@ async def run_search_turn(
 
     prior_messages = _history_to_messages(history)
 
+    # Wallclock cap so a runaway agent (large prompt context, slow Bedrock,
+    # or a research loop that won't synthesize) can't hang the user
+    # indefinitely. ~3 min is enough for a thorough answer; beyond that the
+    # user gets an explicit error event.
+    max_wallclock_seconds = 180
+
     loop = AgentLoop(
         provider=provider,
         tools=tools,
         context_manager=context_manager,
         session=None,
-        max_turns=12,
+        max_turns=8,
         workspace=".",
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
@@ -143,12 +154,24 @@ async def run_search_turn(
                  if prior_summary else "")
                 + f"User: {user_message}"
             )
-            result = await loop.run(prompt=full_prompt, system=system_prompt)
+            result = await asyncio.wait_for(
+                loop.run(prompt=full_prompt, system=system_prompt),
+                timeout=max_wallclock_seconds,
+            )
             await queue.put({
                 "type": "done",
                 "answer": result.output,
                 "input_tokens": result.tokens_used.input_tokens,
                 "output_tokens": result.tokens_used.output_tokens,
+            })
+        except asyncio.TimeoutError:
+            logger.warning("search_loop_timeout", seconds=max_wallclock_seconds)
+            await queue.put({
+                "type": "error",
+                "message": (
+                    f"Search timed out after {max_wallclock_seconds}s. "
+                    "Try a more specific question or split it into parts."
+                ),
             })
         except Exception as e:
             logger.warning("search_loop_failed", error=str(e))
