@@ -1,4 +1,9 @@
-import type { TaskData, TaskMessageData } from './api';
+import type {
+  MemoryEntityDetail,
+  MemoryEntitySummary,
+  TaskData,
+  TaskMessageData,
+} from './api';
 
 export interface ChatEntry {
   kind: 'user' | 'system' | 'event' | 'stream' | 'error';
@@ -65,7 +70,19 @@ export type WSEvent =
   | { type: 'repo_created'; repo_name: string }
   | { type: 'memory_rows'; rows: MemoryRow[]; source_id?: string }
   | { type: 'memory_saved'; results: { ok: boolean; error?: string }[] }
-  | { type: 'memory_error'; message: string };
+  | { type: 'memory_error'; message: string }
+  | {
+      type: 'memory_search_results';
+      query: string;
+      entities: MemoryEntitySummary[];
+    }
+  | {
+      type: 'memory_entity';
+      include_superseded: boolean;
+      detail: MemoryEntityDetail;
+    }
+  | { type: 'memory_fact_corrected'; fact_id: string; new_fact_id: string }
+  | { type: 'memory_fact_deleted'; fact_id: string };
 
 export type WSCommand =
   | { type: 'load_history'; task_id: number }
@@ -88,4 +105,8 @@ export type WSCommand =
     }
   | { type: 'memory_extract'; source_id?: string; pasted_text?: string; context_hint?: string }
   | { type: 'memory_reextract'; source_id: string; note: string }
-  | { type: 'memory_save'; rows: MemoryRow[]; source_id: string | null };
+  | { type: 'memory_save'; rows: MemoryRow[]; source_id: string | null }
+  | { type: 'memory_search'; query: string }
+  | { type: 'memory_get_entity'; entity: string; include_superseded?: boolean }
+  | { type: 'memory_correct_fact'; fact_id: string; content: string }
+  | { type: 'memory_delete_fact'; fact_id: string };

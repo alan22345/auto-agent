@@ -83,6 +83,33 @@ export interface UserData {
   created_at?: string | null;
   last_login?: string | null;
 }
+export interface MemoryEntityDetail {
+  entity: MemoryEntitySummary;
+  facts?: MemoryFact[];
+}
+/**
+ * Lightweight entity card for search results / recent list.
+ */
+export interface MemoryEntitySummary {
+  id: string;
+  name: string;
+  type: string;
+  tags?: string[];
+  fact_count?: number;
+  latest_fact_at?: string | null;
+}
+/**
+ * A fact row as seen in the browser detail view.
+ */
+export interface MemoryFact {
+  id: string;
+  content: string;
+  kind: string;
+  source?: string | null;
+  author?: string | null;
+  valid_from?: string | null;
+  valid_until?: string | null;
+}
 export interface MemorySaveResult {
   row_id: string;
   ok: boolean;
