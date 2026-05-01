@@ -25,7 +25,7 @@ export interface UseMemoryBrowser {
   selectEntity: (name: string) => void;
   clearSelection: () => void;
   editFact: (fact_id: string, content: string) => void;
-  correctFact: (fact_id: string, content: string) => void;
+  correctFact: (fact_id: string, content: string, reason: string) => void;
   deleteFact: (fact_id: string) => void;
   refresh: () => void;
 }
@@ -57,10 +57,19 @@ export function useMemoryBrowser(): UseMemoryBrowser {
     });
   }, []);
 
-  // Initial load: recent entities + listen for changes
+  // Initial load: recent entities. wsClient.send returns false if the socket
+  // isn't open yet — Providers' connect() runs in a parent useEffect that
+  // fires AFTER ours on cold mount, so we retry until it goes through.
   useEffect(() => {
-    sendSearch('');
-  }, [sendSearch]);
+    if (wsClient.send({ type: 'memory_search', query: '' })) return;
+    let attempts = 0;
+    const id = setInterval(() => {
+      if (wsClient.send({ type: 'memory_search', query: '' }) || ++attempts > 50) {
+        clearInterval(id);
+      }
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
 
   useWS('memory_search_results', (e) => {
     if (e.query) setResults(e.entities);
@@ -181,7 +190,7 @@ export function useMemoryBrowser(): UseMemoryBrowser {
     wsClient.send({ type: 'memory_correct_fact', fact_id, content });
   }, []);
 
-  const correctFact = useCallback((fact_id: string, content: string) => {
+  const correctFact = useCallback((fact_id: string, content: string, reason: string) => {
     setPending((p) => ({ ...p, [fact_id]: 'correct' }));
     setFactErrors((prev) => {
       const next = { ...prev };
@@ -189,7 +198,7 @@ export function useMemoryBrowser(): UseMemoryBrowser {
       return next;
     });
     applyOptimisticEdit(fact_id, content);
-    wsClient.send({ type: 'memory_correct_fact', fact_id, content });
+    wsClient.send({ type: 'memory_correct_fact', fact_id, content, reason });
   }, []);
 
   const deleteFact = useCallback((fact_id: string) => {

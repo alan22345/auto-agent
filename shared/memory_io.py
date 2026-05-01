@@ -61,14 +61,24 @@ async def remember_row(row: ProposedFact, *, author: str | None = None) -> str:
     return result.get("fact_id", "")
 
 
-async def correct_fact(fact_id: str, new_content: str, *, author: str | None = None) -> str:
-    """Supersede an existing fact with new content via the correct flow."""
+async def correct_fact(
+    fact_id: str,
+    new_content: str,
+    *,
+    reason: str | None = None,
+    author: str | None = None,
+) -> str:
+    """Supersede an existing fact with new content via the correct flow.
+
+    `reason` is the user-supplied explanation; falls back to a generic marker
+    when omitted so existing call sites (memory_save replace flow) keep working.
+    """
     async with team_memory_session() as session:
         engine = GraphEngine(session)
         result = await engine.correct(
             fact_id=fact_id,
             new_content=new_content,
-            reason="updated via memory tab",
+            reason=reason or "updated via memory tab",
             source="memory-tab",
             author=author,
         )

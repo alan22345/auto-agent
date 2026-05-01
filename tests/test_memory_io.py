@@ -86,7 +86,13 @@ async def test_correct_fact_calls_engine(patched_session):
     kwargs = patched_session.correct.await_args.kwargs
     assert kwargs["fact_id"] == "f1"
     assert kwargs["new_content"] == "new content"
-    assert "reason" in kwargs
+    assert kwargs["reason"] == "updated via memory tab"
+
+
+async def test_correct_fact_passes_user_reason(patched_session):
+    await correct_fact("f1", "new content", reason="ratified after review", author="alan")
+    kwargs = patched_session.correct.await_args.kwargs
+    assert kwargs["reason"] == "ratified after review"
 
 
 # ---- search_entities ----

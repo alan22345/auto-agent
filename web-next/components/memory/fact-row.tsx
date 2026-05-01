@@ -21,7 +21,7 @@ interface Props {
   pending?: FactOp;
   error?: string;
   onEdit: (fact_id: string, content: string) => void;
-  onCorrect: (fact_id: string, content: string) => void;
+  onCorrect: (fact_id: string, content: string, reason: string) => void;
   onDelete: (fact_id: string) => void;
 }
 
@@ -142,8 +142,7 @@ export function FactRow({ fact, pending, error, onEdit, onCorrect, onDelete }: P
             <Button
               disabled={!correctContent.trim() || !correctReason.trim()}
               onClick={() => {
-                const merged = `${correctContent.trim()}\n\n[reason: ${correctReason.trim()}]`;
-                onCorrect(fact.id, merged);
+                onCorrect(fact.id, correctContent.trim(), correctReason.trim());
                 setCorrectOpen(false);
               }}
             >

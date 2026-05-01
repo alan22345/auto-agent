@@ -833,6 +833,7 @@ async def _handle_memory_get_entity(ws, data: dict) -> None:
 async def _handle_memory_correct_fact(ws, data: dict, username: str = "") -> None:
     fact_id = (data.get("fact_id") or "").strip()
     new_content = (data.get("content") or "").strip()
+    reason = (data.get("reason") or "").strip() or None
     if not fact_id:
         await _send_memory_error(ws, "fact_id is required")
         return
@@ -840,7 +841,9 @@ async def _handle_memory_correct_fact(ws, data: dict, username: str = "") -> Non
         await _send_memory_error(ws, "content is required")
         return
     try:
-        new_fact_id = await correct_fact(fact_id, new_content, author=username or None)
+        new_fact_id = await correct_fact(
+            fact_id, new_content, reason=reason, author=username or None
+        )
     except Exception as e:
         await _send_memory_error(ws, f"correct failed: {e}")
         return

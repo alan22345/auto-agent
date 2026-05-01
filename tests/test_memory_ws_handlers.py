@@ -399,8 +399,25 @@ async def test_correct_fact_routes_to_correct_fact():
     cf.assert_awaited_once()
     kwargs = cf.await_args.kwargs
     assert kwargs["author"] == "alan"
+    assert kwargs["reason"] is None
     assert ws.sent[-1]["type"] == "memory_fact_corrected"
     assert ws.sent[-1]["new_fact_id"] == "f-new"
+
+
+async def test_correct_fact_forwards_reason():
+    ws = FakeWS()
+    with patch("web.main.correct_fact", new=AsyncMock(return_value="f-new")) as cf:
+        await _handle_memory_correct_fact(
+            ws,
+            {
+                "type": "memory_correct_fact",
+                "fact_id": "f1",
+                "content": "updated",
+                "reason": "ratified at standup",
+            },
+            username="alan",
+        )
+    assert cf.await_args.kwargs["reason"] == "ratified at standup"
 
 
 async def test_correct_fact_missing_id_errors():

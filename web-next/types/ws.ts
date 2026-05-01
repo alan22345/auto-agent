@@ -108,5 +108,5 @@ export type WSCommand =
   | { type: 'memory_save'; rows: MemoryRow[]; source_id: string | null }
   | { type: 'memory_search'; query: string }
   | { type: 'memory_get_entity'; entity: string; include_superseded?: boolean }
-  | { type: 'memory_correct_fact'; fact_id: string; content: string }
+  | { type: 'memory_correct_fact'; fact_id: string; content: string; reason?: string }
   | { type: 'memory_delete_fact'; fact_id: string };

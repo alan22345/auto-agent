@@ -14,7 +14,7 @@ interface Props {
   factErrors: Record<string, string>;
   onBack: () => void;
   onEdit: (fact_id: string, content: string) => void;
-  onCorrect: (fact_id: string, content: string) => void;
+  onCorrect: (fact_id: string, content: string, reason: string) => void;
   onDelete: (fact_id: string) => void;
 }
 
