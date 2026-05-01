@@ -4,8 +4,9 @@ import { createTask } from '@/lib/tasks';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
 
-export function NewTaskForm() {
+export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [repo, setRepo] = useState('');
@@ -15,19 +16,86 @@ export function NewTaskForm() {
     if (!title.trim() || busy) return;
     setBusy(true);
     try {
-      await createTask({ title: title.trim(), description: desc.trim() || undefined, repo: repo.trim() || undefined });
-      setTitle(''); setDesc(''); setRepo('');
-    } finally { setBusy(false); }
+      await createTask({
+        title: title.trim(),
+        description: desc.trim() || undefined,
+        repo: repo.trim() || undefined,
+      });
+      setTitle('');
+      setDesc('');
+      setRepo('');
+      onCreated?.();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onTitleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
+  }
+
+  function onDescKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
   }
 
   return (
-    <div className="space-y-2 border-t p-3">
-      <Input placeholder="Task title…" value={title} onChange={(e) => setTitle(e.target.value)} />
-      <Textarea rows={2} placeholder="Description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
-      <Input placeholder="Repo name (optional)" value={repo} onChange={(e) => setRepo(e.target.value)} />
-      <Button onClick={submit} disabled={busy} className="w-full">
-        {busy ? 'Creating…' : 'Create Task'}
-      </Button>
+    <div className="flex flex-1 items-center justify-center overflow-auto p-8">
+      <div className="w-full max-w-2xl space-y-6">
+        <div className="space-y-1">
+          <h2 className="text-2xl font-semibold tracking-tight">Create a new task</h2>
+          <p className="text-sm text-muted-foreground">
+            Give the agent a clear goal. Add context in the description — the more specific, the better.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="task-title">Title</Label>
+          <Input
+            id="task-title"
+            placeholder="What should the agent do?"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={onTitleKeyDown}
+            className="h-11 text-base"
+            autoFocus
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="task-desc">Description</Label>
+          <Textarea
+            id="task-desc"
+            rows={8}
+            placeholder="Acceptance criteria, links, constraints… (⌘/Ctrl+Enter to submit)"
+            value={desc}
+            onChange={(e) => setDesc(e.target.value)}
+            onKeyDown={onDescKeyDown}
+            className="min-h-[180px] resize-y text-sm"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="task-repo">Repo</Label>
+          <Input
+            id="task-repo"
+            placeholder="Optional — e.g. auto-agent"
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+          />
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <Button onClick={submit} disabled={busy || !title.trim()} size="lg">
+            {busy ? 'Creating…' : 'Create Task'}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
