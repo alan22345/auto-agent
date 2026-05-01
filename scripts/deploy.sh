@@ -24,6 +24,7 @@ rsync -avz \
   --exclude='.env' \
   --exclude='.git' \
   --exclude='node_modules' \
+  --exclude='.next' \
   --exclude='.claude/settings.local.json' \
   "$SCRIPT_DIR/" "$VM:$REMOTE_DIR/"
 
@@ -36,10 +37,10 @@ echo "==> Rebuilding and restarting container..."
 # Pass GITHUB_TOKEN through so the build can install the private team-memory
 # package. The VM's .env GITHUB_TOKEN is reused here — `docker compose build`
 # reads the build args from compose.yml, which references ${GITHUB_TOKEN}.
-ssh "$VM" "cd $REMOTE_DIR && set -a && . .env && set +a && docker compose up -d --build auto-agent"
+ssh "$VM" "cd $REMOTE_DIR && set -a && . .env && set +a && docker compose up -d --build auto-agent web-next"
 
 echo "==> Waiting for health check..."
 sleep 6
 ssh "$VM" "curl -sf http://localhost:2020/health && echo ' OK'" || echo "WARN: health check failed"
 
-echo "==> Done. App running at http://172.190.26.82:2020"
+echo "==> Done. Legacy UI at http://172.190.26.82:2020 — new Next.js UI at http://172.190.26.82:3000"
