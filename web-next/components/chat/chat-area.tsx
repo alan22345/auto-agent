@@ -36,8 +36,6 @@ export function ChatArea({ taskId }: { taskId: number | null }) {
     const wasAtBottom = isAtBottom(el);
     const newDelta = Math.max(0, entries.length - prevLen);
 
-    if (taskChanged) setPendingCount(0);
-
     if (taskChanged || firstPaint || userJustSent || wasAtBottom) {
       el.scrollTo({ top: el.scrollHeight });
       setPendingCount(0);
