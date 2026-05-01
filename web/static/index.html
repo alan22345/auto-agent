@@ -1621,15 +1621,6 @@
           onTimeout() { resetBtn(); showToast("Save timed out — check your connection", "error"); },
         }
       );
-      ws.send(JSON.stringify({
-        type: "toggle_freeform",
-        repo_name: repoName,
-        enabled,
-        dev_branch: branch,
-        analysis_cron: cron,
-        auto_approve_suggestions: auto,
-        auto_start_tasks: autostart,
-      }));
     }
 
     function triggerAnalysisFor(repoName) {
