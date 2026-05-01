@@ -274,6 +274,24 @@
     .task-list-panel { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
     .task-list-panel.hidden { display: none; }
 
+    .task-filter-bar {
+      display: flex;
+      gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+    }
+    .task-filter-bar select {
+      flex: 1;
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
     .suggestion-item {
       padding: 10px 12px;
       border-radius: 6px;
@@ -1059,6 +1077,18 @@
 
     <!-- Tasks tab -->
     <div class="task-list-panel" id="tasks-panel">
+      <div class="task-filter-bar">
+        <select id="task-filter-status" onchange="onTaskFilterChange(this)">
+          <option value="all">All</option>
+          <option value="active">Active</option>
+          <option value="needs_action">Needs Action</option>
+          <option value="done">Done</option>
+          <option value="failed">Failed</option>
+        </select>
+        <select id="task-filter-repo" onchange="onTaskFilterChange(this)">
+          <option value="all">All repos</option>
+        </select>
+      </div>
       <div class="task-list" id="task-list"></div>
       <div class="new-task-form">
         <input type="text" id="new-title" placeholder="Task title...">
@@ -1187,6 +1217,7 @@
   <script>
     let ws;
     let tasks = [];
+    let taskFilter = { status: 'all', repo: 'all' };
     let selectedTaskId = null;
     let chatMessages = {}; // task_id -> [messages]
     let reconnectAttempts = 0;
@@ -2082,11 +2113,62 @@
       }
     }
 
+    function onTaskFilterChange(el) {
+      if (el.id === "task-filter-status") taskFilter.status = el.value;
+      else if (el.id === "task-filter-repo") taskFilter.repo = el.value;
+      renderTasks();
+    }
+
+    function populateRepoFilter() {
+      const sel = document.getElementById("task-filter-repo");
+      if (!sel) return;
+      const repos = [...new Set(tasks.map(t => t.repo_name).filter(Boolean))].sort();
+      const hasNoRepo = tasks.some(t => !t.repo_name);
+      const previous = taskFilter.repo;
+      const validValues = new Set(["all", ...repos, ...(hasNoRepo ? ["__none__"] : [])]);
+      const opts = ['<option value="all">All repos</option>'];
+      for (const r of repos) {
+        opts.push(`<option value="${escAttr(r)}">${escHtml(r)}</option>`);
+      }
+      if (hasNoRepo) opts.push('<option value="__none__">(no repo)</option>');
+      sel.innerHTML = opts.join("");
+      if (validValues.has(previous)) {
+        sel.value = previous;
+      } else {
+        taskFilter.repo = "all";
+        sel.value = "all";
+      }
+    }
+
+    function applyTaskFilter(list) {
+      return list.filter(t => {
+        switch (taskFilter.status) {
+          case "active":
+            if (["done", "failed"].includes(t.status)) return false;
+            break;
+          case "needs_action":
+            if (!["awaiting_approval", "awaiting_clarification"].includes(t.status)) return false;
+            break;
+          case "done":
+            if (t.status !== "done") return false;
+            break;
+          case "failed":
+            if (t.status !== "failed") return false;
+            break;
+        }
+        if (taskFilter.repo === "all") return true;
+        if (taskFilter.repo === "__none__") return !t.repo_name;
+        return t.repo_name === taskFilter.repo;
+      });
+    }
+
     function renderTasks() {
       const el = document.getElementById("task-list");
       const count = document.getElementById("task-count");
       const active = tasks.filter(t => !["done", "failed"].includes(t.status));
       count.textContent = `${active.length} active / ${tasks.length} total`;
+
+      populateRepoFilter();
 
       // Sort: active tasks first, then by id descending (newest first)
       const statusOrder = {
@@ -2101,23 +2183,28 @@
         return b.id - a.id;
       });
 
-      el.innerHTML = sorted.map(t => {
-        const priorityLabel = t.status === "queued" && t.priority !== undefined && t.priority !== 100
-          ? `<span style="color:${t.priority < 100 ? 'var(--green)' : 'var(--text-muted)'};margin-left:4px;font-size:10px;">P${t.priority}</span>`
-          : '';
-        const complexityLabel = t.complexity === "simple_no_code"
-          ? '<span style="color:var(--accent);margin-left:4px;">query</span>'
-          : (t.complexity ? `<span style="color:var(--text-muted);margin-left:4px;">${t.complexity}</span>` : '');
-        return `
-        <div class="task-item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask(${t.id})">
-          <div class="task-id">#${t.id} ${t.repo_name ? '(' + t.repo_name + ')' : ''}</div>
-          <div class="task-title">${escHtml(t.title)}</div>
-          <div class="task-status">
-            <span class="status-badge status-${t.status}">${t.status}</span>
-            ${complexityLabel}${priorityLabel}
-          </div>
-        </div>`;
-      }).join("");
+      const filtered = applyTaskFilter(sorted);
+      if (filtered.length === 0) {
+        el.innerHTML = '<div class="empty-state" style="padding:20px;font-size:11px;">No tasks match</div>';
+      } else {
+        el.innerHTML = filtered.map(t => {
+          const priorityLabel = t.status === "queued" && t.priority !== undefined && t.priority !== 100
+            ? `<span style="color:${t.priority < 100 ? 'var(--green)' : 'var(--text-muted)'};margin-left:4px;font-size:10px;">P${t.priority}</span>`
+            : '';
+          const complexityLabel = t.complexity === "simple_no_code"
+            ? '<span style="color:var(--accent);margin-left:4px;">query</span>'
+            : (t.complexity ? `<span style="color:var(--text-muted);margin-left:4px;">${t.complexity}</span>` : '');
+          return `
+          <div class="task-item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask(${t.id})">
+            <div class="task-id">#${t.id} ${t.repo_name ? '(' + t.repo_name + ')' : ''}</div>
+            <div class="task-title">${escHtml(t.title)}</div>
+            <div class="task-status">
+              <span class="status-badge status-${t.status}">${t.status}</span>
+              ${complexityLabel}${priorityLabel}
+            </div>
+          </div>`;
+        }).join("");
+      }
 
       // Show/hide approval and clarification bars.
       // Freeform tasks are fully autonomous: their plan is auto-reviewed and
