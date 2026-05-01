@@ -1361,31 +1361,38 @@
       `}).join("");
     }
 
-    async function confirmDeleteRepo(repoName) {
-      if (!confirm(`Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`)) return;
-      try {
-        const res = await authFetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
-        if (res.status === 409) {
-          const data = await res.json();
-          alert(data.detail || "Cannot delete: active tasks reference this repo.");
-          return;
-        }
-        if (!res.ok) {
-          const data = await res.json();
-          alert(data.detail || "Failed to delete repo.");
-          return;
-        }
-        freeformConfigs = freeformConfigs.filter(c => c.repo_name !== repoName);
-        if (selectedFreeformView && selectedFreeformView.repoName === repoName) {
-          selectedFreeformView = "existing";
-          renderFreeformSidebar();
-          renderFreeformAddExisting();
-        } else {
-          renderFreeformSidebar();
-        }
-      } catch (e) {
-        alert("Error deleting repo: " + e.message);
-      }
+    function confirmDeleteRepo(repoName) {
+      showConfirmModal({
+        title: "Remove repo?",
+        message: `Remove <strong>${escHtml(repoName)}</strong>? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`,
+        confirmText: "Remove",
+        confirmColor: "var(--red)",
+        onConfirm: async () => {
+          try {
+            const res = await authFetch(`/api/repos/${encodeURIComponent(repoName)}`, { method: "DELETE" });
+            if (res.status === 409) {
+              const data = await res.json();
+              alert(data.detail || "Cannot delete: active tasks reference this repo.");
+              return;
+            }
+            if (!res.ok) {
+              const data = await res.json();
+              alert(data.detail || "Failed to delete repo.");
+              return;
+            }
+            freeformConfigs = freeformConfigs.filter(c => c.repo_name !== repoName);
+            if (selectedFreeformView && selectedFreeformView.repoName === repoName) {
+              selectedFreeformView = "existing";
+              renderFreeformSidebar();
+              renderFreeformAddExisting();
+            } else {
+              renderFreeformSidebar();
+            }
+          } catch (e) {
+            alert("Error deleting repo: " + e.message);
+          }
+        },
+      });
     }
 
     /* ----- Sidebar action / repo selection ----- */
@@ -1583,7 +1590,7 @@
         </div>
 
         <div class="ff-button-row">
-          <button class="ff-btn" onclick="saveRepoConfig('${escAttr(repoName)}')">Save changes</button>
+          <button class="ff-btn" id="rd-save-btn" onclick="saveRepoConfig('${escAttr(repoName)}')">Save changes</button>
           <button class="ff-btn secondary" id="rd-analyze-btn" onclick="triggerAnalysisFor('${escAttr(repoName)}')"
             ${poAnalysisRunning.has(repoName) || poAnalysisQueued.has(repoName) ? 'disabled' : ''}>
             ${poAnalysisRunning.has(repoName)
@@ -1752,8 +1759,7 @@
         showToast("Connection lost — cannot save", "error");
         return;
       }
-      const btn = document.querySelector(`button[onclick="saveRepoConfig('${CSS.escape(repoName)}')"]`)
-                || document.querySelector('.ff-btn:not(.secondary)');
+      const btn = document.getElementById('rd-save-btn');
       if (btn) setButtonLoading(btn, true, "Save changes");
       const resetBtn = () => { if (btn) setButtonLoading(btn, false, "Save changes"); };
       const enabled = document.getElementById("rd-enabled").checked;
