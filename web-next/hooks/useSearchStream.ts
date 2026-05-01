@@ -10,6 +10,8 @@ export type StreamState = {
   sources: Source[];
   memoryHits: MemoryHit[];
   answer: string;
+  inputTokens: number;
+  outputTokens: number;
   error: string | null;
 };
 
@@ -19,6 +21,8 @@ const initial: StreamState = {
   sources: [],
   memoryHits: [],
   answer: '',
+  inputTokens: 0,
+  outputTokens: 0,
   error: null,
 };
 
@@ -98,7 +102,14 @@ function apply(s: StreamState, ev: SearchEvent): StreamState {
       // tool-call narration ("Let me search…", "Now reading…", final answer).
       return { ...s, answer: ev.delta };
     case 'done':
-      return { ...s, status: 'done', activeTool: null, answer: ev.answer };
+      return {
+        ...s,
+        status: 'done',
+        activeTool: null,
+        answer: ev.answer,
+        inputTokens: ev.input_tokens ?? 0,
+        outputTokens: ev.output_tokens ?? 0,
+      };
     case 'error':
       return { ...s, status: 'error', error: ev.message, activeTool: null };
     default:

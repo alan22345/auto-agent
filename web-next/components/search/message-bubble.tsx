@@ -29,8 +29,23 @@ export function MessageBubble({ message }: { message: SearchMessage }) {
       <div className="prose prose-sm max-w-none rounded-lg bg-card px-3 py-2">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
       </div>
+      <TokenBadge input={message.input_tokens} output={message.output_tokens} />
       <MemoryHits hits={hits} />
       <SourceList sources={sources} />
+    </div>
+  );
+}
+
+export function TokenBadge({ input, output }: { input: number; output: number }) {
+  if (!input && !output) return null;
+  const total = input + output;
+  return (
+    <div className="mt-1 text-xs text-muted-foreground">
+      {total.toLocaleString()} tokens
+      <span className="mx-1">·</span>
+      {input.toLocaleString()} in
+      <span className="mx-1">·</span>
+      {output.toLocaleString()} out
     </div>
   );
 }

@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getSession, type SearchMessage } from '@/lib/search';
 import { useSearchStream } from '@/hooks/useSearchStream';
-import { MessageBubble } from './message-bubble';
+import { MessageBubble, TokenBadge } from './message-bubble';
 import { Composer } from './composer';
 import { SourceList } from './source-list';
 import { MemoryHits } from './memory-hits';
@@ -52,6 +52,8 @@ export function ChatPane({
         content,
         tool_events: [],
         truncated: false,
+        input_tokens: 0,
+        output_tokens: 0,
         created_at: new Date().toISOString(),
       },
     ]);
@@ -80,6 +82,9 @@ export function ChatPane({
               <div className="prose prose-sm mt-3 max-w-none rounded-lg bg-card px-3 py-2 whitespace-pre-wrap">
                 {stream.answer}
               </div>
+            )}
+            {(stream.inputTokens > 0 || stream.outputTokens > 0) && (
+              <TokenBadge input={stream.inputTokens} output={stream.outputTokens} />
             )}
             {!stream.answer && !stream.activeTool && (
               <div className="text-sm text-muted-foreground">Thinking…</div>

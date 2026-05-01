@@ -12,27 +12,36 @@ MODEL_TIERS = {
 }
 
 
-def get_provider(model_override: str | None = None) -> LLMProvider:
+def get_provider(
+    model_override: str | None = None,
+    provider_override: str | None = None,
+) -> LLMProvider:
     """Return the configured LLM provider instance.
 
     Args:
         model_override: Override the configured model. Can be a model name
                        or a tier name ("fast", "standard", "capable").
+        provider_override: Force a specific provider ("anthropic", "bedrock",
+                       "claude_cli"), ignoring `settings.llm_provider`. Used
+                       by flows that require an API provider with native tool
+                       calling (e.g. the Search tab — claude_cli passthrough
+                       skips the agentic loop and can't stream tool events).
     """
     from shared.config import settings
 
     model = model_override or settings.llm_model
     # Resolve tier names to actual model IDs
     model = MODEL_TIERS.get(model, model)
+    provider = provider_override or settings.llm_provider
 
-    if settings.llm_provider == "anthropic":
+    if provider == "anthropic":
         from agent.llm.anthropic import AnthropicProvider
 
         return AnthropicProvider(
             api_key=settings.anthropic_api_key,
             model=model,
         )
-    elif settings.llm_provider == "bedrock":
+    elif provider == "bedrock":
         from agent.llm.bedrock import BedrockProvider
 
         return BedrockProvider(
@@ -43,9 +52,9 @@ def get_provider(model_override: str | None = None) -> LLMProvider:
             aws_secret_key=settings.aws_secret_access_key,
             aws_session_token=settings.aws_session_token,
         )
-    elif settings.llm_provider == "claude_cli":
+    elif provider == "claude_cli":
         from agent.llm.claude_cli import ClaudeCLIProvider
 
         return ClaudeCLIProvider()
     else:
-        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+        raise ValueError(f"Unknown LLM provider: {provider}")

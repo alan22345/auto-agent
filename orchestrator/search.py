@@ -46,6 +46,8 @@ class MessageData(BaseModel):
     content: str
     tool_events: list
     truncated: bool
+    input_tokens: int = 0
+    output_tokens: int = 0
     created_at: str
 
 
@@ -131,6 +133,8 @@ async def get_session_detail(
                 content=m.content,
                 tool_events=list(m.tool_events or []),
                 truncated=m.truncated,
+                input_tokens=m.input_tokens or 0,
+                output_tokens=m.output_tokens or 0,
                 created_at=m.created_at.isoformat(),
             )
             for m in msgs
@@ -216,6 +220,8 @@ async def send_message(
     async def stream() -> AsyncIterator[bytes]:
         events_captured: list[dict] = []
         final_answer: str | None = None
+        input_tokens = 0
+        output_tokens = 0
         truncated = False
         try:
             async for ev in run_search_turn(
@@ -227,6 +233,8 @@ async def send_message(
                 events_captured.append(ev)
                 if ev["type"] == "done":
                     final_answer = ev.get("answer", "") or ""
+                    input_tokens = int(ev.get("input_tokens") or 0)
+                    output_tokens = int(ev.get("output_tokens") or 0)
                 elif ev["type"] == "error":
                     truncated = True
                 yield (json.dumps(ev) + "\n").encode("utf-8")
@@ -254,6 +262,8 @@ async def send_message(
                     content=answer,
                     tool_events=persisted_events,
                     truncated=truncated,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                 )
                 s2.add(msg)
                 target = (

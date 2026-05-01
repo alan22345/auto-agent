@@ -23,7 +23,7 @@ export type SearchEvent =
   | ({ type: 'source' } & Source)
   | ({ type: 'memory_hit' } & MemoryHit)
   | { type: 'text'; delta: string }
-  | { type: 'done'; answer: string }
+  | { type: 'done'; answer: string; input_tokens: number; output_tokens: number }
   | { type: 'error'; message: string };
 
 export type SearchSession = {
@@ -39,6 +39,8 @@ export type SearchMessage = {
   content: string;
   tool_events: SearchEvent[];
   truncated: boolean;
+  input_tokens: number;
+  output_tokens: number;
   created_at: string;
 };
 

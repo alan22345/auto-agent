@@ -113,7 +113,10 @@ async def run_search_turn(
     pre_recall = await query_relevant_memory(user_message)
     system_prompt = _SYSTEM_PROMPT + (("\n\n" + pre_recall) if pre_recall else "")
 
-    provider = get_provider()
+    # Search always runs on Bedrock so the agentic tool-calling loop streams
+    # source/text/tool_call_start events to the UI and reports a real token
+    # count per turn. The claude_cli passthrough provider can't do either.
+    provider = get_provider(provider_override="bedrock")
     context_manager = ContextManager(provider=provider, workspace=".")
 
     prior_messages = _history_to_messages(history)
@@ -141,7 +144,12 @@ async def run_search_turn(
                 + f"User: {user_message}"
             )
             result = await loop.run(prompt=full_prompt, system=system_prompt)
-            await queue.put({"type": "done", "answer": result.output})
+            await queue.put({
+                "type": "done",
+                "answer": result.output,
+                "input_tokens": result.tokens_used.input_tokens,
+                "output_tokens": result.tokens_used.output_tokens,
+            })
         except Exception as e:
             logger.warning("search_loop_failed", error=str(e))
             await queue.put({"type": "error", "message": str(e)})

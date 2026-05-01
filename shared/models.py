@@ -259,6 +259,10 @@ class SearchMessage(Base):
     content = Column(Text, nullable=False, default="")
     tool_events = Column(JSONB, nullable=False, default=list)
     truncated = Column(Boolean, nullable=False, default=False)
+    # Token usage for assistant turns (zero for user rows). Populated from the
+    # AgentResult.tokens_used returned by the search agent loop.
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     session = relationship("SearchSession")
