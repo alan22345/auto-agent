@@ -40,7 +40,8 @@ integrations/             # Slack, Telegram, Linear clients
 orchestrator/             # Task routing, classification, queue, webhooks, state machine
 claude_runner/            # (legacy) Claude CLI execution loop — kept for pass-through mode
     ↑
-web/                      # HTTP UI and static assets
+web/                      # Legacy HTTP UI (deprecated — see web-next)
+web-next/                 # Active Next.js UI (App Router, TS) — DEFAULT for all UI work
     ↑
 run.py                    # Entry point
 ```
@@ -99,7 +100,8 @@ agent/
 | `integrations/` | External service clients | `agent/`, `orchestrator/`, `claude_runner/`, `web/` |
 | `orchestrator/` | Task lifecycle, routing, webhooks, state machine | `claude_runner/`, `web/` |
 | `claude_runner/` | Legacy Claude CLI subprocess runner | `web/` |
-| `web/` | HTTP UI, static assets | _(can import from any lower layer)_ |
+| `web/` | Legacy HTTP UI (deprecated, do not extend) | _(can import from any lower layer)_ |
+| `web-next/` | Active Next.js UI — Tailwind + shadcn/ui, TanStack Query, App Router | _(consumes the FastAPI in `orchestrator/router.py` over HTTP/WS)_ |
 | `migrations/` | Alembic migrations | Everything except `shared/models`, `shared/database` |
 
 ### Critical invariants (context pipeline)
@@ -149,7 +151,7 @@ These are load-bearing — changing them has broken the agent before:
 - New LLM provider → `agent/llm/<provider>.py` + wire in `agent/llm/__init__.py::get_provider`
 - New context layer → `agent/context/<layer>.py` + compose into `agent/context/__init__.py::prepare`
 - Database migrations → `migrations/versions/` (use `alembic revision --autogenerate -m "description"`)
-- Static web assets → `web/static/`
+- **UI work → `web-next/`** (Next.js App Router, TS, Tailwind, shadcn/ui). The legacy SPA in `web/static/index.html` is deprecated; do NOT add features there. New pages → `web-next/app/(app)/<route>/page.tsx`. New components → `web-next/components/<area>/`. Data hooks → `web-next/hooks/`. API client functions → `web-next/lib/`.
 - Max file size guideline: ~500 lines. If a module exceeds this, split by concern.
 
 ## Methodology (MANDATORY)
