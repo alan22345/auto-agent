@@ -2246,6 +2246,8 @@
     function selectTask(id) {
       selectedTaskId = id;
       renderTasks();
+      // renderChat() prepends description/plan/error bubbles via
+      // buildTaskContextPrefix() before any chat history.
       renderChat();
 
       const task = tasks.find(t => t.id === id);
@@ -2289,35 +2291,46 @@
       `;
     }
 
-    function renderChat() {
-      const el = document.getElementById("chat-area");
-      const key = selectedTaskId || "_global";
-      const msgs = [...(chatMessages["_global"] || []), ...(chatMessages[key] || [])];
+    // Statuses at or after the plan has been published to the user.
+    const PLAN_VISIBLE_STATUSES = new Set([
+      "awaiting_approval", "awaiting_clarification", "coding", "pr_created",
+      "awaiting_ci", "awaiting_review", "done", "failed", "blocked",
+    ]);
+    const ERROR_VISIBLE_STATUSES = new Set(["failed", "blocked"]);
 
-      renderSubtaskBar();
+    function buildTaskContextPrefix(task) {
+      if (!task) return "";
+      let html = "";
 
-      // Show plan or query answer at the top of the chat area
-      const selected = tasks.find(t => t.id === selectedTaskId);
-      let answerHtml = "";
-      if (selected && selected.plan) {
-        if (selected.complexity === "simple_no_code") {
-          answerHtml = `
+      if (task.description && task.description.trim()) {
+        html += `
+          <div class="message system" style="margin-bottom:12px;">
+            <div class="message-bubble" style="max-width:100%;white-space:pre-wrap;">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:600;">Description</div>
+              ${escHtml(task.description)}
+            </div>
+          </div>`;
+      }
+
+      if (task.plan) {
+        if (task.complexity === "simple_no_code") {
+          html += `
             <div class="message system" style="margin-bottom:12px;">
               <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
                 <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
-                ${renderMarkdown(selected.plan)}
+                ${renderMarkdown(task.plan)}
               </div>
             </div>`;
-        } else if (selected.complexity !== "simple") {
+        } else if (task.complexity !== "simple" && PLAN_VISIBLE_STATUSES.has(task.status)) {
           // Show the plan for complex/complex_large tasks — strip agent preamble
-          const planLabel = selected.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
-          let planText = selected.plan;
+          const planLabel = task.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
+          let planText = task.plan;
           // Strip thinking/exploration preamble — plan starts at first markdown heading
           const headingMatch = planText.match(/^(#{1,3} )/m);
           if (headingMatch) {
             planText = planText.substring(planText.indexOf(headingMatch[0]));
           }
-          answerHtml = `
+          html += `
             <div class="message system" style="margin-bottom:12px;">
               <div class="message-bubble" style="background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.2);max-height:500px;overflow-y:auto;">
                 <div style="font-size:11px;color:var(--yellow);margin-bottom:6px;font-weight:600;">${planLabel}</div>
@@ -2327,12 +2340,38 @@
         }
       }
 
-      if (msgs.length === 0 && !answerHtml) {
+      if (task.error && task.error.trim() && ERROR_VISIBLE_STATUSES.has(task.status)) {
+        html += `
+          <div class="message error" style="margin-bottom:12px;">
+            <div class="message-bubble" style="max-width:100%;white-space:pre-wrap;">
+              <div style="font-size:11px;margin-bottom:6px;font-weight:600;">Error</div>
+              ${escHtml(task.error)}
+            </div>
+          </div>`;
+      }
+
+      return html;
+    }
+
+    function renderChat() {
+      const el = document.getElementById("chat-area");
+      const key = selectedTaskId || "_global";
+      const msgs = [...(chatMessages["_global"] || []), ...(chatMessages[key] || [])];
+
+      renderSubtaskBar();
+
+      // Description / plan / error bubbles derived from the live task object.
+      // Re-rendered on every renderChat call, so they survive the load_history
+      // round-trip that overwrites chatMessages[key].
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      const prefixHtml = buildTaskContextPrefix(selected);
+
+      if (msgs.length === 0 && !prefixHtml) {
         el.innerHTML = '<div class="empty-state">Messages and events will appear here</div>';
         return;
       }
 
-      el.innerHTML = answerHtml + msgs.map(m => {
+      el.innerHTML = prefixHtml + msgs.map(m => {
         const senderLabel = m.type === 'user' && m.sender
           ? `<div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;text-align:right;">${escHtml(m.sender)}</div>`
           : '';
