@@ -2105,7 +2105,7 @@
           if (data.event_type === "task.subtask_progress" && data.task_id) {
             // Refresh the task list so subtask data is up to date
             if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "get_tasks" }));
+              ws.send(JSON.stringify({ type: "refresh" }));
             }
           }
           // Track PO analysis running/queued state
