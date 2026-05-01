@@ -2303,8 +2303,6 @@
     function selectTask(id) {
       selectedTaskId = id;
       renderTasks();
-      // renderChat() prepends description/plan/error bubbles via
-      // buildTaskContextPrefix() before any chat history.
       renderChat();
 
       const task = tasks.find(t => t.id === id);
@@ -2321,6 +2319,38 @@
       }
     }
 
+    // Statuses at or after the plan has been published to the user.
+    const PLAN_VISIBLE_STATUSES = new Set([
+      "awaiting_approval", "awaiting_clarification", "coding", "pr_created",
+      "awaiting_ci", "awaiting_review", "done", "failed", "blocked",
+    ]);
+    const ERROR_VISIBLE_STATUSES = new Set(["failed", "blocked"]);
+
+    // True when the task's plan field has been published to the user (i.e. the
+    // task has reached awaiting_approval or beyond). Excludes simple/simple_no_code
+    // because those don't produce a reviewable plan (simple goes straight to
+    // coding; simple_no_code's plan is rendered as a "Query Answer" chat bubble
+    // by buildTaskContextPrefix instead).
+    function shouldShowPanelPlan(task) {
+      return !!(
+        task.plan && task.plan.trim() &&
+        task.complexity !== "simple" &&
+        task.complexity !== "simple_no_code" &&
+        PLAN_VISIBLE_STATUSES.has(task.status)
+      );
+    }
+
+    // Strip thinking/exploration preamble — the plan starts at the first
+    // markdown heading the agent emitted.
+    function getDisplayablePlanText(task) {
+      let text = task.plan;
+      const headingMatch = text.match(/^(#{1,3} )/m);
+      if (headingMatch) {
+        text = text.substring(text.indexOf(headingMatch[0]));
+      }
+      return text;
+    }
+
     function renderTaskDetailPanel() {
       const el = document.getElementById("task-detail-panel");
       if (!el) return;
@@ -2334,19 +2364,20 @@
         parts.push(`<div class="task-detail-block description">${escHtml(task.description)}</div>`);
       }
 
-      if (task.plan) {
+      if (shouldShowPanelPlan(task)) {
         const expanded = !!taskDetailPlanExpanded[task.id];
         const arrow = expanded ? "&#9662;" : "&#9656;";
+        const label = task.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
         parts.push(`
           <div class="task-detail-block plan">
             <button type="button" class="task-detail-toggle" onclick="togglePlanDetail(${task.id})">
-              <span>${arrow}</span><span>Plan</span>
+              <span>${arrow}</span><span>${label}</span>
             </button>
-            <div class="plan-body${expanded ? "" : " collapsed"}">${renderMarkdown(task.plan)}</div>
+            <div class="plan-body${expanded ? "" : " collapsed"}">${renderMarkdown(getDisplayablePlanText(task))}</div>
           </div>`);
       }
 
-      if (task.error && task.error.trim()) {
+      if (task.error && task.error.trim() && ERROR_VISIBLE_STATUSES.has(task.status)) {
         parts.push(`<div class="task-detail-block error">${escHtml(task.error)}</div>`);
       }
 
@@ -2386,66 +2417,22 @@
       `;
     }
 
-    // Statuses at or after the plan has been published to the user.
-    const PLAN_VISIBLE_STATUSES = new Set([
-      "awaiting_approval", "awaiting_clarification", "coding", "pr_created",
-      "awaiting_ci", "awaiting_review", "done", "failed", "blocked",
-    ]);
-    const ERROR_VISIBLE_STATUSES = new Set(["failed", "blocked"]);
-
+    // Description / plan / error live in #task-detail-panel below the main
+    // header (see renderTaskDetailPanel). The chat-area prefix only carries the
+    // simple_no_code "Query Answer" bubble, which is genuinely chat content
+    // (the agent's answer to a query, not a plan to be reviewed).
     function buildTaskContextPrefix(task) {
       if (!task) return "";
-      let html = "";
-
-      if (task.description && task.description.trim()) {
-        html += `
+      if (task.complexity === "simple_no_code" && task.plan && task.plan.trim()) {
+        return `
           <div class="message system" style="margin-bottom:12px;">
-            <div class="message-bubble" style="max-width:100%;white-space:pre-wrap;">
-              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:600;">Description</div>
-              ${escHtml(task.description)}
+            <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
+              <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
+              ${renderMarkdown(task.plan)}
             </div>
           </div>`;
       }
-
-      if (task.plan) {
-        if (task.complexity === "simple_no_code") {
-          html += `
-            <div class="message system" style="margin-bottom:12px;">
-              <div class="message-bubble" style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);max-width:100%;">
-                <div style="font-size:11px;color:var(--accent);margin-bottom:6px;font-weight:600;">Query Answer</div>
-                ${renderMarkdown(task.plan)}
-              </div>
-            </div>`;
-        } else if (task.complexity !== "simple" && PLAN_VISIBLE_STATUSES.has(task.status)) {
-          // Show the plan for complex/complex_large tasks — strip agent preamble
-          const planLabel = task.status === "awaiting_approval" ? "Plan — Review and Approve" : "Plan";
-          let planText = task.plan;
-          // Strip thinking/exploration preamble — plan starts at first markdown heading
-          const headingMatch = planText.match(/^(#{1,3} )/m);
-          if (headingMatch) {
-            planText = planText.substring(planText.indexOf(headingMatch[0]));
-          }
-          html += `
-            <div class="message system" style="margin-bottom:12px;">
-              <div class="message-bubble" style="background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.2);max-height:500px;overflow-y:auto;">
-                <div style="font-size:11px;color:var(--yellow);margin-bottom:6px;font-weight:600;">${planLabel}</div>
-                ${renderMarkdown(planText)}
-              </div>
-            </div>`;
-        }
-      }
-
-      if (task.error && task.error.trim() && ERROR_VISIBLE_STATUSES.has(task.status)) {
-        html += `
-          <div class="message error" style="margin-bottom:12px;">
-            <div class="message-bubble" style="max-width:100%;white-space:pre-wrap;">
-              <div style="font-size:11px;margin-bottom:6px;font-weight:600;">Error</div>
-              ${escHtml(task.error)}
-            </div>
-          </div>`;
-      }
-
-      return html;
+      return "";
     }
 
     function renderChat() {
@@ -2455,8 +2442,8 @@
 
       renderSubtaskBar();
 
-      // Description / plan / error bubbles derived from the live task object.
-      // Re-rendered on every renderChat call, so they survive the load_history
+      // simple_no_code "Query Answer" bubble derived from the live task object.
+      // Re-rendered on every renderChat call so it survives the load_history
       // round-trip that overwrites chatMessages[key].
       const selected = tasks.find(t => t.id === selectedTaskId);
       const prefixHtml = buildTaskContextPrefix(selected);
