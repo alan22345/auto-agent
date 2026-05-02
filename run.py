@@ -401,10 +401,29 @@ async def on_ci_passed(event: Event) -> None:
     await r.aclose()
 
 
+# Sentinel strings _fetch_failed_ci_logs returns when it couldn't surface a
+# real failure log. _ci_logs_are_empty lets the deploy-failure handler know
+# the response carries no actionable diagnostic, so it can fall back to the
+# deploy-script output instead of feeding the empty sentinel to the retry loop.
+_EMPTY_CI_LOG_SENTINELS: frozenset[str] = frozenset({
+    "No failed check runs found",
+    "Could not fetch PR details",
+    "Could not fetch check runs",
+})
+
+
+def _ci_logs_are_empty(ci_logs: str) -> bool:
+    """Return True iff _fetch_failed_ci_logs returned an empty/sentinel value."""
+    return ci_logs.strip() in _EMPTY_CI_LOG_SENTINELS
+
+
 async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
     """Fetch the failed GitHub Actions job logs for a PR.
 
-    Returns the log output (truncated) or a fallback message.
+    Returns the log output (truncated) or one of ``_EMPTY_CI_LOG_SENTINELS``
+    when there's nothing actionable to surface. Callers should check
+    ``_ci_logs_are_empty`` and fall back to deploy-script output before
+    feeding a sentinel string to the retry loop.
     """
     try:
         import httpx as _httpx
@@ -631,7 +650,26 @@ async def on_dev_deploy_failed(event: Event) -> None:
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
             ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
-            reason = f"Deployment failed. Here are the failure details:\n\n{ci_logs}"
+            # If GH had no failed check runs to surface (typical for repos
+            # without GitHub Actions — the deploy failure happened in the
+            # auto-agent's own deploy script), fall back to whatever short
+            # output we have. Otherwise the agent retry loop is told
+            # "No failed check runs found" and has nothing actionable to fix.
+            if _ci_logs_are_empty(ci_logs):
+                if output:
+                    reason = (
+                        "Dev deployment failed (no GitHub Actions check runs to "
+                        "fetch). Deploy script output:\n\n"
+                        f"{output[-2000:]}"
+                    )
+                else:
+                    reason = (
+                        "Dev deployment failed and no diagnostics were captured. "
+                        "Check VM logs (~/auto-agent on the deploy host) for "
+                        f"docker compose / alembic errors. CI inspector said: {ci_logs}"
+                    )
+            else:
+                reason = f"Deployment failed. Here are the failure details:\n\n{ci_logs}"
         else:
             reason = f"Dev deployment failed. Fix the deployment issue:\n\n{output[-2000:]}"
 
