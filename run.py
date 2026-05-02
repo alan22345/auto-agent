@@ -401,14 +401,20 @@ async def on_ci_passed(event: Event) -> None:
     await r.aclose()
 
 
-# Sentinel strings _fetch_failed_ci_logs returns when it couldn't surface a
-# real failure log. _ci_logs_are_empty lets the deploy-failure handler know
-# the response carries no actionable diagnostic, so it can fall back to the
-# deploy-script output instead of feeding the empty sentinel to the retry loop.
+# Named sentinels _fetch_failed_ci_logs returns when it couldn't surface a
+# real failure log. Defined as module constants so the function and the
+# detector below share a single source of truth — a new sentinel added in
+# one place but forgotten in the other would silently break the
+# fallback-to-deploy-output path. Reference these constants by name in the
+# function body; never inline a literal.
+_CI_LOG_NO_FAILED_RUNS = "No failed check runs found"
+_CI_LOG_PR_FETCH_FAILED = "Could not fetch PR details"
+_CI_LOG_CHECK_RUNS_FETCH_FAILED = "Could not fetch check runs"
+
 _EMPTY_CI_LOG_SENTINELS: frozenset[str] = frozenset({
-    "No failed check runs found",
-    "Could not fetch PR details",
-    "Could not fetch check runs",
+    _CI_LOG_NO_FAILED_RUNS,
+    _CI_LOG_PR_FETCH_FAILED,
+    _CI_LOG_CHECK_RUNS_FETCH_FAILED,
 })
 
 
@@ -439,7 +445,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                 headers=headers,
             )
             if resp.status_code != 200:
-                return "Could not fetch PR details"
+                return _CI_LOG_PR_FETCH_FAILED
             head_sha = resp.json()["head"]["sha"]
 
             # Get check runs for this commit
@@ -448,7 +454,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                 headers=headers,
             )
             if resp.status_code != 200:
-                return "Could not fetch check runs"
+                return _CI_LOG_CHECK_RUNS_FETCH_FAILED
 
             check_runs = resp.json().get("check_runs", [])
             failed_runs = [
@@ -457,7 +463,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
             ]
 
             if not failed_runs:
-                return "No failed check runs found"
+                return _CI_LOG_NO_FAILED_RUNS
 
             logs_parts = []
             for cr in failed_runs[:3]:  # Limit to 3 failed runs

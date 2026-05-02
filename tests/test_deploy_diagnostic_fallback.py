@@ -15,7 +15,13 @@ The fix:
 
 from __future__ import annotations
 
-from run import _ci_logs_are_empty, _EMPTY_CI_LOG_SENTINELS
+from run import (
+    _CI_LOG_CHECK_RUNS_FETCH_FAILED,
+    _CI_LOG_NO_FAILED_RUNS,
+    _CI_LOG_PR_FETCH_FAILED,
+    _EMPTY_CI_LOG_SENTINELS,
+    _ci_logs_are_empty,
+)
 
 
 def test_known_sentinels_are_recognised_as_empty():
@@ -24,6 +30,25 @@ def test_known_sentinels_are_recognised_as_empty():
         assert _ci_logs_are_empty(sentinel), f"{sentinel!r} not detected"
         # Whitespace tolerance — fetcher may add a trailing newline.
         assert _ci_logs_are_empty(f"  {sentinel}  \n")
+
+
+def test_named_constants_are_registered_in_frozenset():
+    """Every named sentinel constant the fetcher uses must be in the frozenset.
+
+    Locks the single-source-of-truth contract: adding a new sentinel constant
+    + return path but forgetting to register it in _EMPTY_CI_LOG_SENTINELS
+    would silently break the fallback-to-deploy-output path. This test fails
+    fast in that case.
+    """
+    for constant in (
+        _CI_LOG_NO_FAILED_RUNS,
+        _CI_LOG_PR_FETCH_FAILED,
+        _CI_LOG_CHECK_RUNS_FETCH_FAILED,
+    ):
+        assert constant in _EMPTY_CI_LOG_SENTINELS, (
+            f"sentinel constant {constant!r} not in _EMPTY_CI_LOG_SENTINELS — "
+            "adding a new one means updating the frozenset too"
+        )
 
 
 def test_real_log_content_not_treated_as_empty():
