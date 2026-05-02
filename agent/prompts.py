@@ -55,7 +55,7 @@ CODING_PROMPT_WITH_PLAN = """\
 Implement the task below IMMEDIATELY. Do NOT explore the codebase broadly — only \
 read files directly relevant to the change. If the task specifies which file(s) to \
 modify, go straight to editing. If unclear, do ONE targeted search then start coding.
-
+{skill_directive}
 1. Implement the task following the repo's existing patterns and style.
 2. Run the test suite and fix any failures you introduce.
 3. Self-review your changes before committing.
@@ -75,7 +75,7 @@ CODING_PROMPT_NO_PLAN = """\
 Before writing any code, briefly summarize what you are about to do in 2-3 sentences. \
 State which files you expect to modify and what the end result should look like. \
 Then implement.
-
+{skill_directive}
 1. Restate the task: what are you changing, where, and what does "done" look like?
 2. Do ONE targeted search to find the relevant code.
 3. Implement following the repo's existing patterns and style.
@@ -108,6 +108,25 @@ _CRITICAL_RULES = """\
 - Ensure all existing tests still pass.
 - Add tests for new functionality if the repo has a test suite.
 - When replacing a function, REMOVE the old version entirely — never leave duplicate definitions.
+
+### Architecture (deepening lens)
+Every module you write or change is judged by the depth/seam/locality lens \
+(see the system prompt for the full vocabulary). For any change that introduces \
+a new module or alters an existing module's interface:
+- Apply the **deletion test** before adding anything new — if removing the new \
+  module wouldn't concentrate complexity, don't add it.
+- Prefer **deep modules** (small interface, large implementation). A wrapper \
+  that just forwards calls is shallow — push the logic into the deeper module \
+  or back into the caller instead of adding indirection.
+- **One adapter is hypothetical, two is real.** Don't introduce a port at a \
+  seam unless at least two adapters (typically production + test) justify it.
+- Name modules using the project's `CONTEXT.md` domain language when present, \
+  otherwise the clearest noun for what the module *does* — never \
+  `FooBarHandler`, never abbreviated names, avoid generic `Service`/`Manager` \
+  if a more specific term fits.
+- In the commit message, name which deepening choice you made: \
+  "kept depth", "deepened <module>", "new real seam (justified by adapters X, Y)", \
+  or "no architecturally significant choice" if the change is purely local.
 
 ### Security
 - No hardcoded secrets, tokens, or credentials.
@@ -397,6 +416,30 @@ def _intent_section(intent: dict | None) -> str:
     return "\n".join(parts)
 
 
+# Map structured-intent change_type → which skills the agent should load
+# before writing any code. Auto-routes the engineering skills (vendored under
+# skills/engineering/) into the relevant phase of work.
+def _skill_directive(intent: dict | None) -> str:
+    if not intent:
+        return ""
+    change_type = (intent.get("change_type") or "").strip().lower()
+    if change_type == "bugfix":
+        return (
+            "\n**Before writing any fix, call `skill(name='diagnose')` and follow its "
+            "phases (build a feedback loop, reproduce, hypothesise, instrument, "
+            "fix + regression test).**\n"
+        )
+    if change_type in ("feature", "refactor", "performance"):
+        return (
+            "\n**Before writing implementation, call `skill(name='tdd')` and "
+            "`skill(name='improve-codebase-architecture')`, then implement in "
+            "vertical slices (one test → one minimal implementation → repeat). "
+            "Apply the deletion test and prefer deep modules over shallow "
+            "pass-throughs.**\n"
+        )
+    return ""
+
+
 def build_coding_prompt(
     title: str,
     description: str,
@@ -406,6 +449,7 @@ def build_coding_prompt(
     intent: dict | None = None,
 ) -> str:
     intent_section = _intent_section(intent)
+    skill_directive = _skill_directive(intent)
     critical_rules = _CRITICAL_RULES.format(ci_checks_section=_ci_checks_section(ci_checks))
 
     if plan:
@@ -415,6 +459,7 @@ def build_coding_prompt(
             description=description,
             plan_section=plan_section,
             intent_section=intent_section,
+            skill_directive=skill_directive,
             clarification_instructions=CLARIFICATION_INSTRUCTIONS,
             critical_rules=critical_rules,
         )
@@ -423,6 +468,7 @@ def build_coding_prompt(
             title=title,
             description=description,
             intent_section=intent_section,
+            skill_directive=skill_directive,
             clarification_instructions=CLARIFICATION_INSTRUCTIONS,
             critical_rules=critical_rules,
         )

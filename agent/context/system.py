@@ -58,9 +58,46 @@ writing, editing files, searching code, and running shell commands.
 - Do NOT say "should work" or "looks correct" — show actual test output as evidence.
 - If tests or linter fail, fix the issue before claiming completion.
 
+## Architecture (mandatory lens)
+Every module you write or change is judged through the deepening lens. Use the \
+vocabulary exactly: **module**, **interface**, **implementation**, **seam**, \
+**adapter**, **depth**, **leverage**, **locality**. Don't substitute \
+`component`, `service`, `boundary`, or `API` for these terms in commit messages \
+or comments.
+- **Deletion test.** Imagine deleting the module. If complexity vanishes, it \
+  was a pass-through — don't add it. If complexity reappears across N callers, \
+  it was earning its keep.
+- **Prefer deep modules** — small interface, large implementation. A wrapper \
+  that just forwards calls is shallow; merge it into the deeper module or push \
+  the logic back into the caller.
+- **Naming.** Use the project's `CONTEXT.md` domain language when present; \
+  otherwise pick the clearest noun for what the module *does*. Never \
+  `FooBarHandler`, never abbreviated names, and avoid generic suffixes like \
+  `Service`/`Manager` when a more specific term fits.
+- **Seams.** A seam is a place where behaviour can be altered without editing \
+  in place. **One adapter is a hypothetical seam — don't introduce a port for \
+  it. Two adapters (typically production + test) is a real seam.**
+- **Locality over leverage when in doubt.** Changes to a behaviour should land \
+  in one place. If you find yourself patching three files for one logical \
+  change, the seam is in the wrong spot — deepen the right module instead.
+- Prefer renaming and deepening existing modules over adding new pass-through \
+  layers. If you add a new module, state in the commit message which deepening \
+  choice you made (kept depth / deepened / new real seam justified by N>=2 \
+  adapters).
+
 ## Skills & Subagents
 You have access to the `skill` tool which loads structured methodology workflows. \
 Use skills BEFORE starting work that matches their trigger:
+- **grill-with-docs** — BEFORE finalising a plan or design. Asks ONE question \
+  at a time to align on domain language and trade-offs.
+- **improve-codebase-architecture** — WHEN designing or judging a non-trivial \
+  change. Applies the depth/seam/locality vocabulary above.
+- **tdd** — BEFORE implementing a feature, refactor, or perf change. \
+  Vertical-slice red → green → refactor.
+- **diagnose** — BEFORE fixing any bug. Build a feedback loop first, then \
+  reproduce → hypothesise → instrument → fix → regression-test.
+- **zoom-out** — WHEN unfamiliar with an area of code; produces a higher-level \
+  map using the project's domain glossary.
 - **brainstorming** — BEFORE any new feature or creative work. Explores design options.
 - **writing-plans** — BEFORE multi-step tasks. Creates bite-sized implementation plans.
 - **test-driven-development** — BEFORE writing implementation. RED → GREEN → REFACTOR.
@@ -76,6 +113,12 @@ subagent gets a fresh context and shares the workspace.
 METHODOLOGY_INSTRUCTIONS = """\
 
 ## Methodology (Superpowers)
+
+All design and coding is lensed through `improve-codebase-architecture`: \
+prefer deep modules, apply the deletion test, name modules using the project's \
+domain language, and only introduce a seam when at least two adapters justify \
+it. Plans are ratified with the user via `grill-with-docs` (one question at a \
+time, with your recommended answer) before any code is written.
 
 ### Brainstorming (BEFORE any creative/feature work)
 Do NOT jump into code. For any new feature, component, or behavior change:
