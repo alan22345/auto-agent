@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from agent.main import (
     _SKIP_GRILL_COMPLEXITIES,
     _extract_grill_done,
@@ -26,7 +24,6 @@ from agent.prompts import (
     build_grill_phase_prompt,
     build_planning_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # _extract_grill_done

@@ -17,19 +17,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from croniter import croniter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent.prompts import build_architecture_analysis_prompt
+from agent.workspace import clone_repo
 from shared.database import async_session
 from shared.events import Event
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
 from shared.redis_client import get_redis, publish_event
-
-from agent.prompts import build_architecture_analysis_prompt
-from agent.workspace import clone_repo
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ async def _check_and_analyze(session: AsyncSession) -> None:
         select(FreeformConfig).where(FreeformConfig.architecture_mode == True)  # noqa: E712
     )
     configs = result.scalars().all()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for config in configs:
         if _is_due(config, now):
@@ -72,11 +71,11 @@ def _is_due(config: FreeformConfig, now: datetime) -> bool:
         return True
     base_time = config.last_architecture_at
     if base_time.tzinfo is None:
-        base_time = base_time.replace(tzinfo=timezone.utc)
+        base_time = base_time.replace(tzinfo=UTC)
     cron = croniter(config.architecture_cron, base_time)
     next_run = cron.get_next(datetime)
     if next_run.tzinfo is None:
-        next_run = next_run.replace(tzinfo=timezone.utc)
+        next_run = next_run.replace(tzinfo=UTC)
     return now >= next_run
 
 

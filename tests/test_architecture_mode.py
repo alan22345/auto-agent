@@ -8,16 +8,13 @@ architecture tasks arrive with ``intake_qa=[]`` to skip the grill phase.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-
-import pytest
 
 from agent.architect_analyzer import _is_due, _parse_analysis_output
 from agent.prompts import (
     build_architecture_analysis_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # _is_due — cron logic for architecture mode
@@ -28,32 +25,32 @@ def _config(last_at: datetime | None, cron: str = "0 9 * * 1") -> SimpleNamespac
 
 
 def test_is_due_when_never_run():
-    assert _is_due(_config(None), datetime(2026, 5, 4, 12, 0, tzinfo=timezone.utc)) is True
+    assert _is_due(_config(None), datetime(2026, 5, 4, 12, 0, tzinfo=UTC)) is True
 
 
 def test_is_due_when_cron_window_passed():
     """Last run a year ago, weekly cron — definitely due."""
-    last = datetime(2025, 5, 1, 9, 0, tzinfo=timezone.utc)
-    now = datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
+    last = datetime(2025, 5, 1, 9, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     assert _is_due(_config(last, "0 9 * * 1"), now) is True
 
 
 def test_is_not_due_immediately_after_run():
     """Just ran 5 minutes ago — next weekly Monday hasn't fired yet."""
-    last = datetime(2026, 5, 4, 9, 0, tzinfo=timezone.utc)  # Mon 9am
-    now = datetime(2026, 5, 4, 9, 5, tzinfo=timezone.utc)
+    last = datetime(2026, 5, 4, 9, 0, tzinfo=UTC)  # Mon 9am
+    now = datetime(2026, 5, 4, 9, 5, tzinfo=UTC)
     assert _is_due(_config(last, "0 9 * * 1"), now) is False
 
 
 def test_is_due_handles_naive_datetime():
     """Defensive: if DB returns a naive datetime, treat it as UTC and don't crash."""
     last = datetime(2025, 5, 1, 9, 0)  # naive
-    now = datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     assert _is_due(_config(last, "0 9 * * 1"), now) is True
 
 
 def test_is_due_for_minutely_cron():
-    last = datetime(2026, 5, 4, 9, 0, tzinfo=timezone.utc)
+    last = datetime(2026, 5, 4, 9, 0, tzinfo=UTC)
     now = last + timedelta(minutes=2)
     assert _is_due(_config(last, "* * * * *"), now) is True
 
