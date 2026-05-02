@@ -499,6 +499,27 @@ async def update_subtasks(
     return _task_to_response(task)
 
 
+class IntakeQaUpdate(BaseModel):
+    """Update the grill-before-planning Q&A on a task."""
+    intake_qa: list[dict]
+
+
+@router.patch("/tasks/{task_id}/intake_qa", response_model=TaskData)
+async def update_intake_qa(
+    task_id: int,
+    req: IntakeQaUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    """Replace the task's grill Q&A list (used by the agent during the grill phase)."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.intake_qa = req.intake_qa
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 @router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
 async def list_task_messages(
     task_id: int,
@@ -1361,6 +1382,7 @@ def _task_to_response(task: Task) -> TaskData:
         priority=task.priority if task.priority is not None else 100,
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,
+        intake_qa=task.intake_qa,
         created_at=task.created_at.isoformat() if task.created_at else None,
         created_by_user_id=task.created_by_user_id,
     )

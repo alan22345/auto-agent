@@ -102,6 +102,10 @@ class Task(Base):
     created_by_user = relationship("User", foreign_keys=[created_by_user_id])
     subtasks = Column(JSONB, nullable=True)  # [{title, status, output_preview}]
     current_subtask = Column(Integer, nullable=True)  # 0-indexed, null = not started
+    # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
+    # across AWAITING_CLARIFICATION ↔ PLANNING round-trips before the agent
+    # writes a plan. NULL = not yet started; [] = grilling complete or skipped.
+    intake_qa = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -208,6 +212,13 @@ class FreeformConfig(Base):
     # the per-repo active task cap so the queue doesn't grow unboundedly.
     auto_approve_suggestions = Column(Boolean, default=False, nullable=False)
     auto_start_tasks = Column(Boolean, default=False, nullable=False)
+    # Architecture Mode — when True, the architect_analyzer cron runs the
+    # improve-codebase-architecture skill against this repo and produces
+    # deepening-opportunity suggestions analogous to PO suggestions.
+    architecture_mode = Column(Boolean, default=False, nullable=False)
+    architecture_cron = Column(String(100), default="0 9 * * 1", nullable=False)
+    last_architecture_at = Column(DateTime(timezone=True), nullable=True)
+    architecture_knowledge = Column(Text, nullable=True)  # Agent's accumulated depth map
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     repo = relationship("Repo")

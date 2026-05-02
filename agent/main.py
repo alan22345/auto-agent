@@ -31,8 +31,10 @@ from agent.llm import get_provider
 from agent.loop import AgentLoop
 from agent.prompts import (
     CLARIFICATION_MARKER,
+    GRILL_DONE_MARKER,
     MEMORY_REFLECTION_PROMPT,
     build_coding_prompt,
+    build_grill_phase_prompt,
     build_plan_independent_review_prompt,
     build_planning_prompt,
     build_pr_independent_review_prompt,
@@ -143,6 +145,45 @@ def _extract_clarification(output: str) -> str | None:
             parts = [first_line] + remaining
             return "\n".join(parts)
     return None
+
+
+def _extract_grill_done(output: str) -> str | None:
+    """Check if agent output declares grilling complete (GRILL_DONE: <reason>)."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(GRILL_DONE_MARKER):
+            return stripped[len(GRILL_DONE_MARKER):].strip() or "(no reason)"
+    return None
+
+
+# Tasks where grilling is skipped — the agent goes straight to planning.
+# Simple tasks don't need design alignment; query/no-code tasks aren't planned;
+# tasks created from architecture-mode suggestions arrive pre-grilled
+# (intake_qa = []).
+_SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
+
+
+def _should_run_grill(task) -> bool:
+    """Decide whether the grill phase runs before planning for this task.
+
+    Grilling runs when:
+      - complexity is complex/complex_large (not simple).
+      - intake_qa is None (never started). Empty list [] = "complete or
+        explicitly skipped" so we go straight to plan.
+    """
+    if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
+        return False
+    return task.intake_qa is None
+
+
+async def _save_intake_qa(task_id: int, intake_qa: list[dict]) -> None:
+    """PATCH the task's intake_qa via the orchestrator API."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/intake_qa",
+            json={"intake_qa": intake_qa},
+        )
+        resp.raise_for_status()
 
 
 _PLAN_MAX_LENGTH = 50_000  # Must match TransitionRequest.plan max_length
@@ -579,14 +620,29 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     try:
         agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
+        # Three planning entry paths:
+        #   1. Plan-revision (user rejected previous plan, sent feedback).
+        #   2. Grill phase (complex task, no plan yet, intake_qa not yet
+        #      complete) — ask one question at a time until GRILL_DONE.
+        #   3. Final plan (simple task, OR grilling done).
         if feedback:
             prompt = (
                 f"The user rejected your previous plan with this feedback:\n\n{feedback}\n\n"
                 f"Please revise the plan addressing their concerns. Output the revised plan as text."
             )
             result = await agent.run(prompt, resume=True)
+        elif _should_run_grill(task):
+            # First grill turn — initialize intake_qa to [] and run grill prompt.
+            intake_qa = task.intake_qa if task.intake_qa is not None else []
+            log.info(f"Task #{task_id} entering GRILL phase (intake_qa={len(intake_qa)} entries)")
+            prompt = build_grill_phase_prompt(
+                task.title, task.description, intake_qa=intake_qa, repo_summary=repo.summary,
+            )
+            result = await agent.run(prompt)
         else:
-            prompt = build_planning_prompt(task.title, task.description, repo.summary)
+            prompt = build_planning_prompt(
+                task.title, task.description, repo.summary, intake_qa=task.intake_qa,
+            )
             result = await agent.run(prompt)
 
         # Plans can span multiple turns if they hit max_tokens and get
@@ -596,10 +652,39 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             if msg.role == "assistant" and msg.content
         ) or result.output
 
+        # If we're in grill mode, GRILL_DONE switches us into a regular plan
+        # right now (within the same handler invocation).
+        if _should_run_grill(task) and not feedback:
+            grill_done = _extract_grill_done(output)
+            if grill_done is not None:
+                log.info(f"Task #{task_id} GRILL_DONE: {grill_done[:120]}")
+                # Mark grilling complete so future re-entry goes straight to plan.
+                if task.intake_qa is None:
+                    await _save_intake_qa(task_id, [])
+                # Re-run with the planning prompt, resuming the same session.
+                plan_prompt = build_planning_prompt(
+                    task.title, task.description, repo.summary,
+                    intake_qa=task.intake_qa or [],
+                )
+                result = await agent.run(plan_prompt, resume=True)
+                output = "\n".join(
+                    msg.content for msg in result.messages
+                    if msg.role == "assistant" and msg.content
+                ) or result.output
+
         # Check if agent needs clarification
         question = _extract_clarification(output)
         if question:
-            log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
+            phase = "grill" if _should_run_grill(task) and not feedback else "planning"
+            log.info(f"Task #{task_id} needs clarification ({phase}): {question[:100]}...")
+
+            # Grill phase: append a {question, answer: None} to intake_qa so
+            # the next turn (after the user replies) can fill in the answer.
+            if phase == "grill":
+                intake_qa = list(task.intake_qa or [])
+                intake_qa.append({"question": question, "answer": None})
+                await _save_intake_qa(task_id, intake_qa)
+
             await transition_task(task_id, "awaiting_clarification", question)
             r = await get_redis()
             await publish_event(
@@ -607,7 +692,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
                 Event(
                     type="task.clarification_needed",
                     task_id=task_id,
-                    payload={"question": question, "phase": "planning"},
+                    payload={"question": question, "phase": phase},
                 ).to_redis(),
             )
             await r.aclose()
@@ -1296,6 +1381,21 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
     task = await get_task(task_id)
     if not task or not task.repo_name:
         return
+
+    # Grill-phase clarification: fill in the trailing {question, answer: None}
+    # entry on intake_qa, transition back to PLANNING, and re-trigger the
+    # planning handler. The next turn either asks the next question or emits
+    # GRILL_DONE.
+    if task.intake_qa and task.plan is None:
+        last = task.intake_qa[-1] if task.intake_qa else None
+        if isinstance(last, dict) and last.get("answer") is None:
+            log.info(f"Task #{task_id} GRILL answer received — re-entering grill loop")
+            updated_qa = list(task.intake_qa)
+            updated_qa[-1] = {**last, "answer": answer}
+            await _save_intake_qa(task_id, updated_qa)
+            await transition_task(task_id, "planning", "User answered grill question")
+            await handle_planning(task_id)
+            return
 
     repo = await get_repo(task.repo_name)
     if not repo:

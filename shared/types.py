@@ -47,6 +47,10 @@ class TaskData(BaseModel):
     priority: int = 100
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
+    # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
+    # across AWAITING_CLARIFICATION ↔ PLANNING round-trips. None = grilling
+    # not started; [] = grilling complete or skipped.
+    intake_qa: list[dict] | None = None
     created_at: str | None = None
     created_by_user_id: int | None = None
     # Structured intent (extracted by LLM after classification)
@@ -207,6 +211,11 @@ class FreeformConfigData(BaseModel):
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
     last_analysis_at: str | None = None
+    # Architecture Mode — periodic improve-codebase-architecture cron.
+    architecture_mode: bool = False
+    architecture_cron: str = "0 9 * * 1"
+    last_architecture_at: str | None = None
+    architecture_knowledge: str | None = None
     created_at: str | None = None
 
 

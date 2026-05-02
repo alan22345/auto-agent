@@ -4,6 +4,7 @@ Adapted from claude_runner/prompts.py for use with the model-agnostic agent.
 """
 
 CLARIFICATION_MARKER = "CLARIFICATION_NEEDED:"
+GRILL_DONE_MARKER = "GRILL_DONE:"
 
 CLARIFICATION_INSTRUCTIONS = """
 ## Asking for clarification
@@ -12,6 +13,58 @@ output a single line starting with "CLARIFICATION_NEEDED:" followed by your ques
 Then STOP — do not continue working until you receive an answer. \
 Only ask if genuinely blocked; prefer making a reasonable decision when possible.
 """
+
+
+# Grill-before-planning prompt — runs as a multi-round Q&A with the user before
+# any plan is written. Each turn produces ONE clarifying question (or
+# GRILL_DONE) so the orchestrator can route it through the existing
+# AWAITING_CLARIFICATION state.
+GRILL_PROMPT = """\
+## You are in the GRILL phase
+
+Before writing any plan, you grill the user to align on design — domain
+language, seams, dependency category, what "done" means, and what NOT to
+change. This is interactive: you ask ONE question per turn, the user
+answers, and you continue. Do NOT output a plan yet.
+
+Load these skills before your first question:
+- `skill(name='grill-with-docs')` — the grilling protocol.
+- `skill(name='improve-codebase-architecture')` — depth/seam vocabulary so
+  questions probe the right places.
+
+## Task
+Title: {title}
+Description: {description}
+
+## Grill so far
+{grill_history}
+
+## What to do this turn
+
+1. If you genuinely have enough to plan a sensible design AND you've asked at \
+least 3 questions (or you've covered domain language, seams, "done", \
+constraints, and the caller), output exactly one line:
+
+       GRILL_DONE: <one-line rationale>
+
+   …then STOP. The orchestrator will move you to the planning prompt.
+
+2. Otherwise output exactly one clarifying question using the existing \
+clarification mechanism. Provide your recommended answer. STOP after the \
+question.
+
+       CLARIFICATION_NEEDED: <question>
+       Recommended answer: <your answer, with reasoning>
+
+Cover, across rounds: (a) domain language — terms in the task that conflict \
+with or extend `CONTEXT.md`; (b) seams + dependency category (in-process / \
+local-substitutable / remote-owned / true-external — see DEEPENING.md); \
+(c) what "done" means concretely; (d) what NOT to change; (e) who the \
+caller / consumer is. Aim for 3–7 questions total.
+
+DO NOT output a plan in this turn. Either GRILL_DONE: or one CLARIFICATION_NEEDED:.
+"""
+
 
 PLANNING_PROMPT = """\
 ## Instructions
@@ -24,7 +77,7 @@ IMPORTANT: Output the plan as plain text in your response. Do NOT write to any f
 ## Task
 Title: {title}
 Description: {description}
-
+{grill_section}
 ## Required plan structure
 Your plan MUST include these sections in this order:
 
@@ -45,6 +98,11 @@ Break the work into sequential phases (## Phase 1, ## Phase 2, etc.). Each phase
 - Have a clear, descriptive title
 - List the specific changes to make
 - Be independently committable
+
+Frame the plan through the `improve-codebase-architecture` lens: identify the \
+modules, interfaces, and seams involved; apply the deletion test to anything \
+new; favour deep modules over shallow pass-throughs; name modules using the \
+project's domain language.
 
 Do NOT write any code. Plan only. Output the plan as text.
 """
@@ -378,13 +436,60 @@ def _repo_context(repo_summary: str | None) -> str:
     return f"\n## Repo context (cached summary — skip re-exploring known areas)\n{repo_summary}\n"
 
 
+def _grill_history(intake_qa: list[dict] | None) -> str:
+    """Render the grill Q&A list as a readable transcript."""
+    if not intake_qa:
+        return "(no questions asked yet)"
+    lines = []
+    for i, qa in enumerate(intake_qa, start=1):
+        question = qa.get("question", "").strip()
+        answer = qa.get("answer", "").strip()
+        lines.append(f"### Q{i}\n{question}\n\n**A{i}:** {answer}")
+    return "\n\n".join(lines)
+
+
+def build_grill_phase_prompt(
+    title: str,
+    description: str,
+    intake_qa: list[dict] | None = None,
+    repo_summary: str | None = None,
+) -> str:
+    """Build the grill-phase prompt: ONE question per turn, or GRILL_DONE.
+
+    Used before any plan is written, so the agent aligns on design with the
+    user via the existing AWAITING_CLARIFICATION round-trip. ``intake_qa`` is
+    the running list of {question, answer} pairs; the prompt renders it so
+    the agent doesn't repeat questions.
+    """
+    return GRILL_PROMPT.format(
+        title=title,
+        description=description,
+        grill_history=_grill_history(intake_qa),
+    ) + _repo_context(repo_summary)
+
+
+def _grill_section_for_planning(intake_qa: list[dict] | None) -> str:
+    """Inject grilled answers into the planning prompt, after grill exits."""
+    if not intake_qa:
+        return ""
+    return (
+        "\n## Pre-flight grill (Q&A from before planning)\n"
+        f"{_grill_history(intake_qa)}\n\n"
+        "Use these answers — do not re-ask.\n"
+    )
+
+
 def build_planning_prompt(
-    title: str, description: str, repo_summary: str | None = None
+    title: str,
+    description: str,
+    repo_summary: str | None = None,
+    intake_qa: list[dict] | None = None,
 ) -> str:
     return PLANNING_PROMPT.format(
         title=title,
         description=description,
         clarification_instructions=CLARIFICATION_INSTRUCTIONS,
+        grill_section=_grill_section_for_planning(intake_qa),
     ) + _repo_context(repo_summary)
 
 
