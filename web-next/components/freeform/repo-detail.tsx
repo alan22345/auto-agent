@@ -1,6 +1,6 @@
 'use client';
 // Mirrors renderFreeformRepoDetail() in web/static/index.html ~line 1346
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { wsClient } from '@/lib/ws';
+import { useWS } from '@/hooks/useWS';
 import { CRON_PRESETS } from '@/lib/cron-presets';
 import type { FreeformConfig } from '@/types/ws';
 
@@ -20,15 +21,26 @@ interface Props {
   config: FreeformConfig | null;
 }
 
+type SaveStatus =
+  | { kind: 'idle' }
+  | { kind: 'saving' }
+  | { kind: 'saved' }
+  | { kind: 'error'; message: string };
+
 export function RepoDetail({ config }: Props) {
   const [enabled, setEnabled] = useState(false);
   const [auto, setAuto] = useState(false);
   const [autoStart, setAutoStart] = useState(false);
   const [branch, setBranch] = useState('dev');
   const [cron, setCron] = useState(CRON_PRESETS[0].value);
-  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<SaveStatus>({ kind: 'idle' });
+  const savingRef = useRef(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync form when config changes (e.g. on first load or repo switch)
+  // Only re-sync from server when the user switches to a different repo —
+  // not on every WS push. Otherwise an in-flight broadcast can clobber the
+  // user's local edits (e.g. toggling enabled off, then a stale config push
+  // resetting it back to on).
   useEffect(() => {
     if (!config) return;
     setEnabled(config.enabled);
@@ -36,19 +48,49 @@ export function RepoDetail({ config }: Props) {
     setAutoStart(config.auto_start_tasks ?? false);
     setBranch(config.dev_branch || 'dev');
     setCron(config.analysis_cron || CRON_PRESETS[0].value);
-  }, [config]);
+    setStatus({ kind: 'idle' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.repo_name]);
+
+  // Confirm save by waiting for the next freeform_config_list broadcast.
+  useWS('freeform_config_list', (e) => {
+    if (!savingRef.current) return;
+    const next = e.configs.find((c) => c.repo_name === config?.repo_name);
+    if (!next) return;
+    savingRef.current = false;
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setStatus({ kind: 'saved' });
+    // Mirror the saved values back into local state so we stay in sync.
+    setEnabled(next.enabled);
+    setAuto(next.auto_approve_suggestions);
+    setAutoStart(next.auto_start_tasks ?? false);
+    setBranch(next.dev_branch || 'dev');
+    setCron(next.analysis_cron || CRON_PRESETS[0].value);
+  });
+
+  useWS('error', (e) => {
+    if (!savingRef.current) return;
+    savingRef.current = false;
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setStatus({ kind: 'error', message: e.message || 'Save failed' });
+  });
+
+  useEffect(() => () => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  }, []);
 
   if (!config) {
     return <p className="text-muted-foreground">Repo not found.</p>;
   }
 
-  // Determine if the current cron value is one of the presets (for the select)
   const isPreset = CRON_PRESETS.some((p) => p.value === cron);
+  const saving = status.kind === 'saving';
 
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    setSaving(true);
-    wsClient.send({
+    if (saving) return;
+
+    const sent = wsClient.send({
       type: 'toggle_freeform',
       repo_name: config!.repo_name,
       enabled,
@@ -57,8 +99,22 @@ export function RepoDetail({ config }: Props) {
       auto_approve_suggestions: auto,
       auto_start_tasks: autoStart,
     });
-    // TODO: listen for freeform_config_list / error to show toast feedback (see web/static/index.html ~line 1586 saveRepoConfig)
-    setTimeout(() => setSaving(false), 5000);
+    if (!sent) {
+      setStatus({
+        kind: 'error',
+        message: 'Connection lost — reconnecting. Try again in a moment.',
+      });
+      return;
+    }
+
+    savingRef.current = true;
+    setStatus({ kind: 'saving' });
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
+      if (!savingRef.current) return;
+      savingRef.current = false;
+      setStatus({ kind: 'error', message: 'Save timed out — check your connection.' });
+    }, 8000);
   }
 
   return (
@@ -153,13 +209,17 @@ export function RepoDetail({ config }: Props) {
           </p>
         )}
 
-        {/* TODO: recent tasks list for this repo (see web/static/index.html ~line 1450 #rd-recent-tasks) */}
-        {/* TODO: pending suggestions list + approve/reject actions (see web/static/index.html ~line 1443 #rd-suggestions) */}
-        {/* TODO: "Run PO analysis now" button with trigger_analysis WS command (see web/static/index.html ~line 1423 triggerAnalysisFor) */}
-
-        <Button type="submit" disabled={saving}>
-          {saving ? 'Saving…' : 'Save changes'}
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button type="submit" disabled={saving}>
+            {saving ? 'Saving…' : 'Save changes'}
+          </Button>
+          {status.kind === 'saved' && (
+            <span className="text-xs text-success">Saved.</span>
+          )}
+          {status.kind === 'error' && (
+            <span className="text-xs text-destructive">{status.message}</span>
+          )}
+        </div>
       </form>
     </div>
   );
