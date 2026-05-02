@@ -67,7 +67,7 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
           </button>
           <div
             className={cn(
-              'prose prose-sm max-w-none px-3 pb-3 text-xs leading-relaxed',
+              'prose prose-sm max-h-[50vh] max-w-none overflow-y-auto px-3 pb-3 text-xs leading-relaxed',
               !planOpen && 'hidden',
             )}
           >
