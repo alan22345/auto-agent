@@ -72,6 +72,7 @@ from integrations.telegram.main import (
     inbound_loop as telegram_inbound_loop,
     notification_loop as telegram_notification_loop,
 )
+from agent.architect_analyzer import run_architecture_loop
 from agent.main import event_loop as claude_runner_loop
 from agent.po_analyzer import run_po_analysis_loop
 
@@ -727,6 +728,11 @@ async def on_po_suggestions_ready(event: Event) -> None:
 
         created_task_ids: list[int] = []
         for suggestion in suggestions:
+            # Architecture suggestions arrive pre-grilled (the analyzer
+            # already applied the deepening lens), so we mark intake_qa=[]
+            # to skip the grill phase. Other categories leave intake_qa=None
+            # and grill normally.
+            intake_qa = [] if suggestion.category == "architecture" else None
             task = Task(
                 title=suggestion.title,
                 description=suggestion.description,
@@ -736,6 +742,7 @@ async def on_po_suggestions_ready(event: Event) -> None:
                 complexity=TaskComplexity.COMPLEX,
                 repo_id=suggestion.repo_id,
                 freeform_mode=True,
+                intake_qa=intake_qa,
             )
             session.add(task)
             await session.flush()
@@ -1536,6 +1543,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(pr_comment_poller()),
         asyncio.create_task(pr_merge_poller()),
         asyncio.create_task(run_po_analysis_loop()),
+        asyncio.create_task(run_architecture_loop()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")

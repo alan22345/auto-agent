@@ -1048,6 +1048,11 @@ class FreeformConfigRequest(BaseModel):
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
+    # Architecture Mode — periodic improve-codebase-architecture cron
+    # producing deepening Suggestions. Off by default so existing repos are
+    # unaffected.
+    architecture_mode: bool = False
+    architecture_cron: str = Field(default="0 9 * * 1", max_length=128)
 
     @field_validator("prod_branch", "dev_branch")
     @classmethod
@@ -1060,7 +1065,7 @@ class FreeformConfigRequest(BaseModel):
             )
         return v
 
-    @field_validator("analysis_cron")
+    @field_validator("analysis_cron", "architecture_cron")
     @classmethod
     def validate_cron(cls, v: str) -> str:
         if not croniter.is_valid(v):
@@ -1090,6 +1095,8 @@ async def upsert_freeform_config(
         config.analysis_cron = req.analysis_cron
         config.auto_approve_suggestions = req.auto_approve_suggestions
         config.auto_start_tasks = req.auto_start_tasks
+        config.architecture_mode = req.architecture_mode
+        config.architecture_cron = req.architecture_cron
     else:
         config = FreeformConfig(
             repo_id=repo.id,
@@ -1099,6 +1106,8 @@ async def upsert_freeform_config(
             analysis_cron=req.analysis_cron,
             auto_approve_suggestions=req.auto_approve_suggestions,
             auto_start_tasks=req.auto_start_tasks,
+            architecture_mode=req.architecture_mode,
+            architecture_cron=req.architecture_cron,
         )
         session.add(config)
     await session.commit()
@@ -1233,7 +1242,11 @@ async def approve_suggestion(
     if suggestion.status != SuggestionStatus.PENDING:
         raise HTTPException(400, f"Suggestion is already {suggestion.status.value}")
 
-    # Create task from suggestion
+    # Create task from suggestion. Architecture suggestions arrive
+    # pre-grilled (the analyzer already applied the deepening lens), so we
+    # set intake_qa=[] to skip the grill phase. Other suggestion categories
+    # leave intake_qa=None so they go through the normal grill loop.
+    intake_qa = [] if suggestion.category == "architecture" else None
     task = Task(
         title=suggestion.title,
         description=suggestion.description,
@@ -1241,6 +1254,7 @@ async def approve_suggestion(
         source_id=f"suggestion:{suggestion.id}",
         repo_id=suggestion.repo_id,
         freeform_mode=True,
+        intake_qa=intake_qa,
     )
     session.add(task)
     await session.flush()
@@ -1361,6 +1375,12 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         auto_approve_suggestions=c.auto_approve_suggestions or False,
         auto_start_tasks=c.auto_start_tasks or False,
         last_analysis_at=c.last_analysis_at.isoformat() if c.last_analysis_at else None,
+        architecture_mode=c.architecture_mode or False,
+        architecture_cron=c.architecture_cron or "0 9 * * 1",
+        last_architecture_at=(
+            c.last_architecture_at.isoformat() if c.last_architecture_at else None
+        ),
+        architecture_knowledge=c.architecture_knowledge,
         created_at=c.created_at.isoformat() if c.created_at else None,
     )
 

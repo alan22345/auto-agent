@@ -364,6 +364,65 @@ Priority: 1=critical, 2=high, 3=medium, 4=low, 5=nice-to-have.
 Output ONLY the JSON object. No other text.
 """
 
+ARCHITECTURE_ANALYSIS_PROMPT = """\
+You are an architectural reviewer analysing this codebase for **deepening
+opportunities** — refactors that turn shallow modules into deep ones, with
+the aim of improving testability and AI-navigability.
+
+## Load these skills first
+
+Before exploring, load the architecture skill so your suggestions use its
+vocabulary exactly:
+
+- `skill(name='improve-codebase-architecture')` — depth, seam, leverage,
+  locality, the deletion test, and the format for candidates.
+- `skill(name='grill-with-docs')` — for any term you'd flag in suggestions.
+
+## Your accumulated knowledge about this repo's architecture
+
+{architecture_knowledge}
+
+## Recently suggested (do NOT re-suggest these)
+
+{recent_suggestions}
+
+## Instructions
+
+1. Read `CONTEXT.md` (if present) and ADRs in `docs/decisions/` to learn the
+   project's domain language and prior decisions. Don't re-litigate decisions
+   already recorded as ADRs.
+2. Walk the codebase organically (use grep + file_read; dispatch a `subagent`
+   if breadth helps). Note where you experience friction:
+   - Modules whose interfaces are nearly as complex as their implementations
+     (shallow).
+   - Pure functions extracted only for testability — bugs hide at call sites.
+   - Tightly coupled modules leaking across seams.
+   - Untested modules, or modules hard to test through the current interface.
+3. Apply the **deletion test** to anything you suspect is shallow.
+4. Produce 3–5 ranked deepening opportunities. Use `LANGUAGE.md` vocabulary
+   for the architecture (module/interface/seam/adapter/depth/leverage/
+   locality) and `CONTEXT.md` vocabulary for the domain.
+5. Update your knowledge summary with what you learned about the depth state.
+
+## Output format (STRICT JSON — no markdown fences, no commentary)
+{{
+  "suggestions": [
+    {{
+      "title": "Short title (use the affected module name from CONTEXT.md if applicable)",
+      "description": "Files involved + Problem + Solution + Benefits — plain English, deepening-lens vocabulary",
+      "rationale": "Why this matters in terms of locality and leverage; how tests would improve",
+      "category": "architecture",
+      "priority": 1
+    }}
+  ],
+  "architecture_knowledge_update": "Updated map of the repo's depth state..."
+}}
+
+Priority: 1=critical (load-bearing shallow seams), 2=high, 3=medium, 4=low, 5=nice-to-have.
+Output ONLY the JSON object. No other text.
+"""
+
+
 REPO_NAME_PROMPT = """\
 You will receive a description of a project a user wants to build. Your only job \
 is to pick a short, lowercase, hyphen-separated GitHub repository name for it.
@@ -628,5 +687,22 @@ def build_po_analysis_prompt(
         suggestions = "None yet — this is the first analysis."
     return PO_ANALYSIS_PROMPT.format(
         ux_knowledge=knowledge,
+        recent_suggestions=suggestions,
+    )
+
+
+def build_architecture_analysis_prompt(
+    architecture_knowledge: str | None = None,
+    recent_suggestions: list[str] | None = None,
+) -> str:
+    """Build the prompt that drives architecture-mode (continuous deepening)."""
+    knowledge = architecture_knowledge or (
+        "No prior knowledge — this is the first architecture pass."
+    )
+    suggestions = "\n".join(f"- {s}" for s in (recent_suggestions or []))
+    if not suggestions:
+        suggestions = "None yet — this is the first analysis."
+    return ARCHITECTURE_ANALYSIS_PROMPT.format(
+        architecture_knowledge=knowledge,
         recent_suggestions=suggestions,
     )

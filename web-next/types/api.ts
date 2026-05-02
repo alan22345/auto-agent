@@ -50,6 +50,10 @@ export interface FreeformConfigData {
   auto_approve_suggestions?: boolean;
   auto_start_tasks?: boolean;
   last_analysis_at?: string | null;
+  architecture_mode?: boolean;
+  architecture_cron?: string;
+  last_architecture_at?: string | null;
+  architecture_knowledge?: string | null;
   created_at?: string | null;
 }
 /**
@@ -232,6 +236,11 @@ export interface TaskData {
       }[]
     | null;
   current_subtask?: number | null;
+  intake_qa?:
+    | {
+        [k: string]: unknown;
+      }[]
+    | null;
   created_at?: string | null;
   created_by_user_id?: number | null;
   change_type?: string | null;
