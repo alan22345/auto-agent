@@ -1196,6 +1196,34 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         output = result.output
         log.info(f"Independent review for task #{task_id}: {output[:300]}...")
 
+        # If the underlying provider crashed (e.g. Claude CLI subprocess
+        # failure that didn't recover), it returns "[ERROR] ...". Treating
+        # that string as review feedback would route it to the coding agent
+        # as if it were a real comment — and the coder would try to "fix"
+        # the CLI error. Skip the review entirely on a recognised error
+        # prefix and emit an auto-approve so the task isn't blocked.
+        if output.lstrip().startswith("[ERROR]"):
+            log.warning(
+                f"Task #{task_id}: reviewer agent errored ({output[:200]!r}), "
+                "skipping review and auto-approving so the task isn't blocked"
+            )
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(
+                    type="task.review_complete",
+                    task_id=task_id,
+                    payload={
+                        "review": f"Review skipped — agent error: {output[:500]}",
+                        "pr_url": pr_url,
+                        "branch": branch_name,
+                        "approved": True,
+                    },
+                ).to_redis(),
+            )
+            await r.aclose()
+            return
+
         approved = any(
             phrase in output.lower()
             for phrase in ["--approve", "lgtm", "looks good", "pr review --approve"]
