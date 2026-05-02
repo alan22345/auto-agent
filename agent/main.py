@@ -131,9 +131,31 @@ async def _pr_title(title: str) -> str:
 
 
 def _session_id(task_id: int, created_at: str | None = None) -> str:
-    """Deterministic UUID session ID for a task."""
+    """Deterministic UUID session ID for a task.
+
+    Stable across handler invocations so the planning → coding → clarification
+    → review-fix lifecycle can resume the same session. Lifecycle handlers
+    are guarded against concurrent re-entry (``_active_planning``,
+    ``_active_clarification_tasks``) so a second handler can't race the first
+    on the same session ID.
+    """
     seed = f"auto-agent-task-{task_id}-{created_at or ''}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def _fresh_session_id(task_id: int, label: str) -> str:
+    """Per-invocation UUID for agents that are designed NOT to resume.
+
+    The independent reviewer (and any other one-shot agent) needs a fresh
+    session every call. A deterministic hash collides on retry: the Claude
+    CLI provider tracks live session IDs and rejects re-use with
+    "Session ID ... is already in use." We include task_id + label in
+    the seed for log readability and uuid4().hex for uniqueness.
+    """
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"auto-agent-{label}-{task_id}-{uuid.uuid4().hex}",
+    ))
 
 
 def _extract_clarification(output: str) -> str | None:
@@ -1153,10 +1175,10 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             base_branch = freeform_cfg.dev_branch
             fallback_branch = freeform_cfg.prod_branch or repo.default_branch
 
-    reviewer_session = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"auto-agent-review-{task_id}-{task.created_at or ''}",
-    ))
+    # Per-invocation session — the reviewer is a fresh, independent agent
+    # by design. A deterministic hash here collides on retry (the Claude
+    # CLI provider rejects re-used session IDs with "already in use").
+    reviewer_session = _fresh_session_id(task_id, "review")
 
     log.info(f"Independent review of task #{task_id} PR (session={reviewer_session})")
     workspace = await clone_repo(repo.url, task_id, base_branch, fallback_branch=fallback_branch)
