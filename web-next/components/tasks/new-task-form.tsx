@@ -11,10 +11,12 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
   const [desc, setDesc] = useState('');
   const [repo, setRepo] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function submit() {
     if (!title.trim() || busy) return;
     setBusy(true);
+    setError(null);
     try {
       await createTask({
         title: title.trim(),
@@ -25,6 +27,8 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
       setDesc('');
       setRepo('');
       onCreated?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create task');
     } finally {
       setBusy(false);
     }
@@ -90,7 +94,10 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
           />
         </div>
 
-        <div className="flex justify-end pt-2">
+        <div className="flex items-center justify-end gap-3 pt-2">
+          {error && (
+            <span className="text-xs text-destructive">{error}</span>
+          )}
           <Button onClick={submit} disabled={busy || !title.trim()} size="lg">
             {busy ? 'Creating…' : 'Create Task'}
           </Button>

@@ -9,8 +9,22 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
   });
   if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(res.status, detail.detail || res.statusText);
+    const body = await res.json().catch(() => null);
+    const detail = body?.detail;
+    let message = res.statusText;
+    if (typeof detail === 'string') {
+      message = detail;
+    } else if (Array.isArray(detail) && detail.length) {
+      // FastAPI 422: detail is an array of {loc, msg, type}
+      message = detail
+        .map((d: { loc?: unknown[]; msg?: string }) => {
+          const field = Array.isArray(d.loc) ? d.loc.slice(1).join('.') : '';
+          return field ? `${field}: ${d.msg}` : d.msg || '';
+        })
+        .filter(Boolean)
+        .join('; ');
+    }
+    throw new ApiError(res.status, message);
   }
   return res.json();
 }
