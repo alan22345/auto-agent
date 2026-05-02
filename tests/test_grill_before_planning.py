@@ -21,6 +21,7 @@ from agent.main import (
 )
 from agent.prompts import (
     GRILL_DONE_MARKER,
+    GRILL_DONE_QUESTION_SENTINEL,
     build_grill_phase_prompt,
     build_planning_prompt,
 )
@@ -66,12 +67,32 @@ def test_should_skip_grill_for_simple_task():
     assert _should_run_grill(_task("simple_no_code")) is False
 
 
-def test_should_skip_grill_when_intake_qa_already_set():
-    """Empty list means 'grilling complete or skipped'."""
+def test_should_skip_grill_when_explicitly_complete():
+    """[] = explicitly skipped; sentinel last entry = grilling done."""
+    # Empty list = explicit skip (e.g. simple task, architecture suggestion).
     assert _should_run_grill(_task("complex", intake_qa=[])) is False
-    assert _should_run_grill(
-        _task("complex", intake_qa=[{"question": "q", "answer": "a"}])
-    ) is False
+    # Sentinel last entry = grilling complete via GRILL_DONE.
+    completed = [
+        {"question": "q1", "answer": "a1"},
+        {"question": GRILL_DONE_QUESTION_SENTINEL, "answer": "covered enough"},
+    ]
+    assert _should_run_grill(_task("complex", intake_qa=completed)) is False
+
+
+def test_should_continue_grill_when_in_progress():
+    """Populated intake_qa without sentinel = grilling in progress.
+
+    The agent gets another grill turn so it can ask the next question OR
+    emit GRILL_DONE — never go straight to planning.
+    """
+    in_progress = [{"question": "q1", "answer": "a1"}]
+    assert _should_run_grill(_task("complex", intake_qa=in_progress)) is True
+
+    pending = [
+        {"question": "q1", "answer": "a1"},
+        {"question": "q2", "answer": None},
+    ]
+    assert _should_run_grill(_task("complex", intake_qa=pending)) is True
 
 
 def test_should_skip_grill_when_complexity_missing():
@@ -123,6 +144,35 @@ def test_grill_prompt_warns_against_outputting_a_plan():
     assert "DO NOT output a plan" in prompt or "Do NOT output a plan" in prompt
 
 
+def test_grill_history_hides_sentinel_entry():
+    """The GRILL_DONE sentinel is bookkeeping, not visible in the transcript."""
+    prompt = build_grill_phase_prompt(
+        "t", "d",
+        intake_qa=[
+            {"question": "real q", "answer": "real a"},
+            {"question": GRILL_DONE_QUESTION_SENTINEL, "answer": "covered enough"},
+        ],
+    )
+    assert "real q" in prompt
+    assert "real a" in prompt
+    assert GRILL_DONE_QUESTION_SENTINEL not in prompt
+    assert "covered enough" not in prompt
+
+
+def test_planning_prompt_hides_sentinel_in_preflight():
+    """Same filter applies to the post-grill planning prompt's preflight section."""
+    prompt = build_planning_prompt(
+        "t", "d",
+        intake_qa=[
+            {"question": "real q", "answer": "real a"},
+            {"question": GRILL_DONE_QUESTION_SENTINEL, "answer": "done"},
+        ],
+    )
+    assert "real q" in prompt
+    assert "real a" in prompt
+    assert GRILL_DONE_QUESTION_SENTINEL not in prompt
+
+
 # ---------------------------------------------------------------------------
 # build_planning_prompt with intake_qa
 # ---------------------------------------------------------------------------
@@ -158,40 +208,49 @@ def test_planning_prompt_keeps_architecture_lens_paragraph():
 # ---------------------------------------------------------------------------
 
 def test_grill_round_trip_state_evolution():
-    """Simulate three grill rounds; show how intake_qa evolves.
+    """Simulate three grill rounds + GRILL_DONE; show how intake_qa evolves.
 
-    Round 1: agent asks q1 → state appends {q1, None}.
-    Round 2 (after user answers a1): {q1, a1}; agent asks q2 → append {q2, None}.
-    Round 3 (after user answers a2): {q1,a1}, {q2,a2}; agent asks q3 → append {q3, None}.
-    Round 4 (after user answers a3): {q1,a1}, {q2,a2}, {q3,a3}; GRILL_DONE.
+    The grill gate (`_should_run_grill`) is checked at each step to lock
+    the contract: grilling continues until the sentinel is appended.
     """
-    intake_qa: list[dict] = []
+    task = SimpleNamespace(complexity="complex", intake_qa=None)
 
-    # Round 1: agent asks q1
-    intake_qa.append({"question": "q1", "answer": None})
-    assert intake_qa[-1]["answer"] is None
+    # Initial state: never grilled.
+    assert _should_run_grill(task) is True
 
-    # User answers a1 → fill in the last pending
-    last = intake_qa[-1]
-    intake_qa[-1] = {**last, "answer": "a1"}
-    assert intake_qa[-1] == {"question": "q1", "answer": "a1"}
+    # Round 1: agent asks q1, handler appends {q1, None}.
+    task.intake_qa = [{"question": "q1", "answer": None}]
+    # Still grilling (no sentinel yet).
+    assert _should_run_grill(task) is True
 
-    # Round 2: agent asks q2
-    intake_qa.append({"question": "q2", "answer": None})
+    # User answers a1 → handle_clarification_response fills in the pending.
+    task.intake_qa[-1] = {**task.intake_qa[-1], "answer": "a1"}
+    assert _should_run_grill(task) is True
 
-    # User answers a2
-    intake_qa[-1] = {**intake_qa[-1], "answer": "a2"}
+    # Round 2: agent asks q2.
+    task.intake_qa.append({"question": "q2", "answer": None})
+    assert _should_run_grill(task) is True
 
-    # Round 3: agent asks q3
-    intake_qa.append({"question": "q3", "answer": None})
+    # User answers a2.
+    task.intake_qa[-1] = {**task.intake_qa[-1], "answer": "a2"}
+    assert _should_run_grill(task) is True
 
-    # User answers a3
-    intake_qa[-1] = {**intake_qa[-1], "answer": "a3"}
+    # Round 3: agent asks q3.
+    task.intake_qa.append({"question": "q3", "answer": None})
+    # User answers a3.
+    task.intake_qa[-1] = {**task.intake_qa[-1], "answer": "a3"}
+    assert _should_run_grill(task) is True
 
-    # GRILL_DONE — list now holds the full transcript
-    assert len(intake_qa) == 3
-    assert all(qa["answer"] is not None for qa in intake_qa)
-    assert [qa["question"] for qa in intake_qa] == ["q1", "q2", "q3"]
+    # Round 4: agent emits GRILL_DONE → handler appends sentinel.
+    task.intake_qa.append({
+        "question": GRILL_DONE_QUESTION_SENTINEL,
+        "answer": "covered all five axes",
+    })
+
+    # Sentinel present → grilling complete; future calls go straight to plan.
+    assert _should_run_grill(task) is False
+    assert len(task.intake_qa) == 4
+    assert task.intake_qa[-1]["question"] == GRILL_DONE_QUESTION_SENTINEL
 
 
 # ---------------------------------------------------------------------------

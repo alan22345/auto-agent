@@ -32,6 +32,7 @@ from agent.loop import AgentLoop
 from agent.prompts import (
     CLARIFICATION_MARKER,
     GRILL_DONE_MARKER,
+    GRILL_DONE_QUESTION_SENTINEL,
     MEMORY_REFLECTION_PROMPT,
     build_coding_prompt,
     build_grill_phase_prompt,
@@ -166,14 +167,26 @@ _SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
 def _should_run_grill(task) -> bool:
     """Decide whether the grill phase runs before planning for this task.
 
-    Grilling runs when:
-      - complexity is complex/complex_large (not simple).
-      - intake_qa is None (never started). Empty list [] = "complete or
-        explicitly skipped" so we go straight to plan.
+    Three signals on ``task.intake_qa`` drive the gate:
+      - ``None`` → grilling never started. Run grill (initial turn).
+      - ``[]`` → grilling explicitly skipped (simple tasks, architecture-
+        derived tasks). Skip.
+      - ``[…, {"question": GRILL_DONE_QUESTION_SENTINEL, …}]`` → grilling
+        completed (sentinel appended after agent emitted GRILL_DONE). Skip.
+      - ``[…, {"question": q, "answer": …}]`` (no sentinel) → grilling in
+        progress. Run grill again so the agent can ask the next question
+        OR emit GRILL_DONE.
     """
     if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
         return False
-    return task.intake_qa is None
+    if task.intake_qa is None:
+        return True
+    if not task.intake_qa:
+        return False  # Empty list = explicitly complete/skipped.
+    return not any(
+        qa.get("question") == GRILL_DONE_QUESTION_SENTINEL
+        for qa in task.intake_qa
+    )
 
 
 async def _save_intake_qa(task_id: int, intake_qa: list[dict]) -> None:
@@ -620,10 +633,15 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     try:
         agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
+        # Track grill state in a local boolean. After GRILL_DONE we flip it
+        # to False; we don't re-evaluate _should_run_grill(task) because the
+        # local task object's intake_qa is stale (we patch via API).
+        in_grill_phase = _should_run_grill(task) and not feedback
+
         # Three planning entry paths:
         #   1. Plan-revision (user rejected previous plan, sent feedback).
-        #   2. Grill phase (complex task, no plan yet, intake_qa not yet
-        #      complete) — ask one question at a time until GRILL_DONE.
+        #   2. Grill phase (complex task, grilling not complete) — ask one
+        #      question at a time until the agent emits GRILL_DONE.
         #   3. Final plan (simple task, OR grilling done).
         if feedback:
             prompt = (
@@ -631,12 +649,12 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
                 f"Please revise the plan addressing their concerns. Output the revised plan as text."
             )
             result = await agent.run(prompt, resume=True)
-        elif _should_run_grill(task):
-            # First grill turn — initialize intake_qa to [] and run grill prompt.
-            intake_qa = task.intake_qa if task.intake_qa is not None else []
-            log.info(f"Task #{task_id} entering GRILL phase (intake_qa={len(intake_qa)} entries)")
+        elif in_grill_phase:
+            existing_qa = list(task.intake_qa or [])
+            log.info(f"Task #{task_id} GRILL phase (intake_qa={len(existing_qa)} entries)")
             prompt = build_grill_phase_prompt(
-                task.title, task.description, intake_qa=intake_qa, repo_summary=repo.summary,
+                task.title, task.description,
+                intake_qa=existing_qa, repo_summary=repo.summary,
             )
             result = await agent.run(prompt)
         else:
@@ -654,17 +672,25 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
         # If we're in grill mode, GRILL_DONE switches us into a regular plan
         # right now (within the same handler invocation).
-        if _should_run_grill(task) and not feedback:
+        if in_grill_phase:
             grill_done = _extract_grill_done(output)
             if grill_done is not None:
                 log.info(f"Task #{task_id} GRILL_DONE: {grill_done[:120]}")
-                # Mark grilling complete so future re-entry goes straight to plan.
-                if task.intake_qa is None:
-                    await _save_intake_qa(task_id, [])
+                # Persist the sentinel so future re-entry skips the grill
+                # gate. Keep the existing transcript so the planner can use
+                # it as preflight context.
+                completed_qa = list(task.intake_qa or []) + [{
+                    "question": GRILL_DONE_QUESTION_SENTINEL,
+                    "answer": grill_done[:500],
+                }]
+                await _save_intake_qa(task_id, completed_qa)
+                task.intake_qa = completed_qa  # keep local consistent
+                in_grill_phase = False
+
                 # Re-run with the planning prompt, resuming the same session.
                 plan_prompt = build_planning_prompt(
                     task.title, task.description, repo.summary,
-                    intake_qa=task.intake_qa or [],
+                    intake_qa=completed_qa,
                 )
                 result = await agent.run(plan_prompt, resume=True)
                 output = "\n".join(
@@ -675,7 +701,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         # Check if agent needs clarification
         question = _extract_clarification(output)
         if question:
-            phase = "grill" if _should_run_grill(task) and not feedback else "planning"
+            phase = "grill" if in_grill_phase else "planning"
             log.info(f"Task #{task_id} needs clarification ({phase}): {question[:100]}...")
 
             # Grill phase: append a {question, answer: None} to intake_qa so

@@ -63,12 +63,27 @@ name collision the engineering version wins.
 
 A new `tasks.intake_qa` JSONB column persists the grill transcript
 (`list[{question, answer}]`) across the existing `PLANNING ↔
-AWAITING_CLARIFICATION` round-trip. Three states:
+AWAITING_CLARIFICATION` round-trip. The state machine has four states
+encoded on the same column:
 
 - `intake_qa is None` — grilling not yet started.
-- `intake_qa = []` — grilling complete, or skipped (simple tasks,
-  architecture-suggestion tasks).
-- `intake_qa = [{question, answer}, …]` — in-progress or completed.
+- `intake_qa = []` — grilling explicitly skipped (simple tasks,
+  architecture-suggestion tasks created with `intake_qa=[]` to signal
+  "already pre-grilled by the analyzer").
+- `intake_qa = [{q1,a1}, …, {qN, null}]` — in progress; the trailing
+  `answer: null` entry marks "waiting for the user's reply." The
+  clarification-response handler detects this shape and fills in the
+  `answer`.
+- `intake_qa = […, {question: "__grill_done__", answer: <reason>}]` —
+  grilling complete. A sentinel last-entry (`GRILL_DONE_QUESTION_SENTINEL`)
+  is appended after the agent emits `GRILL_DONE: <reason>`. The sentinel
+  is filtered out of the rendered transcript so neither the agent nor the
+  user ever sees it.
+
+A boolean column was rejected because it doubles the state surface (column
++ list) for a flag that already has a natural home in the list itself.
+The sentinel survives `_grill_history` filtering and is the single source
+of truth for "grilling complete."
 
 `agent/main.py::handle_planning` gates: complex tasks with `intake_qa is
 None` enter the grill flow (`build_grill_phase_prompt`), emit one

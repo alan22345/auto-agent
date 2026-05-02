@@ -5,6 +5,11 @@ Adapted from claude_runner/prompts.py for use with the model-agnostic agent.
 
 CLARIFICATION_MARKER = "CLARIFICATION_NEEDED:"
 GRILL_DONE_MARKER = "GRILL_DONE:"
+# Sentinel value stored as the final {question, answer} entry in
+# tasks.intake_qa once the agent has emitted GRILL_DONE. Lets the gate
+# function distinguish "grill complete with transcript" from "grill in
+# progress" without adding another DB column.
+GRILL_DONE_QUESTION_SENTINEL = "__grill_done__"
 
 CLARIFICATION_INSTRUCTIONS = """
 ## Asking for clarification
@@ -496,13 +501,23 @@ def _repo_context(repo_summary: str | None) -> str:
 
 
 def _grill_history(intake_qa: list[dict] | None) -> str:
-    """Render the grill Q&A list as a readable transcript."""
+    """Render the grill Q&A list as a readable transcript.
+
+    Filters out the GRILL_DONE sentinel entry — that's bookkeeping for the
+    state machine, not something the agent or the user should see.
+    """
     if not intake_qa:
         return "(no questions asked yet)"
+    visible = [
+        qa for qa in intake_qa
+        if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
+    ]
+    if not visible:
+        return "(no questions asked yet)"
     lines = []
-    for i, qa in enumerate(intake_qa, start=1):
-        question = qa.get("question", "").strip()
-        answer = qa.get("answer", "").strip()
+    for i, qa in enumerate(visible, start=1):
+        question = (qa.get("question") or "").strip()
+        answer = (qa.get("answer") or "").strip()
         lines.append(f"### Q{i}\n{question}\n\n**A{i}:** {answer}")
     return "\n\n".join(lines)
 
