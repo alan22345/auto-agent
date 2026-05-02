@@ -18,10 +18,10 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from croniter import croniter
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.prompts import build_architecture_analysis_prompt
 from agent.workspace import clone_repo
@@ -30,9 +30,18 @@ from shared.events import Event
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
 from shared.redis_client import get_redis, publish_event
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 log = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 60  # seconds
+
+# After a failed analysis, advance last_architecture_at so the next try
+# happens on the regular cron schedule rather than retrying every CHECK_INTERVAL.
+# Without this back-off a perma-broken repo would clone + invoke the agent
+# every 60s. Mirrors the same back-off in po_analyzer.
+_FAILURE_BACKOFF_NOW = True
 
 
 async def run_architecture_loop() -> None:
@@ -63,6 +72,13 @@ async def _check_and_analyze(session: AsyncSession) -> None:
                 await session.commit()
             except Exception:
                 log.exception(f"Architecture analysis failed for repo_id={config.repo_id}")
+                # Back off on failure: advance last_architecture_at so we
+                # don't re-clone + re-invoke the agent every CHECK_INTERVAL
+                # seconds for a perma-broken repo. The next attempt waits
+                # for the regular cron tick.
+                if _FAILURE_BACKOFF_NOW:
+                    config.last_architecture_at = now
+                    await session.commit()
 
 
 def _is_due(config: FreeformConfig, now: datetime) -> bool:
@@ -200,7 +216,7 @@ def _parse_analysis_output(output: str) -> dict | None:
 
     if text.startswith("```"):
         lines = text.splitlines()
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     start = text.find("{")

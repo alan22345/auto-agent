@@ -163,11 +163,19 @@ def _extract_grill_done(output: str) -> str | None:
 # (intake_qa = []).
 _SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
 
+# Hard cap on grill rounds to bound user fatigue. The grill prompt asks the
+# agent to aim for 3–7 questions and emit GRILL_DONE; this is a fail-safe in
+# case the agent keeps asking without ever exiting. Counted as
+# "non-sentinel entries in intake_qa" — when the count reaches this limit on
+# entry to handle_planning, we force a synthetic GRILL_DONE and proceed to
+# planning with the transcript so far.
+_MAX_GRILL_ROUNDS = 10
+
 
 def _should_run_grill(task) -> bool:
     """Decide whether the grill phase runs before planning for this task.
 
-    Three signals on ``task.intake_qa`` drive the gate:
+    Four signals on ``task.intake_qa`` drive the gate:
       - ``None`` → grilling never started. Run grill (initial turn).
       - ``[]`` → grilling explicitly skipped (simple tasks, architecture-
         derived tasks). Skip.
@@ -176,6 +184,9 @@ def _should_run_grill(task) -> bool:
       - ``[…, {"question": q, "answer": …}]`` (no sentinel) → grilling in
         progress. Run grill again so the agent can ask the next question
         OR emit GRILL_DONE.
+
+    The ``_MAX_GRILL_ROUNDS`` cap is enforced inside ``handle_planning``
+    (it forces a synthetic GRILL_DONE rather than mutating gate semantics).
     """
     if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
         return False
@@ -186,6 +197,16 @@ def _should_run_grill(task) -> bool:
     return not any(
         qa.get("question") == GRILL_DONE_QUESTION_SENTINEL
         for qa in task.intake_qa
+    )
+
+
+def _grill_round_count(intake_qa: list[dict] | None) -> int:
+    """Number of real grill rounds — sentinel entries don't count."""
+    if not intake_qa:
+        return 0
+    return sum(
+        1 for qa in intake_qa
+        if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
     )
 
 
@@ -702,27 +723,61 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         question = _extract_clarification(output)
         if question:
             phase = "grill" if in_grill_phase else "planning"
-            log.info(f"Task #{task_id} needs clarification ({phase}): {question[:100]}...")
 
-            # Grill phase: append a {question, answer: None} to intake_qa so
-            # the next turn (after the user replies) can fill in the answer.
-            if phase == "grill":
-                intake_qa = list(task.intake_qa or [])
-                intake_qa.append({"question": question, "answer": None})
-                await _save_intake_qa(task_id, intake_qa)
+            # Hard cap on grill rounds — if the agent would push us past the
+            # limit, force a synthetic GRILL_DONE and proceed to planning
+            # with the transcript so far. This bounds user fatigue when the
+            # agent can't decide it's heard enough.
+            if phase == "grill" and _grill_round_count(task.intake_qa) >= _MAX_GRILL_ROUNDS:
+                log.warning(
+                    f"Task #{task_id} hit grill cap ({_MAX_GRILL_ROUNDS}); "
+                    f"forcing GRILL_DONE and dropping question: {question[:80]}..."
+                )
+                completed_qa = list(task.intake_qa or []) + [{
+                    "question": GRILL_DONE_QUESTION_SENTINEL,
+                    "answer": f"hit grill cap ({_MAX_GRILL_ROUNDS} rounds); proceeding to plan",
+                }]
+                await _save_intake_qa(task_id, completed_qa)
+                task.intake_qa = completed_qa
 
-            await transition_task(task_id, "awaiting_clarification", question)
-            r = await get_redis()
-            await publish_event(
-                r,
-                Event(
-                    type="task.clarification_needed",
-                    task_id=task_id,
-                    payload={"question": question, "phase": phase},
-                ).to_redis(),
-            )
-            await r.aclose()
-            return
+                plan_prompt = build_planning_prompt(
+                    task.title, task.description, repo.summary,
+                    intake_qa=completed_qa,
+                )
+                result = await agent.run(plan_prompt, resume=True)
+                output = "\n".join(
+                    msg.content for msg in result.messages
+                    if msg.role == "assistant" and msg.content
+                ) or result.output
+                # Re-check for a (planning-phase) clarification on the new output
+                question = _extract_clarification(output)
+                phase = "planning"
+                if not question:
+                    output = _trim_plan_text(output)
+                    # Fall through to the awaiting_approval transition below.
+
+            if question:
+                log.info(f"Task #{task_id} needs clarification ({phase}): {question[:100]}...")
+
+                # Grill phase: append a {question, answer: None} to intake_qa so
+                # the next turn (after the user replies) can fill in the answer.
+                if phase == "grill":
+                    intake_qa = list(task.intake_qa or [])
+                    intake_qa.append({"question": question, "answer": None})
+                    await _save_intake_qa(task_id, intake_qa)
+
+                await transition_task(task_id, "awaiting_clarification", question)
+                r = await get_redis()
+                await publish_event(
+                    r,
+                    Event(
+                        type="task.clarification_needed",
+                        task_id=task_id,
+                        payload={"question": question, "phase": phase},
+                    ).to_redis(),
+                )
+                await r.aclose()
+                return
 
         output = _trim_plan_text(output)
 

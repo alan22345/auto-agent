@@ -179,7 +179,7 @@ class Suggestion(Base):
     title = Column(String(512), nullable=False)
     description = Column(Text, default="")
     rationale = Column(Text, default="")
-    category = Column(String(100), default="")  # ux_gap, feature, improvement
+    category = Column(String(100), default="")  # ux_gap, feature, improvement, architecture
     priority = Column(Integer, default=3)  # 1=critical, 5=nice-to-have
     status = Column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
@@ -187,6 +187,23 @@ class Suggestion(Base):
 
     repo = relationship("Repo")
     task = relationship("Task")
+
+
+# Categories whose tasks arrive pre-grilled — the analyzer that produced the
+# suggestion has already applied the grill-with-docs lens, so the resulting
+# task should skip the grill phase. Encoded as intake_qa = [] on the Task.
+PRE_GRILLED_SUGGESTION_CATEGORIES: frozenset[str] = frozenset({"architecture"})
+
+
+def intake_qa_for_suggestion(category: str | None) -> list | None:
+    """Return the initial intake_qa for a Task created from a Suggestion.
+
+    [] = grilling complete (skip the grill phase entirely).
+    None = grill normally.
+    """
+    if category and category in PRE_GRILLED_SUGGESTION_CATEGORIES:
+        return []
+    return None
 
 
 class FreeformConfig(Base):

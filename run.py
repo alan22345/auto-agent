@@ -40,6 +40,7 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    intake_qa_for_suggestion,
 )
 from sqlalchemy import select as sa_select
 from shared.notifier import send_telegram
@@ -728,11 +729,6 @@ async def on_po_suggestions_ready(event: Event) -> None:
 
         created_task_ids: list[int] = []
         for suggestion in suggestions:
-            # Architecture suggestions arrive pre-grilled (the analyzer
-            # already applied the deepening lens), so we mark intake_qa=[]
-            # to skip the grill phase. Other categories leave intake_qa=None
-            # and grill normally.
-            intake_qa = [] if suggestion.category == "architecture" else None
             task = Task(
                 title=suggestion.title,
                 description=suggestion.description,
@@ -742,7 +738,7 @@ async def on_po_suggestions_ready(event: Event) -> None:
                 complexity=TaskComplexity.COMPLEX,
                 repo_id=suggestion.repo_id,
                 freeform_mode=True,
-                intake_qa=intake_qa,
+                intake_qa=intake_qa_for_suggestion(suggestion.category),
             )
             session.add(task)
             await session.flush()

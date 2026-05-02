@@ -15,8 +15,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent.main import (
+    _MAX_GRILL_ROUNDS,
     _SKIP_GRILL_COMPLEXITIES,
     _extract_grill_done,
+    _grill_round_count,
     _should_run_grill,
 )
 from agent.prompts import (
@@ -103,6 +105,27 @@ def test_skip_grill_complexities_constants():
     """Sanity — grill skips simple AND query/no-code paths."""
     assert "simple" in _SKIP_GRILL_COMPLEXITIES
     assert "simple_no_code" in _SKIP_GRILL_COMPLEXITIES
+
+
+# ---------------------------------------------------------------------------
+# _grill_round_count + _MAX_GRILL_ROUNDS cap
+# ---------------------------------------------------------------------------
+
+def test_grill_round_count_ignores_sentinel():
+    """Sentinel entries are bookkeeping — they don't count as user rounds."""
+    assert _grill_round_count(None) == 0
+    assert _grill_round_count([]) == 0
+    assert _grill_round_count([{"question": "q1", "answer": "a1"}]) == 1
+    assert _grill_round_count([
+        {"question": "q1", "answer": "a1"},
+        {"question": "q2", "answer": "a2"},
+        {"question": GRILL_DONE_QUESTION_SENTINEL, "answer": "done"},
+    ]) == 2  # sentinel doesn't count
+
+
+def test_max_grill_rounds_is_reasonable():
+    """The cap should be high enough for normal use, low enough to bound fatigue."""
+    assert 5 <= _MAX_GRILL_ROUNDS <= 20
 
 
 # ---------------------------------------------------------------------------

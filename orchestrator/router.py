@@ -34,6 +34,7 @@ from shared.models import (
     TaskSource,
     TaskStatus,
     User,
+    intake_qa_for_suggestion,
 )
 from shared.redis_client import get_redis, publish_event
 from shared.types import (
@@ -1242,11 +1243,9 @@ async def approve_suggestion(
     if suggestion.status != SuggestionStatus.PENDING:
         raise HTTPException(400, f"Suggestion is already {suggestion.status.value}")
 
-    # Create task from suggestion. Architecture suggestions arrive
-    # pre-grilled (the analyzer already applied the deepening lens), so we
-    # set intake_qa=[] to skip the grill phase. Other suggestion categories
-    # leave intake_qa=None so they go through the normal grill loop.
-    intake_qa = [] if suggestion.category == "architecture" else None
+    # Create task from suggestion. intake_qa_for_suggestion routes
+    # pre-grilled categories (e.g. architecture) to [] to skip the grill
+    # phase; everything else stays None to grill normally.
     task = Task(
         title=suggestion.title,
         description=suggestion.description,
@@ -1254,7 +1253,7 @@ async def approve_suggestion(
         source_id=f"suggestion:{suggestion.id}",
         repo_id=suggestion.repo_id,
         freeform_mode=True,
-        intake_qa=intake_qa,
+        intake_qa=intake_qa_for_suggestion(suggestion.category),
     )
     session.add(task)
     await session.flush()

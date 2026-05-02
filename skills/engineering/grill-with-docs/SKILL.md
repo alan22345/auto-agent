@@ -27,7 +27,7 @@ Most repos have a single context:
 /
 ├── CONTEXT.md
 ├── docs/
-│   └── adr/
+│   └── decisions/
 │       ├── 0001-event-sourced-orders.md
 │       └── 0002-postgres-for-write-model.md
 └── src/
@@ -39,11 +39,11 @@ If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The ma
 /
 ├── CONTEXT-MAP.md
 ├── docs/
-│   └── adr/                          ← system-wide decisions
+│   └── decisions/                    ← system-wide decisions
 ├── src/
 │   ├── ordering/
 │   │   ├── CONTEXT.md
-│   │   └── docs/decisions/                 ← context-specific decisions
+│   │   └── docs/decisions/           ← context-specific decisions
 │   └── billing/
 │       ├── CONTEXT.md
 │       └── docs/decisions/

@@ -126,13 +126,18 @@ def test_arch_prompt_uses_repo_adr_path():
 # ---------------------------------------------------------------------------
 
 def test_intake_qa_default_for_architecture_category():
-    """The auto-approval path sets intake_qa=[] for category='architecture'."""
-    # We replicate the branch logic from run.py / router.py to lock the
-    # contract: architecture → [] (skip grill); other → None (grill).
-    def derive(category: str) -> list | None:
-        return [] if category == "architecture" else None
+    """intake_qa_for_suggestion is the single source of truth for the
+    suggestion → task pre-grilled contract: architecture → [] (skip grill);
+    other → None (grill). Both run.py and orchestrator/router.py use it."""
+    from shared.models import (
+        PRE_GRILLED_SUGGESTION_CATEGORIES,
+        intake_qa_for_suggestion,
+    )
 
-    assert derive("architecture") == []
-    assert derive("ux_gap") is None
-    assert derive("feature") is None
-    assert derive("improvement") is None
+    assert "architecture" in PRE_GRILLED_SUGGESTION_CATEGORIES
+    assert intake_qa_for_suggestion("architecture") == []
+    assert intake_qa_for_suggestion("ux_gap") is None
+    assert intake_qa_for_suggestion("feature") is None
+    assert intake_qa_for_suggestion("improvement") is None
+    assert intake_qa_for_suggestion(None) is None
+    assert intake_qa_for_suggestion("") is None
