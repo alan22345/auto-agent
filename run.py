@@ -1510,8 +1510,49 @@ async def _recover_stuck_tasks() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _run_alembic_upgrade_sync() -> None:
+    """Apply pending alembic migrations. Runs synchronously in its own thread.
+
+    The deploy script (scripts/deploy.sh) only runs migrations when invoked
+    with the explicit `migrate` flag, so a default deploy ships new code
+    against an old schema. New columns added to existing tables would
+    silently break SQL queries (Base.metadata.create_all only creates
+    missing TABLES, not missing COLUMNS). Running alembic at startup keeps
+    the schema in sync with the code that's about to run, regardless of
+    how the container was deployed.
+
+    Must run in a thread (not the lifespan event loop) because
+    migrations/env.py::run_migrations_online calls asyncio.run(), which
+    can't be invoked from within a running loop.
+
+    Idempotent — alembic skips revisions already applied.
+    """
+    from pathlib import Path as _Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg_path = _Path(__file__).parent / "alembic.ini"
+    if not cfg_path.is_file():
+        log.warning("alembic.ini not found, skipping startup migration")
+        return
+    cfg = Config(str(cfg_path))
+    try:
+        command.upgrade(cfg, "head")
+    except Exception:
+        # Don't crash startup on a migration error — log and let the app
+        # boot. A broken migration is the operator's problem to fix; the
+        # process should still come up so the existing app keeps serving.
+        log.exception("alembic upgrade head failed at startup")
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Run alembic migrations BEFORE create_all so we never query columns
+    # that don't exist yet on the deployed DB. Threaded to dodge the
+    # nested-event-loop problem in migrations/env.py.
+    await asyncio.to_thread(_run_alembic_upgrade_sync)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
