@@ -30,6 +30,19 @@ export interface MemoryRow {
   resolution: 'keep_existing' | 'replace' | 'keep_both' | null;
 }
 
+export interface Suggestion {
+  id: number;
+  repo_name: string | null;
+  title: string;
+  description: string;
+  rationale: string;
+  category: string;
+  priority: number;
+  status: string;
+  task_id: number | null;
+  created_at: string | null;
+}
+
 export interface FreeformConfig {
   repo_name: string;
   enabled: boolean;
@@ -68,6 +81,7 @@ export type WSEvent =
   | { type: 'system'; message: string }
   | { type: 'error'; message: string }
   | { type: 'freeform_config_list'; configs: FreeformConfig[] }
+  | { type: 'suggestion_list'; suggestions: Suggestion[] }
   | { type: 'freeform_tasks_list'; tasks: TaskData[] }
   | { type: 'repo_created'; repo_name: string }
   | { type: 'memory_rows'; rows: MemoryRow[]; source_id?: string }
@@ -94,6 +108,9 @@ export type WSCommand =
   | { type: 'approve'; task_id: number }
   | { type: 'reject'; task_id: number; feedback: string }
   | { type: 'load_freeform_config' }
+  | { type: 'load_suggestions'; status?: string; repo_name?: string }
+  | { type: 'approve_suggestion'; suggestion_id: number }
+  | { type: 'reject_suggestion'; suggestion_id: number }
   | { type: 'load_freeform_tasks' }
   | { type: 'create_repo'; description: string; org: string; loop: boolean }
   | {

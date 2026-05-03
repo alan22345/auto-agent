@@ -7,6 +7,7 @@ import {
   Brain,
   ChevronLeft,
   ChevronRight,
+  Lightbulb,
   ListTodo,
   LogOut,
   Search,
@@ -22,6 +23,7 @@ type Tab = { href: string; label: string; icon: LucideIcon };
 const tabs: Tab[] = [
   { href: '/tasks', label: 'Tasks', icon: ListTodo },
   { href: '/freeform', label: 'Freeform', icon: Sparkles },
+  { href: '/suggestions', label: 'Suggestions', icon: Lightbulb },
   { href: '/memory', label: 'Memory', icon: Brain },
   { href: '/search', label: 'Search', icon: Search },
   { href: '/metrics', label: 'Metrics', icon: BarChart3 },
