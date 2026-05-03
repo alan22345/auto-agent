@@ -1,4 +1,4 @@
-# 005 — Extract Anthropic message mapper as the LLM provider seam
+# 006 — Extract Anthropic message mapper as the LLM provider seam
 
 ## Status
 Accepted

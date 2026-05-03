@@ -97,8 +97,11 @@ def to_api_tool(tool: ToolDefinition) -> dict[str, Any]:
 
     Always injects `"type": "object"` at the schema root when missing. Bedrock
     rejects schemas without it, and the JSON Schema spec requires it for an
-    object-shaped input regardless — so this is correct for native Anthropic
-    too. Idempotent: schemas that already declare `"type"` pass through.
+    object-shaped input regardless. This is a no-op for the native Anthropic
+    provider in practice — every tool in the registry already declares
+    `"type": "object"` — but it widens the contract slightly: the mapper
+    will now also accept and fix up tools that omit it, where the previous
+    AnthropicProvider would have forwarded them verbatim. Idempotent.
     """
     schema = tool.parameters
     if isinstance(schema, dict) and "type" not in schema:

@@ -232,11 +232,10 @@ class TestToApiTool:
         to_api_tool(tool)
         assert "type" not in original
 
-    def test_non_dict_schema_passes_through(self):
-        """Defensive: if a tool somehow ships a non-dict schema, don't crash."""
+    def test_empty_schema_gets_object_injected(self):
+        """An empty dict has no "type" key, so the mapper injects it."""
         tool = ToolDefinition(name="t", description="d", parameters={})
         api = to_api_tool(tool)
-        # An empty dict is missing "type", so the mapper injects it.
         assert api["input_schema"] == {"type": "object"}
 
 
