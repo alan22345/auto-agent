@@ -89,7 +89,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     Uses readonly tools so the PO agent can explore the codebase (grep, file_read, glob)
     rather than relying on a black-box CLI subprocess.
     """
-    from agent.main import _create_agent
+    from agent.lifecycle._agent import create_agent
 
     repo_result = await session.execute(select(Repo).where(Repo.id == config.repo_id))
     repo = repo_result.scalar_one_or_none()
@@ -121,7 +121,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
         # Use readonly tools so the PO can explore the codebase
-        agent = _create_agent(workspace, readonly=True, max_turns=25)
+        agent = create_agent(workspace, readonly=True, max_turns=25)
         result = await agent.run(prompt)
         output = result.output
     except Exception:

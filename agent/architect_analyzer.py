@@ -101,7 +101,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
     Deepening proposals become Suggestions; if auto-approval is on, they become
     Tasks via the existing suggestion → task path.
     """
-    from agent.main import _create_agent
+    from agent.lifecycle._agent import create_agent
 
     repo_result = await session.execute(select(Repo).where(Repo.id == config.repo_id))
     repo = repo_result.scalar_one_or_none()
@@ -138,7 +138,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
 
     log.info(f"Running architecture analysis for repo '{repo.name}'")
     try:
-        agent = _create_agent(workspace, readonly=True, max_turns=30, include_methodology=True)
+        agent = create_agent(workspace, readonly=True, max_turns=30, include_methodology=True)
         result = await agent.run(prompt)
         output = result.output
     except Exception:
