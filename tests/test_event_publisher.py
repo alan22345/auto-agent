@@ -22,6 +22,7 @@ from shared.events import (
     RedisStreamPublisher,
     get_publisher,
     publish,
+    reset_publisher,
     set_publisher,
 )
 
@@ -41,6 +42,20 @@ class TestInMemoryPublisher:
         await pub.publish(ev)
         got = await pub.wait_for("task.classified", timeout=0.1)
         assert got is ev
+
+    @pytest.mark.asyncio
+    async def test_wait_for_does_not_consume_matched_event(self):
+        """Documented behaviour — wait_for is non-destructive. Two successive
+        waits for the same type return the same first event."""
+        pub = InMemoryPublisher()
+        first = Event(type="task.created", task_id=1)
+        second = Event(type="task.created", task_id=2)
+        await pub.publish(first)
+        await pub.publish(second)
+        got_a = await pub.wait_for("task.created", timeout=0.1)
+        got_b = await pub.wait_for("task.created", timeout=0.1)
+        assert got_a is first
+        assert got_b is first  # not `second` — already-published events are not consumed
 
     @pytest.mark.asyncio
     async def test_wait_for_resolves_when_event_arrives_later(self):
@@ -147,9 +162,7 @@ class TestRedisStreamPublisher:
 class TestModuleLevelPublishHelper:
     @pytest.mark.asyncio
     async def test_get_publisher_raises_when_none_set(self):
-        # Reset to no publisher
-        from shared import events as events_mod
-        events_mod._publisher = None
+        reset_publisher(None)
         with pytest.raises(RuntimeError, match="No Publisher registered"):
             get_publisher()
 

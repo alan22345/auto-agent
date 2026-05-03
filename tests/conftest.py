@@ -10,20 +10,27 @@ from __future__ import annotations
 
 import pytest
 
-from shared import events as _events_mod
-from shared.events import InMemoryPublisher, set_publisher
+from shared.events import (
+    InMemoryPublisher,
+    get_publisher,
+    reset_publisher,
+    set_publisher,
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolated_publisher():
     """Swap in a fresh InMemoryPublisher per test, restore after."""
-    previous = _events_mod._publisher
+    try:
+        previous = get_publisher()
+    except RuntimeError:
+        previous = None
     pub = InMemoryPublisher()
     set_publisher(pub)
     try:
         yield pub
     finally:
-        _events_mod._publisher = previous
+        reset_publisher(previous)
 
 
 @pytest.fixture

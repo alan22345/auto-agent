@@ -155,6 +155,10 @@ class RedisStreamPublisher:
         await client.xadd(self._stream_key, event.to_redis())
 
     async def aclose(self) -> None:
+        """Release the underlying client. Idempotent and not terminal — a
+        subsequent ``publish`` will lazily re-open. The lifespan calls this
+        once on shutdown; ``Publisher`` implementations don't need to defend
+        against post-close use."""
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -184,9 +188,12 @@ class InMemoryPublisher:
         self._waiters = remaining
 
     async def wait_for(self, event_type: str, timeout: float = 1.0) -> Event:
-        """Return the next event matching *event_type* (glob pattern allowed).
+        """Return the first event matching *event_type* (glob pattern allowed).
 
-        Returns immediately if a matching event was already published.
+        Already-published events match without being consumed — successive
+        ``wait_for("foo")`` calls return the same event. To step through a
+        sequence, ``clear()`` between waits or assert against ``self.events``
+        directly.
         """
         for ev in self.events:
             if fnmatch.fnmatch(ev.type, event_type):
@@ -204,6 +211,10 @@ class InMemoryPublisher:
         self._waiters.clear()
 
     async def aclose(self) -> None:
+        """Drop captured events and cancel waiters. Idempotent and not
+        terminal — the publisher remains usable for further ``publish`` /
+        ``wait_for`` calls. (Most readers expect ``aclose`` to be terminal;
+        this adapter is intentionally not, since tests reuse instances.)"""
         self.clear()
 
 
@@ -217,7 +228,19 @@ def set_publisher(publisher: Publisher) -> None:
     Does NOT aclose the previous publisher — if the caller is replacing a live
     one, it owns the cleanup. Production wires a single RedisStreamPublisher in
     ``run.py``'s lifespan and acloses it on shutdown; tests use a per-test
-    fixture that restores the previous reference without calling this again.
+    fixture that calls ``reset_publisher`` to restore the previous reference.
+    """
+    global _publisher
+    _publisher = publisher
+
+
+def reset_publisher(publisher: Publisher | None = None) -> None:
+    """Replace the active publisher (or clear it when *publisher* is None).
+
+    Exists so callers — chiefly the per-test fixture in ``tests/conftest.py``
+    and tests covering the unset-publisher error path — don't have to poke
+    the module-level ``_publisher`` directly. ``set_publisher`` only accepts
+    a real ``Publisher``; this is the documented escape hatch for unsetting.
     """
     global _publisher
     _publisher = publisher
