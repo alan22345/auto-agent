@@ -37,8 +37,8 @@ class FileWriteTool(Tool):
         file_path = arguments["file_path"]
         content = arguments["content"]
 
-        resolved = self._resolve_path(file_path, context.workspace)
-        if not resolved:
+        resolved = context.resolve(file_path)
+        if resolved is None:
             return ToolResult(output=f"Error: path '{file_path}' escapes the workspace.", is_error=True)
 
         try:
@@ -50,14 +50,3 @@ class FileWriteTool(Tool):
 
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return ToolResult(output=f"Wrote {line_count} lines to {file_path}")
-
-    @staticmethod
-    def _resolve_path(file_path: str, workspace: str) -> str | None:
-        if os.path.isabs(file_path):
-            resolved = os.path.realpath(file_path)
-        else:
-            resolved = os.path.realpath(os.path.join(workspace, file_path))
-        ws_real = os.path.realpath(workspace)
-        if not resolved.startswith(ws_real + os.sep) and resolved != ws_real:
-            return None
-        return resolved

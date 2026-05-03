@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,27 @@ class ToolContext:
     # Optional async sink for tools that emit progress events to a streaming
     # caller (e.g. web_search emits 'source' events as Brave results arrive).
     event_sink: Callable[[dict], Awaitable[None]] | None = None
+
+    def resolve(self, path: str) -> str | None:
+        """Resolve a path against the workspace, refusing escapes.
+
+        Accepts a relative path (joined under ``workspace``) or an absolute path
+        (must already be inside the workspace). Returns the canonical absolute
+        real path on success, or ``None`` if the path would escape the sandbox.
+
+        This is the single seam every path-touching tool routes through, so the
+        sandboxing invariant lives in one place — including the trailing-os.sep
+        guard that prevents a workspace named ``/work`` from accepting paths
+        like ``/workshop/secret``.
+        """
+        if os.path.isabs(path):
+            resolved = os.path.realpath(path)
+        else:
+            resolved = os.path.realpath(os.path.join(self.workspace, path))
+        ws_real = os.path.realpath(self.workspace)
+        if resolved == ws_real or resolved.startswith(ws_real + os.sep):
+            return resolved
+        return None
 
 
 class Tool(ABC):
