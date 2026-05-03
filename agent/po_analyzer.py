@@ -9,23 +9,30 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from croniter import croniter
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent.prompts import build_po_analysis_prompt
+from agent.workspace import clone_repo
 from shared.database import async_session
 from shared.events import Event
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
 from shared.redis_client import get_redis, publish_event
 
-from agent.prompts import build_po_analysis_prompt
-from agent.workspace import clone_repo
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 60  # seconds
+
+# After a failed analysis, advance last_analysis_at so the next try happens
+# on the regular cron schedule rather than retrying every CHECK_INTERVAL
+# seconds against a perma-broken repo.
+_FAILURE_BACKOFF_NOW = True
 
 
 async def run_po_analysis_loop() -> None:
@@ -45,7 +52,7 @@ async def _check_and_analyze(session: AsyncSession) -> None:
         select(FreeformConfig).where(FreeformConfig.enabled == True)  # noqa: E712
     )
     configs = result.scalars().all()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for config in configs:
         if _is_due(config, now):
@@ -56,6 +63,12 @@ async def _check_and_analyze(session: AsyncSession) -> None:
                 await session.commit()
             except Exception:
                 log.exception(f"PO analysis failed for repo_id={config.repo_id}")
+                # Back off on failure: advance last_analysis_at so we don't
+                # re-clone + re-invoke the agent every CHECK_INTERVAL
+                # seconds against a perma-broken repo.
+                if _FAILURE_BACKOFF_NOW:
+                    config.last_analysis_at = now
+                    await session.commit()
 
 
 def _is_due(config: FreeformConfig, now: datetime) -> bool:
@@ -63,11 +76,11 @@ def _is_due(config: FreeformConfig, now: datetime) -> bool:
         return True
     base_time = config.last_analysis_at
     if base_time.tzinfo is None:
-        base_time = base_time.replace(tzinfo=timezone.utc)
+        base_time = base_time.replace(tzinfo=UTC)
     cron = croniter(config.analysis_cron, base_time)
     next_run = cron.get_next(datetime)
     if next_run.tzinfo is None:
-        next_run = next_run.replace(tzinfo=timezone.utc)
+        next_run = next_run.replace(tzinfo=UTC)
     return now >= next_run
 
 
@@ -178,7 +191,7 @@ def _parse_analysis_output(output: str) -> dict | None:
 
     if text.startswith("```"):
         lines = text.splitlines()
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     start = text.find("{")

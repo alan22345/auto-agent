@@ -4,6 +4,12 @@ Adapted from claude_runner/prompts.py for use with the model-agnostic agent.
 """
 
 CLARIFICATION_MARKER = "CLARIFICATION_NEEDED:"
+GRILL_DONE_MARKER = "GRILL_DONE:"
+# Sentinel value stored as the final {question, answer} entry in
+# tasks.intake_qa once the agent has emitted GRILL_DONE. Lets the gate
+# function distinguish "grill complete with transcript" from "grill in
+# progress" without adding another DB column.
+GRILL_DONE_QUESTION_SENTINEL = "__grill_done__"
 
 CLARIFICATION_INSTRUCTIONS = """
 ## Asking for clarification
@@ -12,6 +18,58 @@ output a single line starting with "CLARIFICATION_NEEDED:" followed by your ques
 Then STOP — do not continue working until you receive an answer. \
 Only ask if genuinely blocked; prefer making a reasonable decision when possible.
 """
+
+
+# Grill-before-planning prompt — runs as a multi-round Q&A with the user before
+# any plan is written. Each turn produces ONE clarifying question (or
+# GRILL_DONE) so the orchestrator can route it through the existing
+# AWAITING_CLARIFICATION state.
+GRILL_PROMPT = """\
+## You are in the GRILL phase
+
+Before writing any plan, you grill the user to align on design — domain
+language, seams, dependency category, what "done" means, and what NOT to
+change. This is interactive: you ask ONE question per turn, the user
+answers, and you continue. Do NOT output a plan yet.
+
+Load these skills before your first question:
+- `skill(name='grill-with-docs')` — the grilling protocol.
+- `skill(name='improve-codebase-architecture')` — depth/seam vocabulary so
+  questions probe the right places.
+
+## Task
+Title: {title}
+Description: {description}
+
+## Grill so far
+{grill_history}
+
+## What to do this turn
+
+1. If you genuinely have enough to plan a sensible design AND you've asked at \
+least 3 questions (or you've covered domain language, seams, "done", \
+constraints, and the caller), output exactly one line:
+
+       GRILL_DONE: <one-line rationale>
+
+   …then STOP. The orchestrator will move you to the planning prompt.
+
+2. Otherwise output exactly one clarifying question using the existing \
+clarification mechanism. Provide your recommended answer. STOP after the \
+question.
+
+       CLARIFICATION_NEEDED: <question>
+       Recommended answer: <your answer, with reasoning>
+
+Cover, across rounds: (a) domain language — terms in the task that conflict \
+with or extend `CONTEXT.md`; (b) seams + dependency category (in-process / \
+local-substitutable / remote-owned / true-external — see DEEPENING.md); \
+(c) what "done" means concretely; (d) what NOT to change; (e) who the \
+caller / consumer is. Aim for 3–7 questions total.
+
+DO NOT output a plan in this turn. Either GRILL_DONE: or one CLARIFICATION_NEEDED:.
+"""
+
 
 PLANNING_PROMPT = """\
 ## Instructions
@@ -24,7 +82,7 @@ IMPORTANT: Output the plan as plain text in your response. Do NOT write to any f
 ## Task
 Title: {title}
 Description: {description}
-
+{grill_section}
 ## Required plan structure
 Your plan MUST include these sections in this order:
 
@@ -46,6 +104,11 @@ Break the work into sequential phases (## Phase 1, ## Phase 2, etc.). Each phase
 - List the specific changes to make
 - Be independently committable
 
+Frame the plan through the `improve-codebase-architecture` lens: identify the \
+modules, interfaces, and seams involved; apply the deletion test to anything \
+new; favour deep modules over shallow pass-throughs; name modules using the \
+project's domain language.
+
 Do NOT write any code. Plan only. Output the plan as text.
 """
 
@@ -55,7 +118,7 @@ CODING_PROMPT_WITH_PLAN = """\
 Implement the task below IMMEDIATELY. Do NOT explore the codebase broadly — only \
 read files directly relevant to the change. If the task specifies which file(s) to \
 modify, go straight to editing. If unclear, do ONE targeted search then start coding.
-
+{skill_directive}
 1. Implement the task following the repo's existing patterns and style.
 2. Run the test suite and fix any failures you introduce.
 3. Self-review your changes before committing.
@@ -75,7 +138,7 @@ CODING_PROMPT_NO_PLAN = """\
 Before writing any code, briefly summarize what you are about to do in 2-3 sentences. \
 State which files you expect to modify and what the end result should look like. \
 Then implement.
-
+{skill_directive}
 1. Restate the task: what are you changing, where, and what does "done" look like?
 2. Do ONE targeted search to find the relevant code.
 3. Implement following the repo's existing patterns and style.
@@ -108,6 +171,25 @@ _CRITICAL_RULES = """\
 - Ensure all existing tests still pass.
 - Add tests for new functionality if the repo has a test suite.
 - When replacing a function, REMOVE the old version entirely — never leave duplicate definitions.
+
+### Architecture (deepening lens)
+Every module you write or change is judged by the depth/seam/locality lens \
+(see the system prompt for the full vocabulary). For any change that introduces \
+a new module or alters an existing module's interface:
+- Apply the **deletion test** before adding anything new — if removing the new \
+  module wouldn't concentrate complexity, don't add it.
+- Prefer **deep modules** (small interface, large implementation). A wrapper \
+  that just forwards calls is shallow — push the logic into the deeper module \
+  or back into the caller instead of adding indirection.
+- **One adapter is hypothetical, two is real.** Don't introduce a port at a \
+  seam unless at least two adapters (typically production + test) justify it.
+- Name modules using the project's `CONTEXT.md` domain language when present, \
+  otherwise the clearest noun for what the module *does* — never \
+  `FooBarHandler`, never abbreviated names, avoid generic `Service`/`Manager` \
+  if a more specific term fits.
+- In the commit message, name which deepening choice you made: \
+  "kept depth", "deepened <module>", "new real seam (justified by adapters X, Y)", \
+  or "no architecturally significant choice" if the change is purely local.
 
 ### Security
 - No hardcoded secrets, tokens, or credentials.
@@ -287,6 +369,65 @@ Priority: 1=critical, 2=high, 3=medium, 4=low, 5=nice-to-have.
 Output ONLY the JSON object. No other text.
 """
 
+ARCHITECTURE_ANALYSIS_PROMPT = """\
+You are an architectural reviewer analysing this codebase for **deepening
+opportunities** — refactors that turn shallow modules into deep ones, with
+the aim of improving testability and AI-navigability.
+
+## Load these skills first
+
+Before exploring, load the architecture skill so your suggestions use its
+vocabulary exactly:
+
+- `skill(name='improve-codebase-architecture')` — depth, seam, leverage,
+  locality, the deletion test, and the format for candidates.
+- `skill(name='grill-with-docs')` — for any term you'd flag in suggestions.
+
+## Your accumulated knowledge about this repo's architecture
+
+{architecture_knowledge}
+
+## Recently suggested (do NOT re-suggest these)
+
+{recent_suggestions}
+
+## Instructions
+
+1. Read `CONTEXT.md` (if present) and ADRs in `docs/decisions/` to learn the
+   project's domain language and prior decisions. Don't re-litigate decisions
+   already recorded as ADRs.
+2. Walk the codebase organically (use grep + file_read; dispatch a `subagent`
+   if breadth helps). Note where you experience friction:
+   - Modules whose interfaces are nearly as complex as their implementations
+     (shallow).
+   - Pure functions extracted only for testability — bugs hide at call sites.
+   - Tightly coupled modules leaking across seams.
+   - Untested modules, or modules hard to test through the current interface.
+3. Apply the **deletion test** to anything you suspect is shallow.
+4. Produce 3–5 ranked deepening opportunities. Use `LANGUAGE.md` vocabulary
+   for the architecture (module/interface/seam/adapter/depth/leverage/
+   locality) and `CONTEXT.md` vocabulary for the domain.
+5. Update your knowledge summary with what you learned about the depth state.
+
+## Output format (STRICT JSON — no markdown fences, no commentary)
+{{
+  "suggestions": [
+    {{
+      "title": "Short title (use the affected module name from CONTEXT.md if applicable)",
+      "description": "Files involved + Problem + Solution + Benefits — plain English, deepening-lens vocabulary",
+      "rationale": "Why this matters in terms of locality and leverage; how tests would improve",
+      "category": "architecture",
+      "priority": 1
+    }}
+  ],
+  "architecture_knowledge_update": "Updated map of the repo's depth state..."
+}}
+
+Priority: 1=critical (load-bearing shallow seams), 2=high, 3=medium, 4=low, 5=nice-to-have.
+Output ONLY the JSON object. No other text.
+"""
+
+
 REPO_NAME_PROMPT = """\
 You will receive a description of a project a user wants to build. Your only job \
 is to pick a short, lowercase, hyphen-separated GitHub repository name for it.
@@ -359,13 +500,70 @@ def _repo_context(repo_summary: str | None) -> str:
     return f"\n## Repo context (cached summary — skip re-exploring known areas)\n{repo_summary}\n"
 
 
+def _grill_history(intake_qa: list[dict] | None) -> str:
+    """Render the grill Q&A list as a readable transcript.
+
+    Filters out the GRILL_DONE sentinel entry — that's bookkeeping for the
+    state machine, not something the agent or the user should see.
+    """
+    if not intake_qa:
+        return "(no questions asked yet)"
+    visible = [
+        qa for qa in intake_qa
+        if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
+    ]
+    if not visible:
+        return "(no questions asked yet)"
+    lines = []
+    for i, qa in enumerate(visible, start=1):
+        question = (qa.get("question") or "").strip()
+        answer = (qa.get("answer") or "").strip()
+        lines.append(f"### Q{i}\n{question}\n\n**A{i}:** {answer}")
+    return "\n\n".join(lines)
+
+
+def build_grill_phase_prompt(
+    title: str,
+    description: str,
+    intake_qa: list[dict] | None = None,
+    repo_summary: str | None = None,
+) -> str:
+    """Build the grill-phase prompt: ONE question per turn, or GRILL_DONE.
+
+    Used before any plan is written, so the agent aligns on design with the
+    user via the existing AWAITING_CLARIFICATION round-trip. ``intake_qa`` is
+    the running list of {question, answer} pairs; the prompt renders it so
+    the agent doesn't repeat questions.
+    """
+    return GRILL_PROMPT.format(
+        title=title,
+        description=description,
+        grill_history=_grill_history(intake_qa),
+    ) + _repo_context(repo_summary)
+
+
+def _grill_section_for_planning(intake_qa: list[dict] | None) -> str:
+    """Inject grilled answers into the planning prompt, after grill exits."""
+    if not intake_qa:
+        return ""
+    return (
+        "\n## Pre-flight grill (Q&A from before planning)\n"
+        f"{_grill_history(intake_qa)}\n\n"
+        "Use these answers — do not re-ask.\n"
+    )
+
+
 def build_planning_prompt(
-    title: str, description: str, repo_summary: str | None = None
+    title: str,
+    description: str,
+    repo_summary: str | None = None,
+    intake_qa: list[dict] | None = None,
 ) -> str:
     return PLANNING_PROMPT.format(
         title=title,
         description=description,
         clarification_instructions=CLARIFICATION_INSTRUCTIONS,
+        grill_section=_grill_section_for_planning(intake_qa),
     ) + _repo_context(repo_summary)
 
 
@@ -397,6 +595,30 @@ def _intent_section(intent: dict | None) -> str:
     return "\n".join(parts)
 
 
+# Map structured-intent change_type → which skills the agent should load
+# before writing any code. Auto-routes the engineering skills (vendored under
+# skills/engineering/) into the relevant phase of work.
+def _skill_directive(intent: dict | None) -> str:
+    if not intent:
+        return ""
+    change_type = (intent.get("change_type") or "").strip().lower()
+    if change_type == "bugfix":
+        return (
+            "\n**Before writing any fix, call `skill(name='diagnose')` and follow its "
+            "phases (build a feedback loop, reproduce, hypothesise, instrument, "
+            "fix + regression test).**\n"
+        )
+    if change_type in ("feature", "refactor", "performance"):
+        return (
+            "\n**Before writing implementation, call `skill(name='tdd')` and "
+            "`skill(name='improve-codebase-architecture')`, then implement in "
+            "vertical slices (one test → one minimal implementation → repeat). "
+            "Apply the deletion test and prefer deep modules over shallow "
+            "pass-throughs.**\n"
+        )
+    return ""
+
+
 def build_coding_prompt(
     title: str,
     description: str,
@@ -406,6 +628,7 @@ def build_coding_prompt(
     intent: dict | None = None,
 ) -> str:
     intent_section = _intent_section(intent)
+    skill_directive = _skill_directive(intent)
     critical_rules = _CRITICAL_RULES.format(ci_checks_section=_ci_checks_section(ci_checks))
 
     if plan:
@@ -415,6 +638,7 @@ def build_coding_prompt(
             description=description,
             plan_section=plan_section,
             intent_section=intent_section,
+            skill_directive=skill_directive,
             clarification_instructions=CLARIFICATION_INSTRUCTIONS,
             critical_rules=critical_rules,
         )
@@ -423,6 +647,7 @@ def build_coding_prompt(
             title=title,
             description=description,
             intent_section=intent_section,
+            skill_directive=skill_directive,
             clarification_instructions=CLARIFICATION_INSTRUCTIONS,
             critical_rules=critical_rules,
         )
@@ -477,5 +702,22 @@ def build_po_analysis_prompt(
         suggestions = "None yet — this is the first analysis."
     return PO_ANALYSIS_PROMPT.format(
         ux_knowledge=knowledge,
+        recent_suggestions=suggestions,
+    )
+
+
+def build_architecture_analysis_prompt(
+    architecture_knowledge: str | None = None,
+    recent_suggestions: list[str] | None = None,
+) -> str:
+    """Build the prompt that drives architecture-mode (continuous deepening)."""
+    knowledge = architecture_knowledge or (
+        "No prior knowledge — this is the first architecture pass."
+    )
+    suggestions = "\n".join(f"- {s}" for s in (recent_suggestions or []))
+    if not suggestions:
+        suggestions = "None yet — this is the first analysis."
+    return ARCHITECTURE_ANALYSIS_PROMPT.format(
+        architecture_knowledge=knowledge,
         recent_suggestions=suggestions,
     )

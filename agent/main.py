@@ -31,8 +31,11 @@ from agent.llm import get_provider
 from agent.loop import AgentLoop
 from agent.prompts import (
     CLARIFICATION_MARKER,
+    GRILL_DONE_MARKER,
+    GRILL_DONE_QUESTION_SENTINEL,
     MEMORY_REFLECTION_PROMPT,
     build_coding_prompt,
+    build_grill_phase_prompt,
     build_plan_independent_review_prompt,
     build_planning_prompt,
     build_pr_independent_review_prompt,
@@ -128,9 +131,31 @@ async def _pr_title(title: str) -> str:
 
 
 def _session_id(task_id: int, created_at: str | None = None) -> str:
-    """Deterministic UUID session ID for a task."""
+    """Deterministic UUID session ID for a task.
+
+    Stable across handler invocations so the planning → coding → clarification
+    → review-fix lifecycle can resume the same session. Lifecycle handlers
+    are guarded against concurrent re-entry (``_active_planning``,
+    ``_active_clarification_tasks``) so a second handler can't race the first
+    on the same session ID.
+    """
     seed = f"auto-agent-task-{task_id}-{created_at or ''}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def _fresh_session_id(task_id: int, label: str) -> str:
+    """Per-invocation UUID for agents that are designed NOT to resume.
+
+    The independent reviewer (and any other one-shot agent) needs a fresh
+    session every call. A deterministic hash collides on retry: the Claude
+    CLI provider tracks live session IDs and rejects re-use with
+    "Session ID ... is already in use." We include task_id + label in
+    the seed for log readability and uuid4().hex for uniqueness.
+    """
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"auto-agent-{label}-{task_id}-{uuid.uuid4().hex}",
+    ))
 
 
 def _extract_clarification(output: str) -> str | None:
@@ -143,6 +168,78 @@ def _extract_clarification(output: str) -> str | None:
             parts = [first_line] + remaining
             return "\n".join(parts)
     return None
+
+
+def _extract_grill_done(output: str) -> str | None:
+    """Check if agent output declares grilling complete (GRILL_DONE: <reason>)."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(GRILL_DONE_MARKER):
+            return stripped[len(GRILL_DONE_MARKER):].strip() or "(no reason)"
+    return None
+
+
+# Tasks where grilling is skipped — the agent goes straight to planning.
+# Simple tasks don't need design alignment; query/no-code tasks aren't planned;
+# tasks created from architecture-mode suggestions arrive pre-grilled
+# (intake_qa = []).
+_SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
+
+# Hard cap on grill rounds to bound user fatigue. The grill prompt asks the
+# agent to aim for 3–7 questions and emit GRILL_DONE; this is a fail-safe in
+# case the agent keeps asking without ever exiting. Counted as
+# "non-sentinel entries in intake_qa" — when the count reaches this limit on
+# entry to handle_planning, we force a synthetic GRILL_DONE and proceed to
+# planning with the transcript so far.
+_MAX_GRILL_ROUNDS = 10
+
+
+def _should_run_grill(task) -> bool:
+    """Decide whether the grill phase runs before planning for this task.
+
+    Four signals on ``task.intake_qa`` drive the gate:
+      - ``None`` → grilling never started. Run grill (initial turn).
+      - ``[]`` → grilling explicitly skipped (simple tasks, architecture-
+        derived tasks). Skip.
+      - ``[…, {"question": GRILL_DONE_QUESTION_SENTINEL, …}]`` → grilling
+        completed (sentinel appended after agent emitted GRILL_DONE). Skip.
+      - ``[…, {"question": q, "answer": …}]`` (no sentinel) → grilling in
+        progress. Run grill again so the agent can ask the next question
+        OR emit GRILL_DONE.
+
+    The ``_MAX_GRILL_ROUNDS`` cap is enforced inside ``handle_planning``
+    (it forces a synthetic GRILL_DONE rather than mutating gate semantics).
+    """
+    if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
+        return False
+    if task.intake_qa is None:
+        return True
+    if not task.intake_qa:
+        return False  # Empty list = explicitly complete/skipped.
+    return not any(
+        qa.get("question") == GRILL_DONE_QUESTION_SENTINEL
+        for qa in task.intake_qa
+    )
+
+
+def _grill_round_count(intake_qa: list[dict] | None) -> int:
+    """Number of real grill rounds — sentinel entries don't count."""
+    if not intake_qa:
+        return 0
+    return sum(
+        1 for qa in intake_qa
+        if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
+    )
+
+
+async def _save_intake_qa(task_id: int, intake_qa: list[dict]) -> None:
+    """PATCH the task's intake_qa via the orchestrator API."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/intake_qa",
+            json={"intake_qa": intake_qa},
+        )
+        resp.raise_for_status()
 
 
 _PLAN_MAX_LENGTH = 50_000  # Must match TransitionRequest.plan max_length
@@ -579,14 +676,34 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     try:
         agent = _create_agent(workspace, session_id=session_id, readonly=True, max_turns=30, include_methodology=True)
 
+        # Track grill state in a local boolean. After GRILL_DONE we flip it
+        # to False; we don't re-evaluate _should_run_grill(task) because the
+        # local task object's intake_qa is stale (we patch via API).
+        in_grill_phase = _should_run_grill(task) and not feedback
+
+        # Three planning entry paths:
+        #   1. Plan-revision (user rejected previous plan, sent feedback).
+        #   2. Grill phase (complex task, grilling not complete) — ask one
+        #      question at a time until the agent emits GRILL_DONE.
+        #   3. Final plan (simple task, OR grilling done).
         if feedback:
             prompt = (
                 f"The user rejected your previous plan with this feedback:\n\n{feedback}\n\n"
                 f"Please revise the plan addressing their concerns. Output the revised plan as text."
             )
             result = await agent.run(prompt, resume=True)
+        elif in_grill_phase:
+            existing_qa = list(task.intake_qa or [])
+            log.info(f"Task #{task_id} GRILL phase (intake_qa={len(existing_qa)} entries)")
+            prompt = build_grill_phase_prompt(
+                task.title, task.description,
+                intake_qa=existing_qa, repo_summary=repo.summary,
+            )
+            result = await agent.run(prompt)
         else:
-            prompt = build_planning_prompt(task.title, task.description, repo.summary)
+            prompt = build_planning_prompt(
+                task.title, task.description, repo.summary, intake_qa=task.intake_qa,
+            )
             result = await agent.run(prompt)
 
         # Plans can span multiple turns if they hit max_tokens and get
@@ -596,22 +713,93 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             if msg.role == "assistant" and msg.content
         ) or result.output
 
+        # If we're in grill mode, GRILL_DONE switches us into a regular plan
+        # right now (within the same handler invocation).
+        if in_grill_phase:
+            grill_done = _extract_grill_done(output)
+            if grill_done is not None:
+                log.info(f"Task #{task_id} GRILL_DONE: {grill_done[:120]}")
+                # Persist the sentinel so future re-entry skips the grill
+                # gate. Keep the existing transcript so the planner can use
+                # it as preflight context.
+                completed_qa = list(task.intake_qa or []) + [{
+                    "question": GRILL_DONE_QUESTION_SENTINEL,
+                    "answer": grill_done[:500],
+                }]
+                await _save_intake_qa(task_id, completed_qa)
+                task.intake_qa = completed_qa  # keep local consistent
+                in_grill_phase = False
+
+                # Re-run with the planning prompt, resuming the same session.
+                plan_prompt = build_planning_prompt(
+                    task.title, task.description, repo.summary,
+                    intake_qa=completed_qa,
+                )
+                result = await agent.run(plan_prompt, resume=True)
+                output = "\n".join(
+                    msg.content for msg in result.messages
+                    if msg.role == "assistant" and msg.content
+                ) or result.output
+
         # Check if agent needs clarification
         question = _extract_clarification(output)
         if question:
-            log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
-            await transition_task(task_id, "awaiting_clarification", question)
-            r = await get_redis()
-            await publish_event(
-                r,
-                Event(
-                    type="task.clarification_needed",
-                    task_id=task_id,
-                    payload={"question": question, "phase": "planning"},
-                ).to_redis(),
-            )
-            await r.aclose()
-            return
+            phase = "grill" if in_grill_phase else "planning"
+
+            # Hard cap on grill rounds — if the agent would push us past the
+            # limit, force a synthetic GRILL_DONE and proceed to planning
+            # with the transcript so far. This bounds user fatigue when the
+            # agent can't decide it's heard enough.
+            if phase == "grill" and _grill_round_count(task.intake_qa) >= _MAX_GRILL_ROUNDS:
+                log.warning(
+                    f"Task #{task_id} hit grill cap ({_MAX_GRILL_ROUNDS}); "
+                    f"forcing GRILL_DONE and dropping question: {question[:80]}..."
+                )
+                completed_qa = list(task.intake_qa or []) + [{
+                    "question": GRILL_DONE_QUESTION_SENTINEL,
+                    "answer": f"hit grill cap ({_MAX_GRILL_ROUNDS} rounds); proceeding to plan",
+                }]
+                await _save_intake_qa(task_id, completed_qa)
+                task.intake_qa = completed_qa
+
+                plan_prompt = build_planning_prompt(
+                    task.title, task.description, repo.summary,
+                    intake_qa=completed_qa,
+                )
+                result = await agent.run(plan_prompt, resume=True)
+                output = "\n".join(
+                    msg.content for msg in result.messages
+                    if msg.role == "assistant" and msg.content
+                ) or result.output
+                # Re-check for a (planning-phase) clarification on the new output
+                question = _extract_clarification(output)
+                phase = "planning"
+                if not question:
+                    output = _trim_plan_text(output)
+                    # Fall through to the awaiting_approval transition below.
+
+            if question:
+                log.info(f"Task #{task_id} needs clarification ({phase}): {question[:100]}...")
+
+                # Grill phase: append a {question, answer: None} to intake_qa so
+                # the next turn (after the user replies) can fill in the answer.
+                if phase == "grill":
+                    intake_qa = list(task.intake_qa or [])
+                    intake_qa.append({"question": question, "answer": None})
+                    await _save_intake_qa(task_id, intake_qa)
+
+                await transition_task(task_id, "awaiting_clarification", question)
+                r = await get_redis()
+                await publish_event(
+                    r,
+                    Event(
+                        type="task.clarification_needed",
+                        task_id=task_id,
+                        payload={"question": question, "phase": phase},
+                    ).to_redis(),
+                )
+                await r.aclose()
+                return
 
         output = _trim_plan_text(output)
 
@@ -987,10 +1175,10 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             base_branch = freeform_cfg.dev_branch
             fallback_branch = freeform_cfg.prod_branch or repo.default_branch
 
-    reviewer_session = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"auto-agent-review-{task_id}-{task.created_at or ''}",
-    ))
+    # Per-invocation session — the reviewer is a fresh, independent agent
+    # by design. A deterministic hash here collides on retry (the Claude
+    # CLI provider rejects re-used session IDs with "already in use").
+    reviewer_session = _fresh_session_id(task_id, "review")
 
     log.info(f"Independent review of task #{task_id} PR (session={reviewer_session})")
     workspace = await clone_repo(repo.url, task_id, base_branch, fallback_branch=fallback_branch)
@@ -1007,6 +1195,34 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         result = await agent.run(prompt)
         output = result.output
         log.info(f"Independent review for task #{task_id}: {output[:300]}...")
+
+        # If the underlying provider crashed (e.g. Claude CLI subprocess
+        # failure that didn't recover), it returns "[ERROR] ...". Treating
+        # that string as review feedback would route it to the coding agent
+        # as if it were a real comment — and the coder would try to "fix"
+        # the CLI error. Skip the review entirely on a recognised error
+        # prefix and emit an auto-approve so the task isn't blocked.
+        if output.lstrip().startswith("[ERROR]"):
+            log.warning(
+                f"Task #{task_id}: reviewer agent errored ({output[:200]!r}), "
+                "skipping review and auto-approving so the task isn't blocked"
+            )
+            r = await get_redis()
+            await publish_event(
+                r,
+                Event(
+                    type="task.review_complete",
+                    task_id=task_id,
+                    payload={
+                        "review": f"Review skipped — agent error: {output[:500]}",
+                        "pr_url": pr_url,
+                        "branch": branch_name,
+                        "approved": True,
+                    },
+                ).to_redis(),
+            )
+            await r.aclose()
+            return
 
         approved = any(
             phrase in output.lower()
@@ -1296,6 +1512,21 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
     task = await get_task(task_id)
     if not task or not task.repo_name:
         return
+
+    # Grill-phase clarification: fill in the trailing {question, answer: None}
+    # entry on intake_qa, transition back to PLANNING, and re-trigger the
+    # planning handler. The next turn either asks the next question or emits
+    # GRILL_DONE.
+    if task.intake_qa and task.plan is None:
+        last = task.intake_qa[-1] if task.intake_qa else None
+        if isinstance(last, dict) and last.get("answer") is None:
+            log.info(f"Task #{task_id} GRILL answer received — re-entering grill loop")
+            updated_qa = list(task.intake_qa)
+            updated_qa[-1] = {**last, "answer": answer}
+            await _save_intake_qa(task_id, updated_qa)
+            await transition_task(task_id, "planning", "User answered grill question")
+            await handle_planning(task_id)
+            return
 
     repo = await get_repo(task.repo_name)
     if not repo:

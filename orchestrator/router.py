@@ -34,6 +34,7 @@ from shared.models import (
     TaskSource,
     TaskStatus,
     User,
+    intake_qa_for_suggestion,
 )
 from shared.redis_client import get_redis, publish_event
 from shared.types import (
@@ -494,6 +495,27 @@ async def update_subtasks(
         raise HTTPException(404, "Task not found")
     task.subtasks = req.subtasks
     task.current_subtask = req.current_subtask
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
+class IntakeQaUpdate(BaseModel):
+    """Update the grill-before-planning Q&A on a task."""
+    intake_qa: list[dict]
+
+
+@router.patch("/tasks/{task_id}/intake_qa", response_model=TaskData)
+async def update_intake_qa(
+    task_id: int,
+    req: IntakeQaUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> TaskData:
+    """Replace the task's grill Q&A list (used by the agent during the grill phase)."""
+    task = await get_task(session, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.intake_qa = req.intake_qa
     await session.commit()
     await session.refresh(task)
     return _task_to_response(task)
@@ -1027,6 +1049,11 @@ class FreeformConfigRequest(BaseModel):
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
+    # Architecture Mode — periodic improve-codebase-architecture cron
+    # producing deepening Suggestions. Off by default so existing repos are
+    # unaffected.
+    architecture_mode: bool = False
+    architecture_cron: str = Field(default="0 9 * * 1", max_length=128)
 
     @field_validator("prod_branch", "dev_branch")
     @classmethod
@@ -1039,7 +1066,7 @@ class FreeformConfigRequest(BaseModel):
             )
         return v
 
-    @field_validator("analysis_cron")
+    @field_validator("analysis_cron", "architecture_cron")
     @classmethod
     def validate_cron(cls, v: str) -> str:
         if not croniter.is_valid(v):
@@ -1069,6 +1096,8 @@ async def upsert_freeform_config(
         config.analysis_cron = req.analysis_cron
         config.auto_approve_suggestions = req.auto_approve_suggestions
         config.auto_start_tasks = req.auto_start_tasks
+        config.architecture_mode = req.architecture_mode
+        config.architecture_cron = req.architecture_cron
     else:
         config = FreeformConfig(
             repo_id=repo.id,
@@ -1078,6 +1107,8 @@ async def upsert_freeform_config(
             analysis_cron=req.analysis_cron,
             auto_approve_suggestions=req.auto_approve_suggestions,
             auto_start_tasks=req.auto_start_tasks,
+            architecture_mode=req.architecture_mode,
+            architecture_cron=req.architecture_cron,
         )
         session.add(config)
     await session.commit()
@@ -1212,7 +1243,9 @@ async def approve_suggestion(
     if suggestion.status != SuggestionStatus.PENDING:
         raise HTTPException(400, f"Suggestion is already {suggestion.status.value}")
 
-    # Create task from suggestion
+    # Create task from suggestion. intake_qa_for_suggestion routes
+    # pre-grilled categories (e.g. architecture) to [] to skip the grill
+    # phase; everything else stays None to grill normally.
     task = Task(
         title=suggestion.title,
         description=suggestion.description,
@@ -1220,6 +1253,7 @@ async def approve_suggestion(
         source_id=f"suggestion:{suggestion.id}",
         repo_id=suggestion.repo_id,
         freeform_mode=True,
+        intake_qa=intake_qa_for_suggestion(suggestion.category),
     )
     session.add(task)
     await session.flush()
@@ -1340,6 +1374,12 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         auto_approve_suggestions=c.auto_approve_suggestions or False,
         auto_start_tasks=c.auto_start_tasks or False,
         last_analysis_at=c.last_analysis_at.isoformat() if c.last_analysis_at else None,
+        architecture_mode=c.architecture_mode or False,
+        architecture_cron=c.architecture_cron or "0 9 * * 1",
+        last_architecture_at=(
+            c.last_architecture_at.isoformat() if c.last_architecture_at else None
+        ),
+        architecture_knowledge=c.architecture_knowledge,
         created_at=c.created_at.isoformat() if c.created_at else None,
     )
 
@@ -1361,6 +1401,7 @@ def _task_to_response(task: Task) -> TaskData:
         priority=task.priority if task.priority is not None else 100,
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,
+        intake_qa=task.intake_qa,
         created_at=task.created_at.isoformat() if task.created_at else None,
         created_by_user_id=task.created_by_user_id,
     )

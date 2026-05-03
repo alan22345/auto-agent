@@ -8,6 +8,7 @@ This gives a clean baseline to compare against direct API providers.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from agent.llm.base import LLMProvider
@@ -17,6 +18,14 @@ from agent.llm.types import (
     TokenUsage,
     ToolDefinition,
 )
+
+log = logging.getLogger(__name__)
+
+# Substring the Claude CLI emits on stderr when a session ID is already
+# registered (stale lock from a crashed prior invocation). The provider
+# detects this and rotates to a fresh UUID so the caller doesn't get a
+# CLI-error string back as if it were an LLM response.
+_SESSION_ALREADY_IN_USE = "already in use"
 
 
 class ClaudeCLIProvider(LLMProvider):
@@ -77,8 +86,11 @@ class ClaudeCLIProvider(LLMProvider):
         # CLI manages its own context — return 0 so compaction never triggers
         return 0
 
-    async def _run_cli(self, prompt: str) -> str:
-        """Run the Claude Code CLI as a subprocess."""
+    async def _invoke_cli_once(self, prompt: str) -> tuple[str, str, int | None]:
+        """Run the Claude Code CLI as a subprocess once. Returns (stdout, stderr, returncode).
+
+        Returncode is None on timeout. Caller decides whether to retry.
+        """
         cmd = ["claude", "--print", "--dangerously-skip-permissions"]
 
         if self._session_id:
@@ -103,10 +115,45 @@ class ClaudeCLIProvider(LLMProvider):
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
+            return ("", "", None)
+
+        return (
+            (stdout or b"").decode(),
+            (stderr or b"").decode(),
+            proc.returncode,
+        )
+
+    async def _run_cli(self, prompt: str) -> str:
+        """Run the Claude Code CLI, recovering from session-already-in-use collisions.
+
+        If the CLI rejects a deterministic session ID as already-in-use
+        (stale lock from a crashed prior invocation, or a caller passing the
+        same hash twice), rotate ``self._session_id`` to a fresh UUID and
+        retry once. Without this recovery, the error string leaks back as
+        if it were an LLM response — and the calling code (e.g. the
+        independent reviewer) treats it as review feedback. Skip the
+        rotation for resume mode: --resume EXPECTS the session to exist.
+        """
+        output, errors, returncode = await self._invoke_cli_once(prompt)
+        if returncode is None:
             return "[ERROR] Claude Code CLI timed out"
 
-        output = (stdout or b"").decode()
-        errors = (stderr or b"").decode()
-        if proc.returncode != 0 and not output.strip():
-            return f"[ERROR] CLI exited {proc.returncode}: {errors.strip()}"
+        if (
+            returncode != 0
+            and not self._resume
+            and self._session_id
+            and _SESSION_ALREADY_IN_USE in errors
+        ):
+            stale = self._session_id
+            self._session_id = str(uuid.uuid4())
+            log.warning(
+                "Claude CLI session %s already in use; rotated to %s and retrying",
+                stale, self._session_id,
+            )
+            output, errors, returncode = await self._invoke_cli_once(prompt)
+            if returncode is None:
+                return "[ERROR] Claude Code CLI timed out"
+
+        if returncode != 0 and not output.strip():
+            return f"[ERROR] CLI exited {returncode}: {errors.strip()}"
         return output

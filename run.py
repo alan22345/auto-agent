@@ -40,6 +40,7 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    intake_qa_for_suggestion,
 )
 from sqlalchemy import select as sa_select
 from shared.notifier import send_telegram
@@ -72,6 +73,7 @@ from integrations.telegram.main import (
     inbound_loop as telegram_inbound_loop,
     notification_loop as telegram_notification_loop,
 )
+from agent.architect_analyzer import run_architecture_loop
 from agent.main import event_loop as claude_runner_loop
 from agent.po_analyzer import run_po_analysis_loop
 
@@ -399,10 +401,35 @@ async def on_ci_passed(event: Event) -> None:
     await r.aclose()
 
 
+# Named sentinels _fetch_failed_ci_logs returns when it couldn't surface a
+# real failure log. Defined as module constants so the function and the
+# detector below share a single source of truth — a new sentinel added in
+# one place but forgotten in the other would silently break the
+# fallback-to-deploy-output path. Reference these constants by name in the
+# function body; never inline a literal.
+_CI_LOG_NO_FAILED_RUNS = "No failed check runs found"
+_CI_LOG_PR_FETCH_FAILED = "Could not fetch PR details"
+_CI_LOG_CHECK_RUNS_FETCH_FAILED = "Could not fetch check runs"
+
+_EMPTY_CI_LOG_SENTINELS: frozenset[str] = frozenset({
+    _CI_LOG_NO_FAILED_RUNS,
+    _CI_LOG_PR_FETCH_FAILED,
+    _CI_LOG_CHECK_RUNS_FETCH_FAILED,
+})
+
+
+def _ci_logs_are_empty(ci_logs: str) -> bool:
+    """Return True iff _fetch_failed_ci_logs returned an empty/sentinel value."""
+    return ci_logs.strip() in _EMPTY_CI_LOG_SENTINELS
+
+
 async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
     """Fetch the failed GitHub Actions job logs for a PR.
 
-    Returns the log output (truncated) or a fallback message.
+    Returns the log output (truncated) or one of ``_EMPTY_CI_LOG_SENTINELS``
+    when there's nothing actionable to surface. Callers should check
+    ``_ci_logs_are_empty`` and fall back to deploy-script output before
+    feeding a sentinel string to the retry loop.
     """
     try:
         import httpx as _httpx
@@ -418,7 +445,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                 headers=headers,
             )
             if resp.status_code != 200:
-                return "Could not fetch PR details"
+                return _CI_LOG_PR_FETCH_FAILED
             head_sha = resp.json()["head"]["sha"]
 
             # Get check runs for this commit
@@ -427,7 +454,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                 headers=headers,
             )
             if resp.status_code != 200:
-                return "Could not fetch check runs"
+                return _CI_LOG_CHECK_RUNS_FETCH_FAILED
 
             check_runs = resp.json().get("check_runs", [])
             failed_runs = [
@@ -436,7 +463,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
             ]
 
             if not failed_runs:
-                return "No failed check runs found"
+                return _CI_LOG_NO_FAILED_RUNS
 
             logs_parts = []
             for cr in failed_runs[:3]:  # Limit to 3 failed runs
@@ -629,7 +656,26 @@ async def on_dev_deploy_failed(event: Event) -> None:
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
             ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
-            reason = f"Deployment failed. Here are the failure details:\n\n{ci_logs}"
+            # If GH had no failed check runs to surface (typical for repos
+            # without GitHub Actions — the deploy failure happened in the
+            # auto-agent's own deploy script), fall back to whatever short
+            # output we have. Otherwise the agent retry loop is told
+            # "No failed check runs found" and has nothing actionable to fix.
+            if _ci_logs_are_empty(ci_logs):
+                if output:
+                    reason = (
+                        "Dev deployment failed (no GitHub Actions check runs to "
+                        "fetch). Deploy script output:\n\n"
+                        f"{output[-2000:]}"
+                    )
+                else:
+                    reason = (
+                        "Dev deployment failed and no diagnostics were captured. "
+                        "Check VM logs (~/auto-agent on the deploy host) for "
+                        f"docker compose / alembic errors. CI inspector said: {ci_logs}"
+                    )
+            else:
+                reason = f"Deployment failed. Here are the failure details:\n\n{ci_logs}"
         else:
             reason = f"Dev deployment failed. Fix the deployment issue:\n\n{output[-2000:]}"
 
@@ -736,6 +782,7 @@ async def on_po_suggestions_ready(event: Event) -> None:
                 complexity=TaskComplexity.COMPLEX,
                 repo_id=suggestion.repo_id,
                 freeform_mode=True,
+                intake_qa=intake_qa_for_suggestion(suggestion.category),
             )
             session.add(task)
             await session.flush()
@@ -1507,8 +1554,49 @@ async def _recover_stuck_tasks() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _run_alembic_upgrade_sync() -> None:
+    """Apply pending alembic migrations. Runs synchronously in its own thread.
+
+    The deploy script (scripts/deploy.sh) only runs migrations when invoked
+    with the explicit `migrate` flag, so a default deploy ships new code
+    against an old schema. New columns added to existing tables would
+    silently break SQL queries (Base.metadata.create_all only creates
+    missing TABLES, not missing COLUMNS). Running alembic at startup keeps
+    the schema in sync with the code that's about to run, regardless of
+    how the container was deployed.
+
+    Must run in a thread (not the lifespan event loop) because
+    migrations/env.py::run_migrations_online calls asyncio.run(), which
+    can't be invoked from within a running loop.
+
+    Idempotent — alembic skips revisions already applied.
+    """
+    from pathlib import Path as _Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg_path = _Path(__file__).parent / "alembic.ini"
+    if not cfg_path.is_file():
+        log.warning("alembic.ini not found, skipping startup migration")
+        return
+    cfg = Config(str(cfg_path))
+    try:
+        command.upgrade(cfg, "head")
+    except Exception:
+        # Don't crash startup on a migration error — log and let the app
+        # boot. A broken migration is the operator's problem to fix; the
+        # process should still come up so the existing app keeps serving.
+        log.exception("alembic upgrade head failed at startup")
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Run alembic migrations BEFORE create_all so we never query columns
+    # that don't exist yet on the deployed DB. Threaded to dodge the
+    # nested-event-loop problem in migrations/env.py.
+    await asyncio.to_thread(_run_alembic_upgrade_sync)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -1536,6 +1624,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(pr_comment_poller()),
         asyncio.create_task(pr_merge_poller()),
         asyncio.create_task(run_po_analysis_loop()),
+        asyncio.create_task(run_architecture_loop()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")
