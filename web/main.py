@@ -544,6 +544,8 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
     analysis_cron = data.get("analysis_cron", "0 9 * * 1")
     auto_approve_suggestions = data.get("auto_approve_suggestions", False)
     auto_start_tasks = data.get("auto_start_tasks", False)
+    architecture_mode = data.get("architecture_mode", False)
+    architecture_cron = data.get("architecture_cron", "0 9 * * 1")
     if not repo_name:
         await ws.send_json({"type": "error", "message": "repo_name is required"})
         return
@@ -557,6 +559,8 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
                 "analysis_cron": analysis_cron,
                 "auto_approve_suggestions": auto_approve_suggestions,
                 "auto_start_tasks": auto_start_tasks,
+                "architecture_mode": architecture_mode,
+                "architecture_cron": architecture_cron,
             },
         )
         if resp.status_code == 200:

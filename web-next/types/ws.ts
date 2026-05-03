@@ -38,6 +38,8 @@ export interface FreeformConfig {
   auto_approve_suggestions: boolean;
   auto_start_tasks?: boolean;
   last_analysis_at?: string | null;
+  architecture_mode?: boolean;
+  architecture_cron?: string;
 }
 
 export type WSEvent =
@@ -102,6 +104,8 @@ export type WSCommand =
       analysis_cron: string;
       auto_approve_suggestions: boolean;
       auto_start_tasks?: boolean;
+      architecture_mode?: boolean;
+      architecture_cron?: string;
     }
   | { type: 'memory_extract'; source_id?: string; pasted_text?: string; context_hint?: string }
   | { type: 'memory_reextract'; source_id: string; note: string }

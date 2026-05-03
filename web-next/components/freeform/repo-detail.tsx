@@ -33,6 +33,8 @@ export function RepoDetail({ config }: Props) {
   const [autoStart, setAutoStart] = useState(false);
   const [branch, setBranch] = useState('dev');
   const [cron, setCron] = useState(CRON_PRESETS[0].value);
+  const [archMode, setArchMode] = useState(false);
+  const [archCron, setArchCron] = useState(CRON_PRESETS[0].value);
   const [status, setStatus] = useState<SaveStatus>({ kind: 'idle' });
   const savingRef = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,6 +50,8 @@ export function RepoDetail({ config }: Props) {
     setAutoStart(config.auto_start_tasks ?? false);
     setBranch(config.dev_branch || 'dev');
     setCron(config.analysis_cron || CRON_PRESETS[0].value);
+    setArchMode(config.architecture_mode ?? false);
+    setArchCron(config.architecture_cron || CRON_PRESETS[0].value);
     setStatus({ kind: 'idle' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.repo_name]);
@@ -66,6 +70,8 @@ export function RepoDetail({ config }: Props) {
     setAutoStart(next.auto_start_tasks ?? false);
     setBranch(next.dev_branch || 'dev');
     setCron(next.analysis_cron || CRON_PRESETS[0].value);
+    setArchMode(next.architecture_mode ?? false);
+    setArchCron(next.architecture_cron || CRON_PRESETS[0].value);
   });
 
   useWS('error', (e) => {
@@ -84,6 +90,7 @@ export function RepoDetail({ config }: Props) {
   }
 
   const isPreset = CRON_PRESETS.some((p) => p.value === cron);
+  const isArchPreset = CRON_PRESETS.some((p) => p.value === archCron);
   const saving = status.kind === 'saving';
 
   function handleSave(e: React.FormEvent) {
@@ -98,6 +105,8 @@ export function RepoDetail({ config }: Props) {
       analysis_cron: cron,
       auto_approve_suggestions: auto,
       auto_start_tasks: autoStart,
+      architecture_mode: archMode,
+      architecture_cron: archCron,
     });
     if (!sent) {
       setStatus({
@@ -158,6 +167,47 @@ export function RepoDetail({ config }: Props) {
               </p>
             </div>
             <Switch checked={autoStart} onCheckedChange={setAutoStart} id="rd-autostart" />
+          </div>
+        </section>
+
+        {/* Architecture mode section */}
+        <section className="space-y-3">
+          <h2 className="text-base font-medium">Architecture mode</h2>
+
+          <div className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
+            <div>
+              <p className="text-sm font-medium">Continuous architectural improvements</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Periodically run the architect analyzer on a readonly clone. Produces deepening
+                Suggestions (no new features). Combine with auto-approve + auto-start above for
+                end-to-end autonomy.
+              </p>
+            </div>
+            <Switch checked={archMode} onCheckedChange={setArchMode} id="rd-archmode" />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="rd-archcron">Architecture schedule</Label>
+            <Select
+              value={isArchPreset ? archCron : '__custom__'}
+              onValueChange={(v) => {
+                if (v !== '__custom__') setArchCron(v);
+              }}
+            >
+              <SelectTrigger id="rd-archcron">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {!isArchPreset && (
+                  <SelectItem value="__custom__">Custom: {archCron}</SelectItem>
+                )}
+                {CRON_PRESETS.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </section>
 
