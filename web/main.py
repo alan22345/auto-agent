@@ -541,11 +541,13 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
     repo_name = data.get("repo_name", "").strip()
     enabled = data.get("enabled", True)
     dev_branch = data.get("dev_branch", "dev")
-    analysis_cron = data.get("analysis_cron", "0 9 * * 1")
+    # `or` (not just `data.get(default=)`): treat empty string as missing too.
+    # The orchestrator's cron validator rejects "" with a 422.
+    analysis_cron = data.get("analysis_cron") or "0 9 * * 1"
     auto_approve_suggestions = data.get("auto_approve_suggestions", False)
     auto_start_tasks = data.get("auto_start_tasks", False)
     architecture_mode = data.get("architecture_mode", False)
-    architecture_cron = data.get("architecture_cron", "0 9 * * 1")
+    architecture_cron = data.get("architecture_cron") or "0 9 * * 1"
     if not repo_name:
         await ws.send_json({"type": "error", "message": "repo_name is required"})
         return
