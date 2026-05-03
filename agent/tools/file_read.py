@@ -39,8 +39,8 @@ class FileReadTool(Tool):
         offset = arguments.get("offset", 0)
         limit = arguments.get("limit", 2000)
 
-        resolved = self._resolve_path(file_path, context.workspace)
-        if not resolved:
+        resolved = context.resolve(file_path)
+        if resolved is None:
             return ToolResult(
                 output=f"Error: path '{file_path}' escapes the workspace.",
                 is_error=True,
@@ -71,16 +71,3 @@ class FileReadTool(Tool):
             output=output,
             token_estimate=len(output) // 3,
         )
-
-    @staticmethod
-    def _resolve_path(file_path: str, workspace: str) -> str | None:
-        """Resolve a file path relative to workspace, preventing traversal."""
-        if os.path.isabs(file_path):
-            resolved = os.path.realpath(file_path)
-        else:
-            resolved = os.path.realpath(os.path.join(workspace, file_path))
-
-        ws_real = os.path.realpath(workspace)
-        if not resolved.startswith(ws_real + os.sep) and resolved != ws_real:
-            return None
-        return resolved

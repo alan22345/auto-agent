@@ -35,11 +35,10 @@ class GlobTool(Tool):
         pattern = arguments["pattern"]
         search_dir = arguments.get("path", "")
 
-        base = os.path.join(context.workspace, search_dir) if search_dir else context.workspace
-        base = os.path.realpath(base)
-        ws_real = os.path.realpath(context.workspace)
-        if not base.startswith(ws_real):
+        base = context.resolve(search_dir)
+        if base is None:
             return ToolResult(output="Error: path escapes the workspace.", is_error=True)
+        ws_real = os.path.realpath(context.workspace)
 
         try:
             matches = list(pathlib.Path(base).glob(pattern))

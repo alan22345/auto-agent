@@ -49,8 +49,8 @@ class FileEditTool(Tool):
         new_string = arguments["new_string"]
         replace_all = arguments.get("replace_all", False)
 
-        resolved = self._resolve_path(file_path, context.workspace)
-        if not resolved:
+        resolved = context.resolve(file_path)
+        if resolved is None:
             return ToolResult(output=f"Error: path '{file_path}' escapes the workspace.", is_error=True)
 
         if not os.path.isfile(resolved):
@@ -95,14 +95,3 @@ class FileEditTool(Tool):
             return ToolResult(output=f"Error writing file: {e}", is_error=True)
 
         return ToolResult(output=f"Replaced {replaced} occurrence(s) in {file_path}")
-
-    @staticmethod
-    def _resolve_path(file_path: str, workspace: str) -> str | None:
-        if os.path.isabs(file_path):
-            resolved = os.path.realpath(file_path)
-        else:
-            resolved = os.path.realpath(os.path.join(workspace, file_path))
-        ws_real = os.path.realpath(workspace)
-        if not resolved.startswith(ws_real + os.sep) and resolved != ws_real:
-            return None
-        return resolved

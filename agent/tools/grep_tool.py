@@ -65,11 +65,10 @@ class GrepTool(Tool):
         context_lines = min(arguments.get("context_lines", 0), 10)  # Cap at 10
         multiline = arguments.get("multiline", False)
 
-        base = os.path.join(context.workspace, search_path) if search_path else context.workspace
-        base = os.path.realpath(base)
-        ws_real = os.path.realpath(context.workspace)
-        if not base.startswith(ws_real):
+        base = context.resolve(search_path)
+        if base is None:
             return ToolResult(output="Error: path escapes the workspace.", is_error=True)
+        ws_real = os.path.realpath(context.workspace)
 
         flags = re.IGNORECASE if case_insensitive else 0
         if multiline:
