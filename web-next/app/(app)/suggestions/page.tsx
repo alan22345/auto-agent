@@ -29,10 +29,34 @@ const PRIORITY_LABEL: Record<number, { label: string; variant: 'default' | 'seco
   5: { label: 'P5', variant: 'outline' },
 };
 
+// Maps the suggestion `category` (the only signal the API exposes) into a
+// human-friendly source pill. `architecture` is produced by the architect
+// analyzer; everything else comes from the PO analyzer.
+function categoryPill(category: string): { source: 'Architect' | 'PO'; label: string; className: string } {
+  if (category === 'architecture') {
+    return {
+      source: 'Architect',
+      label: 'Architect · architecture',
+      className: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+    };
+  }
+  return {
+    source: 'PO',
+    label: `PO · ${category || 'uncategorized'}`,
+    className: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+  };
+}
+
 export default function SuggestionsPage() {
   const [status, setStatus] = useState('pending');
   const [repo, setRepo] = useState<string>('');
-  const { suggestions, removeLocally } = useSuggestions(status, repo);
+  const [source, setSource] = useState<'all' | 'architect' | 'po'>('all');
+  const { suggestions: rawSuggestions, removeLocally } = useSuggestions(status, repo);
+  const suggestions = useMemo(() => {
+    if (source === 'all') return rawSuggestions;
+    if (source === 'architect') return rawSuggestions.filter((s) => s.category === 'architecture');
+    return rawSuggestions.filter((s) => s.category !== 'architecture');
+  }, [rawSuggestions, source]);
   const configs = useFreeformConfigs();
 
   const repoOptions = useMemo(() => {
@@ -85,6 +109,18 @@ export default function SuggestionsPage() {
                   {o.label}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="w-44">
+          <Select value={source} onValueChange={(v) => setSource(v as 'all' | 'architect' | 'po')}>
+            <SelectTrigger>
+              <SelectValue placeholder="Source" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All sources</SelectItem>
+              <SelectItem value="architect">Architect only</SelectItem>
+              <SelectItem value="po">PO only</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -147,13 +183,15 @@ function SuggestionCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const priority = PRIORITY_LABEL[suggestion.priority] ?? { label: `P${suggestion.priority}`, variant: 'outline' as const };
+  const pill = categoryPill(suggestion.category);
 
   return (
     <div className="rounded-md border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3 mb-1.5">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
             <Badge variant={priority.variant}>{priority.label}</Badge>
+            <Badge variant="outline" className={pill.className}>{pill.label}</Badge>
             {suggestion.repo_name && (
               <Badge variant="outline" className="font-mono text-[10px]">
                 {suggestion.repo_name}
