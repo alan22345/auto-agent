@@ -17,12 +17,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import tempfile
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent.llm import get_provider
+from agent.llm.types import Message
+from agent.prompts import build_repo_name_prompt
 from shared.config import settings
 from shared.events import Event, publish
 from shared.models import FreeformConfig, Repo, Task, TaskComplexity, TaskSource, TaskStatus
@@ -60,18 +62,18 @@ def _sanitize_slug(name: str) -> str:
 
 
 async def _generate_name_via_claude(description: str) -> str:
-    """Run a short Claude call in a temp dir to pick a repo name."""
-    # Local imports to avoid circular dependency with claude_runner.main
-    from claude_runner.main import run_claude_code
-    from claude_runner.prompts import build_repo_name_prompt
-
+    """Ask the configured LLM provider for a short repo slug."""
     prompt = build_repo_name_prompt(description)
-    with tempfile.TemporaryDirectory(prefix="repo-name-") as tmp:
-        try:
-            output = await run_claude_code(tmp, prompt, timeout=120)
-        except Exception:
-            log.exception("Claude name generation failed, using fallback")
-            return _slug_fallback(description)
+    try:
+        provider = get_provider()
+        response = await provider.complete(
+            messages=[Message(role="user", content=prompt)],
+            max_tokens=50,
+        )
+        output = response.message.content
+    except Exception:
+        log.exception("Claude name generation failed, using fallback")
+        return _slug_fallback(description)
 
     name = _sanitize_slug(output)
     if not name or name == "new-project":
