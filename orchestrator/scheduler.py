@@ -11,9 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import async_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import ScheduledTask, Task, TaskSource
-from shared.redis_client import get_redis, publish_event
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +72,4 @@ async def _create_scheduled_task(session: AsyncSession, schedule: ScheduledTask)
     session.add(task)
     await session.flush()
 
-    r = await get_redis()
-    event = Event(type="task.created", task_id=task.id)
-    await publish_event(r, event.to_redis())
-    await r.aclose()
+    await publish(Event(type="task.created", task_id=task.id))

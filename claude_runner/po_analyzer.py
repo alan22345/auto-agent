@@ -13,9 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
 from shared.database import async_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
-from shared.redis_client import get_redis, publish_event
 
 from claude_runner.main import run_claude_code
 from claude_runner.prompts import build_po_analysis_prompt
@@ -104,48 +103,39 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     )
 
     # Notify UI that analysis is starting
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="po.analysis_started",
             task_id=0,
             payload={"repo_name": repo.name},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
         output = await run_claude_code(workspace, prompt, timeout=900)
     except Exception:
         log.exception(f"PO analysis for '{repo.name}' failed during Claude Code execution")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="po.analysis_failed",
                 task_id=0,
                 payload={"repo_name": repo.name},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         raise
 
     # Parse JSON output
     suggestions_data = _parse_analysis_output(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="po.analysis_failed",
                 task_id=0,
                 payload={"repo_name": repo.name, "reason": "No parseable output from Claude"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         return
 
     # Insert suggestions
@@ -171,16 +161,13 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     log.info(f"PO analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
     # Notify UI
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="po.suggestions_ready",
             task_id=0,
             payload={"repo_name": repo.name, "count": len(new_suggestions)},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
 
 def _parse_analysis_output(output: str) -> dict | None:

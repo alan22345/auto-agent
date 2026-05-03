@@ -21,7 +21,7 @@ from orchestrator.feedback import analyze_patterns, get_feedback_summary, record
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 from shared.database import get_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import (
     FreeformConfig,
     Repo,
@@ -36,7 +36,7 @@ from shared.models import (
     User,
     intake_qa_for_suggestion,
 )
-from shared.redis_client import get_redis, publish_event
+from shared.redis_client import get_redis
 from shared.types import (
     CreateUserRequest,
     FeedbackSummary,
@@ -315,10 +315,7 @@ async def create_task(
     await session.refresh(task)
 
     # Publish event
-    r = await get_redis()
-    event = Event(type="task.created", task_id=task.id)
-    await publish_event(r, event.to_redis())
-    await r.aclose()
+    await publish(Event(type="task.created", task_id=task.id))
 
     return _task_to_response(task)
 
@@ -355,10 +352,8 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     await session.commit()
 
     # Publish cleanup event to free workspace
-    r = await get_redis()
-    await publish_event(r, Event(type="task.cleanup", task_id=task_id).to_redis())
-    await publish_event(r, Event(type="task.failed", task_id=task_id).to_redis())
-    await r.aclose()
+    await publish(Event(type="task.cleanup", task_id=task_id))
+    await publish(Event(type="task.failed", task_id=task_id))
 
     return {"deleted": task_id}
 
@@ -406,13 +401,8 @@ async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)
     )
     await session.commit()
 
-    from shared.events import Event
-    from shared.redis_client import get_redis, publish_event
-
-    r = await get_redis()
-    await publish_event(r, Event(type="task.cleanup", task_id=task_id).to_redis())
-    await publish_event(r, Event(type="task.failed", task_id=task_id).to_redis())
-    await r.aclose()
+    await publish(Event(type="task.cleanup", task_id=task_id))
+    await publish(Event(type="task.failed", task_id=task_id))
 
     return _task_to_response(task)
 
@@ -596,16 +586,17 @@ async def post_task_message(
     # next turn, and publish an event for any other subscribers.
     formatted = f"{sender}: {content}" if sender not in ("anonymous",) else content
     r = await get_redis()
-    await r.rpush(f"task:{task_id}:guidance", formatted)
-    await publish_event(
-        r,
+    try:
+        await r.rpush(f"task:{task_id}:guidance", formatted)
+    finally:
+        await r.aclose()
+    await publish(
         Event(
             type="task.feedback",
             task_id=task_id,
             payload={"message_id": msg.id, "sender": sender},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
     return TaskMessageData(
         id=msg.id,
@@ -630,9 +621,7 @@ async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(400, f"Cannot mark done from {task.status.value}")
 
     if task.status == TaskStatus.AWAITING_REVIEW:
-        r = await get_redis()
-        await publish_event(r, Event(type="task.review_approved", task_id=task.id).to_redis())
-        await r.aclose()
+        await publish(Event(type="task.review_approved", task_id=task.id))
 
     task = await transition(session, task, TaskStatus.DONE, "Marked done by user")
     await session.commit()
@@ -678,35 +667,31 @@ async def approve_task(
     if task.status != TaskStatus.AWAITING_APPROVAL:
         raise HTTPException(400, f"Task is in {task.status.value}, not awaiting_approval")
 
-    r = await get_redis()
     if req.approved:
         approve_msg = req.message or "Plan approved by user"
         task = await transition(session, task, TaskStatus.CODING, approve_msg)
         await session.commit()
-        await publish_event(r, Event(type="task.approved", task_id=task.id).to_redis())
+        await publish(Event(type="task.approved", task_id=task.id))
     else:
         # Clear the old plan and re-run planning with feedback
         task.plan = None
         reject_msg = req.message or f"Plan rejected: {req.feedback}"
         task = await transition(session, task, TaskStatus.PLANNING, reject_msg)
         await session.commit()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.rejected",
                 task_id=task.id,
                 payload={"feedback": req.feedback},
-            ).to_redis(),
+            )
         )
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.start_planning",
                 task_id=task.id,
                 payload={"feedback": req.feedback},
-            ).to_redis(),
+            )
         )
-    await r.aclose()
 
     return _task_to_response(task)
 
@@ -939,16 +924,13 @@ async def trigger_harness_onboarding(
         await session.commit()
 
     # Publish event to trigger onboarding asynchronously
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="repo.onboard",
             task_id=0,
             payload={"repo_id": repo.id, "repo_name": repo.name},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
     return {"status": "onboarding_started", "repo": repo.name}
 
@@ -1022,16 +1004,13 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
     await session.commit()
 
     # Publish event so background loops can react
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="repo.deleted",
             task_id=0,
             payload={"repo_name": repo_name},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
     return {"deleted": repo_name}
 
@@ -1201,14 +1180,11 @@ async def trigger_po_analysis(
     if not repo:
         raise HTTPException(404, f"Repo '{repo_name}' not found")
 
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="po.analyze", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}
-        ).to_redis(),
+        )
     )
-    await r.aclose()
     return {"ok": True, "message": f"PO analysis triggered for {repo_name}"}
 
 
@@ -1263,9 +1239,7 @@ async def approve_suggestion(
     await session.commit()
 
     # Trigger task pipeline
-    r = await get_redis()
-    await publish_event(r, Event(type="task.created", task_id=task.id).to_redis())
-    await r.aclose()
+    await publish(Event(type="task.created", task_id=task.id))
 
     return _task_to_response(task)
 

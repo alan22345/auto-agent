@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from shared.config import settings
 from shared.database import async_session, engine
-from shared.events import Event, EventBus
+from shared.events import Event, EventBus, RedisStreamPublisher, publish, set_publisher
 from shared.logging import setup_logging
 from shared.models import (
     Base,
@@ -48,7 +48,6 @@ from shared.redis_client import (
     ack_event,
     ensure_stream_group,
     get_redis,
-    publish_event,
     read_events,
 )
 
@@ -200,13 +199,11 @@ async def on_task_created(event: Event) -> None:
         # directly to the query handler.
         if complexity == TaskComplexity.SIMPLE_NO_CODE:
             log.info(f"Task #{task.id} classified as simple_no_code — skipping repo match")
-            r = await get_redis()
-            await publish_event(r, Event(
+            await publish(Event(
                 type="task.classified",
                 task_id=task.id,
                 payload=payload,
-            ).to_redis())
-            await r.aclose()
+            ))
             return
 
         # Auto-match repo from task text if not already set
@@ -217,13 +214,11 @@ async def on_task_created(event: Event) -> None:
                 await session.commit()
                 log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
 
-        r = await get_redis()
-        await publish_event(r, Event(
+        await publish(Event(
             type="task.classified",
             task_id=task.id,
             payload=payload,
-        ).to_redis())
-        await r.aclose()
+        ))
 
 
 async def on_task_classified(event: Event) -> None:
@@ -239,11 +234,7 @@ async def on_task_classified(event: Event) -> None:
             task = await transition(session, task, TaskStatus.QUEUED)
             task = await transition(session, task, TaskStatus.CODING, "Processing query...")
             await session.commit()
-            r = await get_redis()
-            await publish_event(
-                r, Event(type="task.query", task_id=task.id).to_redis()
-            )
-            await r.aclose()
+            await publish(Event(type="task.query", task_id=task.id))
             return
 
         # Freeform tasks with auto_start_tasks bypass the concurrency queue
@@ -268,12 +259,10 @@ async def on_task_classified(event: Event) -> None:
             task = await transition(session, task, TaskStatus.QUEUED, "Waiting for available slot")
         await session.commit()
 
-        r = await get_redis()
         if task.status == TaskStatus.PLANNING:
-            await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
+            await publish(Event(type="task.start_planning", task_id=task.id))
         elif task.status == TaskStatus.CODING:
-            await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
-        await r.aclose()
+            await publish(Event(type="task.start_coding", task_id=task.id))
 
 
 async def on_clarification_resolved(event: Event) -> None:
@@ -288,16 +277,12 @@ async def on_clarification_resolved(event: Event) -> None:
             # Was in planning phase, hasn't produced a plan yet — resume planning
             task = await transition(session, task, TaskStatus.PLANNING, "Clarification resolved, resuming planning")
             await session.commit()
-            r = await get_redis()
-            await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
-            await r.aclose()
+            await publish(Event(type="task.start_planning", task_id=task.id))
         else:
             # Was in coding phase — resume coding
             task = await transition(session, task, TaskStatus.CODING, "Clarification resolved, resuming coding")
             await session.commit()
-            r = await get_redis()
-            await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
-            await r.aclose()
+            await publish(Event(type="task.start_coding", task_id=task.id))
 
 
 async def on_task_approved(event: Event) -> None:
@@ -305,9 +290,7 @@ async def on_task_approved(event: Event) -> None:
         task = await get_task(session, event.task_id)
         if not task:
             return
-        r = await get_redis()
-        await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
-        await r.aclose()
+        await publish(Event(type="task.start_coding", task_id=task.id))
 
 
 async def on_review_complete(event: Event) -> None:
@@ -394,11 +377,7 @@ async def on_ci_passed(event: Event) -> None:
         await session.commit()
 
     # Trigger dev deploy so the user can review a live preview
-    r = await get_redis()
-    await publish_event(
-        r, Event(type="task.deploy_preview", task_id=event.task_id).to_redis()
-    )
-    await r.aclose()
+    await publish(Event(type="task.deploy_preview", task_id=event.task_id))
 
 
 # Named sentinels _fetch_failed_ci_logs returns when it couldn't surface a
@@ -554,13 +533,11 @@ async def on_ci_failed(event: Event) -> None:
         task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
         await session.commit()
 
-        r = await get_redis()
-        await publish_event(r, Event(
+        await publish(Event(
             type="task.start_coding",
             task_id=task.id,
             payload={"retry_reason": reason[-3000:]},
-        ).to_redis())
-        await r.aclose()
+        ))
 
 
 # Cap on consecutive deploy failures before we stop retrying. Picked low
@@ -682,13 +659,11 @@ async def on_dev_deploy_failed(event: Event) -> None:
         task = await transition(session, task, TaskStatus.CODING, f"Deploy failed — fetched logs")
         await session.commit()
 
-        r = await get_redis()
-        await publish_event(r, Event(
+        await publish(Event(
             type="task.start_coding",
             task_id=task.id,
             payload={"retry_reason": reason[-3000:]},
-        ).to_redis())
-        await r.aclose()
+        ))
 
 
 async def on_review_approved(event: Event) -> None:
@@ -796,20 +771,14 @@ async def on_po_suggestions_ready(event: Event) -> None:
             f"(slots remaining: {slots - len(created_task_ids)}): tasks {created_task_ids}"
         )
 
-    r = await get_redis()
     for tid in created_task_ids:
-        await publish_event(r, Event(type="task.created", task_id=tid).to_redis())
-    await r.aclose()
+        await publish(Event(type="task.created", task_id=tid))
 
 
 async def on_task_finished(event: Event) -> None:
     # Clean up workspace and session for the finished task
     if event.task_id:
-        r = await get_redis()
-        await publish_event(
-            r, Event(type="task.cleanup", task_id=event.task_id).to_redis()
-        )
-        await r.aclose()
+        await publish(Event(type="task.cleanup", task_id=event.task_id))
 
     async with async_session() as session:
         await _try_start_queued(session)
@@ -844,10 +813,8 @@ async def _try_start_queued(session) -> None:
                 task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
             await session.commit()
 
-            r = await get_redis()
             evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
-            await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
-            await r.aclose()
+            await publish(Event(type=evt, task_id=task.id))
 
 
 async def on_start_queued_task(event: Event) -> None:
@@ -867,10 +834,8 @@ async def on_start_queued_task(event: Event) -> None:
             task = await transition(session, task, TaskStatus.CODING, "Starting coding")
         await session.commit()
 
-        r = await get_redis()
         evt = "task.start_planning" if task.status == TaskStatus.PLANNING else "task.start_coding"
-        await publish_event(r, Event(type=evt, task_id=task.id).to_redis())
-        await r.aclose()
+        await publish(Event(type=evt, task_id=task.id))
         log.info(f"Started queued task #{task.id}")
 
 
@@ -1037,16 +1002,12 @@ async def task_timeout_watchdog() -> None:
                         await session.commit()
                         _recovery_attempted.discard(task.id)
 
-                        r = await get_redis()
-                        await publish_event(
-                            r, Event(type="task.failed", task_id=task.id, payload={
-                                "error": f"Hard timeout in {task.status.value}",
-                            }).to_redis()
-                        )
-                        await publish_event(
-                            r, Event(type="task.cleanup", task_id=task.id).to_redis()
-                        )
-                        await r.aclose()
+                        await publish(Event(
+                            type="task.failed",
+                            task_id=task.id,
+                            payload={"error": f"Hard timeout in {task.status.value}"},
+                        ))
+                        await publish(Event(type="task.cleanup", task_id=task.id))
 
                     elif age_s > soft_timeout and task.id not in _recovery_attempted:
                         # Soft timeout: try recovery once
@@ -1055,16 +1016,10 @@ async def task_timeout_watchdog() -> None:
                             f"Task #{task.id} soft timeout in {task.status.value} "
                             f"({age_s:.0f}s, no heartbeat) — attempting recovery"
                         )
-                        r = await get_redis()
                         if task.status == TaskStatus.PLANNING:
-                            await publish_event(
-                                r, Event(type="task.start_planning", task_id=task.id).to_redis()
-                            )
+                            await publish(Event(type="task.start_planning", task_id=task.id))
                         elif task.status == TaskStatus.CODING:
-                            await publish_event(
-                                r, Event(type="task.start_coding", task_id=task.id).to_redis()
-                            )
-                        await r.aclose()
+                            await publish(Event(type="task.start_coding", task_id=task.id))
 
         except Exception:
             log.exception("Watchdog error")
@@ -1116,29 +1071,19 @@ async def ci_status_poller() -> None:
                         no_ci = await _pr_has_no_checks(task.pr_url, _settings.github_token)
                         if no_ci:
                             log.info(f"Task #{task.id}: no CI checks on PR, skipping to review")
-                            r = await get_redis()
-                            await publish_event(r, Event(
-                                type="task.ci_passed",
-                                task_id=task.id,
-                            ).to_redis())
-                            await r.aclose()
+                            await publish(Event(type="task.ci_passed", task_id=task.id))
                         continue
 
-                    r = await get_redis()
                     if conclusion == "success":
                         log.info(f"Task #{task.id}: CI passed (polled)")
-                        await publish_event(r, Event(
-                            type="task.ci_passed",
-                            task_id=task.id,
-                        ).to_redis())
+                        await publish(Event(type="task.ci_passed", task_id=task.id))
                     elif conclusion in ("failure", "timed_out", "action_required"):
                         log.info(f"Task #{task.id}: CI failed: {conclusion} (polled)")
-                        await publish_event(r, Event(
+                        await publish(Event(
                             type="task.ci_failed",
                             task_id=task.id,
                             payload={"reason": f"CI conclusion: {conclusion}"},
-                        ).to_redis())
-                    await r.aclose()
+                        ))
 
         except Exception:
             log.exception("CI poller error")
@@ -1313,12 +1258,7 @@ async def pr_merge_poller() -> None:
 
                     if merged:
                         log.info(f"Task #{task.id}: PR merged detected (polled)")
-                        r = await get_redis()
-                        await publish_event(r, Event(
-                            type="task.review_approved",
-                            task_id=task.id,
-                        ).to_redis())
-                        await r.aclose()
+                        await publish(Event(type="task.review_approved", task_id=task.id))
                         # Clean up — task will transition out of AWAITING_REVIEW
                         _merge_poll_intervals.pop(task.id, None)
                         _merge_poll_last_check.pop(task.id, None)
@@ -1463,16 +1403,14 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
     all_feedback = "\n\n---\n\n".join(msg for _, msg in sorted(new_comments))
     log.info(f"Task #{task.id}: {len(new_comments)} new PR comment(s) found (polled)")
 
-    r = await get_redis()
-    await publish_event(r, Event(
+    await publish(Event(
         type="human.message",
         task_id=task.id,
         payload={
             "message": all_feedback,
             "source": "github_pr_comment_poll",
         },
-    ).to_redis())
-    await r.aclose()
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -1524,24 +1462,22 @@ async def _recover_stuck_tasks() -> None:
         if not stuck_tasks:
             return
 
-        r = await get_redis()
         for task in stuck_tasks:
             if task.status == TaskStatus.PLANNING:
                 log.info(f"Recovering task #{task.id}: re-emitting start_planning")
-                await publish_event(r, Event(type="task.start_planning", task_id=task.id).to_redis())
+                await publish(Event(type="task.start_planning", task_id=task.id))
             elif task.status == TaskStatus.CODING:
                 if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
                     log.info(f"Recovering query task #{task.id}: re-emitting task.query")
-                    await publish_event(r, Event(type="task.query", task_id=task.id).to_redis())
+                    await publish(Event(type="task.query", task_id=task.id))
                 else:
                     log.info(f"Recovering task #{task.id}: re-emitting start_coding")
-                    await publish_event(r, Event(type="task.start_coding", task_id=task.id).to_redis())
+                    await publish(Event(type="task.start_coding", task_id=task.id))
             elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
                 log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
-                await publish_event(
-                    r, Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan or ""}).to_redis()
+                await publish(
+                    Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan or ""})
                 )
-        await r.aclose()
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
 
     # Also try starting any queued tasks that may have been left behind
@@ -1600,6 +1536,11 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # Wire the production publisher BEFORE anything that emits events runs.
+    # _recover_stuck_tasks publishes on startup, so this must come first.
+    redis_publisher = RedisStreamPublisher(settings.redis_url)
+    set_publisher(redis_publisher)
+
     # Seed admin user if no users exist
     from orchestrator.router import seed_admin_user
     await seed_admin_user()
@@ -1638,6 +1579,7 @@ async def lifespan(app: FastAPI):
     for t in bg:
         with contextlib.suppress(asyncio.CancelledError):
             await t
+    await redis_publisher.aclose()
 
 
 app.router.lifespan_context = lifespan

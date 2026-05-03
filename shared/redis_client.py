@@ -1,12 +1,18 @@
-"""Redis Streams helpers for event bus communication."""
+"""Redis Streams helpers for the consumer side of the event bus.
+
+Publishers should NOT import from this module — they call
+``shared.events.publish(event)`` instead, which owns connection lifecycle.
+This module is the consumer-side seam: opening a Redis client, creating
+consumer groups, reading and acknowledging events.
+"""
 
 from __future__ import annotations
 
 import redis.asyncio as aioredis
 
 from shared.config import settings
+from shared.events import STREAM_KEY
 
-STREAM_KEY = "autoagent:events"
 GROUP_NAME = "autoagent"
 
 
@@ -29,11 +35,6 @@ async def ensure_stream_group(r: aioredis.Redis, stream: str = STREAM_KEY, group
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
-
-
-async def publish_event(r: aioredis.Redis, event_data: dict[str, str], stream: str = STREAM_KEY) -> str:
-    """Publish an event to the stream. Returns the message ID."""
-    return await r.xadd(stream, event_data)
 
 
 async def read_events(

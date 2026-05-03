@@ -14,8 +14,6 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from shared.config import settings
-from shared.events import Event
-from shared.redis_client import get_redis, publish_event
 from shared.types import LinearIssue
 
 log = logging.getLogger(__name__)

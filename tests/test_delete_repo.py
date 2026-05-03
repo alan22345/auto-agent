@@ -10,12 +10,8 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.models import (
-    FreeformConfig,
     Repo,
-    Suggestion,
-    SuggestionStatus,
     Task,
-    TaskSource,
     TaskStatus,
 )
 from orchestrator.router import delete_repo, TERMINAL_STATUSES
@@ -39,16 +35,6 @@ def _make_task(id: int = 1, repo_id: int = 1, status: TaskStatus = TaskStatus.DO
     task.repo_id = repo_id
     task.status = status
     return task
-
-
-def _mock_session(select_results: dict | None = None):
-    """Create a mock AsyncSession.
-
-    select_results: maps a description key to the scalars().all() result.
-    The first execute call returns the first entry, etc.
-    """
-    session = AsyncMock(spec=AsyncSession)
-    return session
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +70,8 @@ class TestDeleteRepoEndpoint:
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router.publish_event", new_callable=AsyncMock)
-    @patch("orchestrator.router.get_redis", new_callable=AsyncMock)
     @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
-    async def test_active_task_blocks_deletion(self, mock_get_repo, mock_redis, mock_publish):
+    async def test_active_task_blocks_deletion(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
         active_task = _make_task(status=TaskStatus.CODING)
@@ -103,18 +87,16 @@ class TestDeleteRepoEndpoint:
         assert exc_info.value.status_code == 409
         assert "1 active task(s)" in exc_info.value.detail
 
-        # Verify no deletes happened
+        # Verify no deletes happened and no event was published
         session.delete.assert_not_called()
         session.commit.assert_not_called()
+        assert publisher.events == []
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router.publish_event", new_callable=AsyncMock)
-    @patch("orchestrator.router.get_redis", new_callable=AsyncMock)
     @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
-    async def test_successful_delete(self, mock_get_repo, mock_redis, mock_publish):
+    async def test_successful_delete(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
-        mock_redis.return_value = AsyncMock()
 
         session = AsyncMock(spec=AsyncSession)
         # First execute: active task query returns empty
@@ -136,14 +118,11 @@ class TestDeleteRepoEndpoint:
         assert session.execute.call_count == 4
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router.publish_event", new_callable=AsyncMock)
-    @patch("orchestrator.router.get_redis", new_callable=AsyncMock)
     @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
-    async def test_blocked_task_allows_deletion(self, mock_get_repo, mock_redis, mock_publish):
+    async def test_blocked_task_allows_deletion(self, mock_get_repo, publisher):
         """BLOCKED tasks should not prevent repo deletion."""
         repo = _make_repo()
         mock_get_repo.return_value = repo
-        mock_redis.return_value = AsyncMock()
 
         session = AsyncMock(spec=AsyncSession)
         # Active task query returns empty (BLOCKED is terminal)
@@ -155,14 +134,10 @@ class TestDeleteRepoEndpoint:
         assert result == {"deleted": "test-repo"}
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router.publish_event", new_callable=AsyncMock)
-    @patch("orchestrator.router.get_redis", new_callable=AsyncMock)
     @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
-    async def test_publishes_event(self, mock_get_repo, mock_redis, mock_publish):
+    async def test_publishes_event(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
-        mock_redis_instance = AsyncMock()
-        mock_redis.return_value = mock_redis_instance
 
         session = AsyncMock(spec=AsyncSession)
         mock_result = MagicMock()
@@ -171,15 +146,14 @@ class TestDeleteRepoEndpoint:
 
         await delete_repo("test-repo", session)
 
-        mock_publish.assert_called_once()
-        assert mock_publish.call_args[0][0] is mock_redis_instance
-        mock_redis_instance.aclose.assert_called_once()
+        assert len(publisher.events) == 1
+        ev = publisher.events[0]
+        assert ev.type == "repo.deleted"
+        assert ev.payload == {"repo_name": "test-repo"}
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router.publish_event", new_callable=AsyncMock)
-    @patch("orchestrator.router.get_redis", new_callable=AsyncMock)
     @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
-    async def test_multiple_active_tasks_reports_count(self, mock_get_repo, mock_redis, mock_publish):
+    async def test_multiple_active_tasks_reports_count(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
 

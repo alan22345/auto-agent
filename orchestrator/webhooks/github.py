@@ -20,9 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
 from shared.database import async_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import Task, TaskStatus
-from shared.redis_client import get_redis, publish_event
 from shared.types import PRReviewComment
 
 log = logging.getLogger(__name__)
@@ -125,21 +124,16 @@ async def _handle_check_suite(payload: dict[str, Any]) -> None:
         if task.status != TaskStatus.AWAITING_CI:
             return  # Not waiting for CI
 
-        r = await get_redis()
         if conclusion == "success":
-            await publish_event(r, Event(
-                type="task.ci_passed",
-                task_id=task.id,
-            ).to_redis())
+            await publish(Event(type="task.ci_passed", task_id=task.id))
             log.info(f"CI passed for task #{task.id} (webhook)")
         elif conclusion in ("failure", "timed_out", "action_required"):
-            await publish_event(r, Event(
+            await publish(Event(
                 type="task.ci_failed",
                 task_id=task.id,
                 payload={"reason": f"CI conclusion: {conclusion}"},
-            ).to_redis())
+            ))
             log.info(f"CI failed for task #{task.id}: {conclusion} (webhook)")
-        await r.aclose()
 
 
 async def _handle_commit_status(payload: dict[str, Any]) -> None:
@@ -157,18 +151,16 @@ async def _handle_commit_status(payload: dict[str, Any]) -> None:
             if not task or task.status != TaskStatus.AWAITING_CI:
                 continue
 
-            r = await get_redis()
             if state == "success":
-                await publish_event(r, Event(type="task.ci_passed", task_id=task.id).to_redis())
+                await publish(Event(type="task.ci_passed", task_id=task.id))
                 log.info(f"CI passed for task #{task.id} (status webhook)")
             elif state in ("failure", "error"):
-                await publish_event(r, Event(
+                await publish(Event(
                     type="task.ci_failed",
                     task_id=task.id,
                     payload={"reason": f"Commit status: {state}"},
-                ).to_redis())
+                ))
                 log.info(f"CI failed for task #{task.id}: {state} (status webhook)")
-            await r.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -208,16 +200,14 @@ async def _handle_pr_review(payload: dict[str, Any]) -> None:
                 body=review.get("body", ""),
                 type="review",
             )
-            r = await get_redis()
-            await publish_event(r, Event(
+            await publish(Event(
                 type="human.message",
                 task_id=task.id,
                 payload={
                     "message": f"[{comment.author}] Review (changes requested): {comment.body}",
                     "source": "github_review",
                 },
-            ).to_redis())
-            await r.aclose()
+            ))
             log.info(f"Changes requested on task #{task.id} by {comment.author} (webhook)")
 
 
@@ -254,16 +244,14 @@ async def _handle_pr_comment(payload: dict[str, Any]) -> None:
             return
 
         file_context = f" on `{path}`" if path else ""
-        r = await get_redis()
-        await publish_event(r, Event(
+        await publish(Event(
             type="human.message",
             task_id=task.id,
             payload={
                 "message": f"[{author}] PR comment{file_context}: {body}",
                 "source": "github_pr_comment",
             },
-        ).to_redis())
-        await r.aclose()
+        ))
         log.info(f"PR comment on task #{task.id} by {author} (webhook)")
 
 
@@ -295,16 +283,14 @@ async def _handle_issue_comment(payload: dict[str, Any]) -> None:
         if not task:
             return
 
-        r = await get_redis()
-        await publish_event(r, Event(
+        await publish(Event(
             type="human.message",
             task_id=task.id,
             payload={
                 "message": f"[{author}] PR comment: {body}",
                 "source": "github_pr_comment",
             },
-        ).to_redis())
-        await r.aclose()
+        ))
         log.info(f"PR conversation comment on task #{task.id} by {author} (webhook)")
 
 
@@ -329,12 +315,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
             if not task:
                 return
 
-            r = await get_redis()
-            await publish_event(r, Event(
-                type="task.review_approved",
-                task_id=task.id,
-            ).to_redis())
-            await r.aclose()
+            await publish(Event(type="task.review_approved", task_id=task.id))
             log.info(f"PR merged for task #{task.id} (webhook)")
 
     elif action == "closed" and not merged and head_branch.startswith("auto-agent/"):
@@ -346,11 +327,9 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
             if not task:
                 return
 
-            r = await get_redis()
-            await publish_event(r, Event(
+            await publish(Event(
                 type="task.failed",
                 task_id=task.id,
                 payload={"reason": "PR closed without merging"},
-            ).to_redis())
-            await r.aclose()
+            ))
             log.info(f"PR closed without merge for task #{task.id} (webhook)")

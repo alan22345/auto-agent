@@ -24,9 +24,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import FreeformConfig, Repo, Task, TaskComplexity, TaskSource, TaskStatus
-from shared.redis_client import get_redis, publish_event
 
 log = logging.getLogger(__name__)
 
@@ -241,11 +240,7 @@ async def create_repo_and_scaffold_task(
     await session.refresh(primary_repo)
 
     # 7. Publish task.created so the orchestrator picks it up
-    r = await get_redis()
-    await publish_event(
-        r, Event(type="task.created", task_id=task.id).to_redis()
-    )
-    await r.aclose()
+    await publish(Event(type="task.created", task_id=task.id))
 
     log.info(f"Scaffold task #{task.id} created for repo {full_name}")
     return primary_repo, task

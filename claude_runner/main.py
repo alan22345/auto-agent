@@ -10,13 +10,12 @@ from datetime import datetime, timezone, timedelta
 import httpx
 
 from shared.config import settings
-from shared.events import Event
+from shared.events import Event, publish
 from shared.logging import setup_logging
 from shared.redis_client import (
     ack_event,
     ensure_stream_group,
     get_redis,
-    publish_event,
     read_events,
 )
 from shared.types import FreeformConfigData, RepoData, TaskData
@@ -180,16 +179,13 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
         )
     # Publish an event for terminal transitions so notifications fire
     if status in ("failed", "blocked", "done"):
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type=f"task.{status}",
                 task_id=task_id,
                 payload={"error": message} if status in ("failed", "blocked") else {},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
 
 async def run_claude_code(
@@ -278,16 +274,13 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     # Trigger harness onboarding if not done yet (non-blocking — runs in background)
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="repo.onboard",
                 task_id=0,
                 payload={"repo_id": repo.id, "repo_name": repo.name},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
     # Generate repo summary if missing or stale — saves context on future tasks
     summary_stale = False
@@ -350,16 +343,13 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         if question:
             log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
             await transition_task(task_id, "awaiting_clarification", question)
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.clarification_needed",
                     task_id=task_id,
                     payload={"question": question, "phase": "planning"},
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
             return
 
         async with httpx.AsyncClient() as client:
@@ -371,16 +361,13 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
                 },
             )
 
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.plan_ready",
                 task_id=task_id,
                 payload={"plan": output},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
@@ -443,16 +430,13 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     # Trigger harness onboarding if not done yet (non-blocking — runs in background)
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="repo.onboard",
                 task_id=0,
                 payload={"repo_id": repo.id, "repo_name": repo.name},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
     session_id = _session_id(task_id, task.created_at)
     base_branch = repo.default_branch
@@ -530,16 +514,13 @@ async def _handle_coding_single(
     if question:
         log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
         await transition_task(task_id, "awaiting_clarification", question)
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.clarification_needed",
                 task_id=task_id,
                 payload={"question": question, "phase": "coding"},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
         return
 
     await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
@@ -581,9 +562,7 @@ async def _handle_coding_with_subtasks(
         await _update_subtasks(task_id, phases, i)
 
         # Publish progress event
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.subtask_progress",
                 task_id=task_id,
@@ -593,9 +572,8 @@ async def _handle_coding_with_subtasks(
                     "title": phase["title"],
                     "status": "running",
                 },
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
         prompt = (
             f"You are implementing a large task in phases. This is phase {i + 1} of {total}.\n\n"
@@ -628,16 +606,13 @@ async def _handle_coding_with_subtasks(
             phases[i]["status"] = "blocked"
             await _update_subtasks(task_id, phases, i)
             await transition_task(task_id, "awaiting_clarification", question)
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.clarification_needed",
                     task_id=task_id,
                     payload={"question": question, "phase": f"subtask {i + 1}: {phase['title']}"},
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
             return
 
         phases[i]["status"] = "done"
@@ -645,9 +620,7 @@ async def _handle_coding_with_subtasks(
         await _update_subtasks(task_id, phases, i)
 
         # Publish completion event for this subtask
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.subtask_progress",
                 task_id=task_id,
@@ -657,9 +630,8 @@ async def _handle_coding_with_subtasks(
                     "title": phase["title"],
                     "status": "done",
                 },
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
     log.info(f"Task #{task_id}: all {total} subtasks complete, proceeding to review + PR")
     await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
@@ -764,9 +736,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
 
         if approved:
             log.info(f"Independent review approved task #{task_id}")
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.review_complete",
                     task_id=task_id,
@@ -776,9 +746,8 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                         "branch": branch_name,
                         "approved": True,
                     },
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
         else:
             log.info(f"Independent review requested changes for task #{task_id}")
             # Resume the coding session (session A) to address review feedback
@@ -797,9 +766,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             # Push the fixes
             await push_branch(workspace, branch_name)
 
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.review_complete",
                     task_id=task_id,
@@ -810,16 +777,13 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                         "branch": branch_name,
                         "approved": False,
                     },
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
 
     except Exception as e:
         log.exception(f"Independent review failed for task #{task_id}")
         # Don't fail the task — just skip review and proceed
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.review_complete",
                 task_id=task_id,
@@ -829,9 +793,8 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                     "branch": branch_name,
                     "approved": True,
                 },
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
 
 async def handle_plan_independent_review(task_id: int) -> None:
@@ -952,9 +915,7 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         await push_branch(workspace, branch_name)
 
         # Notify that review comments have been addressed
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.review_comments_addressed",
                 task_id=task_id,
@@ -962,9 +923,8 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
                     "output": output[:1000],
                     "pr_url": task.pr_url or "",
                 },
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
 
     except Exception as e:
         log.exception(f"PR review response failed for task #{task_id}")
@@ -1007,29 +967,23 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
     if follow_up:
         log.info(f"Task #{task_id} needs another clarification: {follow_up[:100]}...")
         await transition_task(task_id, "awaiting_clarification", follow_up)
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.clarification_needed",
                 task_id=task_id,
                 payload={"question": follow_up, "phase": "continuation"},
-            ).to_redis(),
+            ),
         )
-        await r.aclose()
         return
 
     # Clarification resolved — tell orchestrator to resume the task's previous phase
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="task.clarification_resolved",
             task_id=task_id,
             payload={"output": output},
-        ).to_redis(),
+        ),
     )
-    await r.aclose()
 
 
 async def _try_assign_repo(task_id: int, message: str) -> bool:
@@ -1077,16 +1031,13 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
                 f"from message: {message[:100]}"
             )
             # Re-publish blocked event so user gets notified with instructions
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.blocked",
                     task_id=task_id,
                     payload={"error": "No repo assigned. Please include the repo name in your message."},
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
             return
 
     if task.pr_url:
@@ -1205,10 +1156,8 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
                 owner, repo, workflow_id, branch_name, headers, task_id,
             )
 
-            r = await get_redis()
             if conclusion == "success":
-                await publish_event(
-                    r,
+                await publish(
                     Event(
                         type="task.dev_deployed",
                         task_id=task_id,
@@ -1217,11 +1166,10 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
                             "output": f"Deploy workflow '{deploy_workflow['name']}' completed successfully. Branch '{branch_name}' is now live on dev.",
                             "pr_url": task.pr_url or "",
                         },
-                    ).to_redis(),
+                    )
                 )
             else:
-                await publish_event(
-                    r,
+                await publish(
                     Event(
                         type="task.dev_deploy_failed",
                         task_id=task_id,
@@ -1230,9 +1178,8 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
                             "output": f"Deploy workflow '{deploy_workflow['name']}' finished with conclusion: {conclusion}",
                             "pr_url": task.pr_url or "",
                         },
-                    ).to_redis(),
+                    )
                 )
-            await r.aclose()
             return True
         else:
             log.warning(
@@ -1332,9 +1279,7 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
             proc.kill()
             await proc.wait()
             log.warning(f"Task #{task_id}: deploy script timed out after 300s")
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.dev_deploy_failed",
                     task_id=task_id,
@@ -1343,20 +1288,17 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
                         "output": "Deploy script timed out after 300s",
                         "pr_url": task.pr_url or "",
                     },
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
             return
 
         stdout_str = (stdout or b"").decode()
         stderr_str = (stderr or b"").decode()
         output = (stdout_str + stderr_str).strip()
 
-        r = await get_redis()
         if proc.returncode == 0:
             log.info(f"Task #{task_id}: dev deploy succeeded")
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.dev_deployed",
                     task_id=task_id,
@@ -1365,12 +1307,11 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
                         "output": output[-1000:],
                         "pr_url": task.pr_url or "",
                     },
-                ).to_redis(),
+                )
             )
         else:
             log.warning(f"Task #{task_id}: deploy script failed (exit {proc.returncode}): {output[-500:]}")
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.dev_deploy_failed",
                     task_id=task_id,
@@ -1379,16 +1320,13 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
                         "output": f"Deploy script failed (exit {proc.returncode}):\n{output[-1000:]}",
                         "pr_url": task.pr_url or "",
                     },
-                ).to_redis(),
+                )
             )
-        await r.aclose()
 
     except Exception:
         log.exception(f"Task #{task_id}: deploy preview failed")
         try:
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.dev_deploy_failed",
                     task_id=task_id,
@@ -1397,9 +1335,8 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
                         "output": "Deploy preview failed due to an unexpected error",
                         "pr_url": task.pr_url or "",
                     },
-                ).to_redis(),
+                ),
             )
-            await r.aclose()
         except Exception:
             log.exception(f"Task #{task_id}: failed to publish deploy failure event")
 
@@ -1484,16 +1421,13 @@ async def event_loop() -> None:
                             queued = _po_queue.qsize() > 0
                             await _po_queue.put(repo_id)
                             if queued:
-                                r2 = await get_redis()
-                                await publish_event(
-                                    r2,
+                                await publish(
                                     Event(
                                         type="po.analysis_queued",
                                         task_id=0,
                                         payload={"repo_name": repo_name, "position": _po_queue.qsize()},
-                                    ).to_redis(),
+                                    )
                                 )
-                                await r2.aclose()
                     elif event.type == "repo.onboard":
                         repo_id = event.payload.get("repo_id")
                         repo_name = event.payload.get("repo_name", "")
@@ -1522,16 +1456,13 @@ async def event_loop() -> None:
                                     f"not routing to Claude (no branch/PR yet)"
                                 )
                                 if task.plan:
-                                    r2 = await get_redis()
-                                    await publish_event(
-                                        r2,
+                                    await publish(
                                         Event(
                                             type="task.plan_ready",
                                             task_id=task_id,
                                             payload={"plan": task.plan},
-                                        ).to_redis(),
+                                        )
                                     )
-                                    await r2.aclose()
                 except Exception:
                     log.exception("Error handling event")
                 finally:

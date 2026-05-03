@@ -50,7 +50,7 @@ class TestPostTaskMessage:
             assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_x_sender_header_used_when_no_auth(self):
+    async def test_x_sender_header_used_when_no_auth(self, publisher):
         """Internal callers (Telegram bridge) pass X-Sender."""
         session = AsyncMock(spec=AsyncSession)
         # Simulate the row hydration from refresh()
@@ -61,8 +61,7 @@ class TestPostTaskMessage:
         fake_redis = AsyncMock()
 
         with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())), \
-             patch("orchestrator.router.get_redis", AsyncMock(return_value=fake_redis)), \
-             patch("orchestrator.router.publish_event", AsyncMock()):
+             patch("orchestrator.router.get_redis", AsyncMock(return_value=fake_redis)):
             result = await post_task_message(
                 task_id=1,
                 req=TaskMessagePost(content="stop doing that"),
@@ -78,6 +77,10 @@ class TestPostTaskMessage:
         args, _ = fake_redis.rpush.await_args
         assert args[0] == "task:1:guidance"
         assert "telegram:12345: stop doing that" in args[1]
+        # Event published through the new seam
+        assert len(publisher.events) == 1
+        assert publisher.events[0].type == "task.feedback"
+        assert publisher.events[0].task_id == 1
 
 
 class TestListTaskMessages:
