@@ -1,7 +1,7 @@
 """Product Owner analyzer — periodically analyzes repos to generate improvement suggestions.
 
-Ported from claude_runner/po_analyzer.py to use the AgentLoop with readonly tools,
-allowing the PO agent to actually explore the codebase with grep, file_read, etc.
+Uses the AgentLoop with readonly tools so the PO agent can explore the codebase
+with grep, file_read, etc.
 """
 
 from __future__ import annotations

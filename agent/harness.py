@@ -1,7 +1,4 @@
-"""Harness engineering — onboard repos with structure, linting, and entropy management.
-
-Ported from claude_runner/harness.py to use the AgentLoop instead of CLI subprocess.
-"""
+"""Harness engineering — onboard repos with structure, linting, and entropy management."""
 
 from __future__ import annotations
 

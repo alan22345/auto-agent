@@ -1,7 +1,4 @@
-"""Prompt templates for the agent — planning, coding, reviewing, and PO analysis.
-
-Adapted from claude_runner/prompts.py for use with the model-agnostic agent.
-"""
+"""Prompt templates for the agent — planning, coding, reviewing, and PO analysis."""
 
 CLARIFICATION_MARKER = "CLARIFICATION_NEEDED:"
 GRILL_DONE_MARKER = "GRILL_DONE:"

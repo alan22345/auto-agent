@@ -39,15 +39,13 @@ checks:
 
   module_boundaries:
     enabled: true
-    # Verify shared/ does not import from orchestrator/, claude_runner/, integrations/, web/
-    # Verify integrations/ does not import from orchestrator/, claude_runner/, web/
-    # Verify orchestrator/ does not import from claude_runner/, web/
+    # Verify shared/ does not import from orchestrator/, integrations/, web/
+    # Verify integrations/ does not import from orchestrator/, web/
+    # Verify orchestrator/ does not import from web/
     rules:
       - module: "shared"
-        banned_imports: ["orchestrator", "claude_runner", "integrations", "web"]
+        banned_imports: ["orchestrator", "integrations", "web"]
       - module: "integrations"
-        banned_imports: ["orchestrator", "claude_runner", "web"]
+        banned_imports: ["orchestrator", "web"]
       - module: "orchestrator"
-        banned_imports: ["claude_runner", "web"]
-      - module: "claude_runner"
         banned_imports: ["web"]

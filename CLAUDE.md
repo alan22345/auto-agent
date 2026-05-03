@@ -38,7 +38,6 @@ agent/                    # Model-agnostic agent runtime (see below)
 integrations/             # Slack, Telegram, Linear clients
     ↑
 orchestrator/             # Task routing, classification, queue, webhooks, state machine
-claude_runner/            # (legacy) Claude CLI execution loop — kept for pass-through mode
     ↑
 web/                      # Legacy HTTP UI (deprecated — see web-next)
 web-next/                 # Active Next.js UI (App Router, TS) — DEFAULT for all UI work
@@ -95,11 +94,10 @@ agent/
 
 | Directory | Owns | Must NOT import from |
 |-----------|------|----------------------|
-| `shared/` | Config, DB, models, types, events, logging | `agent/`, `orchestrator/`, `claude_runner/`, `integrations/`, `web/` |
+| `shared/` | Config, DB, models, types, events, logging | `agent/`, `orchestrator/`, `integrations/`, `web/` |
 | `agent/` | Model-agnostic runtime (loop, context, tools, llm) | `orchestrator/`, `web/`, `integrations/` |
-| `integrations/` | External service clients | `agent/`, `orchestrator/`, `claude_runner/`, `web/` |
-| `orchestrator/` | Task lifecycle, routing, webhooks, state machine | `claude_runner/`, `web/` |
-| `claude_runner/` | Legacy Claude CLI subprocess runner | `web/` |
+| `integrations/` | External service clients | `agent/`, `orchestrator/`, `web/` |
+| `orchestrator/` | Task lifecycle, routing, webhooks, state machine | `web/` |
 | `web/` | Legacy HTTP UI (deprecated, do not extend) | _(can import from any lower layer)_ |
 | `web-next/` | Active Next.js UI — Tailwind + shadcn/ui, TanStack Query, App Router | _(consumes the FastAPI in `orchestrator/router.py` over HTTP/WS)_ |
 | `migrations/` | Alembic migrations | Everything except `shared/models`, `shared/database` |

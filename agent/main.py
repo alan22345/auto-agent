@@ -1,8 +1,4 @@
-"""Agent event loop — listens for coding/planning events and runs the agentic loop.
-
-Replaces claude_runner/main.py. All `run_claude_code()` subprocess calls are
-replaced with in-process `AgentLoop.run()` calls using the configured LLM provider.
-"""
+"""Agent event loop — listens for coding/planning events and runs the agentic loop."""
 
 from __future__ import annotations
 

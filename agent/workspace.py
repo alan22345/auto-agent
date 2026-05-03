@@ -1,7 +1,4 @@
-"""Workspace management — clone repos and manage task branches.
-
-Copied from claude_runner/workspace.py with no CLI dependency.
-"""
+"""Workspace management — clone repos and manage task branches."""
 
 from __future__ import annotations
 

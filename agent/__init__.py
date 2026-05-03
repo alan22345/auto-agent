@@ -1,1 +1,1 @@
-"""Model-agnostic coding agent — replaces claude_runner with in-process tool execution."""
+"""Model-agnostic coding agent with in-process tool execution."""
