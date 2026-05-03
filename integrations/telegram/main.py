@@ -12,13 +12,12 @@ from typing import Any
 import httpx
 
 from shared.config import settings
-from shared.events import Event
+from shared.events import Event, publish
 from shared.notifier import send_telegram_async
 from shared.redis_client import (
     ack_event,
     ensure_stream_group,
     get_redis,
-    publish_event,
     read_events,
 )
 from shared.types import TaskData
@@ -223,14 +222,11 @@ async def _handle_command(text: str) -> None:
             await send_telegram_async("Invalid task ID. Usage: `/answer <task_id> <your answer>`")
             return
         answer = parts[2]
-        r = await get_redis()
-        event = Event(
+        await publish(Event(
             type="human.message",
             task_id=task_id,
             payload={"message": answer, "source": "telegram"},
-        )
-        await publish_event(r, event.to_redis())
-        await r.aclose()
+        ))
         await send_telegram_async(f"Answer sent to task #{task_id}.")
 
     elif cmd == "/cancel":

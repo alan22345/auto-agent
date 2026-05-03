@@ -26,9 +26,8 @@ from sqlalchemy import select
 from agent.prompts import build_architecture_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
-from shared.redis_client import get_redis, publish_event
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -129,16 +128,13 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         recent_suggestions=recent_titles,
     )
 
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="architecture.analysis_started",
             task_id=0,
             payload={"repo_name": repo.name},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
     log.info(f"Running architecture analysis for repo '{repo.name}'")
     try:
@@ -147,31 +143,25 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         output = result.output
     except Exception:
         log.exception(f"Architecture analysis for '{repo.name}' failed during agent execution")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="architecture.analysis_failed",
                 task_id=0,
                 payload={"repo_name": repo.name},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         raise
 
     suggestions_data = _parse_analysis_output(output)
     if not suggestions_data:
         log.warning(f"Architecture analysis for '{repo.name}' returned no parseable output")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="architecture.analysis_failed",
                 task_id=0,
                 payload={"repo_name": repo.name, "reason": "No parseable output"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         return
 
     new_suggestions = suggestions_data.get("suggestions", [])
@@ -198,16 +188,13 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         f"Architecture analysis for '{repo.name}': {len(new_suggestions)} suggestions created"
     )
 
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="architecture.suggestions_ready",
             task_id=0,
             payload={"repo_name": repo.name, "count": len(new_suggestions)},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
 
 def _parse_analysis_output(output: str) -> dict | None:

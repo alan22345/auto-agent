@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.memory_extractor import extract
 from shared.config import settings
-from shared.events import Event
+from shared.events import Event, publish
 from shared.logging import setup_logging
 from shared.memory_io import (
     correct_fact,
@@ -42,7 +42,6 @@ from shared.redis_client import (
     ack_event,
     ensure_stream_group,
     get_redis,
-    publish_event,
     read_events,
 )
 from shared.types import MemorySaveResult, ProposedFact, TaskData
@@ -404,14 +403,11 @@ async def _handle_send_message(
             json={"message": text, "username": username or "unknown"},
         )
 
-    r = await get_redis()
-    event = Event(
+    await publish(Event(
         type="human.message",
         task_id=task_id,
         payload={"message": text, "source": "web"},
-    )
-    await publish_event(r, event.to_redis())
-    await r.aclose()
+    ))
 
     await broadcast({"type": "user", "message": text, "task_id": task_id, "username": username})
 

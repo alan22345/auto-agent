@@ -18,9 +18,8 @@ from sqlalchemy import select
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
-from shared.events import Event
+from shared.events import Event, publish
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
-from shared.redis_client import get_redis, publish_event
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,12 +114,9 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     )
 
     # Notify UI
-    r = await get_redis()
-    await publish_event(
-        r,
-        Event(type="po.analysis_started", task_id=0, payload={"repo_name": repo.name}).to_redis(),
+    await publish(
+        Event(type="po.analysis_started", task_id=0, payload={"repo_name": repo.name})
     )
-    await r.aclose()
 
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
@@ -130,27 +126,21 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         output = result.output
     except Exception:
         log.exception(f"PO analysis for '{repo.name}' failed during agent execution")
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="po.analysis_failed", task_id=0, payload={"repo_name": repo.name}).to_redis(),
+        await publish(
+            Event(type="po.analysis_failed", task_id=0, payload={"repo_name": repo.name})
         )
-        await r.aclose()
         raise
 
     suggestions_data = _parse_analysis_output(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="po.analysis_failed",
                 task_id=0,
                 payload={"repo_name": repo.name, "reason": "No parseable output"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         return
 
     new_suggestions = suggestions_data.get("suggestions", [])
@@ -173,16 +163,13 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     await session.flush()
     log.info(f"PO analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
-    r = await get_redis()
-    await publish_event(
-        r,
+    await publish(
         Event(
             type="po.suggestions_ready",
             task_id=0,
             payload={"repo_name": repo.name, "count": len(new_suggestions)},
-        ).to_redis(),
+        )
     )
-    await r.aclose()
 
 
 def _parse_analysis_output(output: str) -> dict | None:

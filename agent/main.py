@@ -15,13 +15,12 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from shared.config import settings
-from shared.events import Event
+from shared.events import Event, publish
 from shared.logging import setup_logging
 from shared.redis_client import (
     ack_event,
     ensure_stream_group,
     get_redis,
-    publish_event,
     read_events,
 )
 from shared.types import FreeformConfigData, RepoData, TaskData
@@ -509,16 +508,13 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
             json={"status": status, "message": message},
         )
     if status in ("failed", "blocked", "done"):
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type=f"task.{status}",
                 task_id=task_id,
                 payload={"error": message} if status in ("failed", "blocked") else {},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
 
 
 async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
@@ -635,12 +631,9 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     # Trigger harness onboarding if not done yet
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="repo.onboard", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}).to_redis(),
+        await publish(
+            Event(type="repo.onboard", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name})
         )
-        await r.aclose()
 
     # Generate repo summary if missing or stale
     summary_stale = False
@@ -789,16 +782,13 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
                     await _save_intake_qa(task_id, intake_qa)
 
                 await transition_task(task_id, "awaiting_clarification", question)
-                r = await get_redis()
-                await publish_event(
-                    r,
+                await publish(
                     Event(
                         type="task.clarification_needed",
                         task_id=task_id,
                         payload={"question": question, "phase": phase},
-                    ).to_redis(),
+                    )
                 )
-                await r.aclose()
                 return
 
         output = _trim_plan_text(output)
@@ -810,12 +800,9 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             )
             resp.raise_for_status()
 
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="task.plan_ready", task_id=task_id, payload={"plan": output}).to_redis(),
+        await publish(
+            Event(type="task.plan_ready", task_id=task_id, payload={"plan": output})
         )
-        await r.aclose()
 
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
@@ -879,12 +866,9 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        r = await get_redis()
-        await publish_event(
-            r,
-            Event(type="repo.onboard", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}).to_redis(),
+        await publish(
+            Event(type="repo.onboard", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name})
         )
-        await r.aclose()
 
     session_id = _session_id(task_id, task.created_at)
     base_branch = repo.default_branch
@@ -964,16 +948,13 @@ async def _handle_coding_single(
     if question:
         log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
         await transition_task(task_id, "awaiting_clarification", question)
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.clarification_needed",
                 task_id=task_id,
                 payload={"question": question, "phase": "coding"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         return
 
     # Post-task memory reflection — agent writes learnings into the graph
@@ -1021,16 +1002,13 @@ async def _handle_coding_with_subtasks(
         phases[i]["status"] = "running"
         await _update_subtasks(task_id, phases, i)
 
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.subtask_progress",
                 task_id=task_id,
                 payload={"current": i + 1, "total": total, "title": phase["title"], "status": "running"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
 
         from agent.prompts import _intent_section
         intent_block = _intent_section(intent)
@@ -1076,32 +1054,26 @@ async def _handle_coding_with_subtasks(
             phases[i]["status"] = "blocked"
             await _update_subtasks(task_id, phases, i)
             await transition_task(task_id, "awaiting_clarification", question)
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.clarification_needed",
                     task_id=task_id,
                     payload={"question": question, "phase": f"subtask {i + 1}: {phase['title']}"},
-                ).to_redis(),
+                )
             )
-            await r.aclose()
             return
 
         phases[i]["status"] = "done"
         phases[i]["output_preview"] = output[:1500]
         await _update_subtasks(task_id, phases, i)
 
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.subtask_progress",
                 task_id=task_id,
                 payload={"current": i + 1, "total": total, "title": phase["title"], "status": "done"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
 
     log.info(f"Task #{task_id}: all {total} subtasks complete, proceeding to review + PR")
     await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
@@ -1207,9 +1179,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 f"Task #{task_id}: reviewer agent errored ({output[:200]!r}), "
                 "skipping review and auto-approving so the task isn't blocked"
             )
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.review_complete",
                     task_id=task_id,
@@ -1219,9 +1189,8 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                         "branch": branch_name,
                         "approved": True,
                     },
-                ).to_redis(),
+                )
             )
-            await r.aclose()
             return
 
         approved = any(
@@ -1231,16 +1200,13 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
 
         if approved:
             log.info(f"Independent review approved task #{task_id}")
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.review_complete",
                     task_id=task_id,
                     payload={"review": output[:2000], "pr_url": pr_url, "branch": branch_name, "approved": True},
-                ).to_redis(),
+                )
             )
-            await r.aclose()
         else:
             log.info(f"Independent review requested changes for task #{task_id}")
             session_id = _session_id(task_id, task.created_at)
@@ -1262,9 +1228,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 )
             await push_branch(workspace, branch_name)
 
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.review_complete",
                     task_id=task_id,
@@ -1272,22 +1236,18 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                         "review": output[:2000], "fixes": fix_result.output[:1000],
                         "pr_url": pr_url, "branch": branch_name, "approved": False,
                     },
-                ).to_redis(),
+                )
             )
-            await r.aclose()
 
     except Exception as e:
         log.exception(f"Independent review failed for task #{task_id}")
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.review_complete",
                 task_id=task_id,
                 payload={"review": f"Review skipped: {e}", "pr_url": pr_url, "branch": branch_name, "approved": True},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
 
 
 async def handle_plan_independent_review(task_id: int) -> None:
@@ -1401,16 +1361,13 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
             )
         await push_branch(workspace, branch_name)
 
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.review_comments_addressed",
                 task_id=task_id,
                 payload={"output": result.output[:1000], "pr_url": task.pr_url or ""},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
 
     except Exception as e:
         log.exception(f"PR review response failed for task #{task_id}")
@@ -1473,21 +1430,15 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
                     json={"status": "awaiting_approval", "message": "Plan revised", "plan": full_output},
                 )
                 resp.raise_for_status()
-            r = await get_redis()
-            await publish_event(
-                r,
-                Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output}).to_redis(),
+            await publish(
+                Event(type="task.plan_ready", task_id=task_id, payload={"plan": full_output})
             )
-            await r.aclose()
         else:
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(type="task.status_changed", task_id=task_id, payload={
                     "status": task.status, "message": output[:2000],
-                }).to_redis(),
+                })
             )
-            await r.aclose()
 
         log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
     finally:
@@ -1551,24 +1502,18 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
     if follow_up:
         log.info(f"Task #{task_id} needs another clarification: {follow_up[:100]}...")
         await transition_task(task_id, "awaiting_clarification", follow_up)
-        r = await get_redis()
-        await publish_event(
-            r,
+        await publish(
             Event(
                 type="task.clarification_needed",
                 task_id=task_id,
                 payload={"question": follow_up, "phase": "continuation"},
-            ).to_redis(),
+            )
         )
-        await r.aclose()
         return
 
-    r = await get_redis()
-    await publish_event(
-        r,
-        Event(type="task.clarification_resolved", task_id=task_id, payload={"output": result.output}).to_redis(),
+    await publish(
+        Event(type="task.clarification_resolved", task_id=task_id, payload={"output": result.output})
     )
-    await r.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -1603,16 +1548,13 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
         assigned = await _try_assign_repo(task_id, message)
         if not assigned:
             log.warning(f"Task #{task_id} blocked with no repo, couldn't extract from message")
-            r = await get_redis()
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type="task.blocked",
                     task_id=task_id,
                     payload={"error": "No repo assigned. Please include the repo name in your message."},
-                ).to_redis(),
+                )
             )
-            await r.aclose()
             return
 
     if task.pr_url:
@@ -1698,10 +1640,8 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
 
         if resp.status_code == 204:
             conclusion = await _wait_for_workflow_run(owner, repo, workflow_id, branch_name, headers, task_id)
-            r = await get_redis()
             event_type = "task.dev_deployed" if conclusion == "success" else "task.dev_deploy_failed"
-            await publish_event(
-                r,
+            await publish(
                 Event(
                     type=event_type,
                     task_id=task_id,
@@ -1710,9 +1650,8 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
                         "output": f"Deploy workflow finished: {conclusion}",
                         "pr_url": task.pr_url or "",
                     },
-                ).to_redis(),
+                )
             )
-            await r.aclose()
             return True
         else:
             log.warning(f"Task #{task_id}: workflow dispatch failed: {resp.status_code}")
@@ -1792,32 +1731,23 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            r = await get_redis()
-            await publish_event(
-                r,
-                Event(type="task.dev_deploy_failed", task_id=task_id, payload={"branch": branch_name, "output": "Deploy timed out", "pr_url": task.pr_url or ""}).to_redis(),
+            await publish(
+                Event(type="task.dev_deploy_failed", task_id=task_id, payload={"branch": branch_name, "output": "Deploy timed out", "pr_url": task.pr_url or ""})
             )
-            await r.aclose()
             return
 
         output = ((stdout or b"").decode() + (stderr or b"").decode()).strip()
-        r = await get_redis()
         event_type = "task.dev_deployed" if proc.returncode == 0 else "task.dev_deploy_failed"
-        await publish_event(
-            r,
-            Event(type=event_type, task_id=task_id, payload={"branch": branch_name, "output": output[-1000:], "pr_url": task.pr_url or ""}).to_redis(),
+        await publish(
+            Event(type=event_type, task_id=task_id, payload={"branch": branch_name, "output": output[-1000:], "pr_url": task.pr_url or ""})
         )
-        await r.aclose()
 
     except Exception:
         log.exception(f"Task #{task_id}: deploy preview failed")
         try:
-            r = await get_redis()
-            await publish_event(
-                r,
-                Event(type="task.dev_deploy_failed", task_id=task_id, payload={"branch": branch_name, "output": "Unexpected error", "pr_url": task.pr_url or ""}).to_redis(),
+            await publish(
+                Event(type="task.dev_deploy_failed", task_id=task_id, payload={"branch": branch_name, "output": "Unexpected error", "pr_url": task.pr_url or ""})
             )
-            await r.aclose()
         except Exception:
             pass
 
@@ -1975,12 +1905,9 @@ async def event_loop() -> None:
                             queued = _po_queue.qsize() > 0
                             await _po_queue.put(repo_id)
                             if queued:
-                                r2 = await get_redis()
-                                await publish_event(
-                                    r2,
-                                    Event(type="po.analysis_queued", task_id=0, payload={"repo_name": repo_name, "position": _po_queue.qsize()}).to_redis(),
+                                await publish(
+                                    Event(type="po.analysis_queued", task_id=0, payload={"repo_name": repo_name, "position": _po_queue.qsize()})
                                 )
-                                await r2.aclose()
                     elif event.type == "repo.onboard":
                         repo_id = event.payload.get("repo_id")
                         repo_name = event.payload.get("repo_name", "")
@@ -2011,12 +1938,9 @@ async def event_loop() -> None:
                             elif task.status == "queued":
                                 # User wants to kick a queued task — ask orchestrator to start it
                                 log.info(f"Message for queued task #{task_id} — attempting to start")
-                                r2 = await get_redis()
-                                await publish_event(
-                                    r2,
-                                    Event(type="task.start_queued", task_id=task_id).to_redis(),
+                                await publish(
+                                    Event(type="task.start_queued", task_id=task_id)
                                 )
-                                await r2.aclose()
                             else:
                                 log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")
                 except Exception:
