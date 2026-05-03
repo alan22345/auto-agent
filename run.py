@@ -73,7 +73,7 @@ from integrations.telegram.main import (
     notification_loop as telegram_notification_loop,
 )
 from agent.architect_analyzer import run_architecture_loop
-from agent.main import event_loop as claude_runner_loop
+from agent.main import event_loop as agent_event_loop
 from agent.po_analyzer import run_po_analysis_loop
 
 log = setup_logging("auto-agent")
@@ -1555,7 +1555,7 @@ async def lifespan(app: FastAPI):
     bg = [
         asyncio.create_task(orchestrator_event_loop()),
         asyncio.create_task(run_scheduler()),
-        asyncio.create_task(claude_runner_loop()),
+        asyncio.create_task(agent_event_loop()),
         asyncio.create_task(telegram_inbound_loop()),
         asyncio.create_task(telegram_notification_loop()),
         asyncio.create_task(web_event_listener()),
