@@ -66,7 +66,8 @@ export default function SuggestionsPage() {
   }
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="h-full overflow-auto">
+      <div className="p-6 max-w-5xl mx-auto">
       <h1 className="text-2xl font-semibold mb-1">Improvement suggestions</h1>
       <p className="text-sm text-muted-foreground mb-6">
         Suggestions produced by the PO and architect analyzers. Approving creates a freeform task.
@@ -127,6 +128,7 @@ export default function SuggestionsPage() {
             </div>
           </section>
         ))}
+      </div>
       </div>
     </div>
   );
