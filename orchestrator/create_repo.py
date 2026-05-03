@@ -65,7 +65,9 @@ async def _generate_name_via_claude(description: str) -> str:
     """Ask the configured LLM provider for a short repo slug."""
     prompt = build_repo_name_prompt(description)
     try:
-        provider = get_provider()
+        # "fast" tier (Haiku) — naming is the canonical fast-tier use case
+        # per agent/llm/__init__.py::MODEL_TIERS.
+        provider = get_provider(model_override="fast")
         response = await provider.complete(
             messages=[Message(role="user", content=prompt)],
             max_tokens=50,

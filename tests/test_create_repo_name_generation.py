@@ -17,18 +17,25 @@ from orchestrator.create_repo import _generate_name_via_claude
 
 @pytest.mark.asyncio
 async def test_generate_name_uses_provider_and_sanitizes_output():
-    """Provider response is sanitized into a valid GitHub repo slug."""
+    """Provider response is sanitized into a valid GitHub repo slug.
+
+    Also asserts the fast tier (Haiku) is requested — naming is the
+    canonical fast-tier use case per agent/llm/__init__.py::MODEL_TIERS.
+    """
     mock_response = MagicMock()
     mock_response.message.content = "Cool Project Name!\n"
 
     mock_provider = AsyncMock()
     mock_provider.complete.return_value = mock_response
 
-    with patch("orchestrator.create_repo.get_provider", return_value=mock_provider):
+    with patch(
+        "orchestrator.create_repo.get_provider", return_value=mock_provider
+    ) as mock_get_provider:
         name = await _generate_name_via_claude("a tool that does X")
 
     assert name == "cool-project-name"
     mock_provider.complete.assert_awaited_once()
+    mock_get_provider.assert_called_once_with(model_override="fast")
 
 
 @pytest.mark.asyncio
