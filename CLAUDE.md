@@ -63,6 +63,8 @@ agent/
 │   ├─ types.py            # Message, ToolCall, LLMResponse, TokenUsage
 │   ├─ bedrock.py          # AWS Bedrock provider (default for VM deploys)
 │   ├─ anthropic.py        # Native Anthropic API provider
+│   ├─ anthropic_mapper.py # Message ↔ Anthropic API wire format (single owner)
+│   ├─ structured.py       # parse_json_response + complete_json (one-shot + retry)
 │   └─ claude_cli.py       # Claude Code CLI pass-through (no tool loop)
 │
 ├─ context/

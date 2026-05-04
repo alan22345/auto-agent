@@ -10,9 +10,8 @@ CLI provider understands the task natively.
 
 from __future__ import annotations
 
-import json as _json
-
 from agent.llm import get_provider
+from agent.llm.structured import parse_json_response
 from agent.llm.types import Message
 from shared.config import settings
 from shared.logging import setup_logging
@@ -64,14 +63,7 @@ async def extract_intent(title: str, description: str) -> dict:
             ],
             max_tokens=300,
         )
-        text = response.message.content.strip()
-        # Strip markdown fences if the LLM wraps the JSON
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-        return _json.loads(text)
+        return parse_json_response(response.message.content) or {}
     except Exception:
         log.warning("intent_extraction_failed", title=title[:80])
         return {}
