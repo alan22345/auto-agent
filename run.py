@@ -50,6 +50,10 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import (
+    RedisTaskChannelFactory,
+    set_task_channel_factory,
+)
 
 from datetime import datetime, timezone
 
@@ -1541,6 +1545,12 @@ async def lifespan(app: FastAPI):
     redis_publisher = RedisStreamPublisher(settings.redis_url)
     set_publisher(redis_publisher)
 
+    # Wire the production task-channel factory alongside the publisher —
+    # symmetric seam for the per-task Redis surface (heartbeat, guidance,
+    # streaming, telegram reply-binding). See ADR-010.
+    redis_task_channel_factory = RedisTaskChannelFactory(settings.redis_url)
+    set_task_channel_factory(redis_task_channel_factory)
+
     # Seed admin user if no users exist
     from orchestrator.router import seed_admin_user
     await seed_admin_user()
@@ -1580,6 +1590,7 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await t
     await redis_publisher.aclose()
+    await redis_task_channel_factory.aclose()
 
 
 app.router.lifespan_context = lifespan
