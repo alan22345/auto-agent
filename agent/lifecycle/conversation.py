@@ -22,7 +22,7 @@ import re as _re
 
 import httpx
 
-from agent.lifecycle._agent import create_agent
+from agent.lifecycle import coding, planning, review
 from agent.lifecycle._clarification import _extract_clarification
 from agent.lifecycle._naming import _session_id
 from agent.lifecycle._orchestrator_api import (
@@ -31,6 +31,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
+from agent.lifecycle.factory import create_agent
 from agent.workspace import WORKSPACES_DIR
 from shared.events import Event, publish
 from shared.logging import setup_logging
@@ -100,9 +101,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
                 )
                 or output
             )
-            from agent.lifecycle.planning import _trim_plan_text
-
-            full_output = _trim_plan_text(full_output)
+            full_output = planning._trim_plan_text(full_output)
 
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -160,11 +159,9 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             log.info(f"Task #{task_id} GRILL answer received — re-entering grill loop")
             updated_qa = list(task.intake_qa)
             updated_qa[-1] = {**last, "answer": answer}
-            from agent.lifecycle.planning import _save_intake_qa, handle_planning
-
-            await _save_intake_qa(task_id, updated_qa)
+            await planning._save_intake_qa(task_id, updated_qa)
             await transition_task(task_id, "planning", "User answered grill question")
-            await handle_planning(task_id)
+            await planning.handle_planning(task_id)
             return
 
     repo = await get_repo(task.repo_name)
@@ -229,9 +226,7 @@ async def _try_assign_repo(task_id: int, message: str) -> bool:
                     json={"repo_name": name},
                 )
                 if resp.status_code == 200:
-                    log.info(
-                        f"Assigned repo '{name}' to task #{task_id} from user message"
-                    )
+                    log.info(f"Assigned repo '{name}' to task #{task_id} from user message")
                     return True
     return False
 
@@ -243,9 +238,7 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
     if not task.repo_name:
         assigned = await _try_assign_repo(task_id, message)
         if not assigned:
-            log.warning(
-                f"Task #{task_id} blocked with no repo, couldn't extract from message"
-            )
+            log.warning(f"Task #{task_id} blocked with no repo, couldn't extract from message")
             await publish(
                 Event(
                     type="task.blocked",
@@ -260,19 +253,15 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
     # Lifecycle dispatch: tell the right phase to take over. Direct calls
     # rather than bus round-trips because these are intra-handler control
     # flow (the bus is for entry from Redis Streams, not for re-routing).
-    from agent.lifecycle.coding import handle_coding
-    from agent.lifecycle.planning import handle_planning
-    from agent.lifecycle.review import handle_pr_review_comments
-
     if task.pr_url:
         await transition_task(task_id, "coding", f"User unblocked: {message[:200]}")
-        await handle_pr_review_comments(task_id, message)
+        await review.handle_pr_review_comments(task_id, message)
     elif task.plan:
         await transition_task(task_id, "coding", f"User unblocked: {message[:200]}")
-        await handle_coding(task_id)
+        await coding.handle_coding(task_id)
     else:
         await transition_task(task_id, "planning", f"User unblocked: {message[:200]}")
-        await handle_planning(task_id)
+        await planning.handle_planning(task_id)
 
 
 async def handle_clarification_event(event: Event) -> None:
@@ -310,13 +299,8 @@ async def route_human_message(event: Event) -> None:
         await handle_clarification_response(task_id, comments)
     elif task.status == "blocked":
         await handle_blocked_response(task_id, task, comments)
-    elif (
-        task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding")
-        and task.pr_url
-    ):
-        from agent.lifecycle.review import handle_pr_review_comments
-
-        await handle_pr_review_comments(task_id, comments)
+    elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
+        await review.handle_pr_review_comments(task_id, comments)
     elif task.status == "coding" and not task.pr_url:
         # Agent is actively coding — push as guidance for next turn
         r = await get_redis()
@@ -331,6 +315,4 @@ async def route_human_message(event: Event) -> None:
         log.info(f"Message for queued task #{task_id} — attempting to start")
         await publish(Event(type="task.start_queued", task_id=task_id))
     else:
-        log.info(
-            f"Message for task #{task_id} in status '{task.status}' — not routing"
-        )
+        log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")

@@ -58,7 +58,7 @@ agent/lifecycle/
 ├─ harness_onboard.py    # thin handle(event) → agent.harness shim
 ├─ intent.py             # extract_intent + INTENT_EXTRACTION_PROMPT
 ├─ _orchestrator_api.py  # get_task, get_repo, get_freeform_config, transition_task
-├─ _agent.py             # create_agent factory + UI streaming hooks
+├─ factory.py            # create_agent factory + UI streaming hooks
 ├─ _naming.py            # slugify, branch name, PR title, _session_id, _fresh_session_id
 └─ _clarification.py     # _extract_clarification (CLARIFICATION_MARKER)
 ```

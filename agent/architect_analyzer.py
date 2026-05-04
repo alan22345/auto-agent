@@ -101,7 +101,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
     Deepening proposals become Suggestions; if auto-approval is on, they become
     Tasks via the existing suggestion → task path.
     """
-    from agent.lifecycle._agent import create_agent
+    from agent.lifecycle.factory import create_agent
 
     repo_result = await session.execute(select(Repo).where(Repo.id == config.repo_id))
     repo = repo_result.scalar_one_or_none()

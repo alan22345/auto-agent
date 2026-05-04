@@ -68,7 +68,7 @@ Create `.auto-agent/entropy.yml` with scanning rules for dead code, stale docs, 
 
 async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
     """Run harness onboarding for a repo using the agent. Returns PR URL or None."""
-    from agent.lifecycle._agent import create_agent
+    from agent.lifecycle.factory import create_agent
 
     log.info(f"Starting harness onboarding for repo '{repo_name}'")
 

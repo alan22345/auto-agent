@@ -124,9 +124,14 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
 
 
 async def _wait_for_workflow_run(
-    owner: str, repo: str, workflow_id: int, branch: str,
-    headers: dict, task_id: int,
-    poll_interval: int = 30, max_wait: int = 1200,
+    owner: str,
+    repo: str,
+    workflow_id: int,
+    branch: str,
+    headers: dict,
+    task_id: int,
+    poll_interval: int = 30,
+    max_wait: int = 1200,
 ) -> str:
     start = time.monotonic()
     await asyncio.sleep(5)
@@ -149,9 +154,7 @@ async def _wait_for_workflow_run(
     return "timed_out"
 
 
-async def _try_local_deploy(
-    task_id: int, task: TaskData, branch_name: str, workspace: str
-) -> None:
+async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, workspace: str) -> None:
     """Try running a local deploy script from the workspace."""
     deploy_script = None
     for candidate in DEPLOY_SCRIPT_CANDIDATES:
@@ -175,15 +178,14 @@ async def _try_local_deploy(
         log.info(f"Task #{task_id}: no deploy script found, skipping dev deploy")
         return
 
-    log.info(
-        f"Task #{task_id}: deploying branch '{branch_name}' to dev via local script"
-    )
+    log.info(f"Task #{task_id}: deploying branch '{branch_name}' to dev via local script")
     try:
         if deploy_script:
             script_path = os.path.join(workspace, deploy_script)
             os.chmod(script_path, 0o755)
             proc = await asyncio.create_subprocess_exec(
-                f"./{deploy_script}", branch_name,
+                f"./{deploy_script}",
+                branch_name,
                 cwd=workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -191,7 +193,8 @@ async def _try_local_deploy(
             )
         else:
             proc = await asyncio.create_subprocess_exec(
-                "make", "deploy-dev",
+                "make",
+                "deploy-dev",
                 cwd=workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -217,9 +220,7 @@ async def _try_local_deploy(
             return
 
         output = ((stdout or b"").decode() + (stderr or b"").decode()).strip()
-        event_type = (
-            "task.dev_deployed" if proc.returncode == 0 else "task.dev_deploy_failed"
-        )
+        event_type = "task.dev_deployed" if proc.returncode == 0 else "task.dev_deploy_failed"
         await publish(
             Event(
                 type=event_type,

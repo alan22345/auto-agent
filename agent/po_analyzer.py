@@ -89,7 +89,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     Uses readonly tools so the PO agent can explore the codebase (grep, file_read, glob)
     rather than relying on a black-box CLI subprocess.
     """
-    from agent.lifecycle._agent import create_agent
+    from agent.lifecycle.factory import create_agent
 
     repo_result = await session.execute(select(Repo).where(Repo.id == config.repo_id))
     repo = repo_result.scalar_one_or_none()

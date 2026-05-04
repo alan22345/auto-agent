@@ -17,7 +17,7 @@ import re as _re
 
 import httpx
 
-from agent.lifecycle._agent import create_agent
+from agent.lifecycle import review
 from agent.lifecycle._clarification import _extract_clarification
 from agent.lifecycle._naming import _branch_name, _pr_title, _session_id
 from agent.lifecycle._orchestrator_api import (
@@ -27,6 +27,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
+from agent.lifecycle.factory import create_agent
 from agent.lifecycle.intent import extract_intent
 from agent.prompts import (
     MEMORY_REFLECTION_PROMPT,
@@ -63,9 +64,7 @@ def _parse_plan_phases(plan: str) -> list[dict]:
         chunk = plan[start:end].strip()
         first_line = chunk.split("\n", 1)[0]
         title = first_line.lstrip("#").strip()
-        phases.append(
-            {"title": title, "content": chunk, "status": "pending", "output_preview": ""}
-        )
+        phases.append({"title": title, "content": chunk, "status": "pending", "output_preview": ""})
     return phases
 
 
@@ -155,15 +154,29 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
         if phases and len(phases) >= 2:
             await _handle_coding_with_subtasks(
-                task_id, task, phases, workspace, session_id,
-                base_branch, branch_name, is_continuation, repo,
+                task_id,
+                task,
+                phases,
+                workspace,
+                session_id,
+                base_branch,
+                branch_name,
+                is_continuation,
+                repo,
                 intent=intent,
             )
         else:
             await _handle_coding_single(
-                task_id, task, workspace, session_id,
-                base_branch, branch_name, is_continuation, repo,
-                retry_reason, intent=intent,
+                task_id,
+                task,
+                workspace,
+                session_id,
+                base_branch,
+                branch_name,
+                is_continuation,
+                repo,
+                retry_reason,
+                intent=intent,
             )
     except Exception as e:
         log.exception(f"Coding failed for task #{task_id}")
@@ -172,9 +185,16 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
 
 async def _handle_coding_single(
-    task_id: int, task, workspace: str, session_id: str,
-    base_branch: str, branch_name: str, is_continuation: bool, repo,
-    retry_reason: str | None = None, intent: dict | None = None,
+    task_id: int,
+    task,
+    workspace: str,
+    session_id: str,
+    base_branch: str,
+    branch_name: str,
+    is_continuation: bool,
+    repo,
+    retry_reason: str | None = None,
+    intent: dict | None = None,
 ) -> None:
     """Standard coding path — single implementation pass."""
     coding_prompt = build_coding_prompt(
@@ -226,8 +246,15 @@ async def _handle_coding_single(
 
 
 async def _handle_coding_with_subtasks(
-    task_id: int, task, phases: list[dict], workspace: str, session_id: str,
-    base_branch: str, branch_name: str, is_continuation: bool, repo,
+    task_id: int,
+    task,
+    phases: list[dict],
+    workspace: str,
+    session_id: str,
+    base_branch: str,
+    branch_name: str,
+    is_continuation: bool,
+    repo,
     intent: dict | None = None,
 ) -> None:
     """Complex-large coding path — implement each phase as a subtask."""
@@ -238,21 +265,15 @@ async def _handle_coding_with_subtasks(
     if existing and len(existing) == total:
         done_count = sum(1 for s in existing if s.get("status") == "done")
         if done_count == total:
-            log.info(
-                f"Task #{task_id}: all {total} subtasks already done, skipping to review + PR"
-            )
-            await _finish_coding(
-                task_id, task, workspace, session_id, base_branch, branch_name
-            )
+            log.info(f"Task #{task_id}: all {total} subtasks already done, skipping to review + PR")
+            await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
             return
         for i, ex in enumerate(existing):
             if ex.get("status") == "done":
                 phases[i]["status"] = "done"
                 phases[i]["output_preview"] = ex.get("output_preview", "")
         start_from = done_count
-        log.info(
-            f"Task #{task_id}: resuming complex-large from subtask {start_from + 1}/{total}"
-        )
+        log.info(f"Task #{task_id}: resuming complex-large from subtask {start_from + 1}/{total}")
     else:
         start_from = 0
         log.info(f"Task #{task_id}: complex-large with {total} subtasks")
@@ -308,9 +329,7 @@ async def _handle_coding_with_subtasks(
                 "Implement ONLY the current phase. Commit your changes before stopping.\n"
             )
 
-        log.info(
-            f"Task #{task_id}: starting subtask {i + 1}/{total} — {phase['title']}"
-        )
+        log.info(f"Task #{task_id}: starting subtask {i + 1}/{total} — {phase['title']}")
         # Fresh agent per subtask (context isolation — superpowers pattern)
         # Each subtask gets its own agent with no session resume, so it starts
         # with clean context. The repo map in the system prompt provides structure.
@@ -354,15 +373,17 @@ async def _handle_coding_with_subtasks(
             )
         )
 
-    log.info(
-        f"Task #{task_id}: all {total} subtasks complete, proceeding to review + PR"
-    )
+    log.info(f"Task #{task_id}: all {total} subtasks complete, proceeding to review + PR")
     await _finish_coding(task_id, task, workspace, session_id, base_branch, branch_name)
 
 
 async def _finish_coding(
-    task_id: int, task, workspace: str, session_id: str,
-    base_branch: str, branch_name: str,
+    task_id: int,
+    task,
+    workspace: str,
+    session_id: str,
+    base_branch: str,
+    branch_name: str,
 ) -> None:
     """Self-review, push, create PR, and trigger independent review."""
     for attempt in range(MAX_REVIEW_RETRIES):
@@ -370,16 +391,12 @@ async def _finish_coding(
         agent = create_agent(workspace, session_id=session_id, max_turns=20, task_id=task_id)
         result = await agent.run(review_prompt, resume=True)
         review_output = result.output
-        log.info(
-            f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}..."
-        )
+        log.info(f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}...")
 
         if "REVIEW_PASSED" in review_output:
             log.info(f"Self-review passed for task #{task_id}")
             break
-        log.info(
-            f"Self-review found issues, agent fixed them (attempt {attempt + 1})"
-        )
+        log.info(f"Self-review found issues, agent fixed them (attempt {attempt + 1})")
     else:
         log.warning(
             f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
@@ -404,17 +421,12 @@ async def _finish_coding(
         f"*Generated by auto-agent. Code was self-reviewed for correctness, security, and root-cause analysis.*"
     )
     title = await _pr_title(task.title)
-    # Late import to avoid circular: review.py would otherwise import coding
-    # transitively via _agent → ContextManager? No, but keeping the late import
-    # mirrors the lifecycle dependency direction (coding triggers review).
-    from agent.lifecycle import review as _review
-
-    pr_url = await _review.create_pr(workspace, title, pr_body, base_branch, branch_name)
+    pr_url = await review.create_pr(workspace, title, pr_body, base_branch, branch_name)
     log.info(f"PR created: {pr_url}")
     if not pr_url.startswith("http"):
         raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
 
-    await _review.handle_independent_review(task_id, pr_url, branch_name)
+    await review.handle_independent_review(task_id, pr_url, branch_name)
 
 
 async def handle(event: Event) -> None:

@@ -14,7 +14,6 @@ import tempfile
 
 import httpx
 
-from agent.lifecycle._agent import create_agent
 from agent.lifecycle._naming import _branch_name, _fresh_session_id, _session_id
 from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
@@ -23,6 +22,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
+from agent.lifecycle.factory import create_agent
 from agent.prompts import (
     build_plan_independent_review_prompt,
     build_pr_independent_review_prompt,
@@ -56,10 +56,15 @@ async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
     env = os.environ.copy()
     env["GH_TOKEN"] = settings.github_token
     proc = await asyncio.create_subprocess_exec(
-        "gh", "pr", "list",
-        "--head", head_branch,
-        "--state", "open",
-        "--json", "url,state",
+        "gh",
+        "pr",
+        "list",
+        "--head",
+        head_branch,
+        "--state",
+        "open",
+        "--json",
+        "url,state",
         cwd=workspace,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -94,11 +99,17 @@ async def create_pr(
     env = os.environ.copy()
     env["GH_TOKEN"] = settings.github_token
     proc = await asyncio.create_subprocess_exec(
-        "gh", "pr", "create",
-        "--title", title,
-        "--body", body,
-        "--base", base_branch,
-        "--head", head_branch,
+        "gh",
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body",
+        body,
+        "--base",
+        base_branch,
+        "--head",
+        head_branch,
         cwd=workspace,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -136,13 +147,13 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
     reviewer_session = _fresh_session_id(task_id, "review")
 
     log.info(f"Independent review of task #{task_id} PR (session={reviewer_session})")
-    workspace = await clone_repo(
-        repo.url, task_id, base_branch, fallback_branch=fallback_branch
-    )
+    workspace = await clone_repo(repo.url, task_id, base_branch, fallback_branch=fallback_branch)
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "checkout", branch_name,
+            "git",
+            "checkout",
+            branch_name,
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -152,9 +163,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         prompt = build_pr_independent_review_prompt(
             task.title, task.description, pr_url, base_branch
         )
-        agent = create_agent(
-            workspace, session_id=reviewer_session, readonly=True, max_turns=20
-        )
+        agent = create_agent(workspace, session_id=reviewer_session, readonly=True, max_turns=20)
         result = await agent.run(prompt)
         output = result.output
         log.info(f"Independent review for task #{task_id}: {output[:300]}...")
@@ -260,9 +269,7 @@ async def handle_plan_independent_review(task_id: int) -> None:
     if not task:
         return
     if task.status != "awaiting_approval":
-        log.info(
-            f"Plan auto-review skipped for task #{task_id}: status is '{task.status}'"
-        )
+        log.info(f"Plan auto-review skipped for task #{task_id}: status is '{task.status}'")
         return
     if not task.freeform_mode:
         return
@@ -354,7 +361,9 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "checkout", branch_name,
+            "git",
+            "checkout",
+            branch_name,
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

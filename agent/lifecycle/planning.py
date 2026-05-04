@@ -18,7 +18,6 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from agent.lifecycle._agent import create_agent
 from agent.lifecycle._clarification import _extract_clarification
 from agent.lifecycle._naming import _session_id
 from agent.lifecycle._orchestrator_api import (
@@ -27,6 +26,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
+from agent.lifecycle.factory import create_agent
 from agent.prompts import (
     GRILL_DONE_MARKER,
     GRILL_DONE_QUESTION_SENTINEL,
@@ -93,18 +93,14 @@ def _should_run_grill(task) -> bool:
         return True
     if not task.intake_qa:
         return False  # Empty list = explicitly complete/skipped.
-    return not any(
-        qa.get("question") == GRILL_DONE_QUESTION_SENTINEL for qa in task.intake_qa
-    )
+    return not any(qa.get("question") == GRILL_DONE_QUESTION_SENTINEL for qa in task.intake_qa)
 
 
 def _grill_round_count(intake_qa: list[dict] | None) -> int:
     """Number of real grill rounds — sentinel entries don't count."""
     if not intake_qa:
         return 0
-    return sum(
-        1 for qa in intake_qa if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
-    )
+    return sum(1 for qa in intake_qa if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL)
 
 
 async def _save_intake_qa(task_id: int, intake_qa: list[dict]) -> None:
@@ -132,9 +128,7 @@ def _trim_plan_text(text: str) -> str:
     return text
 
 
-async def generate_repo_summary(
-    repo_url: str, repo_name: str, default_branch: str
-) -> str | None:
+async def generate_repo_summary(repo_url: str, repo_name: str, default_branch: str) -> str | None:
     """Generate a repo summary using the agent with readonly tools."""
     from agent.workspace import clone_repo as _clone
 
@@ -256,9 +250,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         # continuation prompts. Collect ALL assistant text to get the full plan.
         output = (
             "\n".join(
-                msg.content
-                for msg in result.messages
-                if msg.role == "assistant" and msg.content
+                msg.content for msg in result.messages if msg.role == "assistant" and msg.content
             )
             or result.output
         )
@@ -308,10 +300,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             # limit, force a synthetic GRILL_DONE and proceed to planning
             # with the transcript so far. This bounds user fatigue when the
             # agent can't decide it's heard enough.
-            if (
-                phase == "grill"
-                and _grill_round_count(task.intake_qa) >= _MAX_GRILL_ROUNDS
-            ):
+            if phase == "grill" and _grill_round_count(task.intake_qa) >= _MAX_GRILL_ROUNDS:
                 log.warning(
                     f"Task #{task_id} hit grill cap ({_MAX_GRILL_ROUNDS}); "
                     f"forcing GRILL_DONE and dropping question: {question[:80]}..."
@@ -380,9 +369,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             )
             resp.raise_for_status()
 
-        await publish(
-            Event(type="task.plan_ready", task_id=task_id, payload={"plan": output})
-        )
+        await publish(Event(type="task.plan_ready", task_id=task_id, payload={"plan": output}))
 
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
