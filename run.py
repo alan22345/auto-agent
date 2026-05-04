@@ -53,6 +53,7 @@ from shared.redis_client import (
 from shared.task_channel import (
     RedisTaskChannelFactory,
     set_task_channel_factory,
+    task_channel,
 )
 
 from datetime import datetime, timezone
@@ -941,17 +942,6 @@ TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 _recovery_attempted: set[int] = set()
 
 
-async def _task_has_heartbeat(task_id: int) -> bool:
-    """Check if the agent is actively sending heartbeat signals for this task."""
-    try:
-        r = await get_redis()
-        result = await r.exists(f"task:{task_id}:heartbeat")
-        await r.aclose()
-        return bool(result)
-    except Exception:
-        return False
-
-
 async def task_timeout_watchdog() -> None:
     """Progress-aware watchdog. Checks heartbeat before killing tasks.
 
@@ -983,7 +973,7 @@ async def task_timeout_watchdog() -> None:
                     hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
 
                     # If agent is actively sending heartbeats, it's alive — skip
-                    if await _task_has_heartbeat(task.id):
+                    if await task_channel(task.id).is_alive():
                         if age_s > soft_timeout:
                             log.debug(
                                 f"Task #{task.id} past soft timeout ({age_s:.0f}s) "
