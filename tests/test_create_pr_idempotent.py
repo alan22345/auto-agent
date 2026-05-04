@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from agent.main import find_existing_pr_url
+from agent.lifecycle.review import find_existing_pr_url
 
 
 @pytest.mark.asyncio
