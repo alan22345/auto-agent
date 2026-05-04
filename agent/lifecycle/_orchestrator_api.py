@@ -9,7 +9,7 @@ from __future__ import annotations
 import httpx
 
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import publish, task_blocked, task_done, task_failed
 from shared.types import FreeformConfigData, RepoData, TaskData
 
 ORCHESTRATOR_URL = settings.orchestrator_url
@@ -47,17 +47,19 @@ async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
     return None
 
 
+_TERMINAL_FACTORIES = {
+    "failed": lambda task_id, message: task_failed(task_id, error=message),
+    "blocked": lambda task_id, message: task_blocked(task_id, error=message),
+    "done": lambda task_id, _message: task_done(task_id),
+}
+
+
 async def transition_task(task_id: int, status: str, message: str = "") -> None:
     async with httpx.AsyncClient() as client:
         await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
             json={"status": status, "message": message},
         )
-    if status in ("failed", "blocked", "done"):
-        await publish(
-            Event(
-                type=f"task.{status}",
-                task_id=task_id,
-                payload={"error": message} if status in ("failed", "blocked") else {},
-            )
-        )
+    factory = _TERMINAL_FACTORIES.get(status)
+    if factory is not None:
+        await publish(factory(task_id, message))

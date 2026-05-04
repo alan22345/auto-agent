@@ -24,7 +24,14 @@ from agent.lifecycle import (
     query,
     review,
 )
-from shared.events import Event, EventBus
+from shared.events import (
+    Event,
+    EventBus,
+    HumanEventType,
+    POEventType,
+    RepoEventType,
+    TaskEventType,
+)
 from shared.logging import setup_logging
 from shared.redis_client import (
     ack_event,
@@ -44,16 +51,16 @@ def register_handlers(bus: EventBus) -> None:
     production wiring. Per-module self-registration via import-time side
     effects would make import order load-bearing.
     """
-    bus.on("task.start_planning", planning.handle)
-    bus.on("task.plan_ready", review.handle_plan_ready)
-    bus.on("task.start_coding", coding.handle)
-    bus.on("task.deploy_preview", deploy.handle)
-    bus.on("task.query", query.handle)
-    bus.on("task.cleanup", cleanup.handle)
-    bus.on("task.clarification_response", conversation.handle_clarification_event)
-    bus.on("po.analyze", po_worker.handle)
-    bus.on("repo.onboard", harness_onboard.handle)
-    bus.on("human.message", conversation.route_human_message)
+    bus.on(TaskEventType.START_PLANNING, planning.handle)
+    bus.on(TaskEventType.PLAN_READY, review.handle_plan_ready)
+    bus.on(TaskEventType.START_CODING, coding.handle)
+    bus.on(TaskEventType.DEPLOY_PREVIEW, deploy.handle)
+    bus.on(TaskEventType.QUERY, query.handle)
+    bus.on(TaskEventType.CLEANUP, cleanup.handle)
+    bus.on(TaskEventType.CLARIFICATION_RESPONSE, conversation.handle_clarification_event)
+    bus.on(POEventType.ANALYZE, po_worker.handle)
+    bus.on(RepoEventType.ONBOARD, harness_onboard.handle)
+    bus.on(HumanEventType.MESSAGE, conversation.route_human_message)
 
 
 async def event_loop() -> None:

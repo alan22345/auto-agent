@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import Event, human_message, publish
 from shared.notifier import send_telegram_async
 from shared.redis_client import (
     ack_event,
@@ -222,11 +222,7 @@ async def _handle_command(text: str) -> None:
             await send_telegram_async("Invalid task ID. Usage: `/answer <task_id> <your answer>`")
             return
         answer = parts[2]
-        await publish(Event(
-            type="human.message",
-            task_id=task_id,
-            payload={"message": answer, "source": "telegram"},
-        ))
+        await publish(human_message(task_id=task_id, message=answer, source="telegram"))
         await send_telegram_async(f"Answer sent to task #{task_id}.")
 
     elif cmd == "/cancel":

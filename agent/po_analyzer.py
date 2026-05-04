@@ -18,7 +18,12 @@ from sqlalchemy import select
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
-from shared.events import Event, publish
+from shared.events import (
+    po_analysis_failed,
+    po_analysis_started,
+    po_suggestions_ready,
+    publish,
+)
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
 
 if TYPE_CHECKING:
@@ -114,9 +119,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     )
 
     # Notify UI
-    await publish(
-        Event(type="po.analysis_started", task_id=0, payload={"repo_name": repo.name})
-    )
+    await publish(po_analysis_started(repo_name=repo.name))
 
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
@@ -126,20 +129,14 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         output = result.output
     except Exception:
         log.exception(f"PO analysis for '{repo.name}' failed during agent execution")
-        await publish(
-            Event(type="po.analysis_failed", task_id=0, payload={"repo_name": repo.name})
-        )
+        await publish(po_analysis_failed(repo_name=repo.name))
         raise
 
     suggestions_data = _parse_analysis_output(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
         await publish(
-            Event(
-                type="po.analysis_failed",
-                task_id=0,
-                payload={"repo_name": repo.name, "reason": "No parseable output"},
-            )
+            po_analysis_failed(repo_name=repo.name, reason="No parseable output")
         )
         return
 
@@ -164,11 +161,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     log.info(f"PO analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
     await publish(
-        Event(
-            type="po.suggestions_ready",
-            task_id=0,
-            payload={"repo_name": repo.name, "count": len(new_suggestions)},
-        )
+        po_suggestions_ready(repo_name=repo.name, count=len(new_suggestions))
     )
 
 

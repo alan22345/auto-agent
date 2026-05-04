@@ -13,8 +13,6 @@ git log) are trivially re-derivable and safe to collapse.
 
 from __future__ import annotations
 
-import copy
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
