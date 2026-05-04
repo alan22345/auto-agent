@@ -45,7 +45,9 @@ Introduce `agent/llm/structured.py` as the single owner of
   one-shot LLM call + parse + bounded retry. On attempt 2+, appends
   "Your previous response was not valid JSON" to `system`. Raises
   `ValueError` after exhausting retries. Generalises the loop that lived
-  in `memory_extractor.extract`.
+  in `memory_extractor.extract`. No `schema_hint`/`format_hint`
+  parameter: zero callers want it today, so adding it would fail the
+  deletion test ("one adapter is hypothetical, two is real").
 
 All five call sites delete their helpers and route through these.
 

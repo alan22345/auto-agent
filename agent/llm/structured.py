@@ -93,27 +93,21 @@ async def complete_json(
     max_tokens: int = 4096,
     temperature: float = 0.0,
     retries: int = 2,
-    schema_hint: str | None = None,
 ) -> dict:
     """One-shot ``provider.complete`` + ``parse_json_response`` + retry.
 
     On failure, retries up to ``retries`` total attempts. On attempt 2+,
     a "your previous response wasn't valid JSON" nudge is appended to
-    ``system``. Optional ``schema_hint`` is appended to ``system`` on
-    every attempt so the model sees the expected shape.
+    ``system``.
 
     Raises ``ValueError`` when no attempt produced parseable JSON.
     """
-    base_system = system or ""
-    if schema_hint:
-        base_system = f"{base_system}\n\nExpected JSON schema:\n{schema_hint}".strip()
-
     last_raw = ""
     for attempt in range(1, max(1, retries) + 1):
-        attempt_system = base_system if attempt == 1 else base_system + _RETRY_NUDGE
+        attempt_system = system if attempt == 1 else (system or "") + _RETRY_NUDGE
         response = await provider.complete(
             messages=messages,
-            system=attempt_system or None,
+            system=attempt_system,
             max_tokens=max_tokens,
             temperature=temperature,
         )

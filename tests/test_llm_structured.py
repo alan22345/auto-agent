@@ -160,16 +160,3 @@ async def test_complete_json_passes_through_max_tokens_and_temperature():
     kwargs = provider.complete.await_args_list[0].kwargs
     assert kwargs["max_tokens"] == 512
     assert kwargs["temperature"] == 0.2
-
-
-@pytest.mark.asyncio
-async def test_complete_json_schema_hint_appended_to_first_system():
-    provider = _mock_provider_sequence(json.dumps({"ok": True}))
-    await complete_json(
-        provider,
-        messages=[Message(role="user", content="hi")],
-        system="be a JSON robot",
-        schema_hint='{"facts": [{"entity": "..."}]}',
-    )
-    first_system = provider.complete.await_args_list[0].kwargs["system"]
-    assert "schema" in first_system.lower() or '"facts"' in first_system
