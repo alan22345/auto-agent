@@ -19,11 +19,7 @@ from shared.redis_client import get_redis
 
 def _format_tool_args(tool_name: str, args: dict) -> str:
     """Format tool args into a human-readable preview for the streaming UI."""
-    if tool_name == "file_read":
-        return args.get("file_path", "?")
-    elif tool_name == "file_write":
-        return args.get("file_path", "?")
-    elif tool_name == "file_edit":
+    if tool_name == "file_read" or tool_name == "file_write" or tool_name == "file_edit":
         return args.get("file_path", "?")
     elif tool_name == "grep":
         path = args.get("path", "")

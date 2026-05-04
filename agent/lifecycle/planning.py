@@ -14,7 +14,7 @@ collapse onto a single in-flight planning run.
 from __future__ import annotations
 
 import re as _re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -184,8 +184,8 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         if isinstance(updated, str):
             updated = datetime.fromisoformat(updated)
         if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        summary_stale = datetime.now(timezone.utc) - updated > SUMMARY_MAX_AGE
+            updated = updated.replace(tzinfo=UTC)
+        summary_stale = datetime.now(UTC) - updated > SUMMARY_MAX_AGE
 
     if not repo.summary or summary_stale:
         reason = "stale" if summary_stale else "missing"

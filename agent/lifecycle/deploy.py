@@ -200,7 +200,7 @@ async def _try_local_deploy(
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             await publish(

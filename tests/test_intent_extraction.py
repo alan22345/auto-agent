@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.main import extract_intent
+from agent.lifecycle.intent import extract_intent
 from shared.types import TaskData
 
 
@@ -54,8 +54,8 @@ class TestExtractIntent:
         mock_provider = AsyncMock()
         mock_provider.complete.return_value = mock_response
 
-        with patch("agent.main.settings") as mock_settings, \
-             patch("agent.main.get_provider", return_value=mock_provider):
+        with patch("agent.lifecycle.intent.settings") as mock_settings, \
+             patch("agent.lifecycle.intent.get_provider", return_value=mock_provider):
             mock_settings.llm_provider = "anthropic"
             result = await extract_intent("Fix login bug", "Login fails on mobile devices")
 
@@ -70,7 +70,7 @@ class TestExtractIntent:
         mock_provider = AsyncMock()
         mock_provider.complete.side_effect = Exception("LLM down")
 
-        with patch("agent.main.get_provider", return_value=mock_provider):
+        with patch("agent.lifecycle.intent.get_provider", return_value=mock_provider):
             result = await extract_intent("Fix login bug", "Login fails on mobile")
 
         assert result == {}
@@ -84,7 +84,7 @@ class TestExtractIntent:
         mock_provider = AsyncMock()
         mock_provider.complete.return_value = mock_response
 
-        with patch("agent.main.get_provider", return_value=mock_provider):
+        with patch("agent.lifecycle.intent.get_provider", return_value=mock_provider):
             result = await extract_intent("Fix login bug", "Login fails on mobile")
 
         assert result == {}
@@ -170,9 +170,9 @@ class TestSubtaskHandoff:
         """Subtask output_preview should capture at least 1000 chars, not just 200."""
         import inspect
 
-        from agent import main as agent_main
+        from agent.lifecycle import coding
 
-        source = inspect.getsource(agent_main._handle_coding_with_subtasks)
+        source = inspect.getsource(coding._handle_coding_with_subtasks)
         assert "output[:200]" not in source, "output_preview should be longer than 200 chars"
         assert "output[:1500]" in source
 
@@ -181,9 +181,9 @@ class TestIntentExtractionSkipsForCLI:
     @pytest.mark.asyncio
     async def test_extract_intent_skips_for_cli_provider(self):
         """extract_intent should return empty dict when provider is claude_cli."""
-        from agent.main import extract_intent
+        from agent.lifecycle.intent import extract_intent
 
-        with patch("agent.main.settings") as mock_settings:
+        with patch("agent.lifecycle.intent.settings") as mock_settings:
             mock_settings.llm_provider = "claude_cli"
             result = await extract_intent("Fix bug", "Something broken")
 

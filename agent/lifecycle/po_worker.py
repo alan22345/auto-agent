@@ -9,7 +9,7 @@ background worker task — call it once at process startup.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from shared.events import Event, publish
 from shared.logging import setup_logging
@@ -22,10 +22,11 @@ _po_queue: asyncio.Queue[int] = asyncio.Queue()
 
 async def _po_worker() -> None:
     """Background worker — runs PO analyses sequentially."""
+    from sqlalchemy import select as _select
+
     from agent.po_analyzer import handle_po_analysis as _handle_po
     from shared.database import async_session as _async_session
     from shared.models import FreeformConfig as _FC
-    from sqlalchemy import select as _select
 
     log.info("PO analysis worker started")
     while True:
@@ -36,7 +37,7 @@ async def _po_worker() -> None:
                 _config = _result.scalar_one_or_none()
                 if _config:
                     await _handle_po(_session, _config)
-                    _config.last_analysis_at = datetime.now(timezone.utc)
+                    _config.last_analysis_at = datetime.now(UTC)
                     await _session.commit()
         except Exception:
             log.exception(f"PO analysis worker error for repo_id={repo_id}")
