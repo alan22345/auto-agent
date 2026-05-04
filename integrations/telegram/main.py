@@ -20,27 +20,13 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import task_id_for_telegram_message
 from shared.types import TaskData
 
 log = logging.getLogger(__name__)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 ORCHESTRATOR_URL = settings.orchestrator_url
-
-
-async def _task_id_for_message(telegram_message_id: int) -> int | None:
-    """Look up the task a previously-sent Telegram notification belongs to."""
-    try:
-        r = await get_redis()
-        raw = await r.get(f"telegram:msg:{telegram_message_id}")
-        await r.aclose()
-        if raw is None:
-            return None
-        decoded = raw.decode() if isinstance(raw, bytes) else str(raw)
-        return int(decoded)
-    except Exception:
-        log.exception("Error looking up telegram→task mapping")
-        return None
 
 
 async def _post_task_feedback(task_id: int, content: str, sender: str) -> None:
@@ -120,7 +106,7 @@ async def _handle_update(update: dict[str, Any]) -> None:
     reply_to = message.get("reply_to_message") or {}
     reply_msg_id = reply_to.get("message_id")
     if reply_msg_id and not text.startswith("/"):
-        task_id = await _task_id_for_message(reply_msg_id)
+        task_id = await task_id_for_telegram_message(reply_msg_id)
         if task_id is not None:
             await _post_task_feedback(task_id, text, sender=f"telegram:{chat_id}")
             await send_telegram_async(f"✉️ Sent to task #{task_id}.")
