@@ -283,7 +283,6 @@ class TestProcessToolCallsSeam:
             tool_context=ctx,
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert outcome.count == 2
@@ -312,7 +311,6 @@ class TestProcessToolCallsSeam:
             tool_context=ctx,
             tool_cache=cache,
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert len(grep.calls) == 1
@@ -339,7 +337,6 @@ class TestProcessToolCallsSeam:
             tool_context=ctx,
             tool_cache=cache,
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert grep.calls == []  # tool not executed
@@ -364,7 +361,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=cache,
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert cache.size == 0
@@ -383,7 +379,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert outcome.wrote is True
@@ -404,7 +399,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert outcome.wrote is True
@@ -423,7 +417,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
         assert outcome.verified is True
@@ -443,7 +436,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
         assert outcome.verified is True
 
@@ -461,7 +453,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
         assert outcome.verified is False
 
@@ -479,7 +470,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
         assert outcome.turn_has_write is True
         # bash echo is not a write to a file, so wrote stays False
@@ -503,7 +493,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
         assert outcome.turn_has_write is False
 
@@ -522,7 +511,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=True,
         )
 
         assert on_tool_call.await_count == 1
@@ -533,13 +521,13 @@ class TestProcessToolCallsSeam:
         assert args[3] == 3
 
     @pytest.mark.asyncio
-    async def test_does_not_stream_when_disabled(self, tmp_path):
-        on_tool_call = AsyncMock()
+    async def test_does_not_stream_when_no_callback_configured(self, tmp_path):
+        # Natural gate: when on_tool_call isn't wired, the seam never tries to stream.
         tools = ToolRegistry()
         tools.register(_RecordingTool("file_read"))
-        loop = _make_loop(tools, tmp_path, on_tool_call=on_tool_call)
+        loop = _make_loop(tools, tmp_path, on_tool_call=None)
 
-        await loop._process_tool_calls(
+        outcome = await loop._process_tool_calls(
             turn=0,
             tool_calls=[_tc("file_read", {"file_path": "a"})],
             messages=[],
@@ -547,10 +535,10 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=False,
         )
 
-        on_tool_call.assert_not_awaited()
+        # No callback set → bookkeeping still runs, just no streaming.
+        assert outcome.count == 1
 
     @pytest.mark.asyncio
     async def test_stream_callback_exception_swallowed(self, tmp_path):
@@ -570,7 +558,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=WorkspaceState(),
-            stream=True,
         )
 
         # No exception bubbled up; bookkeeping still complete
@@ -596,7 +583,6 @@ class TestProcessToolCallsSeam:
             tool_context=ToolContext(workspace=str(tmp_path)),
             tool_cache=ToolCache(),
             ws_state=ws,
-            stream=False,
         )
 
         assert "a.txt" in ws.files

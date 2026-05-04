@@ -325,7 +325,6 @@ class AgentLoop:
                         tool_context=tool_context,
                         tool_cache=tool_cache,
                         ws_state=ws_state,
-                        stream=True,
                     )
                     total_tool_calls += outcome.count
                     has_written = has_written or outcome.wrote
@@ -354,7 +353,6 @@ class AgentLoop:
                     tool_context=tool_context,
                     tool_cache=tool_cache,
                     ws_state=ws_state,
-                    stream=True,
                 )
                 total_tool_calls += outcome.count
                 has_written = has_written or outcome.wrote
@@ -414,14 +412,13 @@ class AgentLoop:
         tool_context: ToolContext,
         tool_cache: ToolCache,
         ws_state: WorkspaceState,
-        stream: bool,
     ) -> ToolBatchOutcome:
         """Execute a batch of tool calls and update all per-call loop bookkeeping.
 
         Owns: cache lookup/put, _execute_tool, building the role="tool" Message,
         appending to both message lists, ws_state.process_tool_call, write/verify
-        flag tracking, cache invalidation on writes, and (when stream=True)
-        streaming each call to the on_tool_call UI callback.
+        flag tracking, cache invalidation on writes, and (when on_tool_call is
+        configured) streaming each call to the UI callback.
 
         Cross-turn state (consecutive_reads, nudge_injected, verification_nudge)
         and branch-specific behaviour (continuation messages) stay in the caller.
@@ -458,7 +455,7 @@ class AgentLoop:
                 turn=turn,
             )
 
-            if stream and self._on_tool_call:
+            if self._on_tool_call:
                 try:
                     preview = result.output[:200] if result.output else ""
                     await self._on_tool_call(tc.name, tc.arguments, preview, turn)
