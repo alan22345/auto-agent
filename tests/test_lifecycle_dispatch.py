@@ -15,7 +15,6 @@ import pytest
 from agent.main import register_handlers
 from shared.events import Event, EventBus
 
-
 REGISTERED_EVENT_TYPES = [
     "task.start_planning",
     "task.plan_ready",
