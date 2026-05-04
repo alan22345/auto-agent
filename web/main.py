@@ -44,6 +44,7 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import TASK_STREAM_PATTERN
 from shared.types import MemorySaveResult, ProposedFact, TaskData
 
 log = setup_logging("web-ui")
@@ -939,14 +940,17 @@ async def event_listener() -> None:
 async def agent_stream_listener() -> None:
     """Subscribe to agent live-stream channels via Redis pub/sub.
 
-    The agent publishes tool calls and thinking to `task:{id}:stream`.
-    We forward these to WebSocket clients so the UI shows real-time
-    agent activity — the pair-programming feed.
+    The agent publishes tool calls and thinking through the
+    ``TaskChannel`` seam (see ``shared/task_channel.py``); this
+    listener subscribes to every task's stream at once via
+    ``TASK_STREAM_PATTERN`` and forwards each message to WebSocket
+    clients so the UI shows real-time agent activity — the
+    pair-programming feed.
     """
     import json as _json
     r = await get_redis()
     pubsub = r.pubsub()
-    await pubsub.psubscribe("task:*:stream")
+    await pubsub.psubscribe(TASK_STREAM_PATTERN)
     log.info("Agent stream listener started (pub/sub)")
 
     while True:
@@ -956,7 +960,7 @@ async def agent_stream_listener() -> None:
                 channel = msg["channel"]
                 if isinstance(channel, bytes):
                     channel = channel.decode()
-                # Extract task_id from channel name "task:123:stream"
+                # Extract task_id from the channel name (matches TASK_STREAM_PATTERN)
                 parts = channel.split(":")
                 task_id = int(parts[1]) if len(parts) >= 3 else 0
 
@@ -978,7 +982,7 @@ async def agent_stream_listener() -> None:
             try:
                 r = await get_redis()
                 pubsub = r.pubsub()
-                await pubsub.psubscribe("task:*:stream")
+                await pubsub.psubscribe(TASK_STREAM_PATTERN)
             except Exception:
                 pass
 

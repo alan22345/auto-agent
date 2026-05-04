@@ -50,6 +50,11 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import (
+    RedisTaskChannelFactory,
+    set_task_channel_factory,
+    task_channel,
+)
 
 from datetime import datetime, timezone
 
@@ -937,17 +942,6 @@ TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 _recovery_attempted: set[int] = set()
 
 
-async def _task_has_heartbeat(task_id: int) -> bool:
-    """Check if the agent is actively sending heartbeat signals for this task."""
-    try:
-        r = await get_redis()
-        result = await r.exists(f"task:{task_id}:heartbeat")
-        await r.aclose()
-        return bool(result)
-    except Exception:
-        return False
-
-
 async def task_timeout_watchdog() -> None:
     """Progress-aware watchdog. Checks heartbeat before killing tasks.
 
@@ -979,7 +973,7 @@ async def task_timeout_watchdog() -> None:
                     hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
 
                     # If agent is actively sending heartbeats, it's alive — skip
-                    if await _task_has_heartbeat(task.id):
+                    if await task_channel(task.id).is_alive():
                         if age_s > soft_timeout:
                             log.debug(
                                 f"Task #{task.id} past soft timeout ({age_s:.0f}s) "
@@ -1541,6 +1535,12 @@ async def lifespan(app: FastAPI):
     redis_publisher = RedisStreamPublisher(settings.redis_url)
     set_publisher(redis_publisher)
 
+    # Wire the production task-channel factory alongside the publisher —
+    # symmetric seam for the per-task Redis surface (heartbeat, guidance,
+    # streaming, telegram reply-binding). See ADR-011.
+    redis_task_channel_factory = RedisTaskChannelFactory(settings.redis_url)
+    set_task_channel_factory(redis_task_channel_factory)
+
     # Seed admin user if no users exist
     from orchestrator.router import seed_admin_user
     await seed_admin_user()
@@ -1580,6 +1580,7 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await t
     await redis_publisher.aclose()
+    await redis_task_channel_factory.aclose()
 
 
 app.router.lifespan_context = lifespan
