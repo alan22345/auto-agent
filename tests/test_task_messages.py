@@ -50,7 +50,7 @@ class TestPostTaskMessage:
             assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_x_sender_header_used_when_no_auth(self, publisher):
+    async def test_x_sender_header_used_when_no_auth(self, publisher, task_channel):
         """Internal callers (Telegram bridge) pass X-Sender."""
         session = AsyncMock(spec=AsyncSession)
         # Simulate the row hydration from refresh()
@@ -58,10 +58,8 @@ class TestPostTaskMessage:
             msg.id = 42
             msg.created_at = None
         session.refresh = refresh_stub
-        fake_redis = AsyncMock()
 
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())), \
-             patch("orchestrator.router.get_redis", AsyncMock(return_value=fake_redis)):
+        with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())):
             result = await post_task_message(
                 task_id=1,
                 req=TaskMessagePost(content="stop doing that"),
@@ -72,12 +70,9 @@ class TestPostTaskMessage:
 
         assert result.sender == "telegram:12345"
         assert result.content == "stop doing that"
-        # Guidance pushed onto the agent's Redis queue for next-turn pickup
-        fake_redis.rpush.assert_awaited_once()
-        args, _ = fake_redis.rpush.await_args
-        assert args[0] == "task:1:guidance"
-        assert "telegram:12345: stop doing that" in args[1]
-        # Event published through the new seam
+        # Guidance pushed onto the agent's queue via the TaskChannel seam
+        assert task_channel.guidance[1] == ["telegram:12345: stop doing that"]
+        # Event published through the publisher seam
         assert len(publisher.events) == 1
         assert publisher.events[0].type == "task.feedback"
         assert publisher.events[0].task_id == 1
