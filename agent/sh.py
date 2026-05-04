@@ -45,7 +45,6 @@ class RunResult:
     stderr: str
     returncode: int | None
     timed_out: bool
-    argv: tuple[str, ...]
 
     @property
     def failed(self) -> bool:
@@ -102,7 +101,7 @@ async def run(
         stderr=stderr_pipe,
         env=_build_env(env),
     )
-    return await _await_proc(proc, tuple(argv), timeout, stderr_to_stdout, max_output)
+    return await _await_proc(proc, timeout, stderr_to_stdout, max_output)
 
 
 async def run_shell(
@@ -128,12 +127,11 @@ async def run_shell(
         stderr=stderr_pipe,
         env=_build_env(env),
     )
-    return await _await_proc(proc, (command,), timeout, stderr_to_stdout, max_output)
+    return await _await_proc(proc, timeout, stderr_to_stdout, max_output)
 
 
 async def _await_proc(
     proc: asyncio.subprocess.Process,
-    argv: tuple[str, ...],
     timeout: float,
     stderr_to_stdout: bool,
     max_output: int | None,
@@ -160,5 +158,4 @@ async def _await_proc(
         stderr=stderr,
         returncode=proc.returncode,
         timed_out=timed_out,
-        argv=argv,
     )

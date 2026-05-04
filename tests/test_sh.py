@@ -138,19 +138,7 @@ async def test_run_stderr_to_stdout_merges_streams():
     assert result.stderr == ""
 
 
-@pytest.mark.asyncio
-async def test_run_argv_recorded_in_result():
-    result = await run([sys.executable, "-c", "pass"], timeout=5)
-    assert result.argv == (sys.executable, "-c", "pass")
-
-
-@pytest.mark.asyncio
-async def test_run_shell_argv_records_command_string():
-    result = await run_shell("true", timeout=5)
-    assert result.argv == ("true",)
-
-
 def test_run_result_failed_predicate():
-    assert RunResult("", "", 0, False, ()).failed is False
-    assert RunResult("", "", 1, False, ()).failed is True
-    assert RunResult("", "", None, True, ()).failed is True
+    assert RunResult("", "", 0, False).failed is False
+    assert RunResult("", "", 1, False).failed is True
+    assert RunResult("", "", None, True).failed is True

@@ -47,7 +47,7 @@ in a small dataclass.
 Introduce `agent/sh.py` as the single subprocess seam for the agent
 layer. It exports:
 
-- `RunResult(stdout, stderr, returncode, timed_out, argv)` — frozen
+- `RunResult(stdout, stderr, returncode, timed_out)` — frozen
   dataclass with a `failed` predicate (`timed_out or returncode != 0`).
 - `async def run(argv, *, cwd, timeout, env=None, stderr_to_stdout=False, max_output=None) -> RunResult` —
   argv form via `create_subprocess_exec`.

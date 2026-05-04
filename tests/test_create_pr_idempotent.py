@@ -31,7 +31,6 @@ def _result(stdout: str = "", *, returncode: int = 0, timed_out: bool = False) -
         stderr="",
         returncode=None if timed_out else returncode,
         timed_out=timed_out,
-        argv=("gh", "pr", "list"),
     )
 
 

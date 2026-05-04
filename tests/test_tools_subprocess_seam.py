@@ -20,7 +20,7 @@ from agent.tools.git import GitTool
 
 @pytest.mark.asyncio
 async def test_bash_formats_stdout_and_stderr(tmp_path):
-    fake = RunResult(stdout="hello\n", stderr="warn\n", returncode=0, timed_out=False, argv=("ls",))
+    fake = RunResult(stdout="hello\n", stderr="warn\n", returncode=0, timed_out=False)
     with patch("agent.tools.bash.sh.run_shell", new=AsyncMock(return_value=fake)):
         result = await BashTool().execute({"command": "ls"}, ToolContext(workspace=str(tmp_path)))
     assert "hello" in result.output
@@ -30,7 +30,7 @@ async def test_bash_formats_stdout_and_stderr(tmp_path):
 
 @pytest.mark.asyncio
 async def test_bash_formats_non_zero_exit_code(tmp_path):
-    fake = RunResult(stdout="", stderr="boom", returncode=2, timed_out=False, argv=("ls",))
+    fake = RunResult(stdout="", stderr="boom", returncode=2, timed_out=False)
     with patch("agent.tools.bash.sh.run_shell", new=AsyncMock(return_value=fake)):
         result = await BashTool().execute({"command": "ls"}, ToolContext(workspace=str(tmp_path)))
     assert "Exit code: 2" in result.output
@@ -39,7 +39,7 @@ async def test_bash_formats_non_zero_exit_code(tmp_path):
 
 @pytest.mark.asyncio
 async def test_bash_reports_timeout(tmp_path):
-    fake = RunResult(stdout="", stderr="", returncode=None, timed_out=True, argv=("sleep 99",))
+    fake = RunResult(stdout="", stderr="", returncode=None, timed_out=True)
     with patch("agent.tools.bash.sh.run_shell", new=AsyncMock(return_value=fake)):
         result = await BashTool().execute(
             {"command": "sleep 99", "timeout": 1}, ToolContext(workspace=str(tmp_path))
@@ -56,7 +56,6 @@ async def test_git_only_shows_stderr_on_failure(tmp_path):
         stderr="warning: ...\n",
         returncode=0,
         timed_out=False,
-        argv=("git", "status"),
     )
     with patch("agent.tools.git.sh.run", new=AsyncMock(return_value=ok)):
         result = await GitTool().execute(
@@ -71,7 +70,6 @@ async def test_git_only_shows_stderr_on_failure(tmp_path):
         stderr="fatal: not a git repo",
         returncode=128,
         timed_out=False,
-        argv=("git", "status"),
     )
     with patch("agent.tools.git.sh.run", new=AsyncMock(return_value=fail)):
         result = await GitTool().execute(
@@ -83,7 +81,7 @@ async def test_git_only_shows_stderr_on_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_git_reports_timeout(tmp_path):
-    fake = RunResult(stdout="", stderr="", returncode=None, timed_out=True, argv=("git", "status"))
+    fake = RunResult(stdout="", stderr="", returncode=None, timed_out=True)
     with patch("agent.tools.git.sh.run", new=AsyncMock(return_value=fake)):
         result = await GitTool().execute(
             {"command": "status"}, ToolContext(workspace=str(tmp_path))
