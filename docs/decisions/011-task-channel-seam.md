@@ -1,4 +1,4 @@
-## [ADR-010] Per-task Redis state as a real seam (TaskChannel)
+## [ADR-011] Per-task Redis state as a real seam (TaskChannel)
 
 ## Status
 

@@ -4,7 +4,7 @@ ADR-007 deepened the broadcast-event publisher into a Publisher seam, but
 left the *per-task* state side untouched. The same Protocol + RedisXxx +
 InMemoryXxx + module-level facade shape applies to the four keys that key
 off ``task_id``: the guidance list, heartbeat key, streaming pub/sub
-channel, and the Telegram message → task reply-binding key. ADR-010
+channel, and the Telegram message → task reply-binding key. ADR-011
 records that decision; this module is its implementation.
 
 This module is the single owner of:
