@@ -15,6 +15,7 @@ import time
 
 import httpx
 
+from agent import sh
 from agent.lifecycle._naming import _branch_name
 from agent.lifecycle._orchestrator_api import get_task
 from agent.workspace import WORKSPACES_DIR
@@ -180,32 +181,17 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
 
     log.info(f"Task #{task_id}: deploying branch '{branch_name}' to dev via local script")
     try:
+        env = {"BRANCH": branch_name, "TASK_ID": str(task_id)}
         if deploy_script:
             script_path = os.path.join(workspace, deploy_script)
             os.chmod(script_path, 0o755)
-            proc = await asyncio.create_subprocess_exec(
-                f"./{deploy_script}",
-                branch_name,
-                cwd=workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "BRANCH": branch_name, "TASK_ID": str(task_id)},
-            )
+            argv = [f"./{deploy_script}", branch_name]
         else:
-            proc = await asyncio.create_subprocess_exec(
-                "make",
-                "deploy-dev",
-                cwd=workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "BRANCH": branch_name, "TASK_ID": str(task_id)},
-            )
+            argv = ["make", "deploy-dev"]
 
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
+        result = await sh.run(argv, cwd=workspace, timeout=300, env=env)
+
+        if result.timed_out:
             await publish(
                 Event(
                     type="task.dev_deploy_failed",
@@ -219,8 +205,8 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
             )
             return
 
-        output = ((stdout or b"").decode() + (stderr or b"").decode()).strip()
-        event_type = "task.dev_deployed" if proc.returncode == 0 else "task.dev_deploy_failed"
+        output = (result.stdout + result.stderr).strip()
+        event_type = "task.dev_deployed" if result.returncode == 0 else "task.dev_deploy_failed"
         await publish(
             Event(
                 type=event_type,

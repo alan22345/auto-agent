@@ -9,11 +9,11 @@ Unlike bash, this tool:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from typing import Any
 
+from agent import sh
 from agent.tools.base import Tool, ToolContext, ToolResult
 
 
@@ -66,23 +66,24 @@ class TestRunnerTool(Tool):
             )
 
         try:
-            proc = await asyncio.create_subprocess_shell(
+            result = await sh.run_shell(
                 cmd,
                 cwd=context.workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "FORCE_COLOR": "0", "NO_COLOR": "1"},
+                timeout=120,
+                stderr_to_stdout=True,
+                env={"FORCE_COLOR": "0", "NO_COLOR": "1"},
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-            raw_output = (stdout or b"").decode(errors="replace")
-            exit_code = proc.returncode or 0
-        except asyncio.TimeoutError:
+        except Exception as e:
+            return ToolResult(output=f"Error running tests: {e}", is_error=True)
+
+        if result.timed_out:
             return ToolResult(
                 output="Test run timed out after 120 seconds.",
                 is_error=True,
             )
-        except Exception as e:
-            return ToolResult(output=f"Error running tests: {e}", is_error=True)
+
+        raw_output = result.stdout
+        exit_code = result.returncode or 0
 
         # Parse and summarize
         summary = _parse_output(framework, raw_output, exit_code)

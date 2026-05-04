@@ -2,32 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 
+from agent import sh
 from shared.config import settings
 
 WORKSPACES_DIR = os.environ.get("WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces"))
 
 
-async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> tuple[str, str, int]:
-    """Run a git command asynchronously. Returns (stdout, stderr, returncode)."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    stdout_str = (stdout or b"").decode()
-    stderr_str = (stderr or b"").decode()
-    if check and proc.returncode != 0:
+async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> tuple[str, str, int | None]:
+    """Run a git command asynchronously. Returns (stdout, stderr, returncode).
+
+    Routes through ``agent.sh.run`` so this call inherits the seam's
+    invariants — a 60s default timeout (no remote git command should hang
+    indefinitely waiting for a TTY) and ``GIT_TERMINAL_PROMPT=0``.
+    """
+    result = await sh.run(["git", *args], cwd=cwd, timeout=60)
+    if check and result.failed:
         # Include the failed git args in the error for easier diagnosis
         raise RuntimeError(
-            f"git {args[0]} failed: {stderr_str.strip() or stdout_str.strip()}"
+            f"git {args[0]} failed: {result.stderr.strip() or result.stdout.strip()}"
         )
-    return stdout_str, stderr_str, proc.returncode
+    return result.stdout, result.stderr, result.returncode
 
 
 # Identity used for auto-commits by the safety net, and configured in each
