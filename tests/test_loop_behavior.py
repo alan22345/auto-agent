@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+from unittest.mock import AsyncMock
+
 import pytest
 
+from agent.context import ContextManager
 from agent.context.workspace_state import WorkspaceState
+from agent.llm.types import Message, ToolCall
 from agent.loop import (
     _EXPLORATION_BUDGET,
     _EXPLORATION_NUDGE,
@@ -12,7 +17,10 @@ from agent.loop import (
     _VERIFICATION_NUDGE,
     _VERIFICATION_PATTERNS,
     _WRITE_TOOLS,
+    AgentLoop,
 )
+from agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
+from agent.tools.cache import ToolCache
 
 
 class TestExplorationBudgetConstants:
@@ -197,3 +205,400 @@ class TestComplexityAwareExplorationBudget:
     def test_get_exploration_budget_unknown_returns_default(self):
         from agent.loop import get_exploration_budget
         assert get_exploration_budget("unknown") == 8
+
+
+# ----------------------------------------------------------------------
+# Seam: AgentLoop._process_tool_calls
+# ----------------------------------------------------------------------
+
+
+class _RecordingTool(Tool):
+    """Tool that returns a canned result and records execution count."""
+
+    parameters: ClassVar[dict] = {"type": "object", "properties": {}}
+
+    def __init__(self, name: str, output: str = "ok", token_estimate: int = 0):
+        self.name = name
+        self.description = f"recording stub for {name}"
+        self._output = output
+        self._token_estimate = token_estimate
+        self.calls: list[dict] = []
+
+    async def execute(self, arguments, context):
+        self.calls.append(dict(arguments))
+        return ToolResult(output=self._output, token_estimate=self._token_estimate)
+
+
+class _NoopProvider:
+    """Bare-minimum provider stub. We never call .complete() in these tests."""
+
+    model = "stub-model"
+    max_context_tokens = 200_000
+    is_passthrough = False
+
+    async def complete(self, *a, **kw):  # pragma: no cover - never invoked
+        raise AssertionError("provider.complete() should not be called by seam tests")
+
+    async def count_tokens(self, messages, system=None, tools=None):
+        return 0
+
+    def rough_token_count(self, text):
+        return len(text) // 4
+
+
+def _make_loop(tools: ToolRegistry, tmp_path, on_tool_call=None) -> AgentLoop:
+    provider = _NoopProvider()
+    ctx = ContextManager(str(tmp_path), provider)
+    return AgentLoop(
+        provider=provider,
+        tools=tools,
+        context_manager=ctx,
+        max_turns=5,
+        workspace=str(tmp_path),
+        on_tool_call=on_tool_call,
+    )
+
+
+def _tc(name: str, args: dict | None = None, tc_id: str | None = None) -> ToolCall:
+    return ToolCall(id=tc_id or f"tu_{name}", name=name, arguments=args or {})
+
+
+class TestProcessToolCallsSeam:
+    @pytest.mark.asyncio
+    async def test_executes_each_call_and_appends_tool_messages(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read", output="contents"))
+        tools.register(_RecordingTool("grep", output="matches"))
+        loop = _make_loop(tools, tmp_path)
+
+        messages: list[Message] = []
+        api_messages: list[Message] = []
+        ctx = ToolContext(workspace=str(tmp_path))
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_read", {"file_path": "a.txt"}), _tc("grep", {"pattern": "x"})],
+            messages=messages,
+            api_messages=api_messages,
+            tool_context=ctx,
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert outcome.count == 2
+        assert len(messages) == 2
+        assert len(api_messages) == 2
+        for m in messages:
+            assert m.role == "tool"
+            assert m.tool_call_id is not None
+            assert m.tool_name in {"file_read", "grep"}
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_executes_then_puts(self, tmp_path):
+        tools = ToolRegistry()
+        grep = _RecordingTool("grep", output="matches")
+        tools.register(grep)
+        loop = _make_loop(tools, tmp_path)
+
+        cache = ToolCache()
+        ctx = ToolContext(workspace=str(tmp_path))
+
+        await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("grep", {"pattern": "x"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ctx,
+            tool_cache=cache,
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert len(grep.calls) == 1
+        assert cache.get("grep", {"pattern": "x"}) is not None
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_execute(self, tmp_path):
+        tools = ToolRegistry()
+        grep = _RecordingTool("grep", output="cold")
+        tools.register(grep)
+        loop = _make_loop(tools, tmp_path)
+
+        cache = ToolCache()
+        cache.put("grep", {"pattern": "x"}, ToolResult(output="cached"))
+        ctx = ToolContext(workspace=str(tmp_path))
+
+        messages: list[Message] = []
+        api_messages: list[Message] = []
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("grep", {"pattern": "x"})],
+            messages=messages,
+            api_messages=api_messages,
+            tool_context=ctx,
+            tool_cache=cache,
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert grep.calls == []  # tool not executed
+        assert outcome.count == 1
+        assert messages[0].content == "cached"
+
+    @pytest.mark.asyncio
+    async def test_write_tool_invalidates_cache(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_write", output="written"))
+        loop = _make_loop(tools, tmp_path)
+
+        cache = ToolCache()
+        cache.put("grep", {"pattern": "x"}, ToolResult(output="cached"))
+        assert cache.size == 1
+
+        await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_write", {"file_path": "a.txt", "content": "hi"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=cache,
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert cache.size == 0
+
+    @pytest.mark.asyncio
+    async def test_file_write_sets_wrote_flag(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_write"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_write", {"file_path": "x", "content": "y"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert outcome.wrote is True
+        assert outcome.verified is False
+        assert outcome.turn_has_write is True
+
+    @pytest.mark.asyncio
+    async def test_file_edit_sets_wrote_flag(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_edit"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_edit", {"file_path": "x"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert outcome.wrote is True
+
+    @pytest.mark.asyncio
+    async def test_test_runner_sets_verified_flag(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("test_runner"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("test_runner", {})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        assert outcome.verified is True
+        assert outcome.wrote is False
+
+    @pytest.mark.asyncio
+    async def test_bash_pytest_sets_verified_flag(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("bash"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("bash", {"command": "python -m pytest tests/"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+        assert outcome.verified is True
+
+    @pytest.mark.asyncio
+    async def test_bash_non_test_does_not_verify(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("bash"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("bash", {"command": "ls -la"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+        assert outcome.verified is False
+
+    @pytest.mark.asyncio
+    async def test_turn_has_write_for_bash(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("bash"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("bash", {"command": "echo hi"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+        assert outcome.turn_has_write is True
+        # bash echo is not a write to a file, so wrote stays False
+        assert outcome.wrote is False
+
+    @pytest.mark.asyncio
+    async def test_turn_has_write_false_for_pure_reads(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read"))
+        tools.register(_RecordingTool("grep"))
+        loop = _make_loop(tools, tmp_path)
+
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[
+                _tc("file_read", {"file_path": "a"}),
+                _tc("grep", {"pattern": "x"}),
+            ],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+        assert outcome.turn_has_write is False
+
+    @pytest.mark.asyncio
+    async def test_streams_when_enabled(self, tmp_path):
+        on_tool_call = AsyncMock()
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read", output="hello"))
+        loop = _make_loop(tools, tmp_path, on_tool_call=on_tool_call)
+
+        await loop._process_tool_calls(
+            turn=3,
+            tool_calls=[_tc("file_read", {"file_path": "a.txt"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=True,
+        )
+
+        assert on_tool_call.await_count == 1
+        args, _ = on_tool_call.await_args
+        assert args[0] == "file_read"
+        assert args[1] == {"file_path": "a.txt"}
+        assert args[2] == "hello"
+        assert args[3] == 3
+
+    @pytest.mark.asyncio
+    async def test_does_not_stream_when_disabled(self, tmp_path):
+        on_tool_call = AsyncMock()
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read"))
+        loop = _make_loop(tools, tmp_path, on_tool_call=on_tool_call)
+
+        await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_read", {"file_path": "a"})],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=False,
+        )
+
+        on_tool_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stream_callback_exception_swallowed(self, tmp_path):
+        async def boom(*a, **kw):
+            raise RuntimeError("ui crashed")
+
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read"))
+        loop = _make_loop(tools, tmp_path, on_tool_call=boom)
+
+        messages: list[Message] = []
+        outcome = await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[_tc("file_read", {"file_path": "a"})],
+            messages=messages,
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=WorkspaceState(),
+            stream=True,
+        )
+
+        # No exception bubbled up; bookkeeping still complete
+        assert outcome.count == 1
+        assert len(messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_ws_state_called_per_tool(self, tmp_path):
+        tools = ToolRegistry()
+        tools.register(_RecordingTool("file_read"))
+        tools.register(_RecordingTool("file_write"))
+        loop = _make_loop(tools, tmp_path)
+
+        ws = WorkspaceState()
+        await loop._process_tool_calls(
+            turn=0,
+            tool_calls=[
+                _tc("file_read", {"file_path": "a.txt"}),
+                _tc("file_write", {"file_path": "b.txt", "content": "x"}),
+            ],
+            messages=[],
+            api_messages=[],
+            tool_context=ToolContext(workspace=str(tmp_path)),
+            tool_cache=ToolCache(),
+            ws_state=ws,
+            stream=False,
+        )
+
+        assert "a.txt" in ws.files
+        assert "b.txt" in ws.files
+        assert ws.files["b.txt"].was_modified is True
