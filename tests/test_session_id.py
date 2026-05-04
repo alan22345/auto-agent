@@ -1,4 +1,4 @@
-"""Tests for session-ID generation policies in agent/main.py.
+"""Tests for session-ID generation policies in agent/lifecycle/_naming.py.
 
 Two contracts:
   - ``_session_id(task_id, created_at)`` is **deterministic** across calls,
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 
-from agent.main import _fresh_session_id, _session_id
+from agent.lifecycle._naming import _fresh_session_id, _session_id
 
 
 def test_session_id_is_deterministic_per_task():
