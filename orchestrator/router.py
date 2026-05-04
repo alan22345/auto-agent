@@ -21,7 +21,20 @@ from orchestrator.feedback import analyze_patterns, get_feedback_summary, record
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 from shared.database import get_session
-from shared.events import Event, publish
+from shared.events import (
+    po_analyze,
+    publish,
+    repo_deleted,
+    repo_onboard,
+    task_approved,
+    task_cleanup,
+    task_created,
+    task_failed,
+    task_feedback,
+    task_rejected,
+    task_review_approved,
+    task_start_planning,
+)
 from shared.models import (
     FreeformConfig,
     Repo,
@@ -315,7 +328,7 @@ async def create_task(
     await session.refresh(task)
 
     # Publish event
-    await publish(Event(type="task.created", task_id=task.id))
+    await publish(task_created(task.id))
 
     return _task_to_response(task)
 
@@ -352,8 +365,8 @@ async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)
     await session.commit()
 
     # Publish cleanup event to free workspace
-    await publish(Event(type="task.cleanup", task_id=task_id))
-    await publish(Event(type="task.failed", task_id=task_id))
+    await publish(task_cleanup(task_id))
+    await publish(task_failed(task_id))
 
     return {"deleted": task_id}
 
@@ -401,8 +414,8 @@ async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)
     )
     await session.commit()
 
-    await publish(Event(type="task.cleanup", task_id=task_id))
-    await publish(Event(type="task.failed", task_id=task_id))
+    await publish(task_cleanup(task_id))
+    await publish(task_failed(task_id))
 
     return _task_to_response(task)
 
@@ -590,13 +603,7 @@ async def post_task_message(
         await r.rpush(f"task:{task_id}:guidance", formatted)
     finally:
         await r.aclose()
-    await publish(
-        Event(
-            type="task.feedback",
-            task_id=task_id,
-            payload={"message_id": msg.id, "sender": sender},
-        )
-    )
+    await publish(task_feedback(task_id=task_id, message_id=msg.id, sender=sender))
 
     return TaskMessageData(
         id=msg.id,
@@ -621,7 +628,7 @@ async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(400, f"Cannot mark done from {task.status.value}")
 
     if task.status == TaskStatus.AWAITING_REVIEW:
-        await publish(Event(type="task.review_approved", task_id=task.id))
+        await publish(task_review_approved(task.id))
 
     task = await transition(session, task, TaskStatus.DONE, "Marked done by user")
     await session.commit()
@@ -671,27 +678,15 @@ async def approve_task(
         approve_msg = req.message or "Plan approved by user"
         task = await transition(session, task, TaskStatus.CODING, approve_msg)
         await session.commit()
-        await publish(Event(type="task.approved", task_id=task.id))
+        await publish(task_approved(task.id))
     else:
         # Clear the old plan and re-run planning with feedback
         task.plan = None
         reject_msg = req.message or f"Plan rejected: {req.feedback}"
         task = await transition(session, task, TaskStatus.PLANNING, reject_msg)
         await session.commit()
-        await publish(
-            Event(
-                type="task.rejected",
-                task_id=task.id,
-                payload={"feedback": req.feedback},
-            )
-        )
-        await publish(
-            Event(
-                type="task.start_planning",
-                task_id=task.id,
-                payload={"feedback": req.feedback},
-            )
-        )
+        await publish(task_rejected(task.id, feedback=req.feedback))
+        await publish(task_start_planning(task.id, feedback=req.feedback))
 
     return _task_to_response(task)
 
@@ -924,13 +919,7 @@ async def trigger_harness_onboarding(
         await session.commit()
 
     # Publish event to trigger onboarding asynchronously
-    await publish(
-        Event(
-            type="repo.onboard",
-            task_id=0,
-            payload={"repo_id": repo.id, "repo_name": repo.name},
-        )
-    )
+    await publish(repo_onboard(repo_id=repo.id, repo_name=repo.name))
 
     return {"status": "onboarding_started", "repo": repo.name}
 
@@ -1004,13 +993,7 @@ async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_sessio
     await session.commit()
 
     # Publish event so background loops can react
-    await publish(
-        Event(
-            type="repo.deleted",
-            task_id=0,
-            payload={"repo_name": repo_name},
-        )
-    )
+    await publish(repo_deleted(repo_name=repo_name))
 
     return {"deleted": repo_name}
 
@@ -1180,11 +1163,7 @@ async def trigger_po_analysis(
     if not repo:
         raise HTTPException(404, f"Repo '{repo_name}' not found")
 
-    await publish(
-        Event(
-            type="po.analyze", task_id=0, payload={"repo_id": repo.id, "repo_name": repo.name}
-        )
-    )
+    await publish(po_analyze(repo_id=repo.id, repo_name=repo.name))
     return {"ok": True, "message": f"PO analysis triggered for {repo_name}"}
 
 
@@ -1239,7 +1218,7 @@ async def approve_suggestion(
     await session.commit()
 
     # Trigger task pipeline
-    await publish(Event(type="task.created", task_id=task.id))
+    await publish(task_created(task.id))
 
     return _task_to_response(task)
 
