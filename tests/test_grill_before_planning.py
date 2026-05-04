@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent.main import (
+from agent.lifecycle.planning import (
     _MAX_GRILL_ROUNDS,
     _SKIP_GRILL_COMPLEXITIES,
     _extract_grill_done,
