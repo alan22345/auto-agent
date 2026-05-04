@@ -7,7 +7,6 @@ with grep, file_read, etc.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING
 from croniter import croniter
 from sqlalchemy import select
 
+from agent.llm.structured import parse_json_response
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
@@ -106,7 +106,9 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     recent_titles = [row[0] for row in recent_result.all()]
 
     ws_name = f"po-{repo.name.replace('/', '-')}"
-    workspace = await clone_repo(repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name)
+    workspace = await clone_repo(
+        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name
+    )
 
     prompt = build_po_analysis_prompt(
         ux_knowledge=config.ux_knowledge,
@@ -114,9 +116,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     )
 
     # Notify UI
-    await publish(
-        Event(type="po.analysis_started", task_id=0, payload={"repo_name": repo.name})
-    )
+    await publish(Event(type="po.analysis_started", task_id=0, payload={"repo_name": repo.name}))
 
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
@@ -126,12 +126,10 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         output = result.output
     except Exception:
         log.exception(f"PO analysis for '{repo.name}' failed during agent execution")
-        await publish(
-            Event(type="po.analysis_failed", task_id=0, payload={"repo_name": repo.name})
-        )
+        await publish(Event(type="po.analysis_failed", task_id=0, payload={"repo_name": repo.name}))
         raise
 
-    suggestions_data = _parse_analysis_output(output)
+    suggestions_data = parse_json_response(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
         await publish(
@@ -170,24 +168,3 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
             payload={"repo_name": repo.name, "count": len(new_suggestions)},
         )
     )
-
-
-def _parse_analysis_output(output: str) -> dict | None:
-    """Parse JSON output from PO analysis, handling markdown fences."""
-    text = output.strip()
-
-    if text.startswith("```"):
-        lines = text.splitlines()
-        lines = [line for line in lines if not line.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        return None
-
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        log.warning(f"Failed to parse PO analysis JSON: {text[:200]}...")
-        return None

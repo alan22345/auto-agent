@@ -15,7 +15,6 @@ phase (the analyzer has already grilled itself).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -23,6 +22,7 @@ from typing import TYPE_CHECKING
 from croniter import croniter
 from sqlalchemy import select
 
+from agent.llm.structured import parse_json_response
 from agent.prompts import build_architecture_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
@@ -152,7 +152,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         )
         raise
 
-    suggestions_data = _parse_analysis_output(output)
+    suggestions_data = parse_json_response(output)
     if not suggestions_data:
         log.warning(f"Architecture analysis for '{repo.name}' returned no parseable output")
         await publish(
@@ -184,9 +184,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         config.architecture_knowledge = knowledge_update
 
     await session.flush()
-    log.info(
-        f"Architecture analysis for '{repo.name}': {len(new_suggestions)} suggestions created"
-    )
+    log.info(f"Architecture analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
     await publish(
         Event(
@@ -195,24 +193,3 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
             payload={"repo_name": repo.name, "count": len(new_suggestions)},
         )
     )
-
-
-def _parse_analysis_output(output: str) -> dict | None:
-    """Parse JSON output from architecture analysis, handling markdown fences."""
-    text = output.strip()
-
-    if text.startswith("```"):
-        lines = text.splitlines()
-        lines = [line for line in lines if not line.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        return None
-
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        log.warning(f"Failed to parse architecture analysis JSON: {text[:200]}...")
-        return None

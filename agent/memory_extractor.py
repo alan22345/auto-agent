@@ -1,12 +1,13 @@
 """Single-call LLM extractor: source text → proposed team-memory facts."""
+
 from __future__ import annotations
 
-import json
 import uuid
 
 import structlog
 
 from agent.llm import get_provider
+from agent.llm.structured import complete_json
 from agent.llm.types import Message
 from shared.types import ConflictInfo, ProposedFact
 
@@ -51,20 +52,6 @@ def _build_user_message(text: str, hint: str | None, existing: dict[str, list[di
     return "\n".join(parts)
 
 
-def _parse_response(raw: str) -> list[dict]:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.rsplit("```", 1)[0]
-    data = json.loads(cleaned)
-    facts = data.get("facts", [])
-    if not isinstance(facts, list):
-        raise ValueError("'facts' is not a list")
-    return facts
-
-
 def _to_proposed(raw: dict, existing_by_id: dict[str, dict]) -> ProposedFact:
     kind = raw.get("kind", "fact")
     if kind not in _ALLOWED_KINDS:
@@ -105,23 +92,19 @@ async def extract(
     user_message = _build_user_message(text, hint, existing_facts_by_entity)
     messages = [Message(role="user", content=user_message)]
 
-    last_error: Exception | None = None
-    for attempt in (1, 2):
-        system = _SYSTEM_PROMPT
-        if attempt == 2:
-            system += "\n\nYour previous response was not valid JSON. Return ONLY valid JSON now."
-        response = await provider.complete(
+    try:
+        data = await complete_json(
+            provider,
             messages=messages,
-            system=system,
+            system=_SYSTEM_PROMPT,
             max_tokens=4096,
-            temperature=0.0,
+            retries=2,
         )
-        raw_text = response.message.content or ""
-        try:
-            facts_raw = _parse_response(raw_text)
-            return [_to_proposed(f, existing_by_id) for f in facts_raw]
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("memory_extract_parse_failed", attempt=attempt, error=str(e))
-            last_error = e
+    except ValueError as e:
+        logger.warning("memory_extract_parse_failed", error=str(e))
+        raise ValueError(f"could not parse extractor response: {e}") from e
 
-    raise ValueError(f"could not parse extractor response after 2 attempts: {last_error}")
+    facts_raw = data.get("facts", [])
+    if not isinstance(facts_raw, list):
+        raise ValueError("'facts' is not a list")
+    return [_to_proposed(f, existing_by_id) for f in facts_raw]
