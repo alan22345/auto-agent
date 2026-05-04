@@ -136,10 +136,36 @@ def test_task_created():
     assert ev.payload == {}
 
 
-def test_task_classified_passes_through_kwargs():
+def test_task_classified_pins_complexity_and_reasoning():
     ev = task_classified(task_id=1, complexity="simple", reasoning="trivial")
     assert ev.type == TaskEventType.CLASSIFIED
     assert ev.payload == {"complexity": "simple", "reasoning": "trivial"}
+
+
+def test_task_classified_accepts_extra_classifier_fields():
+    """Extra fields from ClassificationResult.model_dump() (estimated_files,
+    risk, etc.) flow through as **extra, so a richer classifier output doesn't
+    require a factory change."""
+    ev = task_classified(
+        task_id=1,
+        complexity="complex",
+        reasoning="lots of files",
+        estimated_files=12,
+        risk="high",
+    )
+    assert ev.payload == {
+        "complexity": "complex",
+        "reasoning": "lots of files",
+        "estimated_files": 12,
+        "risk": "high",
+    }
+
+
+def test_task_classified_typo_on_pinned_field_is_a_typeerror():
+    """The whole point of pinning complexity/reasoning is that a producer-side
+    typo raises at the call site instead of silently misrouting."""
+    with pytest.raises(TypeError):
+        task_classified(task_id=1)  # missing required `complexity`
 
 
 def test_task_status_changed():

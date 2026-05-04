@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -550,11 +551,17 @@ def _fmt_po_analysis_failed(payload: dict[str, Any], _task_info: str, _is_freefo
     )
 
 
+# `Formatter` takes (payload, task_info, is_freeform, task_id) and returns the
+# rendered Telegram message. Pinning the signature keeps the typo guarantee on
+# the consumer side too: a formatter with a wrong shape fails at registration.
+Formatter = Callable[[dict[str, Any], str, bool, int | None], str]
+
+
 # Map of event-type wire string → formatter. Keyed on the StrEnum value
 # (which is the wire string) so a new event type can be hooked up by adding
 # a single line. Events not in this dict are silently dropped — that is the
 # legacy behaviour and the unit tests below pin it.
-_NOTIFICATION_FORMATTERS: dict[str, Any] = {
+_NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
     TaskEventType.CREATED: _fmt_task_created,
     TaskEventType.START_PLANNING: _fmt_task_start_planning,
     TaskEventType.START_CODING: _fmt_task_start_coding,

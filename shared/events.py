@@ -164,8 +164,14 @@ def task_created(task_id: int) -> Event:
     return Event(type=TaskEventType.CREATED, task_id=task_id)
 
 
-def task_classified(task_id: int, **fields: Any) -> Event:
-    return Event(type=TaskEventType.CLASSIFIED, task_id=task_id, payload=dict(fields))
+def task_classified(
+    task_id: int, complexity: str, reasoning: str = "", **extra: Any
+) -> Event:
+    return Event(
+        type=TaskEventType.CLASSIFIED,
+        task_id=task_id,
+        payload={"complexity": complexity, "reasoning": reasoning, **extra},
+    )
 
 
 def task_status_changed(task_id: int, status: str, message: str = "") -> Event:
