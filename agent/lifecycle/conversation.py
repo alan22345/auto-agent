@@ -35,7 +35,7 @@ from agent.lifecycle.factory import create_agent
 from agent.workspace import WORKSPACES_DIR
 from shared.events import Event, publish
 from shared.logging import setup_logging
-from shared.redis_client import get_redis
+from shared.task_channel import task_channel
 from shared.types import TaskData
 
 log = setup_logging("agent.lifecycle.conversation")
@@ -59,9 +59,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
     """
     if task_id in _active_plan_conversations:
         log.info(f"Task #{task_id} plan conversation already active — pushing as guidance")
-        r = await get_redis()
-        await r.rpush(f"task:{task_id}:guidance", message)
-        await r.aclose()
+        await task_channel(task_id).push_guidance(message)
         return
 
     task = await get_task(task_id)
@@ -140,9 +138,7 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
     # a previous clarification answer, push this message as guidance instead
     if task_id in _active_clarification_tasks:
         log.info(f"Task #{task_id} already resuming — pushing as guidance")
-        r = await get_redis()
-        await r.rpush(f"task:{task_id}:guidance", answer)
-        await r.aclose()
+        await task_channel(task_id).push_guidance(answer)
         return
 
     task = await get_task(task_id)
@@ -303,9 +299,7 @@ async def route_human_message(event: Event) -> None:
         await review.handle_pr_review_comments(task_id, comments)
     elif task.status == "coding" and not task.pr_url:
         # Agent is actively coding — push as guidance for next turn
-        r = await get_redis()
-        await r.rpush(f"task:{task_id}:guidance", comments)
-        await r.aclose()
+        await task_channel(task_id).push_guidance(comments)
         log.info(f"Pushed guidance to coding task #{task_id}")
     elif task.status in ("awaiting_approval", "planning"):
         # Resume the planning agent session so the user can discuss the plan
