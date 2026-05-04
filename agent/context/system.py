@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from datetime import datetime, timezone
 
 import structlog
 from team_memory.graph import GraphEngine
 
+from agent import sh
 from agent.context.repo_map import (
     build_repo_map,
     format_map_with_commit,
@@ -358,14 +358,8 @@ class SystemPromptBuilder:
     async def _get_head_sha(workspace: str) -> str | None:
         """Get the HEAD commit SHA."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "rev-parse", "HEAD",
-                cwd=workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            sha = (stdout or b"").decode().strip()
+            result = await sh.run(["git", "rev-parse", "HEAD"], cwd=workspace, timeout=5)
+            sha = result.stdout.strip()
             return sha if sha else None
         except Exception:
             return None
@@ -374,17 +368,15 @@ class SystemPromptBuilder:
     async def _get_changed_files(workspace: str, from_sha: str, to_sha: str) -> list[str] | None:
         """Get list of files changed between two commits. Returns None if the diff fails."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "--name-only", f"{from_sha}..{to_sha}",
+            result = await sh.run(
+                ["git", "diff", "--name-only", f"{from_sha}..{to_sha}"],
                 cwd=workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                timeout=10,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode != 0:
+            if result.failed:
                 # SHA not in history (force push, rebase, etc.)
                 return None
-            output = (stdout or b"").decode().strip()
+            output = result.stdout.strip()
             return output.splitlines() if output else []
         except Exception:
             return None
@@ -446,13 +438,7 @@ class SystemPromptBuilder:
     async def _run_git(*args: str, cwd: str) -> str:
         """Run a git command, returning stdout or empty string on failure."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", *args,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            return (stdout or b"").decode(errors="replace")
+            result = await sh.run(["git", *args], cwd=cwd, timeout=10)
+            return result.stdout
         except Exception:
             return ""

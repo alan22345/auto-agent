@@ -8,12 +8,11 @@ session conventions and the same independent-reviewer guardrails.
 
 from __future__ import annotations
 
-import asyncio
-import os
 import tempfile
 
 import httpx
 
+from agent import sh
 from agent.lifecycle._naming import _branch_name, _fresh_session_id, _session_id
 from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
@@ -53,30 +52,18 @@ async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
     Checking first makes the path idempotent — re-entry just pushes new
     commits to the same PR.
     """
-    env = os.environ.copy()
-    env["GH_TOKEN"] = settings.github_token
-    proc = await asyncio.create_subprocess_exec(
-        "gh",
-        "pr",
-        "list",
-        "--head",
-        head_branch,
-        "--state",
-        "open",
-        "--json",
-        "url,state",
+    result = await sh.run(
+        ["gh", "pr", "list", "--head", head_branch, "--state", "open", "--json", "url,state"],
         cwd=workspace,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
+        timeout=20,
+        env={"GH_TOKEN": settings.github_token},
     )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
+    if result.failed:
         return None
     try:
         import json as _json
 
-        prs = _json.loads((stdout or b"").decode())
+        prs = _json.loads(result.stdout)
         for pr in prs:
             if pr.get("state") == "OPEN" and pr.get("url"):
                 return pr["url"]
@@ -96,31 +83,23 @@ async def create_pr(
         log.info(f"PR already exists for {head_branch}, reusing: {existing}")
         return existing
 
-    env = os.environ.copy()
-    env["GH_TOKEN"] = settings.github_token
-    proc = await asyncio.create_subprocess_exec(
-        "gh",
-        "pr",
-        "create",
-        "--title",
-        title,
-        "--body",
-        body,
-        "--base",
-        base_branch,
-        "--head",
-        head_branch,
+    result = await sh.run(
+        [
+            "gh", "pr", "create",
+            "--title", title,
+            "--body", body,
+            "--base", base_branch,
+            "--head", head_branch,
+        ],
         cwd=workspace,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
+        timeout=30,
+        env={"GH_TOKEN": settings.github_token},
     )
-    stdout, stderr = await proc.communicate()
-    stdout_str = (stdout or b"").decode().strip()
-    stderr_str = (stderr or b"").decode().strip()
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh pr create failed: {stderr_str or stdout_str}")
-    return stdout_str
+    if result.failed:
+        raise RuntimeError(
+            f"gh pr create failed: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    return result.stdout.strip()
 
 
 async def handle_independent_review(task_id: int, pr_url: str, branch_name: str) -> None:
@@ -150,15 +129,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
     workspace = await clone_repo(repo.url, task_id, base_branch, fallback_branch=fallback_branch)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "checkout",
-            branch_name,
-            cwd=workspace,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+        await sh.run(["git", "checkout", branch_name], cwd=workspace, timeout=30)
 
         prompt = build_pr_independent_review_prompt(
             task.title, task.description, pr_url, base_branch
@@ -360,15 +331,7 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     workspace = await clone_repo(repo.url, task_id, base_branch)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "checkout",
-            branch_name,
-            cwd=workspace,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+        await sh.run(["git", "checkout", branch_name], cwd=workspace, timeout=30)
 
         prompt = build_pr_review_response_prompt(task.title, task.description, comments)
         agent = create_agent(workspace, session_id=session_id, max_turns=30)

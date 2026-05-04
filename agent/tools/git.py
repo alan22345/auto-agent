@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
 from typing import Any
 
+from agent import sh
 from agent.tools.base import Tool, ToolContext, ToolResult
 
 
@@ -69,34 +68,28 @@ class GitTool(Tool):
                 is_error=True,
             )
 
-        # Execute
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", *parts,
+            result = await sh.run(
+                ["git", *parts],
                 cwd=context.workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                timeout=30,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            return ToolResult(output="Error: git command timed out.", is_error=True)
         except Exception as e:
             return ToolResult(output=f"Error: {e}", is_error=True)
 
-        stdout_str = (stdout or b"").decode(errors="replace")
-        stderr_str = (stderr or b"").decode(errors="replace")
+        if result.timed_out:
+            return ToolResult(output="Error: git command timed out.", is_error=True)
 
         output_parts: list[str] = []
-        if stdout_str.strip():
-            output_parts.append(stdout_str.rstrip())
-        if stderr_str.strip() and proc.returncode != 0:
-            output_parts.append(f"STDERR: {stderr_str.rstrip()}")
+        if result.stdout.strip():
+            output_parts.append(result.stdout.rstrip())
+        if result.stderr.strip() and result.returncode != 0:
+            output_parts.append(f"STDERR: {result.stderr.rstrip()}")
 
         output = "\n".join(output_parts) if output_parts else "(no output)"
 
         return ToolResult(
             output=output,
             token_estimate=len(output) // 4,
-            is_error=proc.returncode != 0,
+            is_error=result.failed,
         )

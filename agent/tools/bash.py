@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
 from typing import Any
 
+from agent import sh
 from agent.tools.base import Tool, ToolContext, ToolResult
 
 
@@ -41,49 +40,33 @@ class BashTool(Tool):
         timeout = min(arguments.get("timeout", 120), 600)  # Cap at 10 minutes
 
         try:
-            proc = await asyncio.create_subprocess_shell(
+            result = await sh.run_shell(
                 command,
                 cwd=context.workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                timeout=timeout,
+                max_output=100_000,
             )
-
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                return ToolResult(
-                    output=f"Command timed out after {timeout}s: {command}",
-                    is_error=True,
-                )
-
-            stdout_str = (stdout or b"").decode(errors="replace")
-            stderr_str = (stderr or b"").decode(errors="replace")
-
-            parts: list[str] = []
-            if stdout_str.strip():
-                parts.append(stdout_str.rstrip())
-            if stderr_str.strip():
-                parts.append(f"STDERR:\n{stderr_str.rstrip()}")
-            if proc.returncode != 0:
-                parts.append(f"Exit code: {proc.returncode}")
-
-            output = "\n".join(parts) if parts else "(no output)"
-
-            # Truncate very large outputs
-            max_chars = 100_000
-            if len(output) > max_chars:
-                output = output[:max_chars] + f"\n... (truncated, {len(output)} total chars)"
-
-            return ToolResult(
-                output=output,
-                token_estimate=len(output) // 3,
-                is_error=proc.returncode != 0,
-            )
-
         except Exception as e:
             return ToolResult(output=f"Error executing command: {e}", is_error=True)
+
+        if result.timed_out:
+            return ToolResult(
+                output=f"Command timed out after {timeout}s: {command}",
+                is_error=True,
+            )
+
+        parts: list[str] = []
+        if result.stdout.strip():
+            parts.append(result.stdout.rstrip())
+        if result.stderr.strip():
+            parts.append(f"STDERR:\n{result.stderr.rstrip()}")
+        if result.returncode != 0:
+            parts.append(f"Exit code: {result.returncode}")
+
+        output = "\n".join(parts) if parts else "(no output)"
+
+        return ToolResult(
+            output=output,
+            token_estimate=len(output) // 3,
+            is_error=result.failed,
+        )
