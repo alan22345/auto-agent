@@ -44,6 +44,7 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import TASK_STREAM_PATTERN
 from shared.types import MemorySaveResult, ProposedFact, TaskData
 
 log = setup_logging("web-ui")
@@ -946,7 +947,7 @@ async def agent_stream_listener() -> None:
     import json as _json
     r = await get_redis()
     pubsub = r.pubsub()
-    await pubsub.psubscribe("task:*:stream")
+    await pubsub.psubscribe(TASK_STREAM_PATTERN)
     log.info("Agent stream listener started (pub/sub)")
 
     while True:
@@ -978,7 +979,7 @@ async def agent_stream_listener() -> None:
             try:
                 r = await get_redis()
                 pubsub = r.pubsub()
-                await pubsub.psubscribe("task:*:stream")
+                await pubsub.psubscribe(TASK_STREAM_PATTERN)
             except Exception:
                 pass
 
