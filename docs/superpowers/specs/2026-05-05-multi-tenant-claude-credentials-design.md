@@ -21,7 +21,9 @@ no spill-over. We also want at least 5 concurrent CLI workers.
    (no SSH, no credential pasting).
 2. A task queued by user X always runs with user X's credentials. No path
    exists for one user's task to use another user's `.claude/` directory.
-3. The orchestrator runs up to 5 CLI workers concurrently, FIFO across users.
+3. The orchestrator runs up to 5 CLI workers concurrently, FIFO across
+   users, with at most 1 active task per repo to avoid working-tree
+   conflicts between concurrent agents on the same codebase.
 4. The system detects when a user's token has expired and prompts them to
    reconnect; queued tasks pause until they do.
 
@@ -128,10 +130,17 @@ for v1. The dispatch-time check is the source of truth.
   `max_concurrent_workers: int = 5`. (The legacy fields can stay as
   deprecated aliases during migration if anything else reads them, then be
   deleted; verified during implementation.)
-- `orchestrator/queue.py::can_start_now` becomes
-  `active_count() < settings.max_concurrent_workers`. FIFO across all
-  users — first eligible task gets the next free slot, regardless of who
-  owns it.
+- `orchestrator/queue.py::can_start_now` becomes a two-condition check:
+  (1) `active_count() < settings.max_concurrent_workers`, AND (2) no
+  other active task currently has the same `repo_id` as the candidate
+  task. FIFO across all users — first eligible task gets the next free
+  slot, regardless of who owns it. Tasks blocked only by the per-repo
+  cap stay in `queued` state and are reconsidered when a slot frees up;
+  the queue scanner skips them and considers later tasks targeting other
+  repos so a busy repo cannot head-of-line-block the whole queue.
+- Tasks with `repo_id IS NULL` (query/research tasks that don't touch a
+  working tree) are exempt from the per-repo cap; only the global 5-slot
+  cap applies to them.
 - Task dispatch reads `task.created_by_user_id`, derives the vault path
   `/data/users/<id>`, and threads it through `agent/main.py` →
   `ClaudeCLIProvider`.
@@ -190,6 +199,9 @@ No tokens are stored in the database. Credentials live only in
   per-user vault path.
 - **Unit:** queue admits up to 5 concurrent tasks and rejects task
   submissions from users whose `claude_auth_status != 'paired'`.
+- **Unit:** per-repo cap holds at most 1 active task per `repo_id`;
+  later tasks for the same repo wait while tasks for other repos get
+  dispatched ahead of them; `repo_id IS NULL` tasks bypass the cap.
 - **Unit:** dispatch-time auth probe correctly classifies stderr
   signatures into `paired` vs `expired`, and `expired` transitions move
   the task to `blocked_on_auth` rather than `failed`.
@@ -207,7 +219,9 @@ No tokens are stored in the database. Credentials live only in
 - Onboarding flow: in-app OAuth (option A), not credential paste or API
   keys.
 - Storage: per-user `HOME` on the VM disk (option A), not encrypted-in-DB.
-- Concurrency fairness: global FIFO across all users, no per-user cap.
+- Concurrency fairness: global FIFO across all users, no per-user cap,
+  but a hard cap of 1 active task per `repo_id` to prevent concurrent
+  agents from corrupting each other's working trees on the same repo.
 - Auth detection: dispatch-time probe with re-prompt, plus optional
   background sweep.
 
