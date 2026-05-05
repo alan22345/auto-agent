@@ -16,6 +16,7 @@ import asyncio
 from agent.lifecycle import (
     cleanup,
     coding,
+    conflict_resolve,
     conversation,
     deploy,
     harness_onboard,
@@ -54,6 +55,7 @@ def register_handlers(bus: EventBus) -> None:
     bus.on("po.analyze", po_worker.handle)
     bus.on("repo.onboard", harness_onboard.handle)
     bus.on("human.message", conversation.route_human_message)
+    bus.on("task.merge_conflict_detected", conflict_resolve.handle)
 
 
 async def event_loop() -> None:
