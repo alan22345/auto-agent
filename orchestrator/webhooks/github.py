@@ -26,6 +26,7 @@ from shared.events import (
     task_ci_failed,
     task_ci_passed,
     task_failed,
+    task_lgtm_received,
     task_review_approved,
 )
 from shared.models import Task, TaskStatus
@@ -190,8 +191,9 @@ async def _handle_pr_review(payload: dict[str, Any]) -> None:
             return
 
         if review_state == "approved":
-            # Reviewer approved — but wait for merge, don't auto-complete
-            log.info(f"PR approved for task #{task.id} (webhook)")
+            reviewer = review.get("user", {}).get("login", "unknown")
+            await publish(task_lgtm_received(task.id, reviewer=reviewer, pr_url=pr_url))
+            log.info(f"LGTM (review approved) on task #{task.id} by {reviewer} (webhook)")
 
         elif review_state == "changes_requested":
             comment = PRReviewComment(

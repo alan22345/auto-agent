@@ -88,6 +88,10 @@ class TaskEventType(StrEnum):
     DONE = "task.done"
     START_QUEUED = "task.start_queued"
     SUBTASK_PROGRESS = "task.subtask_progress"
+    LGTM_RECEIVED = "task.lgtm_received"
+    MERGE_CONFLICT_DETECTED = "task.merge_conflict_detected"
+    MERGE_CONFLICT_RESOLVED = "task.merge_conflict_resolved"
+    MERGE_CONFLICT_RESOLUTION_FAILED = "task.merge_conflict_resolution_failed"
 
 
 class POEventType(StrEnum):
@@ -343,6 +347,38 @@ def task_subtask_progress(
             "title": title,
             "status": status,
         },
+    )
+
+
+def task_lgtm_received(task_id: int, reviewer: str, pr_url: str) -> Event:
+    return Event(
+        type=TaskEventType.LGTM_RECEIVED,
+        task_id=task_id,
+        payload={"reviewer": reviewer, "pr_url": pr_url},
+    )
+
+
+def task_merge_conflict_detected(task_id: int, pr_url: str, trigger: str) -> Event:
+    return Event(
+        type=TaskEventType.MERGE_CONFLICT_DETECTED,
+        task_id=task_id,
+        payload={"pr_url": pr_url, "trigger": trigger},
+    )
+
+
+def task_merge_conflict_resolved(task_id: int, head_branch: str) -> Event:
+    return Event(
+        type=TaskEventType.MERGE_CONFLICT_RESOLVED,
+        task_id=task_id,
+        payload={"head_branch": head_branch},
+    )
+
+
+def task_merge_conflict_resolution_failed(task_id: int, reason: str) -> Event:
+    return Event(
+        type=TaskEventType.MERGE_CONFLICT_RESOLUTION_FAILED,
+        task_id=task_id,
+        payload={"reason": reason},
     )
 
 

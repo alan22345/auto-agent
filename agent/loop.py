@@ -76,6 +76,21 @@ class AgentResult:
     api_messages: list[Message] = field(default_factory=list)
 
 
+@dataclass
+class ToolBatchOutcome:
+    """Aggregated result of executing one batch of tool calls.
+
+    Returned by AgentLoop._process_tool_calls so the caller can update
+    cross-turn state (counts, verification gate, exploration budget)
+    without re-implementing the per-call bookkeeping.
+    """
+
+    count: int = 0
+    turn_has_write: bool = False
+    wrote: bool = False
+    verified: bool = False
+
+
 class AgentLoop:
     """The core agentic conversation loop.
 
@@ -298,42 +313,25 @@ class AgentLoop:
                 break
 
             if response.stop_reason == "max_tokens":
-                # If the truncated response still emitted a complete tool_use
-                # block, we MUST execute it — otherwise the next API call will
-                # have an orphan tool_use followed by a user message, which
-                # Bedrock rejects with 400 "tool_use ids were found without
-                # tool_result blocks immediately after". See task 51.
+                # Execute any complete tool_use first — otherwise the next API
+                # call carries an orphan tool_use that Bedrock rejects with 400
+                # "tool_use ids were found without tool_result blocks". See task 51.
                 if response.message.tool_calls:
-                    for tc in response.message.tool_calls:
-                        cached = tool_cache.get(tc.name, tc.arguments)
-                        if cached is not None:
-                            result = cached
-                        else:
-                            result = await self._execute_tool(tc, tool_context)
-                            tool_cache.put(tc.name, tc.arguments, result)
-                        tool_cache.invalidate_on_write(tc.name)
-                        total_tool_calls += 1
-                        tool_msg = Message(
-                            role="tool",
-                            content=result.output,
-                            tool_call_id=tc.id,
-                            tool_name=tc.name,
-                            token_estimate=result.token_estimate,
-                        )
-                        messages.append(tool_msg)
-                        api_messages.append(tool_msg)
-                        ws_state.process_tool_call(tc.name, tc.arguments)
-                        if tc.name in ("file_write", "file_edit"):
-                            has_written = True
-                        if tc.name == "test_runner":
-                            has_verified = True
-                        elif tc.name == "bash":
-                            cmd = tc.arguments.get("command", "")
-                            if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
-                                has_verified = True
+                    outcome = await self._process_tool_calls(
+                        turn=turn,
+                        tool_calls=response.message.tool_calls,
+                        messages=messages,
+                        api_messages=api_messages,
+                        tool_context=tool_context,
+                        tool_cache=tool_cache,
+                        ws_state=ws_state,
+                    )
+                    total_tool_calls += outcome.count
+                    has_written = has_written or outcome.wrote
+                    has_verified = has_verified or outcome.verified
                     logger.warning(
                         "max_tokens_with_tool_use_executed_tools",
-                        tool_count=len(response.message.tool_calls),
+                        tool_count=outcome.count,
                         turn=turn,
                     )
 
@@ -347,68 +345,21 @@ class AgentLoop:
                 continue
 
             if response.stop_reason == "tool_use" and response.message.tool_calls:
-                # Execute each tool call
-                turn_has_write = False
-                for tc in response.message.tool_calls:
-                    # Check cache for read-only tools
-                    cached = tool_cache.get(tc.name, tc.arguments)
-                    if cached is not None:
-                        result = cached
-                        logger.debug("tool_cache_hit", tool=tc.name)
-                    else:
-                        result = await self._execute_tool(tc, tool_context)
-                        tool_cache.put(tc.name, tc.arguments, result)
-
-                    # Invalidate cache on writes
-                    tool_cache.invalidate_on_write(tc.name)
-
-                    total_tool_calls += 1
-
-                    tool_msg = Message(
-                        role="tool",
-                        content=result.output,
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        token_estimate=result.token_estimate,
-                    )
-                    messages.append(tool_msg)
-                    api_messages.append(tool_msg)
-
-                    logger.debug(
-                        "tool_executed",
-                        tool=tc.name,
-                        is_error=result.is_error,
-                        turn=turn,
-                    )
-
-                    # Stream tool call to UI for pair-programming visibility
-                    if self._on_tool_call:
-                        try:
-                            preview = result.output[:200] if result.output else ""
-                            await self._on_tool_call(tc.name, tc.arguments, preview, turn)
-                        except Exception:
-                            pass
-
-                    if tc.name in _WRITE_TOOLS:
-                        turn_has_write = True
-
-                    # Track writes for verification gate
-                    if tc.name in ("file_write", "file_edit"):
-                        has_written = True
-
-                    # Track verification commands (test/lint runs via bash or test_runner)
-                    if tc.name == "test_runner":
-                        has_verified = True
-                    elif tc.name == "bash":
-                        cmd = tc.arguments.get("command", "")
-                        if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
-                            has_verified = True
-
-                    # Update workspace state tracker
-                    ws_state.process_tool_call(tc.name, tc.arguments)
+                outcome = await self._process_tool_calls(
+                    turn=turn,
+                    tool_calls=response.message.tool_calls,
+                    messages=messages,
+                    api_messages=api_messages,
+                    tool_context=tool_context,
+                    tool_cache=tool_cache,
+                    ws_state=ws_state,
+                )
+                total_tool_calls += outcome.count
+                has_written = has_written or outcome.wrote
+                has_verified = has_verified or outcome.verified
 
                 # Exploration budget: track consecutive read-only turns
-                if turn_has_write:
+                if outcome.turn_has_write:
                     consecutive_reads = 0
                 else:
                     tool_names = {tc.name for tc in response.message.tool_calls}
@@ -450,6 +401,83 @@ class AgentLoop:
             messages=messages,
             api_messages=api_messages,
         )
+
+    async def _process_tool_calls(
+        self,
+        *,
+        turn: int,
+        tool_calls: list[ToolCall],
+        messages: list[Message],
+        api_messages: list[Message],
+        tool_context: ToolContext,
+        tool_cache: ToolCache,
+        ws_state: WorkspaceState,
+    ) -> ToolBatchOutcome:
+        """Execute a batch of tool calls and update all per-call loop bookkeeping.
+
+        Owns: cache lookup/put, _execute_tool, building the role="tool" Message,
+        appending to both message lists, ws_state.process_tool_call, write/verify
+        flag tracking, cache invalidation on writes, and (when on_tool_call is
+        configured) streaming each call to the UI callback.
+
+        Cross-turn state (consecutive_reads, nudge_injected, verification_nudge)
+        and branch-specific behaviour (continuation messages) stay in the caller.
+        """
+        outcome = ToolBatchOutcome()
+
+        for tc in tool_calls:
+            cached = tool_cache.get(tc.name, tc.arguments)
+            if cached is not None:
+                result = cached
+                logger.debug("tool_cache_hit", tool=tc.name)
+            else:
+                result = await self._execute_tool(tc, tool_context)
+                tool_cache.put(tc.name, tc.arguments, result)
+
+            tool_cache.invalidate_on_write(tc.name)
+
+            outcome.count += 1
+
+            tool_msg = Message(
+                role="tool",
+                content=result.output,
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                token_estimate=result.token_estimate,
+            )
+            messages.append(tool_msg)
+            api_messages.append(tool_msg)
+
+            logger.debug(
+                "tool_executed",
+                tool=tc.name,
+                is_error=result.is_error,
+                turn=turn,
+            )
+
+            if self._on_tool_call:
+                try:
+                    preview = result.output[:200] if result.output else ""
+                    await self._on_tool_call(tc.name, tc.arguments, preview, turn)
+                except Exception:
+                    pass
+
+            if tc.name in _WRITE_TOOLS:
+                outcome.turn_has_write = True
+
+            if tc.name in ("file_write", "file_edit"):
+                outcome.wrote = True
+
+            if tc.name == "test_runner":
+                outcome.verified = True
+            elif tc.name == "bash":
+                cmd = tc.arguments.get("command", "")
+                if any(pat in cmd for pat in _VERIFICATION_PATTERNS):
+                    outcome.verified = True
+
+            ws_state.process_tool_call(tc.name, tc.arguments)
+
+        return outcome
 
     async def _execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """Execute a single tool call, handling missing tools gracefully."""

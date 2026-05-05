@@ -45,10 +45,9 @@ TELEGRAM_MAX_LENGTH = 4000  # Telegram limit is 4096, leave room for formatting
 async def send_telegram_async(message: str, task_id: int | None = None) -> None:
     """Async version of send_telegram. Splits long messages automatically.
 
-    If `task_id` is set, the message_id of each outbound chunk is recorded
-    in Redis (`telegram:msg:{message_id} → {task_id}`, 7-day TTL) so that
-    a reply to this notification can be routed back to the task as a
-    feedback message.
+    If `task_id` is set, the message_id of each outbound chunk is bound
+    to the task via the TaskChannel seam so that a reply to this
+    notification can be routed back to the task as a feedback message.
     """
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return
@@ -73,19 +72,10 @@ async def send_telegram_async(message: str, task_id: int | None = None) -> None:
                         log.warning(f"Telegram API error: {resp.status_code} {resp.text[:200]}")
                         continue
                 if task_id is not None:
-                    try:
-                        msg_id = resp.json().get("result", {}).get("message_id")
-                        if msg_id:
-                            from shared.redis_client import get_redis
-                            r = await get_redis()
-                            await r.set(
-                                f"telegram:msg:{msg_id}",
-                                str(task_id),
-                                ex=60 * 60 * 24 * 7,  # 7 days
-                            )
-                            await r.aclose()
-                    except Exception:
-                        log.exception("Failed to record Telegram msg→task mapping")
+                    msg_id = resp.json().get("result", {}).get("message_id")
+                    if msg_id:
+                        from shared.task_channel import task_channel
+                        await task_channel(task_id).bind_telegram_message(msg_id)
     except Exception:
         log.exception("Failed to send Telegram message")
 

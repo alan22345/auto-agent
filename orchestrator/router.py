@@ -49,7 +49,7 @@ from shared.models import (
     User,
     intake_qa_for_suggestion,
 )
-from shared.redis_client import get_redis
+from shared.task_channel import task_channel
 from shared.types import (
     CreateUserRequest,
     FeedbackSummary,
@@ -598,11 +598,7 @@ async def post_task_message(
     # Push onto the agent's guidance queue so the loop picks it up on its
     # next turn, and publish an event for any other subscribers.
     formatted = f"{sender}: {content}" if sender not in ("anonymous",) else content
-    r = await get_redis()
-    try:
-        await r.rpush(f"task:{task_id}:guidance", formatted)
-    finally:
-        await r.aclose()
+    await task_channel(task_id).push_guidance(formatted)
     await publish(task_feedback(task_id=task_id, message_id=msg.id, sender=sender))
 
     return TaskMessageData(

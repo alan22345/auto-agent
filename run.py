@@ -63,6 +63,7 @@ from shared.events import (
     task_created,
     task_deploy_preview,
     task_failed,
+    task_merge_conflict_detected,
     task_plan_ready,
     task_query,
     task_review_approved,
@@ -90,6 +91,12 @@ from shared.redis_client import (
     get_redis,
     read_events,
 )
+from shared.task_channel import (
+    RedisTaskChannelFactory,
+    set_task_channel_factory,
+    task_channel,
+)
+
 from web.main import (
     event_listener as web_event_listener,
 )
@@ -368,12 +375,16 @@ async def on_ci_passed(event: Event) -> None:
 
         if _should_auto_merge(task, repo_freeform_config):
             # Freeform mode: auto-merge to dev, skip human review
-            merge_ok = await _auto_merge_pr(task)
-            if merge_ok:
+            outcome = await _auto_merge_pr(task)
+            if outcome == MERGE_OUTCOME_MERGED:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merging to dev")
                 task = await transition(session, task, TaskStatus.DONE, "Auto-merged to dev branch")
                 await session.commit()
                 await _try_start_queued(session)
+            elif outcome == MERGE_OUTCOME_CONFLICT_DISPATCHED:
+                # Resolver is running; leave task in flight. It will retry merge
+                # on success, or transition to AWAITING_REVIEW on failure.
+                log.info(f"Task #{task.id}: conflict resolver dispatched, awaiting outcome")
             else:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merge failed — awaiting manual review")
                 await session.commit()
@@ -682,6 +693,118 @@ async def on_review_approved(event: Event) -> None:
         await _try_start_queued(session)
 
 
+async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
+    """Attempt to auto-merge a freeform task's PR after an LGTM signal.
+
+    Used by both `on_lgtm_received` (initial review approval) and
+    `on_merge_conflict_resolved` (retry after the resolver fixed conflicts).
+    """
+    async with async_session() as session:
+        task = await get_task(session, task_id)
+        if not task:
+            return
+        if task.status in (TaskStatus.DONE, TaskStatus.FAILED):
+            return
+        if not task.freeform_mode:
+            log.info(f"LGTM on non-freeform task #{task_id} — manual merge required")
+            return
+        if not task.pr_url:
+            log.warning(f"LGTM on task #{task_id} but no PR URL — skipping")
+            return
+        # Only act if the task is in a state where a merge makes sense.
+        # PR_CREATED is the usual no-CI-yet case; AWAITING_CI / AWAITING_REVIEW
+        # are post-CI. Anything earlier (planning, coding, intake) would be a
+        # spurious review signal — log and skip.
+        if task.status not in (
+            TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI, TaskStatus.AWAITING_REVIEW,
+        ):
+            log.info(f"LGTM on task #{task_id} in status {task.status.value} — skipping (not at PR stage)")
+            return
+        starting_status = task.status
+
+    # Drop the session before the network call; reopen to apply transitions.
+    outcome = await _auto_merge_pr(task)
+
+    if outcome == MERGE_OUTCOME_MERGED:
+        async with async_session() as session:
+            task = await get_task(session, task_id)
+            if not task:
+                return
+            # Walk through whatever intermediate states the state machine
+            # requires to land on DONE. From PR_CREATED → AWAITING_CI →
+            # AWAITING_REVIEW → DONE. From AWAITING_CI or AWAITING_REVIEW,
+            # skip the steps that are already behind us.
+            if starting_status == TaskStatus.PR_CREATED:
+                task = await transition(session, task, TaskStatus.AWAITING_CI, f"LGTM ({trigger})")
+            if task.status == TaskStatus.AWAITING_CI:
+                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, f"LGTM ({trigger}), auto-merging")
+            task = await transition(session, task, TaskStatus.DONE, "Auto-merged via LGTM")
+            await session.commit()
+            await _try_start_queued(session)
+        return
+
+    if outcome == MERGE_OUTCOME_CONFLICT_DISPATCHED:
+        # Resolver running; on success it will re-emit lgtm_received
+        # via `task.merge_conflict_resolved`. Leave task in flight.
+        return
+
+    if outcome == MERGE_OUTCOME_CI_BLOCKED:
+        await _settle_at_review(task_id, starting_status, "LGTM received but CI is failing/pending — awaiting manual review")
+        return
+
+    # MERGE_OUTCOME_FAILED
+    await _settle_at_review(task_id, starting_status, "LGTM received but auto-merge failed — awaiting manual review")
+
+
+async def _settle_at_review(task_id: int, starting_status: TaskStatus, message: str) -> None:
+    """Move a task to AWAITING_REVIEW, walking through any required intermediate
+    states. Used by the LGTM/CI-blocked/failed paths so a task in PR_CREATED
+    or AWAITING_CI when LGTM lands ends up cleanly in AWAITING_REVIEW.
+    """
+    async with async_session() as session:
+        task = await get_task(session, task_id)
+        if not task:
+            return
+        if task.status == TaskStatus.AWAITING_REVIEW:
+            return
+        if starting_status == TaskStatus.PR_CREATED:
+            task = await transition(session, task, TaskStatus.AWAITING_CI, message)
+        if task.status == TaskStatus.AWAITING_CI:
+            task = await transition(session, task, TaskStatus.AWAITING_REVIEW, message)
+        await session.commit()
+
+
+async def on_lgtm_received(event: Event) -> None:
+    """A reviewer (any user) approved the PR. For freeform tasks, attempt
+    auto-merge — gated on CI green-or-absent and no merge conflicts. Conflicts
+    trigger the resolver agent; CI failures fall through to manual review.
+    """
+    reviewer = (event.payload or {}).get("reviewer", "unknown")
+    log.info(f"LGTM received for task #{event.task_id} by {reviewer}")
+    await _attempt_lgtm_merge(event.task_id, trigger=f"approved by {reviewer}")
+
+
+async def on_merge_conflict_resolved(event: Event) -> None:
+    """Conflict resolver finished. Retry the merge once."""
+    log.info(f"Merge conflict resolved for task #{event.task_id} — retrying merge")
+    await _attempt_lgtm_merge(event.task_id, trigger="conflict resolved")
+
+
+async def on_merge_conflict_resolution_failed(event: Event) -> None:
+    """Conflict resolver gave up. Fall through to manual review."""
+    reason = (event.payload or {}).get("reason", "unknown")
+    log.warning(f"Merge conflict resolution failed for task #{event.task_id}: {reason}")
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        task = await transition(
+            session, task, TaskStatus.AWAITING_REVIEW,
+            f"Merge conflict resolution failed ({reason[:200]}) — awaiting manual review",
+        )
+        await session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Continuous-loop scrum master: auto-approve PO suggestions
 # ---------------------------------------------------------------------------
@@ -849,16 +972,117 @@ async def on_start_queued_task(event: Event) -> None:
         log.info(f"Started queued task #{task.id}")
 
 
-async def _auto_merge_pr(task: Task) -> bool:
-    """Merge a PR via GitHub API (squash merge). Returns True on success."""
+# Outcomes from an auto-merge attempt. Distinguishing "conflict_dispatched"
+# from "failed" lets callers know the resolver was kicked off and the task
+# should stay in flight rather than transition to AWAITING_REVIEW.
+MERGE_OUTCOME_MERGED = "merged"
+MERGE_OUTCOME_CONFLICT_DISPATCHED = "conflict_dispatched"
+MERGE_OUTCOME_CI_BLOCKED = "ci_blocked"
+MERGE_OUTCOME_FAILED = "failed"
+
+
+def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
+    """Extract (owner, repo, number) from a github PR URL."""
+    parts = pr_url.rstrip("/").split("/")
+    return parts[-4], parts[-3], parts[-1]
+
+
+async def _fetch_pr_state(pr_url: str) -> dict | None:
+    """Fetch a PR's mergeable + mergeable_state from GitHub.
+
+    GitHub computes `mergeable` async — the first GET after a push may return
+    `None` / `"unknown"`. We retry briefly to give it time to settle. Returns
+    the PR JSON dict on success, or None on hard failure.
+    """
+    from shared.config import settings as _settings
+    if not _settings.github_token:
+        return None
+    owner, repo, num = _parse_pr_url(pr_url)
+    headers = {
+        "Authorization": f"token {_settings.github_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{num}"
+    try:
+        async with httpx.AsyncClient() as client:
+            for attempt in range(3):
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                if data.get("mergeable_state") not in (None, "unknown"):
+                    return data
+                await asyncio.sleep(1.0)
+            return data
+    except Exception:
+        log.exception(f"Failed to fetch PR state {pr_url}")
+        return None
+
+
+async def _conflict_resolution_attempted(task_id: int) -> bool:
+    r = await get_redis()
+    try:
+        return bool(await r.exists(f"task:{task_id}:conflict_resolution_attempted"))
+    finally:
+        await r.aclose()
+
+
+async def _mark_conflict_resolution_attempted(task_id: int) -> None:
+    r = await get_redis()
+    try:
+        await r.set(f"task:{task_id}:conflict_resolution_attempted", "1", ex=86400)
+    finally:
+        await r.aclose()
+
+
+async def _dispatch_conflict_resolution(task: Task, trigger: str) -> None:
+    """Emit task.merge_conflict_detected so the agent can resolve conflicts."""
+    await _mark_conflict_resolution_attempted(task.id)
+    await publish(task_merge_conflict_detected(
+        task.id, pr_url=task.pr_url or "", trigger=trigger,
+    ))
+    log.info(f"Conflict resolution dispatched for task #{task.id} (trigger={trigger})")
+
+
+async def _auto_merge_pr(task: Task) -> str:
+    """Attempt to merge a PR via GitHub API (squash merge).
+
+    Returns one of MERGE_OUTCOME_* constants:
+        MERGED               — PR was successfully merged.
+        CONFLICT_DISPATCHED  — PR was conflicting; conflict resolver was kicked
+                               off via task.merge_conflict_detected. Caller
+                               should leave the task in flight; the resolver
+                               will trigger a retry on success or fall through
+                               on failure.
+        CI_BLOCKED           — PR is mergeable but CI is failing/pending.
+                               Caller should fall through to manual review.
+        FAILED               — Merge attempt failed for any other reason.
+    """
     from shared.config import settings as _settings
     if not task.pr_url or not _settings.github_token:
         log.warning(f"Cannot auto-merge task #{task.id}: no PR URL or GitHub token")
-        return False
+        return MERGE_OUTCOME_FAILED
+
+    # Pre-emptive mergeable check. Skip the dispatch if we've already tried
+    # resolving this PR's conflicts once — one retry is the policy.
+    pr_state = await _fetch_pr_state(task.pr_url)
+    if pr_state is not None:
+        ms = pr_state.get("mergeable_state") or "unknown"
+        if ms == "dirty":
+            if await _conflict_resolution_attempted(task.id):
+                log.warning(f"Auto-merge: conflict persists after one resolution attempt on task #{task.id}")
+                return MERGE_OUTCOME_FAILED
+            await _dispatch_conflict_resolution(task, trigger="auto_merge")
+            return MERGE_OUTCOME_CONFLICT_DISPATCHED
+        if ms == "unstable":
+            log.info(f"Auto-merge blocked: CI failing/pending on task #{task.id}")
+            return MERGE_OUTCOME_CI_BLOCKED
+        # "clean", "has_hooks" → proceed.
+        # "blocked", "behind", "draft" → let the API call fail naturally;
+        # surface the GitHub error rather than guessing.
 
     try:
-        parts = task.pr_url.rstrip("/").split("/")
-        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+        owner, repo, pr_number = _parse_pr_url(task.pr_url)
         async with httpx.AsyncClient() as client:
             resp = await client.put(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
@@ -870,12 +1094,12 @@ async def _auto_merge_pr(task: Task) -> bool:
             )
             if resp.status_code in (200, 201):
                 log.info(f"Auto-merged PR {task.pr_url} for task #{task.id}")
-                return True
+                return MERGE_OUTCOME_MERGED
             log.warning(f"Auto-merge failed for task #{task.id}: {resp.status_code} {resp.text[:200]}")
-            return False
+            return MERGE_OUTCOME_FAILED
     except Exception:
         log.exception(f"Auto-merge error for task #{task.id}")
-        return False
+        return MERGE_OUTCOME_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +1116,9 @@ bus.on(TaskEventType.REVIEW_COMMENTS_ADDRESSED, on_review_comments_addressed)
 bus.on(TaskEventType.CI_PASSED, on_ci_passed)
 bus.on(TaskEventType.CI_FAILED, on_ci_failed)
 bus.on(TaskEventType.REVIEW_APPROVED, on_review_approved)
+bus.on(TaskEventType.LGTM_RECEIVED, on_lgtm_received)
+bus.on(TaskEventType.MERGE_CONFLICT_RESOLVED, on_merge_conflict_resolved)
+bus.on(TaskEventType.MERGE_CONFLICT_RESOLUTION_FAILED, on_merge_conflict_resolution_failed)
 bus.on(TaskEventType.DEV_DEPLOY_FAILED, on_dev_deploy_failed)
 bus.on(POEventType.SUGGESTIONS_READY, on_po_suggestions_ready)
 bus.on(TaskEventType.START_QUEUED, on_start_queued_task)
@@ -947,17 +1174,6 @@ TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 _recovery_attempted: set[int] = set()
 
 
-async def _task_has_heartbeat(task_id: int) -> bool:
-    """Check if the agent is actively sending heartbeat signals for this task."""
-    try:
-        r = await get_redis()
-        result = await r.exists(f"task:{task_id}:heartbeat")
-        await r.aclose()
-        return bool(result)
-    except Exception:
-        return False
-
-
 async def task_timeout_watchdog() -> None:
     """Progress-aware watchdog. Checks heartbeat before killing tasks.
 
@@ -989,7 +1205,7 @@ async def task_timeout_watchdog() -> None:
                     hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
 
                     # If agent is actively sending heartbeats, it's alive — skip
-                    if await _task_has_heartbeat(task.id):
+                    if await task_channel(task.id).is_alive():
                         if age_s > soft_timeout:
                             log.debug(
                                 f"Task #{task.id} past soft timeout ({age_s:.0f}s) "
@@ -1542,6 +1758,12 @@ async def lifespan(app: FastAPI):
     redis_publisher = RedisStreamPublisher(settings.redis_url)
     set_publisher(redis_publisher)
 
+    # Wire the production task-channel factory alongside the publisher —
+    # symmetric seam for the per-task Redis surface (heartbeat, guidance,
+    # streaming, telegram reply-binding). See ADR-011.
+    redis_task_channel_factory = RedisTaskChannelFactory(settings.redis_url)
+    set_task_channel_factory(redis_task_channel_factory)
+
     # Seed admin user if no users exist
     from orchestrator.router import seed_admin_user
     await seed_admin_user()
@@ -1581,6 +1803,7 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await t
     await redis_publisher.aclose()
+    await redis_task_channel_factory.aclose()
 
 
 app.router.lifespan_context = lifespan

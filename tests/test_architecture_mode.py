@@ -11,7 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from agent.architect_analyzer import _is_due, _parse_analysis_output
+from agent.architect_analyzer import _is_due
+from agent.llm.structured import parse_json_response
 from agent.prompts import (
     build_architecture_analysis_prompt,
 )
@@ -19,6 +20,7 @@ from agent.prompts import (
 # ---------------------------------------------------------------------------
 # _is_due — cron logic for architecture mode
 # ---------------------------------------------------------------------------
+
 
 def _config(last_at: datetime | None, cron: str = "0 9 * * 1") -> SimpleNamespace:
     return SimpleNamespace(architecture_cron=cron, last_architecture_at=last_at)
@@ -56,31 +58,37 @@ def test_is_due_for_minutely_cron():
 
 
 # ---------------------------------------------------------------------------
-# _parse_analysis_output — JSON parsing tolerant of fences
+# parse_json_response (the shared parser the analyzer routes through)
+#
+# Full coverage of the parser's behaviour lives in tests/test_llm_structured.py.
+# These three smoke tests assert the shapes the architecture analyzer actually
+# emits (suggestions list + architecture_knowledge_update) parse as expected.
 # ---------------------------------------------------------------------------
+
 
 def test_parse_plain_json():
     out = '{"suggestions": [{"title": "Deepen X"}], "architecture_knowledge_update": "..."}'
-    parsed = _parse_analysis_output(out)
+    parsed = parse_json_response(out)
     assert parsed is not None
     assert parsed["suggestions"][0]["title"] == "Deepen X"
 
 
 def test_parse_json_inside_markdown_fences():
     out = '```json\n{"suggestions": [], "architecture_knowledge_update": "stuff"}\n```'
-    parsed = _parse_analysis_output(out)
+    parsed = parse_json_response(out)
     assert parsed is not None
     assert parsed["suggestions"] == []
 
 
 def test_parse_returns_none_on_garbage():
-    assert _parse_analysis_output("not JSON at all") is None
-    assert _parse_analysis_output("") is None
+    assert parse_json_response("not JSON at all") is None
+    assert parse_json_response("") is None
 
 
 # ---------------------------------------------------------------------------
 # build_architecture_analysis_prompt
 # ---------------------------------------------------------------------------
+
 
 def test_arch_prompt_loads_skills():
     prompt = build_architecture_analysis_prompt()
@@ -124,6 +132,7 @@ def test_arch_prompt_uses_repo_adr_path():
 # ---------------------------------------------------------------------------
 # Suggestion → Task path: architecture suggestions skip grilling
 # ---------------------------------------------------------------------------
+
 
 def test_intake_qa_default_for_architecture_category():
     """intake_qa_for_suggestion is the single source of truth for the
