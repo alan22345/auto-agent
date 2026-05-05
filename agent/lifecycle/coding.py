@@ -19,7 +19,7 @@ import httpx
 
 from agent.lifecycle import review
 from agent.lifecycle._clarification import _extract_clarification
-from agent.lifecycle._naming import _branch_name, _pr_title, _session_id
+from agent.lifecycle._naming import _branch_name, _fresh_session_id, _pr_title, _session_id
 from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
     get_freeform_config,
@@ -55,6 +55,28 @@ log = setup_logging("agent.lifecycle.coding")
 
 
 MAX_REVIEW_RETRIES = 2
+
+# Marker the self-review prompt instructs the agent to emit on a line by
+# itself when no issues remain. Substring matching is unsafe because the
+# agent often *mentions* the marker (e.g. "Outputting `REVIEW_PASSED`
+# would be misleading…") — that false-positived task #156 to "passed".
+_REVIEW_PASSED_RE = _re.compile(r"^\s*REVIEW_PASSED\s*$", _re.MULTILINE)
+
+
+def _is_cli_error(output: str) -> bool:
+    """True if `output` is a Claude CLI error sentinel rather than a real response.
+
+    The Claude CLI provider returns "[ERROR] CLI exited N: …" or
+    "[ERROR] Claude Code CLI timed out" as the agent output when the
+    subprocess fails. The lifecycle previously treated those as normal
+    completions and marched onward — see task #156 post-mortem.
+    """
+    return bool(output) and output.lstrip().startswith("[ERROR]")
+
+
+def _review_passed(output: str) -> bool:
+    """True iff the agent emitted REVIEW_PASSED on its own line."""
+    return bool(output) and _REVIEW_PASSED_RE.search(output) is not None
 
 
 def _parse_plan_phases(plan: str) -> list[dict]:
@@ -218,6 +240,9 @@ async def _handle_coding_single(
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
 
+    if _is_cli_error(output):
+        raise RuntimeError(f"agent CLI error during coding: {output.strip()[:300]}")
+
     # Check for clarification
     question = _extract_clarification(output)
     if question:
@@ -323,14 +348,26 @@ async def _handle_coding_with_subtasks(
             )
 
         log.info(f"Task #{task_id}: starting subtask {i + 1}/{total} — {phase['title']}")
-        # Fresh agent per subtask (context isolation — superpowers pattern)
-        # Each subtask gets its own agent with no session resume, so it starts
-        # with clean context. The repo map in the system prompt provides structure.
-        subtask_session = f"{session_id}-phase-{i + 1}"
+        # Fresh agent per subtask (context isolation — superpowers pattern).
+        # Each subtask gets a fresh UUID session id; resume=False means the
+        # CLI registers a new session rather than resuming. Must be a real
+        # UUID — Claude CLI 2.1.x rejects suffixed strings like
+        # "<uuid>-phase-1" with "Invalid session ID. Must be a valid UUID."
+        # which silently failed task #156.
+        subtask_session = _fresh_session_id(task_id, f"phase-{i + 1}")
         agent = create_agent(workspace, session_id=subtask_session, max_turns=40)
         result = await agent.run(prompt, resume=False)
         output = result.output
         log.info(f"Task #{task_id} subtask {i + 1} output: {output[:300]}...")
+
+        if _is_cli_error(output):
+            phases[i]["status"] = "failed"
+            phases[i]["output_preview"] = output[:1500]
+            await _update_subtasks(task_id, phases, i)
+            raise RuntimeError(
+                f"subtask {i + 1}/{total} ({phase['title']}) failed: "
+                f"agent CLI error: {output.strip()[:300]}"
+            )
 
         question = _extract_clarification(output)
         if question:
@@ -380,10 +417,17 @@ async def _finish_coding(
         review_output = result.output
         log.info(f"Review attempt {attempt + 1} for task #{task_id}: {review_output[:300]}...")
 
-        if "REVIEW_PASSED" in review_output:
+        if _is_cli_error(review_output):
+            raise RuntimeError(
+                f"agent CLI error during self-review: {review_output.strip()[:300]}"
+            )
+
+        if _review_passed(review_output):
             log.info(f"Self-review passed for task #{task_id}")
             break
-        log.info(f"Self-review found issues, agent fixed them (attempt {attempt + 1})")
+        log.info(
+            f"Self-review attempt {attempt + 1} did not emit REVIEW_PASSED for task #{task_id}; retrying"
+        )
     else:
         log.warning(
             f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
