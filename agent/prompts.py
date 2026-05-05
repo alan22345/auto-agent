@@ -14,6 +14,14 @@ If the task is ambiguous or you need more information to proceed correctly, \
 output a single line starting with "CLARIFICATION_NEEDED:" followed by your question. \
 Then STOP — do not continue working until you receive an answer. \
 Only ask if genuinely blocked; prefer making a reasonable decision when possible.
+
+The user can also ask YOU questions back instead of answering. If their reply \
+contains a question, pushback, or "I don't know — what do you suggest?", \
+address it in your next turn: write your answer/recommendation on the lines \
+AFTER `CLARIFICATION_NEEDED:` (those lines are shown to the user) and then \
+re-ask your original question (or rephrase it). The conversation continues \
+until the user actually gives you the information you need or you have \
+enough to proceed.
 """
 
 
@@ -57,6 +65,13 @@ question.
 
        CLARIFICATION_NEEDED: <question>
        Recommended answer: <your answer, with reasoning>
+
+   If the user's previous "answer" is actually a question back to you \
+(e.g. "what do you mean by X?" or "I don't know, you choose"), write your \
+reply to them on the lines after `CLARIFICATION_NEEDED:` (those lines are \
+shown to the user verbatim) and then re-ask the original question (or a \
+refined version). Treat grilling as a real conversation — the user may \
+push back, ask back, or defer to you, and you should respond, not march on.
 
 Cover, across rounds: (a) domain language — terms in the task that conflict \
 with or extend `CONTEXT.md`; (b) seams + dependency category (in-process / \

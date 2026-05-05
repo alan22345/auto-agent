@@ -180,7 +180,16 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             repo_name=repo.name,
         )
         result = await agent.run(
-            f"The user answered your clarification question:\n\n{answer}\n\nPlease continue with the task.",
+            (
+                f"The user replied:\n\n{answer}\n\n"
+                "If they answered your question, continue with the task. "
+                "If they asked something back, pushed back, or deferred to you "
+                '("I don\'t know, what do you suggest?"), address that in 1-2 '
+                "sentences on the lines AFTER a new `CLARIFICATION_NEEDED:` "
+                "(those lines are shown to the user) and re-ask your question "
+                "(or rephrase it). Treat this as a real conversation, not a "
+                "strict Q→A. Only proceed when you actually have what you need."
+            ),
             resume=True,
         )
     finally:

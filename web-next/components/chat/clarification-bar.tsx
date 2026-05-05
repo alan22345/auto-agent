@@ -13,8 +13,8 @@ export function ClarificationBar({ taskId }: { taskId: number }) {
   }
   return (
     <div className="flex gap-2 border-t bg-card p-2">
-      <Input placeholder="Type your answer…" value={answer} onChange={(e) => setAnswer(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
-      <Button onClick={submit}>Answer</Button>
+      <Input placeholder="Type your answer — or ask the agent back…" value={answer} onChange={(e) => setAnswer(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
+      <Button onClick={submit}>Send</Button>
     </div>
   );
 }
