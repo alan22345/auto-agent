@@ -48,7 +48,7 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
   return (
     <div className="space-y-2 border-b px-4 py-3">
       {hasDescription && (
-        <div className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
+        <div className="max-h-64 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
           {task.description}
         </div>
       )}
