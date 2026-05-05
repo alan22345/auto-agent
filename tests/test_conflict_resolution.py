@@ -34,26 +34,27 @@ def _stub_repo(name="owner/repo", url="https://github.com/owner/repo.git"):
     return r
 
 
+def _published_types(captured):
+    return [e.type for e in captured]
+
+
 @pytest.mark.asyncio
 async def test_resolver_no_task_emits_failed():
-    """Missing task → emit failed with reason."""
-    published = []
+    captured = []
 
-    async def fake_publish(t, tid, payload=None):
-        published.append((t, tid, payload))
+    async def fake_publish(event):
+        captured.append(event)
 
     with patch("agent.conflict_resolver._get_task", AsyncMock(return_value=None)), \
-         patch("agent.conflict_resolver._publish", side_effect=fake_publish):
+         patch("agent.conflict_resolver.publish", side_effect=fake_publish):
         await cr.handle_merge_conflict_resolution(11, "https://github.com/owner/repo/pull/3")
 
-    assert len(published) == 1
-    assert published[0][0] == "task.merge_conflict_resolution_failed"
-    assert "task not found" in published[0][2]["reason"]
+    assert _published_types(captured) == ["task.merge_conflict_resolution_failed"]
+    assert "task not found" in captured[0].payload["reason"]
 
 
 @pytest.mark.asyncio
 async def test_resolver_clean_merge_pushes_and_emits_success():
-    """git merge returns 0 (no conflicts) → push + success event, no agent."""
     task = _stub_task()
     repo = _stub_repo()
     git_calls: list[list[str]] = []
@@ -71,10 +72,10 @@ async def test_resolver_clean_merge_pushes_and_emits_success():
     async def fake_clone(*a, **kw):
         return "/tmp/ws"
 
-    published = []
+    captured = []
 
-    async def fake_publish(t, tid, payload=None):
-        published.append((t, tid, payload))
+    async def fake_publish(event):
+        captured.append(event)
 
     agent_called = []
 
@@ -88,17 +89,17 @@ async def test_resolver_clean_merge_pushes_and_emits_success():
          patch("agent.conflict_resolver.clone_repo", side_effect=fake_clone), \
          patch("agent.conflict_resolver._run_git", side_effect=fake_run_git), \
          patch("agent.conflict_resolver._run_agent_resolution", side_effect=fake_agent), \
-         patch("agent.conflict_resolver._publish", side_effect=fake_publish):
+         patch("agent.conflict_resolver.publish", side_effect=fake_publish):
         await cr.handle_merge_conflict_resolution(11, task.pr_url)
 
-    assert agent_called == []  # No conflicts → no agent
+    assert agent_called == []
     assert any(c[:1] == ["push"] for c in git_calls)
-    assert published == [("task.merge_conflict_resolved", 11, {"head_branch": "feat/x"})]
+    assert _published_types(captured) == ["task.merge_conflict_resolved"]
+    assert captured[0].payload == {"head_branch": "feat/x"}
 
 
 @pytest.mark.asyncio
 async def test_resolver_conflicts_invoke_agent_then_succeed():
-    """git merge fails with CONFLICT in stderr → agent runs → commit + push + success."""
     task = _stub_task()
     repo = _stub_repo()
     git_calls: list[list[str]] = []
@@ -110,7 +111,7 @@ async def test_resolver_conflicts_invoke_agent_then_succeed():
         if args[:1] == ("merge",) and len(args) > 1 and args[1].startswith("origin/"):
             return ("", "CONFLICT (content): Merge conflict in foo.py\n", 1)
         if args[:1] == ("diff",):
-            return ("", "", 0)  # no leftover markers
+            return ("", "", 0)
         if args[:1] == ("commit",):
             return ("", "", 0)
         if args[:1] == ("push",):
@@ -123,10 +124,10 @@ async def test_resolver_conflicts_invoke_agent_then_succeed():
     async def fake_agent(workspace, base_branch, task_id):
         return True
 
-    published = []
+    captured = []
 
-    async def fake_publish(t, tid, payload=None):
-        published.append((t, tid, payload))
+    async def fake_publish(event):
+        captured.append(event)
 
     with patch("agent.conflict_resolver._get_task", AsyncMock(return_value=task)), \
          patch("agent.conflict_resolver._get_repo", AsyncMock(return_value=repo)), \
@@ -135,18 +136,16 @@ async def test_resolver_conflicts_invoke_agent_then_succeed():
          patch("agent.conflict_resolver._run_git", side_effect=fake_run_git), \
          patch("agent.conflict_resolver._run_agent_resolution", side_effect=fake_agent), \
          patch("agent.conflict_resolver._has_conflict_markers", AsyncMock(return_value=False)), \
-         patch("agent.conflict_resolver._publish", side_effect=fake_publish):
+         patch("agent.conflict_resolver.publish", side_effect=fake_publish):
         await cr.handle_merge_conflict_resolution(11, task.pr_url)
 
-    # Should have committed the merge after agent staged resolutions
     assert any(c[:2] == ["-c", "user.email=auto-agent@bot.local"] or c[0] == "commit" for c in git_calls)
     assert any(c[:1] == ["push"] for c in git_calls)
-    assert published == [("task.merge_conflict_resolved", 11, {"head_branch": "feat/x"})]
+    assert _published_types(captured) == ["task.merge_conflict_resolved"]
 
 
 @pytest.mark.asyncio
 async def test_resolver_agent_giveup_emits_failed_and_aborts():
-    """Agent returns False → merge aborted, failure event emitted."""
     task = _stub_task()
     repo = _stub_repo()
     git_calls: list[list[str]] = []
@@ -167,10 +166,10 @@ async def test_resolver_agent_giveup_emits_failed_and_aborts():
     async def fake_agent(workspace, base_branch, task_id):
         return False
 
-    published = []
+    captured = []
 
-    async def fake_publish(t, tid, payload=None):
-        published.append((t, tid, payload))
+    async def fake_publish(event):
+        captured.append(event)
 
     with patch("agent.conflict_resolver._get_task", AsyncMock(return_value=task)), \
          patch("agent.conflict_resolver._get_repo", AsyncMock(return_value=repo)), \
@@ -178,16 +177,15 @@ async def test_resolver_agent_giveup_emits_failed_and_aborts():
          patch("agent.conflict_resolver.clone_repo", side_effect=fake_clone), \
          patch("agent.conflict_resolver._run_git", side_effect=fake_run_git), \
          patch("agent.conflict_resolver._run_agent_resolution", side_effect=fake_agent), \
-         patch("agent.conflict_resolver._publish", side_effect=fake_publish):
+         patch("agent.conflict_resolver.publish", side_effect=fake_publish):
         await cr.handle_merge_conflict_resolution(11, task.pr_url)
 
     assert any(c[:2] == ["merge", "--abort"] for c in git_calls)
-    assert published[0][0] == "task.merge_conflict_resolution_failed"
+    assert _published_types(captured) == ["task.merge_conflict_resolution_failed"]
 
 
 @pytest.mark.asyncio
 async def test_resolver_remaining_conflict_markers_aborts():
-    """Even if agent claims success, leftover markers trigger abort + failure."""
     task = _stub_task()
     repo = _stub_repo()
 
@@ -202,10 +200,10 @@ async def test_resolver_remaining_conflict_markers_aborts():
     async def fake_agent(*a, **k):
         return True
 
-    published = []
+    captured = []
 
-    async def fake_publish(t, tid, payload=None):
-        published.append((t, tid, payload))
+    async def fake_publish(event):
+        captured.append(event)
 
     with patch("agent.conflict_resolver._get_task", AsyncMock(return_value=task)), \
          patch("agent.conflict_resolver._get_repo", AsyncMock(return_value=repo)), \
@@ -214,8 +212,8 @@ async def test_resolver_remaining_conflict_markers_aborts():
          patch("agent.conflict_resolver._run_git", side_effect=fake_run_git), \
          patch("agent.conflict_resolver._run_agent_resolution", side_effect=fake_agent), \
          patch("agent.conflict_resolver._has_conflict_markers", AsyncMock(return_value=True)), \
-         patch("agent.conflict_resolver._publish", side_effect=fake_publish):
+         patch("agent.conflict_resolver.publish", side_effect=fake_publish):
         await cr.handle_merge_conflict_resolution(11, task.pr_url)
 
-    assert published[0][0] == "task.merge_conflict_resolution_failed"
-    assert "markers remain" in published[0][2]["reason"]
+    assert _published_types(captured) == ["task.merge_conflict_resolution_failed"]
+    assert "markers remain" in captured[0].payload["reason"]

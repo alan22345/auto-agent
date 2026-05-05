@@ -26,7 +26,12 @@ from agent.llm.structured import parse_json_response
 from agent.prompts import build_architecture_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
-from shared.events import Event, publish
+from shared.events import (
+    architecture_analysis_failed,
+    architecture_analysis_started,
+    architecture_suggestions_ready,
+    publish,
+)
 from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
 
 if TYPE_CHECKING:
@@ -128,13 +133,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         recent_suggestions=recent_titles,
     )
 
-    await publish(
-        Event(
-            type="architecture.analysis_started",
-            task_id=0,
-            payload={"repo_name": repo.name},
-        )
-    )
+    await publish(architecture_analysis_started(repo_name=repo.name))
 
     log.info(f"Running architecture analysis for repo '{repo.name}'")
     try:
@@ -143,23 +142,15 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
         output = result.output
     except Exception:
         log.exception(f"Architecture analysis for '{repo.name}' failed during agent execution")
-        await publish(
-            Event(
-                type="architecture.analysis_failed",
-                task_id=0,
-                payload={"repo_name": repo.name},
-            )
-        )
+        await publish(architecture_analysis_failed(repo_name=repo.name))
         raise
 
     suggestions_data = parse_json_response(output)
     if not suggestions_data:
         log.warning(f"Architecture analysis for '{repo.name}' returned no parseable output")
         await publish(
-            Event(
-                type="architecture.analysis_failed",
-                task_id=0,
-                payload={"repo_name": repo.name, "reason": "No parseable output"},
+            architecture_analysis_failed(
+                repo_name=repo.name, reason="No parseable output"
             )
         )
         return
@@ -187,9 +178,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
     log.info(f"Architecture analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
     await publish(
-        Event(
-            type="architecture.suggestions_ready",
-            task_id=0,
-            payload={"repo_name": repo.name, "count": len(new_suggestions)},
+        architecture_suggestions_ready(
+            repo_name=repo.name, count=len(new_suggestions)
         )
     )

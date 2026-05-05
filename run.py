@@ -16,18 +16,60 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re as _re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select as sa_select
 
+from agent.architect_analyzer import run_architecture_loop
+from agent.main import event_loop as agent_event_loop
+from agent.po_analyzer import run_po_analysis_loop
+from integrations.telegram.main import (
+    inbound_loop as telegram_inbound_loop,
+)
+from integrations.telegram.main import (
+    notification_loop as telegram_notification_loop,
+)
+from orchestrator.classifier import classify_task
+from orchestrator.metrics import router as metrics_router
+from orchestrator.queue import can_start, next_queued_task
+from orchestrator.repo_sync import match_repo, sync_repos
+from orchestrator.router import router as api_router
+from orchestrator.scheduler import run_scheduler
+from orchestrator.search import router as search_router
+from orchestrator.state_machine import get_task, transition
+from orchestrator.webhooks.github import router as github_webhook_router
+from orchestrator.webhooks.linear import router as linear_webhook_router
 from shared.config import settings
 from shared.database import async_session, engine
-from shared.events import Event, EventBus, RedisStreamPublisher, publish, set_publisher
+from shared.events import (
+    Event,
+    EventBus,
+    POEventType,
+    RedisStreamPublisher,
+    TaskEventType,
+    human_message,
+    publish,
+    set_publisher,
+    task_ci_failed,
+    task_ci_passed,
+    task_classified,
+    task_cleanup,
+    task_created,
+    task_deploy_preview,
+    task_failed,
+    task_merge_conflict_detected,
+    task_plan_ready,
+    task_query,
+    task_review_approved,
+    task_start_coding,
+    task_start_planning,
+)
 from shared.logging import setup_logging
 from shared.models import (
     Base,
@@ -42,7 +84,6 @@ from shared.models import (
     TaskStatus,
     intake_qa_for_suggestion,
 )
-from sqlalchemy import select as sa_select
 from shared.notifier import send_telegram
 from shared.redis_client import (
     ack_event,
@@ -56,30 +97,12 @@ from shared.task_channel import (
     task_channel,
 )
 
-from datetime import datetime, timezone
-
-from orchestrator.classifier import classify_task
-from orchestrator.metrics import router as metrics_router
-from orchestrator.queue import can_start, next_queued_task
-from orchestrator.repo_sync import match_repo, sync_repos
-from orchestrator.router import router as api_router
-from orchestrator.scheduler import run_scheduler
-from orchestrator.search import router as search_router
-from orchestrator.state_machine import get_task, transition
-from orchestrator.webhooks.github import router as github_webhook_router
-from orchestrator.webhooks.linear import router as linear_webhook_router
-
 from web.main import (
-    websocket_endpoint,
     event_listener as web_event_listener,
 )
-from integrations.telegram.main import (
-    inbound_loop as telegram_inbound_loop,
-    notification_loop as telegram_notification_loop,
+from web.main import (
+    websocket_endpoint,
 )
-from agent.architect_analyzer import run_architecture_loop
-from agent.main import event_loop as agent_event_loop
-from agent.po_analyzer import run_po_analysis_loop
 
 log = setup_logging("auto-agent")
 
@@ -204,11 +227,7 @@ async def on_task_created(event: Event) -> None:
         # directly to the query handler.
         if complexity == TaskComplexity.SIMPLE_NO_CODE:
             log.info(f"Task #{task.id} classified as simple_no_code — skipping repo match")
-            await publish(Event(
-                type="task.classified",
-                task_id=task.id,
-                payload=payload,
-            ))
+            await publish(task_classified(task.id, **payload))
             return
 
         # Auto-match repo from task text if not already set
@@ -219,11 +238,7 @@ async def on_task_created(event: Event) -> None:
                 await session.commit()
                 log.info(f"Auto-matched repo '{repo.name}' for task #{task.id}")
 
-        await publish(Event(
-            type="task.classified",
-            task_id=task.id,
-            payload=payload,
-        ))
+        await publish(task_classified(task.id, **payload))
 
 
 async def on_task_classified(event: Event) -> None:
@@ -239,7 +254,7 @@ async def on_task_classified(event: Event) -> None:
             task = await transition(session, task, TaskStatus.QUEUED)
             task = await transition(session, task, TaskStatus.CODING, "Processing query...")
             await session.commit()
-            await publish(Event(type="task.query", task_id=task.id))
+            await publish(task_query(task.id))
             return
 
         # Freeform tasks with auto_start_tasks bypass the concurrency queue
@@ -265,9 +280,9 @@ async def on_task_classified(event: Event) -> None:
         await session.commit()
 
         if task.status == TaskStatus.PLANNING:
-            await publish(Event(type="task.start_planning", task_id=task.id))
+            await publish(task_start_planning(task.id))
         elif task.status == TaskStatus.CODING:
-            await publish(Event(type="task.start_coding", task_id=task.id))
+            await publish(task_start_coding(task.id))
 
 
 async def on_clarification_resolved(event: Event) -> None:
@@ -282,12 +297,12 @@ async def on_clarification_resolved(event: Event) -> None:
             # Was in planning phase, hasn't produced a plan yet — resume planning
             task = await transition(session, task, TaskStatus.PLANNING, "Clarification resolved, resuming planning")
             await session.commit()
-            await publish(Event(type="task.start_planning", task_id=task.id))
+            await publish(task_start_planning(task.id))
         else:
             # Was in coding phase — resume coding
             task = await transition(session, task, TaskStatus.CODING, "Clarification resolved, resuming coding")
             await session.commit()
-            await publish(Event(type="task.start_coding", task_id=task.id))
+            await publish(task_start_coding(task.id))
 
 
 async def on_task_approved(event: Event) -> None:
@@ -295,7 +310,7 @@ async def on_task_approved(event: Event) -> None:
         task = await get_task(session, event.task_id)
         if not task:
             return
-        await publish(Event(type="task.start_coding", task_id=task.id))
+        await publish(task_start_coding(task.id))
 
 
 async def on_review_complete(event: Event) -> None:
@@ -351,6 +366,7 @@ async def on_ci_passed(event: Event) -> None:
         repo_freeform_config = None
         if task.repo_id:
             from sqlalchemy import select as _sel
+
             from shared.models import FreeformConfig as _FC
             result = await session.execute(
                 _sel(_FC).where(_FC.repo_id == task.repo_id)
@@ -386,7 +402,7 @@ async def on_ci_passed(event: Event) -> None:
         await session.commit()
 
     # Trigger dev deploy so the user can review a live preview
-    await publish(Event(type="task.deploy_preview", task_id=event.task_id))
+    await publish(task_deploy_preview(event.task_id))
 
 
 # Named sentinels _fetch_failed_ci_logs returns when it couldn't surface a
@@ -542,11 +558,7 @@ async def on_ci_failed(event: Event) -> None:
         task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
         await session.commit()
 
-        await publish(Event(
-            type="task.start_coding",
-            task_id=task.id,
-            payload={"retry_reason": reason[-3000:]},
-        ))
+        await publish(task_start_coding(task.id, retry_reason=reason[-3000:]))
 
 
 # Cap on consecutive deploy failures before we stop retrying. Picked low
@@ -668,11 +680,7 @@ async def on_dev_deploy_failed(event: Event) -> None:
         task = await transition(session, task, TaskStatus.CODING, f"Deploy failed — fetched logs")
         await session.commit()
 
-        await publish(Event(
-            type="task.start_coding",
-            task_id=task.id,
-            payload={"retry_reason": reason[-3000:]},
-        ))
+        await publish(task_start_coding(task.id, retry_reason=reason[-3000:]))
 
 
 async def on_review_approved(event: Event) -> None:
@@ -893,13 +901,13 @@ async def on_po_suggestions_ready(event: Event) -> None:
         )
 
     for tid in created_task_ids:
-        await publish(Event(type="task.created", task_id=tid))
+        await publish(task_created(tid))
 
 
 async def on_task_finished(event: Event) -> None:
     # Clean up workspace and session for the finished task
     if event.task_id:
-        await publish(Event(type="task.cleanup", task_id=event.task_id))
+        await publish(task_cleanup(event.task_id))
 
     async with async_session() as session:
         await _try_start_queued(session)
@@ -934,8 +942,10 @@ async def _try_start_queued(session) -> None:
                 task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
             await session.commit()
 
-            evt = "task.start_planning" if complexity == TaskComplexity.COMPLEX else "task.start_coding"
-            await publish(Event(type=evt, task_id=task.id))
+            if complexity == TaskComplexity.COMPLEX:
+                await publish(task_start_planning(task.id))
+            else:
+                await publish(task_start_coding(task.id))
 
 
 async def on_start_queued_task(event: Event) -> None:
@@ -955,8 +965,10 @@ async def on_start_queued_task(event: Event) -> None:
             task = await transition(session, task, TaskStatus.CODING, "Starting coding")
         await session.commit()
 
-        evt = "task.start_planning" if task.status == TaskStatus.PLANNING else "task.start_coding"
-        await publish(Event(type=evt, task_id=task.id))
+        if task.status == TaskStatus.PLANNING:
+            await publish(task_start_planning(task.id))
+        else:
+            await publish(task_start_coding(task.id))
         log.info(f"Started queued task #{task.id}")
 
 
@@ -1026,10 +1038,8 @@ async def _mark_conflict_resolution_attempted(task_id: int) -> None:
 async def _dispatch_conflict_resolution(task: Task, trigger: str) -> None:
     """Emit task.merge_conflict_detected so the agent can resolve conflicts."""
     await _mark_conflict_resolution_attempted(task.id)
-    await publish(Event(
-        type="task.merge_conflict_detected",
-        task_id=task.id,
-        payload={"pr_url": task.pr_url or "", "trigger": trigger},
+    await publish(task_merge_conflict_detected(
+        task.id, pr_url=task.pr_url or "", trigger=trigger,
     ))
     log.info(f"Conflict resolution dispatched for task #{task.id} (trigger={trigger})")
 
@@ -1097,23 +1107,23 @@ async def _auto_merge_pr(task: Task) -> str:
 # ---------------------------------------------------------------------------
 
 bus = EventBus()
-bus.on("task.created", on_task_created)
-bus.on("task.classified", on_task_classified)
-bus.on("task.clarification_resolved", on_clarification_resolved)
-bus.on("task.approved", on_task_approved)
-bus.on("task.review_complete", on_review_complete)
-bus.on("task.review_comments_addressed", on_review_comments_addressed)
-bus.on("task.ci_passed", on_ci_passed)
-bus.on("task.ci_failed", on_ci_failed)
-bus.on("task.review_approved", on_review_approved)
-bus.on("task.lgtm_received", on_lgtm_received)
-bus.on("task.merge_conflict_resolved", on_merge_conflict_resolved)
-bus.on("task.merge_conflict_resolution_failed", on_merge_conflict_resolution_failed)
-bus.on("task.dev_deploy_failed", on_dev_deploy_failed)
-bus.on("po.suggestions_ready", on_po_suggestions_ready)
-bus.on("task.start_queued", on_start_queued_task)
-bus.on("task.done", on_task_finished)
-bus.on("task.failed", on_task_finished)
+bus.on(TaskEventType.CREATED, on_task_created)
+bus.on(TaskEventType.CLASSIFIED, on_task_classified)
+bus.on(TaskEventType.CLARIFICATION_RESOLVED, on_clarification_resolved)
+bus.on(TaskEventType.APPROVED, on_task_approved)
+bus.on(TaskEventType.REVIEW_COMPLETE, on_review_complete)
+bus.on(TaskEventType.REVIEW_COMMENTS_ADDRESSED, on_review_comments_addressed)
+bus.on(TaskEventType.CI_PASSED, on_ci_passed)
+bus.on(TaskEventType.CI_FAILED, on_ci_failed)
+bus.on(TaskEventType.REVIEW_APPROVED, on_review_approved)
+bus.on(TaskEventType.LGTM_RECEIVED, on_lgtm_received)
+bus.on(TaskEventType.MERGE_CONFLICT_RESOLVED, on_merge_conflict_resolved)
+bus.on(TaskEventType.MERGE_CONFLICT_RESOLUTION_FAILED, on_merge_conflict_resolution_failed)
+bus.on(TaskEventType.DEV_DEPLOY_FAILED, on_dev_deploy_failed)
+bus.on(POEventType.SUGGESTIONS_READY, on_po_suggestions_ready)
+bus.on(TaskEventType.START_QUEUED, on_start_queued_task)
+bus.on(TaskEventType.DONE, on_task_finished)
+bus.on(TaskEventType.FAILED, on_task_finished)
 
 
 async def orchestrator_event_loop() -> None:
@@ -1218,12 +1228,10 @@ async def task_timeout_watchdog() -> None:
                         await session.commit()
                         _recovery_attempted.discard(task.id)
 
-                        await publish(Event(
-                            type="task.failed",
-                            task_id=task.id,
-                            payload={"error": f"Hard timeout in {task.status.value}"},
-                        ))
-                        await publish(Event(type="task.cleanup", task_id=task.id))
+                        await publish(
+                            task_failed(task.id, error=f"Hard timeout in {task.status.value}")
+                        )
+                        await publish(task_cleanup(task.id))
 
                     elif age_s > soft_timeout and task.id not in _recovery_attempted:
                         # Soft timeout: try recovery once
@@ -1233,9 +1241,9 @@ async def task_timeout_watchdog() -> None:
                             f"({age_s:.0f}s, no heartbeat) — attempting recovery"
                         )
                         if task.status == TaskStatus.PLANNING:
-                            await publish(Event(type="task.start_planning", task_id=task.id))
+                            await publish(task_start_planning(task.id))
                         elif task.status == TaskStatus.CODING:
-                            await publish(Event(type="task.start_coding", task_id=task.id))
+                            await publish(task_start_coding(task.id))
 
         except Exception:
             log.exception("Watchdog error")
@@ -1287,19 +1295,17 @@ async def ci_status_poller() -> None:
                         no_ci = await _pr_has_no_checks(task.pr_url, _settings.github_token)
                         if no_ci:
                             log.info(f"Task #{task.id}: no CI checks on PR, skipping to review")
-                            await publish(Event(type="task.ci_passed", task_id=task.id))
+                            await publish(task_ci_passed(task.id))
                         continue
 
                     if conclusion == "success":
                         log.info(f"Task #{task.id}: CI passed (polled)")
-                        await publish(Event(type="task.ci_passed", task_id=task.id))
+                        await publish(task_ci_passed(task.id))
                     elif conclusion in ("failure", "timed_out", "action_required"):
                         log.info(f"Task #{task.id}: CI failed: {conclusion} (polled)")
-                        await publish(Event(
-                            type="task.ci_failed",
-                            task_id=task.id,
-                            payload={"reason": f"CI conclusion: {conclusion}"},
-                        ))
+                        await publish(
+                            task_ci_failed(task.id, reason=f"CI conclusion: {conclusion}")
+                        )
 
         except Exception:
             log.exception("CI poller error")
@@ -1474,7 +1480,7 @@ async def pr_merge_poller() -> None:
 
                     if merged:
                         log.info(f"Task #{task.id}: PR merged detected (polled)")
-                        await publish(Event(type="task.review_approved", task_id=task.id))
+                        await publish(task_review_approved(task.id))
                         # Clean up — task will transition out of AWAITING_REVIEW
                         _merge_poll_intervals.pop(task.id, None)
                         _merge_poll_last_check.pop(task.id, None)
@@ -1619,14 +1625,11 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
     all_feedback = "\n\n---\n\n".join(msg for _, msg in sorted(new_comments))
     log.info(f"Task #{task.id}: {len(new_comments)} new PR comment(s) found (polled)")
 
-    await publish(Event(
-        type="human.message",
-        task_id=task.id,
-        payload={
-            "message": all_feedback,
-            "source": "github_pr_comment_poll",
-        },
-    ))
+    await publish(
+        human_message(
+            task_id=task.id, message=all_feedback, source="github_pr_comment_poll"
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1681,19 +1684,17 @@ async def _recover_stuck_tasks() -> None:
         for task in stuck_tasks:
             if task.status == TaskStatus.PLANNING:
                 log.info(f"Recovering task #{task.id}: re-emitting start_planning")
-                await publish(Event(type="task.start_planning", task_id=task.id))
+                await publish(task_start_planning(task.id))
             elif task.status == TaskStatus.CODING:
                 if task.complexity == TaskComplexity.SIMPLE_NO_CODE:
                     log.info(f"Recovering query task #{task.id}: re-emitting task.query")
-                    await publish(Event(type="task.query", task_id=task.id))
+                    await publish(task_query(task.id))
                 else:
                     log.info(f"Recovering task #{task.id}: re-emitting start_coding")
-                    await publish(Event(type="task.start_coding", task_id=task.id))
+                    await publish(task_start_coding(task.id))
             elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
                 log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
-                await publish(
-                    Event(type="task.plan_ready", task_id=task.id, payload={"plan": task.plan or ""})
-                )
+                await publish(task_plan_ready(task.id, plan=task.plan or ""))
         log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
 
     # Also try starting any queued tasks that may have been left behind

@@ -42,7 +42,13 @@ from agent.workspace import (
     ensure_branch_has_commits,
     push_branch,
 )
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    publish,
+    repo_onboard,
+    task_clarification_needed,
+    task_subtask_progress,
+)
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.coding")
@@ -101,13 +107,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
 
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        await publish(
-            Event(
-                type="repo.onboard",
-                task_id=0,
-                payload={"repo_id": repo.id, "repo_name": repo.name},
-            )
-        )
+        await publish(repo_onboard(repo_id=repo.id, repo_name=repo.name))
 
     session_id = _session_id(task_id, task.created_at)
     base_branch = repo.default_branch
@@ -224,11 +224,7 @@ async def _handle_coding_single(
         log.info(f"Task #{task_id} needs clarification: {question[:100]}...")
         await transition_task(task_id, "awaiting_clarification", question)
         await publish(
-            Event(
-                type="task.clarification_needed",
-                task_id=task_id,
-                payload={"question": question, "phase": "coding"},
-            )
+            task_clarification_needed(task_id, question=question, phase="coding")
         )
         return
 
@@ -287,15 +283,12 @@ async def _handle_coding_with_subtasks(
         await _update_subtasks(task_id, phases, i)
 
         await publish(
-            Event(
-                type="task.subtask_progress",
-                task_id=task_id,
-                payload={
-                    "current": i + 1,
-                    "total": total,
-                    "title": phase["title"],
-                    "status": "running",
-                },
+            task_subtask_progress(
+                task_id,
+                current=i + 1,
+                total=total,
+                title=phase["title"],
+                status="running",
             )
         )
 
@@ -345,13 +338,10 @@ async def _handle_coding_with_subtasks(
             await _update_subtasks(task_id, phases, i)
             await transition_task(task_id, "awaiting_clarification", question)
             await publish(
-                Event(
-                    type="task.clarification_needed",
-                    task_id=task_id,
-                    payload={
-                        "question": question,
-                        "phase": f"subtask {i + 1}: {phase['title']}",
-                    },
+                task_clarification_needed(
+                    task_id,
+                    question=question,
+                    phase=f"subtask {i + 1}: {phase['title']}",
                 )
             )
             return
@@ -361,15 +351,12 @@ async def _handle_coding_with_subtasks(
         await _update_subtasks(task_id, phases, i)
 
         await publish(
-            Event(
-                type="task.subtask_progress",
-                task_id=task_id,
-                payload={
-                    "current": i + 1,
-                    "total": total,
-                    "title": phase["title"],
-                    "status": "done",
-                },
+            task_subtask_progress(
+                task_id,
+                current=i + 1,
+                total=total,
+                title=phase["title"],
+                status="done",
             )
         )
 

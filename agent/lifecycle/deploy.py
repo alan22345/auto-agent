@@ -20,7 +20,12 @@ from agent.lifecycle._naming import _branch_name
 from agent.lifecycle._orchestrator_api import get_task
 from agent.workspace import WORKSPACES_DIR
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    publish,
+    task_dev_deploy_failed,
+    task_dev_deployed,
+)
 from shared.logging import setup_logging
 from shared.types import TaskData
 
@@ -104,18 +109,13 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
             conclusion = await _wait_for_workflow_run(
                 owner, repo, workflow_id, branch_name, headers, task_id
             )
-            event_type = (
-                "task.dev_deployed" if conclusion == "success" else "task.dev_deploy_failed"
-            )
+            factory = task_dev_deployed if conclusion == "success" else task_dev_deploy_failed
             await publish(
-                Event(
-                    type=event_type,
-                    task_id=task_id,
-                    payload={
-                        "branch": branch_name,
-                        "output": f"Deploy workflow finished: {conclusion}",
-                        "pr_url": task.pr_url or "",
-                    },
+                factory(
+                    task_id,
+                    branch=branch_name,
+                    output=f"Deploy workflow finished: {conclusion}",
+                    pr_url=task.pr_url or "",
                 )
             )
             return True
@@ -193,29 +193,23 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
 
         if result.timed_out:
             await publish(
-                Event(
-                    type="task.dev_deploy_failed",
-                    task_id=task_id,
-                    payload={
-                        "branch": branch_name,
-                        "output": "Deploy timed out",
-                        "pr_url": task.pr_url or "",
-                    },
+                task_dev_deploy_failed(
+                    task_id,
+                    branch=branch_name,
+                    output="Deploy timed out",
+                    pr_url=task.pr_url or "",
                 )
             )
             return
 
         output = (result.stdout + result.stderr).strip()
-        event_type = "task.dev_deployed" if result.returncode == 0 else "task.dev_deploy_failed"
+        factory = task_dev_deployed if result.returncode == 0 else task_dev_deploy_failed
         await publish(
-            Event(
-                type=event_type,
-                task_id=task_id,
-                payload={
-                    "branch": branch_name,
-                    "output": output[-1000:],
-                    "pr_url": task.pr_url or "",
-                },
+            factory(
+                task_id,
+                branch=branch_name,
+                output=output[-1000:],
+                pr_url=task.pr_url or "",
             )
         )
 
@@ -223,14 +217,11 @@ async def _try_local_deploy(task_id: int, task: TaskData, branch_name: str, work
         log.exception(f"Task #{task_id}: deploy preview failed")
         try:
             await publish(
-                Event(
-                    type="task.dev_deploy_failed",
-                    task_id=task_id,
-                    payload={
-                        "branch": branch_name,
-                        "output": "Unexpected error",
-                        "pr_url": task.pr_url or "",
-                    },
+                task_dev_deploy_failed(
+                    task_id,
+                    branch=branch_name,
+                    output="Unexpected error",
+                    pr_url=task.pr_url or "",
                 )
             )
         except Exception:

@@ -33,7 +33,12 @@ from agent.workspace import (
     push_branch,
 )
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    publish,
+    task_review_comments_addressed,
+    task_review_complete,
+)
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.review")
@@ -151,15 +156,12 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 "skipping review and auto-approving so the task isn't blocked"
             )
             await publish(
-                Event(
-                    type="task.review_complete",
-                    task_id=task_id,
-                    payload={
-                        "review": f"Review skipped — agent error: {output[:500]}",
-                        "pr_url": pr_url,
-                        "branch": branch_name,
-                        "approved": True,
-                    },
+                task_review_complete(
+                    task_id,
+                    review=f"Review skipped — agent error: {output[:500]}",
+                    pr_url=pr_url,
+                    branch=branch_name,
+                    approved=True,
                 )
             )
             return
@@ -172,15 +174,12 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         if approved:
             log.info(f"Independent review approved task #{task_id}")
             await publish(
-                Event(
-                    type="task.review_complete",
-                    task_id=task_id,
-                    payload={
-                        "review": output[:2000],
-                        "pr_url": pr_url,
-                        "branch": branch_name,
-                        "approved": True,
-                    },
+                task_review_complete(
+                    task_id,
+                    review=output[:2000],
+                    pr_url=pr_url,
+                    branch=branch_name,
+                    approved=True,
                 )
             )
         else:
@@ -205,31 +204,25 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             await push_branch(workspace, branch_name)
 
             await publish(
-                Event(
-                    type="task.review_complete",
-                    task_id=task_id,
-                    payload={
-                        "review": output[:2000],
-                        "fixes": fix_result.output[:1000],
-                        "pr_url": pr_url,
-                        "branch": branch_name,
-                        "approved": False,
-                    },
+                task_review_complete(
+                    task_id,
+                    review=output[:2000],
+                    fixes=fix_result.output[:1000],
+                    pr_url=pr_url,
+                    branch=branch_name,
+                    approved=False,
                 )
             )
 
     except Exception as e:
         log.exception(f"Independent review failed for task #{task_id}")
         await publish(
-            Event(
-                type="task.review_complete",
-                task_id=task_id,
-                payload={
-                    "review": f"Review skipped: {e}",
-                    "pr_url": pr_url,
-                    "branch": branch_name,
-                    "approved": True,
-                },
+            task_review_complete(
+                task_id,
+                review=f"Review skipped: {e}",
+                pr_url=pr_url,
+                branch=branch_name,
+                approved=True,
             )
         )
 
@@ -349,10 +342,8 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         await push_branch(workspace, branch_name)
 
         await publish(
-            Event(
-                type="task.review_comments_addressed",
-                task_id=task_id,
-                payload={"output": result.output[:1000], "pr_url": task.pr_url or ""},
+            task_review_comments_addressed(
+                task_id, output=result.output[:1000], pr_url=task.pr_url or ""
             )
         )
 

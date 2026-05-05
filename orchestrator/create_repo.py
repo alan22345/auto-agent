@@ -26,7 +26,7 @@ from agent.llm import get_provider
 from agent.llm.types import Message
 from agent.prompts import build_repo_name_prompt
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import publish, task_created
 from shared.models import FreeformConfig, Repo, Task, TaskComplexity, TaskSource, TaskStatus
 
 log = logging.getLogger(__name__)
@@ -244,7 +244,7 @@ async def create_repo_and_scaffold_task(
     await session.refresh(primary_repo)
 
     # 7. Publish task.created so the orchestrator picks it up
-    await publish(Event(type="task.created", task_id=task.id))
+    await publish(task_created(task.id))
 
     log.info(f"Scaffold task #{task.id} created for repo {full_name}")
     return primary_repo, task

@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from agent.llm.types import LLMResponse, Message, TokenUsage
+from agent.llm.types import Message
 
 if TYPE_CHECKING:
-    from agent.llm.base import LLMProvider
     from agent.context.token_counter import TokenCounter
+    from agent.llm.base import LLMProvider
 
 logger = structlog.get_logger()
 

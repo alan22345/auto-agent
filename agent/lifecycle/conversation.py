@@ -33,7 +33,16 @@ from agent.lifecycle._orchestrator_api import (
 )
 from agent.lifecycle.factory import create_agent
 from agent.workspace import WORKSPACES_DIR
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    publish,
+    task_blocked,
+    task_clarification_needed,
+    task_clarification_resolved,
+    task_plan_ready,
+    task_start_queued,
+    task_status_changed,
+)
 from shared.logging import setup_logging
 from shared.task_channel import task_channel
 from shared.types import TaskData
@@ -111,19 +120,11 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
                     },
                 )
                 resp.raise_for_status()
-            await publish(
-                Event(
-                    type="task.plan_ready",
-                    task_id=task_id,
-                    payload={"plan": full_output},
-                )
-            )
+            await publish(task_plan_ready(task_id, plan=full_output))
         else:
             await publish(
-                Event(
-                    type="task.status_changed",
-                    task_id=task_id,
-                    payload={"status": task.status, "message": output[:2000]},
+                task_status_changed(
+                    task_id, status=task.status, message=output[:2000]
                 )
             )
 
@@ -190,21 +191,11 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
         log.info(f"Task #{task_id} needs another clarification: {follow_up[:100]}...")
         await transition_task(task_id, "awaiting_clarification", follow_up)
         await publish(
-            Event(
-                type="task.clarification_needed",
-                task_id=task_id,
-                payload={"question": follow_up, "phase": "continuation"},
-            )
+            task_clarification_needed(task_id, question=follow_up, phase="continuation")
         )
         return
 
-    await publish(
-        Event(
-            type="task.clarification_resolved",
-            task_id=task_id,
-            payload={"output": result.output},
-        )
-    )
+    await publish(task_clarification_resolved(task_id, output=result.output))
 
 
 async def _try_assign_repo(task_id: int, message: str) -> bool:
@@ -236,12 +227,9 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
         if not assigned:
             log.warning(f"Task #{task_id} blocked with no repo, couldn't extract from message")
             await publish(
-                Event(
-                    type="task.blocked",
-                    task_id=task_id,
-                    payload={
-                        "error": "No repo assigned. Please include the repo name in your message."
-                    },
+                task_blocked(
+                    task_id,
+                    error="No repo assigned. Please include the repo name in your message.",
                 )
             )
             return
@@ -307,6 +295,6 @@ async def route_human_message(event: Event) -> None:
     elif task.status == "queued":
         # User wants to kick a queued task — ask orchestrator to start it
         log.info(f"Message for queued task #{task_id} — attempting to start")
-        await publish(Event(type="task.start_queued", task_id=task_id))
+        await publish(task_start_queued(task_id))
     else:
         log.info(f"Message for task #{task_id} in status '{task.status}' — not routing")

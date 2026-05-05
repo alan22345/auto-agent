@@ -7,14 +7,14 @@ Supports pass-through mode for CLI providers that manage their own tools.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import structlog
 
 from agent.context import ContextManager
 from agent.context.reactive_compact import PromptTooLongError
 from agent.context.workspace_state import WorkspaceState
-from agent.llm.types import LLMResponse, Message, TokenUsage, ToolCall
+from agent.llm.types import Message, TokenUsage, ToolCall
 from agent.session import Session
 from agent.tools.base import ToolContext, ToolRegistry, ToolResult
 from agent.tools.cache import ToolCache

@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.memory_extractor import extract
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import Event, POEventType, human_message, publish
 from shared.logging import setup_logging
 from shared.memory_io import (
     correct_fact,
@@ -404,11 +404,7 @@ async def _handle_send_message(
             json={"message": text, "username": username or "unknown"},
         )
 
-    await publish(Event(
-        type="human.message",
-        task_id=task_id,
-        payload={"message": text, "source": "web"},
-    ))
+    await publish(human_message(task_id=task_id, message=text, source="web"))
 
     await broadcast({"type": "user", "message": text, "task_id": task_id, "username": username})
 
@@ -913,7 +909,7 @@ async def event_listener() -> None:
                                 await broadcast({"type": "task_list", "tasks": tasks})
 
                     # Refresh suggestions and configs when PO analysis completes
-                    if event.type == "po.suggestions_ready":
+                    if event.type == POEventType.SUGGESTIONS_READY:
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(
                                 f"{ORCHESTRATOR_URL}/suggestions", params={"status": "pending"}

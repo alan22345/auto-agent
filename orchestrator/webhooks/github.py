@@ -20,7 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
 from shared.database import async_session
-from shared.events import Event, publish
+from shared.events import (
+    human_message,
+    publish,
+    task_ci_failed,
+    task_ci_passed,
+    task_failed,
+    task_lgtm_received,
+    task_review_approved,
+)
 from shared.models import Task, TaskStatus
 from shared.types import PRReviewComment
 
@@ -125,14 +133,10 @@ async def _handle_check_suite(payload: dict[str, Any]) -> None:
             return  # Not waiting for CI
 
         if conclusion == "success":
-            await publish(Event(type="task.ci_passed", task_id=task.id))
+            await publish(task_ci_passed(task.id))
             log.info(f"CI passed for task #{task.id} (webhook)")
         elif conclusion in ("failure", "timed_out", "action_required"):
-            await publish(Event(
-                type="task.ci_failed",
-                task_id=task.id,
-                payload={"reason": f"CI conclusion: {conclusion}"},
-            ))
+            await publish(task_ci_failed(task.id, reason=f"CI conclusion: {conclusion}"))
             log.info(f"CI failed for task #{task.id}: {conclusion} (webhook)")
 
 
@@ -152,14 +156,10 @@ async def _handle_commit_status(payload: dict[str, Any]) -> None:
                 continue
 
             if state == "success":
-                await publish(Event(type="task.ci_passed", task_id=task.id))
+                await publish(task_ci_passed(task.id))
                 log.info(f"CI passed for task #{task.id} (status webhook)")
             elif state in ("failure", "error"):
-                await publish(Event(
-                    type="task.ci_failed",
-                    task_id=task.id,
-                    payload={"reason": f"Commit status: {state}"},
-                ))
+                await publish(task_ci_failed(task.id, reason=f"Commit status: {state}"))
                 log.info(f"CI failed for task #{task.id}: {state} (status webhook)")
 
 
@@ -192,11 +192,7 @@ async def _handle_pr_review(payload: dict[str, Any]) -> None:
 
         if review_state == "approved":
             reviewer = review.get("user", {}).get("login", "unknown")
-            await publish(Event(
-                type="task.lgtm_received",
-                task_id=task.id,
-                payload={"reviewer": reviewer, "pr_url": pr_url},
-            ))
+            await publish(task_lgtm_received(task.id, reviewer=reviewer, pr_url=pr_url))
             log.info(f"LGTM (review approved) on task #{task.id} by {reviewer} (webhook)")
 
         elif review_state == "changes_requested":
@@ -205,14 +201,13 @@ async def _handle_pr_review(payload: dict[str, Any]) -> None:
                 body=review.get("body", ""),
                 type="review",
             )
-            await publish(Event(
-                type="human.message",
-                task_id=task.id,
-                payload={
-                    "message": f"[{comment.author}] Review (changes requested): {comment.body}",
-                    "source": "github_review",
-                },
-            ))
+            await publish(
+                human_message(
+                    task_id=task.id,
+                    message=f"[{comment.author}] Review (changes requested): {comment.body}",
+                    source="github_review",
+                )
+            )
             log.info(f"Changes requested on task #{task.id} by {comment.author} (webhook)")
 
 
@@ -249,14 +244,13 @@ async def _handle_pr_comment(payload: dict[str, Any]) -> None:
             return
 
         file_context = f" on `{path}`" if path else ""
-        await publish(Event(
-            type="human.message",
-            task_id=task.id,
-            payload={
-                "message": f"[{author}] PR comment{file_context}: {body}",
-                "source": "github_pr_comment",
-            },
-        ))
+        await publish(
+            human_message(
+                task_id=task.id,
+                message=f"[{author}] PR comment{file_context}: {body}",
+                source="github_pr_comment",
+            )
+        )
         log.info(f"PR comment on task #{task.id} by {author} (webhook)")
 
 
@@ -288,14 +282,13 @@ async def _handle_issue_comment(payload: dict[str, Any]) -> None:
         if not task:
             return
 
-        await publish(Event(
-            type="human.message",
-            task_id=task.id,
-            payload={
-                "message": f"[{author}] PR comment: {body}",
-                "source": "github_pr_comment",
-            },
-        ))
+        await publish(
+            human_message(
+                task_id=task.id,
+                message=f"[{author}] PR comment: {body}",
+                source="github_pr_comment",
+            )
+        )
         log.info(f"PR conversation comment on task #{task.id} by {author} (webhook)")
 
 
@@ -320,7 +313,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
             if not task:
                 return
 
-            await publish(Event(type="task.review_approved", task_id=task.id))
+            await publish(task_review_approved(task.id))
             log.info(f"PR merged for task #{task.id} (webhook)")
 
     elif action == "closed" and not merged and head_branch.startswith("auto-agent/"):
@@ -332,9 +325,5 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
             if not task:
                 return
 
-            await publish(Event(
-                type="task.failed",
-                task_id=task.id,
-                payload={"reason": "PR closed without merging"},
-            ))
+            await publish(task_failed(task.id, error="PR closed without merging"))
             log.info(f"PR closed without merge for task #{task.id} (webhook)")

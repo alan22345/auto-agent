@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from shared.events import Event, publish
+from shared.events import Event, po_analysis_queued, publish
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.po_worker")
@@ -66,9 +66,5 @@ async def handle(event: Event) -> None:
     await _po_queue.put(repo_id)
     if queued:
         await publish(
-            Event(
-                type="po.analysis_queued",
-                task_id=0,
-                payload={"repo_name": repo_name, "position": _po_queue.qsize()},
-            )
+            po_analysis_queued(repo_name=repo_name, position=_po_queue.qsize())
         )

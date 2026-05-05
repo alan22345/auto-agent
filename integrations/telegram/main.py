@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    POEventType,
+    TaskEventType,
+    human_message,
+    publish,
+)
 from shared.notifier import send_telegram_async
 from shared.redis_client import (
     ack_event,
@@ -208,11 +215,7 @@ async def _handle_command(text: str) -> None:
             await send_telegram_async("Invalid task ID. Usage: `/answer <task_id> <your answer>`")
             return
         answer = parts[2]
-        await publish(Event(
-            type="human.message",
-            task_id=task_id,
-            payload={"message": answer, "source": "telegram"},
-        ))
+        await publish(human_message(task_id=task_id, message=answer, source="telegram"))
         await send_telegram_async(f"Answer sent to task #{task_id}.")
 
     elif cmd == "/cancel":
@@ -375,30 +378,196 @@ async def _handle_command(text: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Outbound: listen for events and notify via Telegram
+#
+# `_NOTIFICATION_FORMATTERS` is keyed on TaskEventType / POEventType members
+# and is the single place that decides which events trigger a Telegram
+# message. Each formatter receives the event payload plus the resolved
+# task context (task_info string + is_freeform flag) and returns the
+# message body. Adding a new event-type notification is one entry.
 # ---------------------------------------------------------------------------
 
 
-NOTIFY_EVENTS = {
-    "task.created",
-    "task.start_planning",
-    "task.start_coding",
-    "task.plan_ready",
-    "task.review_complete",
-    "task.blocked",
-    "task.failed",
-    "task.done",
-    "task.ci_passed",
-    "task.ci_failed",
-    "task.clarification_needed",
-    "task.rejected",
-    "task.dev_deployed",
-    "task.review_comments_addressed",
-    "task.dev_deploy_failed",
-    "task.subtask_progress",
-    "po.analysis_queued",
-    "po.analysis_started",
-    "po.suggestions_ready",
-    "po.analysis_failed",
+def _fmt_task_created(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    return f"📋 *New task created*\n{task_info}"
+
+
+def _fmt_task_start_planning(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    feedback = payload.get("feedback")
+    if feedback:
+        return f"✏️ *Revising plan* based on your feedback\n{task_info}"
+    return f"🔍 *Planning started*\n{task_info}"
+
+
+def _fmt_task_start_coding(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    return f"⚡ *Coding started*\n{task_info}"
+
+
+def _fmt_task_rejected(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    return f"↩️ *Plan rejected* — revising\n{task_info}"
+
+
+def _fmt_task_done(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    return f"🎉 *Task done*\n{task_info}"
+
+
+def _fmt_task_ci_passed(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    return f"*CI passed* — ready for your review.\n{task_info}"
+
+
+def _fmt_task_ci_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    reason = payload.get("reason", "")
+    return f"❌ *CI failed* — retrying\n{task_info}\n{reason}"
+
+
+def _fmt_task_review_complete(payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None) -> str:
+    pr_url = payload.get("pr_url", "")
+    review = payload.get("review", "")
+    approved = payload.get("approved", False)
+    review_preview = review[:800] if review else ""
+    if is_freeform:
+        return (
+            f"🤖 *Independent review complete (freeform — auto-merging)*\n{task_info}\n{pr_url}\n\n"
+            f"{review_preview}"
+        )
+    if approved:
+        return (
+            f"✅ *PR ready for your review*\n{task_info}\n{pr_url}\n\n"
+            f"Independent review passed.\n{review_preview}"
+        )
+    return (
+        f"🔧 *Review comments addressed — PR ready*\n{task_info}\n{pr_url}\n\n"
+        f"Reviewer found issues, they've been fixed and pushed.\n{review_preview}"
+    )
+
+
+def _fmt_task_plan_ready(payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None) -> str:
+    plan = payload.get("plan", "")
+    plan_preview = plan[:1500] if plan else "No plan details available."
+    if is_freeform:
+        return f"📝 *Plan ready (freeform — auto-reviewing)*\n{task_info}\n\n{plan_preview}"
+    return (
+        f"*Plan ready for review.*\n{task_info}\n\n{plan_preview}\n\n"
+        f"Reply to approve or provide feedback."
+    )
+
+
+def _fmt_task_clarification_needed(payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None) -> str:
+    question = payload.get("question", "")
+    return (
+        f"*Clarification needed*\n{task_info}\n\n❓ {question}\n\n"
+        f"Reply with `/answer {task_id} <your answer>` to respond."
+    )
+
+
+def _fmt_task_blocked(payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None) -> str:
+    reason = payload.get("error", "")
+    reason_text = f"\nReason: {reason}" if reason else ""
+    return (
+        f"*Task blocked* — needs your input.\n{task_info}{reason_text}\n\n"
+        f"Reply with `/answer {task_id} <your response>` to unblock."
+    )
+
+
+def _fmt_task_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    error = payload.get("error", "unknown")
+    return f"*Task failed.*\n{task_info}\nError: {error}"
+
+
+def _fmt_task_dev_deployed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    pr_url = payload.get("pr_url", "")
+    branch = payload.get("branch", "")
+    deploy_output = payload.get("output", "")
+    output_preview = deploy_output[-500:] if deploy_output else ""
+    return (
+        f"🚀 *Dev deployment complete*\n{task_info}\n"
+        f"Branch `{branch}` deployed to dev.\n"
+        f"{pr_url}\n\n"
+        f"Please review the changes and merge or request changes on the PR."
+        + (f"\n\n```\n{output_preview}\n```" if output_preview else "")
+    )
+
+
+def _fmt_task_dev_deploy_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    pr_url = payload.get("pr_url", "")
+    output = payload.get("output", "")
+    return f"❌ *Dev deployment failed*\n{task_info}\n{pr_url}\n\n{output}"
+
+
+def _fmt_task_review_comments_addressed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    pr_url = payload.get("pr_url", "")
+    output = payload.get("output", "")
+    output_preview = output[:500] if output else ""
+    return (
+        f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}"
+        + (f"\n\n{output_preview}" if output_preview else "")
+    )
+
+
+def _fmt_task_subtask_progress(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    current = payload.get("current", "?")
+    total = payload.get("total", "?")
+    title = payload.get("title", "")
+    status = payload.get("status", "")
+    icon = "✅" if status == "done" else "⚙️"
+    return f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}"
+
+
+def _fmt_po_analysis_queued(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    repo_name = payload.get("repo_name", "unknown")
+    position = payload.get("position", "?")
+    return f"⏳ *PO analysis queued* for `{repo_name}` (position {position})"
+
+
+def _fmt_po_analysis_started(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    repo_name = payload.get("repo_name", "unknown")
+    return f"🔄 *PO analysis started* for `{repo_name}`"
+
+
+def _fmt_po_suggestions_ready(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    repo_name = payload.get("repo_name", "unknown")
+    count = payload.get("count", 0)
+    return f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`"
+
+
+def _fmt_po_analysis_failed(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+    repo_name = payload.get("repo_name", "unknown")
+    reason = payload.get("reason", "")
+    return f"❌ *PO analysis failed* for `{repo_name}`" + (
+        f"\nReason: {reason}" if reason else ""
+    )
+
+
+# `Formatter` takes (payload, task_info, is_freeform, task_id) and returns the
+# rendered Telegram message. Pinning the signature keeps the typo guarantee on
+# the consumer side too: a formatter with a wrong shape fails at registration.
+Formatter = Callable[[dict[str, Any], str, bool, int | None], str]
+
+
+# Map of event-type wire string → formatter. Keyed on the StrEnum value
+# (which is the wire string) so a new event type can be hooked up by adding
+# a single line. Events not in this dict are silently dropped — that is the
+# legacy behaviour and the unit tests below pin it.
+_NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
+    TaskEventType.CREATED: _fmt_task_created,
+    TaskEventType.START_PLANNING: _fmt_task_start_planning,
+    TaskEventType.START_CODING: _fmt_task_start_coding,
+    TaskEventType.PLAN_READY: _fmt_task_plan_ready,
+    TaskEventType.REVIEW_COMPLETE: _fmt_task_review_complete,
+    TaskEventType.BLOCKED: _fmt_task_blocked,
+    TaskEventType.FAILED: _fmt_task_failed,
+    TaskEventType.DONE: _fmt_task_done,
+    TaskEventType.CI_PASSED: _fmt_task_ci_passed,
+    TaskEventType.CI_FAILED: _fmt_task_ci_failed,
+    TaskEventType.CLARIFICATION_NEEDED: _fmt_task_clarification_needed,
+    TaskEventType.REJECTED: _fmt_task_rejected,
+    TaskEventType.DEV_DEPLOYED: _fmt_task_dev_deployed,
+    TaskEventType.REVIEW_COMMENTS_ADDRESSED: _fmt_task_review_comments_addressed,
+    TaskEventType.DEV_DEPLOY_FAILED: _fmt_task_dev_deploy_failed,
+    TaskEventType.SUBTASK_PROGRESS: _fmt_task_subtask_progress,
+    POEventType.ANALYSIS_QUEUED: _fmt_po_analysis_queued,
+    POEventType.ANALYSIS_STARTED: _fmt_po_analysis_started,
+    POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,
+    POEventType.ANALYSIS_FAILED: _fmt_po_analysis_failed,
 }
 
 
@@ -418,7 +587,7 @@ async def notification_loop() -> None:
             for msg_id, data in messages:
                 try:
                     event = Event.from_redis(data)
-                    if event.type in NOTIFY_EVENTS:
+                    if event.type in _NOTIFICATION_FORMATTERS:
                         await _notify_user(event)
                 except Exception:
                     log.exception("Error processing notification event")
@@ -433,6 +602,10 @@ async def notification_loop() -> None:
 
 async def _notify_user(event: Event) -> None:
     """Send a Telegram notification based on event type."""
+    formatter = _NOTIFICATION_FORMATTERS.get(event.type)
+    if formatter is None:
+        return
+
     task_info = ""
     is_freeform = False
     if event.task_id:
@@ -446,130 +619,5 @@ async def _notify_user(event: Event) -> None:
         except Exception:
             pass
 
-    # All task-scoped notifications in this function thread back to the
-    # task's chat stream via reply. Bind task_id once so every send records
-    # the message_id → task_id mapping used by _handle_update.
-    async def send(message: str) -> None:
-        await send_telegram_async(message, task_id=event.task_id)
-
-    if event.type == "task.created":
-        await send(f"📋 *New task created*\n{task_info}")
-    elif event.type == "task.start_planning":
-        feedback = event.payload.get("feedback") if event.payload else None
-        if feedback:
-            await send(f"✏️ *Revising plan* based on your feedback\n{task_info}")
-        else:
-            await send(f"🔍 *Planning started*\n{task_info}")
-    elif event.type == "task.rejected":
-        await send(f"↩️ *Plan rejected* — revising\n{task_info}")
-    elif event.type == "task.done":
-        await send(f"🎉 *Task done*\n{task_info}")
-    elif event.type == "task.ci_failed":
-        reason = event.payload.get("reason", "")
-        await send(f"❌ *CI failed* — retrying\n{task_info}\n{reason}")
-    elif event.type == "task.start_coding":
-        await send(f"⚡ *Coding started*\n{task_info}")
-    elif event.type == "task.review_complete":
-        pr_url = event.payload.get("pr_url", "")
-        review = event.payload.get("review", "")
-        approved = event.payload.get("approved", False)
-        review_preview = review[:800] if review else ""
-        if is_freeform:
-            # Freeform tasks auto-merge — no human review needed.
-            await send(
-                f"🤖 *Independent review complete (freeform — auto-merging)*\n{task_info}\n{pr_url}\n\n"
-                f"{review_preview}"
-            )
-        elif approved:
-            await send(
-                f"✅ *PR ready for your review*\n{task_info}\n{pr_url}\n\n"
-                f"Independent review passed.\n{review_preview}"
-            )
-        else:
-            fixes = event.payload.get("fixes", "")
-            await send(
-                f"🔧 *Review comments addressed — PR ready*\n{task_info}\n{pr_url}\n\n"
-                f"Reviewer found issues, they've been fixed and pushed.\n{review_preview}"
-            )
-    elif event.type == "task.plan_ready":
-        plan = event.payload.get("plan", "")
-        plan_preview = plan[:1500] if plan else "No plan details available."
-        if is_freeform:
-            # Freeform tasks have their plan auto-reviewed — no human action needed.
-            await send(
-                f"📝 *Plan ready (freeform — auto-reviewing)*\n{task_info}\n\n{plan_preview}"
-            )
-        else:
-            await send(
-                f"*Plan ready for review.*\n{task_info}\n\n{plan_preview}\n\n"
-                f"Reply to approve or provide feedback."
-            )
-    elif event.type == "task.clarification_needed":
-        question = event.payload.get("question", "")
-        await send(
-            f"*Clarification needed*\n{task_info}\n\n❓ {question}\n\n"
-            f"Reply with `/answer {event.task_id} <your answer>` to respond."
-        )
-    elif event.type == "task.blocked":
-        reason = event.payload.get("error", "")
-        reason_text = f"\nReason: {reason}" if reason else ""
-        await send(
-            f"*Task blocked* — needs your input.\n{task_info}{reason_text}\n\n"
-            f"Reply with `/answer {event.task_id} <your response>` to unblock."
-        )
-    elif event.type == "task.failed":
-        error = event.payload.get("error", "unknown")
-        await send(f"*Task failed.*\n{task_info}\nError: {error}")
-    elif event.type == "task.dev_deployed":
-        pr_url = event.payload.get("pr_url", "")
-        branch = event.payload.get("branch", "")
-        deploy_output = event.payload.get("output", "")
-        output_preview = deploy_output[-500:] if deploy_output else ""
-        await send(
-            f"🚀 *Dev deployment complete*\n{task_info}\n"
-            f"Branch `{branch}` deployed to dev.\n"
-            f"{pr_url}\n\n"
-            f"Please review the changes and merge or request changes on the PR."
-            + (f"\n\n```\n{output_preview}\n```" if output_preview else "")
-        )
-    elif event.type == "task.dev_deploy_failed":
-        pr_url = event.payload.get("pr_url", "")
-        output = event.payload.get("output", "")
-        await send(
-            f"❌ *Dev deployment failed*\n{task_info}\n{pr_url}\n\n{output}"
-        )
-    elif event.type == "task.review_comments_addressed":
-        pr_url = event.payload.get("pr_url", "")
-        output = event.payload.get("output", "")
-        output_preview = output[:500] if output else ""
-        await send(
-            f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}"
-            + (f"\n\n{output_preview}" if output_preview else "")
-        )
-    elif event.type == "task.subtask_progress":
-        current = event.payload.get("current", "?")
-        total = event.payload.get("total", "?")
-        title = event.payload.get("title", "")
-        status = event.payload.get("status", "")
-        icon = "✅" if status == "done" else "⚙️"
-        await send(f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}")
-    elif event.type == "task.ci_passed":
-        await send(f"*CI passed* — ready for your review.\n{task_info}")
-    elif event.type == "po.analysis_queued":
-        repo_name = event.payload.get("repo_name", "unknown")
-        position = event.payload.get("position", "?")
-        await send(f"⏳ *PO analysis queued* for `{repo_name}` (position {position})")
-    elif event.type == "po.analysis_started":
-        repo_name = event.payload.get("repo_name", "unknown")
-        await send(f"🔄 *PO analysis started* for `{repo_name}`")
-    elif event.type == "po.suggestions_ready":
-        repo_name = event.payload.get("repo_name", "unknown")
-        count = event.payload.get("count", 0)
-        await send(f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`")
-    elif event.type == "po.analysis_failed":
-        repo_name = event.payload.get("repo_name", "unknown")
-        reason = event.payload.get("reason", "")
-        await send(
-            f"❌ *PO analysis failed* for `{repo_name}`"
-            + (f"\nReason: {reason}" if reason else "")
-        )
+    message = formatter(event.payload or {}, task_info, is_freeform, event.task_id)
+    await send_telegram_async(message, task_id=event.task_id)

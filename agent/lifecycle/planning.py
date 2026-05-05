@@ -34,7 +34,13 @@ from agent.prompts import (
     build_planning_prompt,
 )
 from agent.workspace import cleanup_workspace, clone_repo
-from shared.events import Event, publish
+from shared.events import (
+    Event,
+    publish,
+    repo_onboard,
+    task_clarification_needed,
+    task_plan_ready,
+)
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.planning")
@@ -163,13 +169,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     # Trigger harness onboarding if not done yet
     if not repo.harness_onboarded:
         log.info(f"Repo '{repo.name}' not harness-onboarded, triggering onboarding")
-        await publish(
-            Event(
-                type="repo.onboard",
-                task_id=0,
-                payload={"repo_id": repo.id, "repo_name": repo.name},
-            )
-        )
+        await publish(repo_onboard(repo_id=repo.id, repo_name=repo.name))
 
     # Generate repo summary if missing or stale
     summary_stale = False
@@ -348,11 +348,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
                 await transition_task(task_id, "awaiting_clarification", question)
                 await publish(
-                    Event(
-                        type="task.clarification_needed",
-                        task_id=task_id,
-                        payload={"question": question, "phase": phase},
-                    )
+                    task_clarification_needed(task_id, question=question, phase=phase)
                 )
                 return
 
@@ -369,7 +365,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             )
             resp.raise_for_status()
 
-        await publish(Event(type="task.plan_ready", task_id=task_id, payload={"plan": output}))
+        await publish(task_plan_ready(task_id, plan=output))
 
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")

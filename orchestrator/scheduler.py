@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import async_session
-from shared.events import Event, publish
+from shared.events import publish, task_created
 from shared.models import ScheduledTask, Task, TaskSource
 
 log = logging.getLogger(__name__)
@@ -72,4 +72,4 @@ async def _create_scheduled_task(session: AsyncSession, schedule: ScheduledTask)
     session.add(task)
     await session.flush()
 
-    await publish(Event(type="task.created", task_id=task.id))
+    await publish(task_created(task.id))

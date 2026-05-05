@@ -13,7 +13,11 @@ import httpx
 
 from agent.workspace import _run_git, clone_repo
 from shared.config import settings
-from shared.events import Event, publish
+from shared.events import (
+    publish,
+    task_merge_conflict_resolution_failed,
+    task_merge_conflict_resolved,
+)
 from shared.logging import setup_logging
 from shared.types import RepoData, TaskData
 
@@ -117,17 +121,9 @@ async def _has_conflict_markers(workspace: str) -> bool:
     return "leftover conflict marker" in out.lower() or "conflict marker" in out.lower()
 
 
-async def _publish(event_type: str, task_id: int, payload: dict | None = None) -> None:
-    await publish(Event(
-        type=event_type,
-        task_id=task_id,
-        payload=payload or {},
-    ))
-
-
 async def _emit_failed(task_id: int, reason: str) -> None:
     log.warning(f"Conflict resolution failed for task #{task_id}: {reason}")
-    await _publish("task.merge_conflict_resolution_failed", task_id, {"reason": reason})
+    await publish(task_merge_conflict_resolution_failed(task_id, reason=reason))
 
 
 async def handle_merge_conflict_resolution(task_id: int, pr_url: str) -> None:
@@ -228,7 +224,7 @@ async def _push_and_emit_success(workspace: str, head_branch: str, task_id: int)
         await _emit_failed(task_id, f"git push failed: {push_err.strip()[:200]}")
         return
     log.info(f"Task #{task_id}: conflict resolved and pushed to {head_branch}")
-    await _publish("task.merge_conflict_resolved", task_id, {"head_branch": head_branch})
+    await publish(task_merge_conflict_resolved(task_id, head_branch=head_branch))
 
 
 async def _run_agent_resolution(workspace: str, base_branch: str, task_id: int) -> bool:
