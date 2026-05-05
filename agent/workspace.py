@@ -74,7 +74,7 @@ async def clone_repo(
             f"https://{settings.github_token}@github.com",
         )
 
-    if os.path.exists(workspace):
+    if os.path.isdir(os.path.join(workspace, ".git")):
         # Reuse existing workspace — make sure we have the latest default branch
         await _run_git("fetch", "origin", default_branch, cwd=workspace)
         await _run_git("checkout", default_branch, cwd=workspace)
@@ -83,6 +83,13 @@ async def clone_repo(
         await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
         return workspace
+
+    # Dir exists but is not a git checkout (e.g. cleanup_workspace left an
+    # empty shell behind, or a prior clone crashed mid-way). Wipe it so
+    # the fresh-clone path below can recreate it — `git clone` refuses to
+    # write into a non-empty directory. Stuck task #156 root cause.
+    if os.path.exists(workspace):
+        shutil.rmtree(workspace)
 
     # Check if the requested branch actually exists on the remote.
     # If not and we have a fallback, clone that then create the missing branch.
