@@ -218,6 +218,10 @@ async def login(req: LoginRequest, response: Response, session: AsyncSession = D
             display_name=user.display_name,
             created_at=user.created_at.isoformat() if user.created_at else None,
             last_login=user.last_login.isoformat() if user.last_login else None,
+            claude_auth_status=user.claude_auth_status,
+            claude_paired_at=(
+                user.claude_paired_at.isoformat() if user.claude_paired_at else None
+            ),
         ),
     )
 
@@ -239,6 +243,10 @@ async def get_me(
         display_name=user.display_name,
         created_at=user.created_at.isoformat() if user.created_at else None,
         last_login=user.last_login.isoformat() if user.last_login else None,
+        claude_auth_status=user.claude_auth_status,
+        claude_paired_at=(
+            user.claude_paired_at.isoformat() if user.claude_paired_at else None
+        ),
     )
 
 

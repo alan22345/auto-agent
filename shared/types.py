@@ -242,6 +242,8 @@ class UserData(BaseModel):
     display_name: str
     created_at: str | None = None
     last_login: str | None = None
+    claude_auth_status: str = "never_paired"
+    claude_paired_at: str | None = None
 
 
 class LoginRequest(BaseModel):

@@ -66,6 +66,8 @@ def _make_user(user_id: int = 1, username: str = "cookie_user") -> MagicMock:
     u.display_name = username
     u.created_at = None
     u.last_login = None
+    u.claude_auth_status = "never_paired"
+    u.claude_paired_at = None
     return u
 
 
