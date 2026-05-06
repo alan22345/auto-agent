@@ -59,9 +59,14 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     aws_session_token: str = ""  # Optional, for temporary credentials
 
-    # Concurrency
-    max_concurrent_simple: int = 1
-    max_concurrent_complex: int = 1
+    # Concurrency: a single global pool. Per-repo cap of 1 is enforced in
+    # orchestrator/queue.py separately to prevent concurrent agents on the
+    # same working tree.
+    max_concurrent_workers: int = 5
+
+    # Root for per-user data. Each user's Claude credentials live at
+    # f"{users_data_dir}/{user_id}/.claude/".
+    users_data_dir: str = "/data/users"
 
     # Logging
     log_level: str = "INFO"
