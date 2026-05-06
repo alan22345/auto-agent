@@ -82,6 +82,7 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    User,
     intake_qa_for_suggestion,
 )
 from shared.notifier import send_telegram
@@ -306,6 +307,36 @@ async def on_task_classified(event: Event) -> None:
             cfg = cfg_result.scalar_one_or_none()
             if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
+
+        # Dispatch-time auth probe — if the user's CLI credentials don't work,
+        # park the task in BLOCKED_ON_AUTH and prompt them to reconnect.
+        if (
+            task.created_by_user_id is not None
+            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
+        ):
+            from sqlalchemy import update as _u
+            from orchestrator.claude_auth import (
+                ensure_vault_dir,
+                probe_credentials,
+            )
+
+            home = ensure_vault_dir(task.created_by_user_id)
+            status = await probe_credentials(home)
+            if status == "expired":
+                await session.execute(
+                    _u(User)
+                    .where(User.id == task.created_by_user_id)
+                    .values(claude_auth_status="expired")
+                )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — user must reconnect",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                return
 
         if force_start or await can_start_task(session, task):
             if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
@@ -973,6 +1004,35 @@ async def _try_start_queued(session) -> None:
                     f"Skipping freeform task #{task.id}: repo freeform is disabled"
                 )
                 return
+
+        # Dispatch-time auth probe — same gate as on_task_classified.
+        if (
+            task.created_by_user_id is not None
+            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
+        ):
+            from sqlalchemy import update as _u
+            from orchestrator.claude_auth import (
+                ensure_vault_dir,
+                probe_credentials,
+            )
+
+            home = ensure_vault_dir(task.created_by_user_id)
+            status = await probe_credentials(home)
+            if status == "expired":
+                await session.execute(
+                    _u(User)
+                    .where(User.id == task.created_by_user_id)
+                    .values(claude_auth_status="expired")
+                )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — user must reconnect",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                continue
 
         if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(
