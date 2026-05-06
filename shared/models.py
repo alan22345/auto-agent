@@ -40,6 +40,7 @@ class TaskStatus(str, enum.Enum):
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
     DONE = "done"
+    BLOCKED_ON_AUTH = "blocked_on_auth"
     BLOCKED = "blocked"
     FAILED = "failed"
 
@@ -251,6 +252,10 @@ class User(Base):
     display_name = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     last_login = Column(DateTime(timezone=True), nullable=True)
+    claude_auth_status = Column(
+        String(32), nullable=False, default="never_paired"
+    )
+    claude_paired_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class SearchSession(Base):
