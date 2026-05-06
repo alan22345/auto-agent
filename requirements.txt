@@ -28,6 +28,7 @@ PyJWT>=2.8.0
 # Utilities
 python-dotenv==1.0.1
 structlog==24.4.0
+ptyprocess>=0.7.0
 
 # LLM providers — Anthropic SDK with Bedrock + native Anthropic support
 anthropic[bedrock]>=0.88.0
