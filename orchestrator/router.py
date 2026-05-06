@@ -315,6 +315,19 @@ async def create_task(
         result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
         repo = result.scalar_one_or_none()
 
+    if req.created_by_user_id is not None:
+        user_q = await session.execute(
+            select(User).where(User.id == req.created_by_user_id)
+        )
+        user_row = user_q.scalar_one_or_none()
+        if user_row is not None and user_row.claude_auth_status != "paired":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Connect your Claude account in Settings before queuing tasks."
+                ),
+            )
+
     task = Task(
         title=req.title,
         description=req.description,
@@ -1392,3 +1405,113 @@ async def seed_admin_user() -> None:
             session.add(admin)
             await session.commit()
             log.info("admin_user_created", username=settings.admin_username)
+
+
+# ---------------------------------------------------------------------------
+# Claude pairing
+# ---------------------------------------------------------------------------
+
+
+from orchestrator import claude_pairing as _claude_pairing
+from orchestrator.claude_auth import vault_dir_for as _vault_dir_for
+from shared.database import async_session as _async_session
+from shared.events import Event as _Event
+
+
+class _PairStartResponse(BaseModel):
+    pairing_id: str
+
+
+class _PairCodeBody(BaseModel):
+    pairing_id: str
+    code: str
+
+
+class _PairStatusResponse(BaseModel):
+    claude_auth_status: str
+    claude_paired_at: datetime | None
+
+
+@router.post("/api/claude/pair/start", response_model=_PairStartResponse)
+async def claude_pair_start(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> _PairStartResponse:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    sess = await _claude_pairing.start_pairing(user_id=payload["user_id"])
+    return _PairStartResponse(pairing_id=sess.pairing_id)
+
+
+@router.post("/api/claude/pair/code")
+async def claude_pair_code(
+    body: _PairCodeBody,
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> dict:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    sess = _claude_pairing.get_pairing(body.pairing_id)
+    if sess is None or sess.user_id != payload["user_id"]:
+        raise HTTPException(status_code=404, detail="pairing session not found")
+    await sess.submit_code(body.code)
+    result = await sess.wait_for_exit(timeout=30.0)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.stderr or "pairing failed")
+
+    async with _async_session() as s:
+        await s.execute(
+            sql_update(User)
+            .where(User.id == payload["user_id"])
+            .values(
+                claude_auth_status="paired",
+                claude_paired_at=datetime.now(UTC),
+            )
+        )
+        # Move blocked_on_auth → queued for this user's tasks.
+        await s.execute(
+            sql_update(Task)
+            .where(
+                Task.created_by_user_id == payload["user_id"],
+                Task.status == TaskStatus.BLOCKED_ON_AUTH,
+            )
+            .values(status=TaskStatus.QUEUED)
+        )
+        await s.commit()
+    await publish(_Event(type="claude_pair_succeeded", task_id=None))
+    return {"ok": True}
+
+
+@router.get("/api/claude/pair/status", response_model=_PairStatusResponse)
+async def claude_pair_status(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> _PairStatusResponse:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    async with _async_session() as s:
+        result = await s.execute(select(User).where(User.id == payload["user_id"]))
+        user = result.scalar_one()
+    return _PairStatusResponse(
+        claude_auth_status=user.claude_auth_status,
+        claude_paired_at=user.claude_paired_at,
+    )
+
+
+@router.post("/api/claude/pair/disconnect")
+async def claude_pair_disconnect(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> dict:
+    import shutil
+
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    vault = _vault_dir_for(payload["user_id"])
+    claude_subdir = os.path.join(vault, ".claude")
+    if os.path.isdir(claude_subdir):
+        shutil.rmtree(claude_subdir)
+    async with _async_session() as s:
+        await s.execute(
+            sql_update(User)
+            .where(User.id == payload["user_id"])
+            .values(claude_auth_status="never_paired", claude_paired_at=None)
+        )
+        await s.commit()
+    return {"ok": True}

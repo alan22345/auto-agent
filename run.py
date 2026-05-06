@@ -193,6 +193,45 @@ async def ws_proxy(ws: WebSocket) -> None:
     await websocket_endpoint(ws)
 
 
+@app.websocket("/ws/claude/pair/{pairing_id}")
+async def ws_claude_pair(ws: WebSocket, pairing_id: str) -> None:
+    """Stream PTY stdout for the named pairing session to the browser.
+
+    Auth is via ?token= query param (same pattern as the main /ws), or via
+    the session cookie sent automatically by the browser.
+    """
+    from orchestrator.auth import verify_token
+    from orchestrator import claude_pairing
+
+    token = ws.query_params.get("token") or ws.cookies.get("auto_agent_session")
+    payload = verify_token(token) if token else None
+    if not payload:
+        await ws.close(code=4401)
+        return
+
+    sess = claude_pairing.get_pairing(pairing_id)
+    if not sess or sess.user_id != payload["user_id"]:
+        await ws.close(code=4404)
+        return
+
+    await ws.accept()
+    try:
+        while True:
+            line = await sess.read_line(timeout=0.5)
+            if line is None:
+                if not sess._proc.isalive():
+                    await ws.send_json({"type": "exit"})
+                    return
+                continue
+            await ws.send_json({"type": "line", "text": line})
+    except Exception as e:
+        log.warning("pairing ws error: %s", e)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
