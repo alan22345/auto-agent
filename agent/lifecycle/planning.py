@@ -209,7 +209,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             readonly=True,
             max_turns=30,
             include_methodology=True,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
 
         # Track grill state in a local boolean. After GRILL_DONE we flip it

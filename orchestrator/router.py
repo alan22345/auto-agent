@@ -323,7 +323,13 @@ async def create_task(
         result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
         repo = result.scalar_one_or_none()
 
-    if req.created_by_user_id is not None:
+    # Reject only if the user hasn't paired AND there's no fallback configured.
+    # When a fallback is set (e.g. admin's user_id), unpaired users transparently
+    # share the admin's Claude credentials.
+    if (
+        req.created_by_user_id is not None
+        and settings.fallback_claude_user_id is None
+    ):
         user_q = await session.execute(
             select(User).where(User.id == req.created_by_user_id)
         )

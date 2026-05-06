@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # f"{users_data_dir}/{user_id}/.claude/".
     users_data_dir: str = "/data/users"
 
+    # If set, users who have not paired their own Claude credentials fall back
+    # to this user_id's vault instead of being blocked. Set to the admin's
+    # user_id to let teammates opt out of pairing and share the admin's
+    # subscription. Leave None to require every user to pair.
+    fallback_claude_user_id: int | None = None
+
     # Logging
     log_level: str = "INFO"
 

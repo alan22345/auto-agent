@@ -308,31 +308,48 @@ async def on_task_classified(event: Event) -> None:
             if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
-        # Dispatch-time auth probe — if the user's CLI credentials don't work,
-        # park the task in BLOCKED_ON_AUTH and prompt them to reconnect.
+        # Dispatch-time auth probe — probe whichever vault will actually be
+        # used (owner's if paired, otherwise fallback's). If the probe fails
+        # AND the failure is on the owner's own vault, mark them expired and
+        # park. If the failure is on the fallback's vault, park too — the
+        # admin needs to reconnect.
         if (
             task.created_by_user_id is not None
             and task.complexity != TaskComplexity.SIMPLE_NO_CODE
         ):
             from sqlalchemy import update as _u
-            from orchestrator.claude_auth import (
-                ensure_vault_dir,
-                probe_credentials,
-            )
+            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
 
-            home = ensure_vault_dir(task.created_by_user_id)
-            status = await probe_credentials(home)
-            if status == "expired":
-                await session.execute(
-                    _u(User)
-                    .where(User.id == task.created_by_user_id)
-                    .values(claude_auth_status="expired")
-                )
+            home = await resolve_home_dir(task.created_by_user_id)
+            if home is None:
+                # No paired credential and no fallback configured.
                 task = await transition(
                     session,
                     task,
                     TaskStatus.BLOCKED_ON_AUTH,
-                    "Claude credentials expired — user must reconnect",
+                    "Connect your Claude account to run this task",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                return
+            status = await probe_credentials(home)
+            if status == "expired":
+                # Only flag the owner's status when probing their OWN vault.
+                user_q = await session.execute(
+                    sa_select(User).where(User.id == task.created_by_user_id)
+                )
+                owner = user_q.scalar_one_or_none()
+                if owner is not None and owner.claude_auth_status == "paired":
+                    await session.execute(
+                        _u(User)
+                        .where(User.id == task.created_by_user_id)
+                        .values(claude_auth_status="expired")
+                    )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — reconnect to resume",
                 )
                 await session.commit()
                 await publish(Event(type="claude_auth_required", task_id=task.id))
@@ -1005,30 +1022,43 @@ async def _try_start_queued(session) -> None:
                 )
                 return
 
-        # Dispatch-time auth probe — same gate as on_task_classified.
+        # Dispatch-time auth probe — same gate as on_task_classified, but
+        # uses `continue` here so the queue scanner moves on to other tasks.
         if (
             task.created_by_user_id is not None
             and task.complexity != TaskComplexity.SIMPLE_NO_CODE
         ):
             from sqlalchemy import update as _u
-            from orchestrator.claude_auth import (
-                ensure_vault_dir,
-                probe_credentials,
-            )
+            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
 
-            home = ensure_vault_dir(task.created_by_user_id)
-            status = await probe_credentials(home)
-            if status == "expired":
-                await session.execute(
-                    _u(User)
-                    .where(User.id == task.created_by_user_id)
-                    .values(claude_auth_status="expired")
-                )
+            home = await resolve_home_dir(task.created_by_user_id)
+            if home is None:
                 task = await transition(
                     session,
                     task,
                     TaskStatus.BLOCKED_ON_AUTH,
-                    "Claude credentials expired — user must reconnect",
+                    "Connect your Claude account to run this task",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                continue
+            status = await probe_credentials(home)
+            if status == "expired":
+                user_q = await session.execute(
+                    sa_select(User).where(User.id == task.created_by_user_id)
+                )
+                owner = user_q.scalar_one_or_none()
+                if owner is not None and owner.claude_auth_status == "paired":
+                    await session.execute(
+                        _u(User)
+                        .where(User.id == task.created_by_user_id)
+                        .values(claude_auth_status="expired")
+                    )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — reconnect to resume",
                 )
                 await session.commit()
                 await publish(Event(type="claude_auth_required", task_id=task.id))

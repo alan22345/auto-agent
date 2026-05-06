@@ -22,8 +22,9 @@ async function getMe(): Promise<Me | null> {
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await getMe();
   if (!user) redirect('/login');
-  const showAuthBanner =
-    user.claude_auth_status && user.claude_auth_status !== 'paired';
+  // Only banner expired credentials. "never_paired" is a normal state when a
+  // shared/fallback account is configured — silent for those users.
+  const showAuthBanner = user.claude_auth_status === 'expired';
   return (
     <div className="flex h-screen">
       <Sidebar username={user.username} />
@@ -31,9 +32,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         {showAuthBanner && (
           <div className="bg-amber-100 border-b border-amber-300 text-amber-900 px-4 py-2 text-sm flex items-center justify-between">
             <span>
-              {user.claude_auth_status === 'expired'
-                ? 'Your Claude session expired. Reconnect to resume queued tasks.'
-                : 'Connect your Claude account to start queuing tasks.'}
+              Your Claude session expired. Reconnect to resume queued tasks.
             </span>
             <Link href="/settings/claude" className="underline font-medium">
               Connect

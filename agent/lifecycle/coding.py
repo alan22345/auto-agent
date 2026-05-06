@@ -235,7 +235,7 @@ async def _handle_coding_single(
         task_description=task.description,
         repo_name=repo.name,
         complexity=task.complexity,
-        home_dir=home_dir_for_task(task),
+        home_dir=await home_dir_for_task(task),
     )
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
@@ -258,7 +258,7 @@ async def _handle_coding_single(
     try:
         reflection_agent = create_agent(
             workspace, session_id=session_id, max_turns=5, task_id=task_id,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
         await reflection_agent.run(MEMORY_REFLECTION_PROMPT, resume=True)
         log.info(f"Task #{task_id}: memory reflection complete")
@@ -359,7 +359,7 @@ async def _handle_coding_with_subtasks(
         subtask_session = _fresh_session_id(task_id, f"phase-{i + 1}")
         agent = create_agent(
             workspace, session_id=subtask_session, max_turns=40,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(prompt, resume=False)
         output = result.output
@@ -419,7 +419,7 @@ async def _finish_coding(
         review_prompt = build_review_prompt(base_branch)
         agent = create_agent(
             workspace, session_id=session_id, max_turns=20, task_id=task_id,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(review_prompt, resume=True)
         review_output = result.output

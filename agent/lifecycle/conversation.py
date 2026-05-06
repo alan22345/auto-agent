@@ -93,7 +93,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             task_id=task_id,
             readonly=True,
             repo_name=repo.name,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(message, resume=True)
         output = result.output
@@ -179,7 +179,7 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             max_turns=40,
             task_id=task_id,
             repo_name=repo.name,
-            home_dir=home_dir_for_task(task),
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(
             (

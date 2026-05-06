@@ -29,6 +29,50 @@ def ensure_vault_dir(user_id: int) -> str:
     return path
 
 
+def fallback_user_id() -> int | None:
+    """Return the configured fallback user_id (or None)."""
+    return settings.fallback_claude_user_id
+
+
+def effective_user_id_for(owner_user_id: int | None, owner_status: str) -> int | None:
+    """Pick which user's vault should run a task.
+
+    - If the owner has paired credentials, use theirs.
+    - Otherwise, if a fallback is configured, use the fallback's.
+    - Otherwise, return None (caller will park the task in BLOCKED_ON_AUTH).
+    """
+    if owner_user_id is not None and owner_status == "paired":
+        return owner_user_id
+    return fallback_user_id()
+
+
+async def resolve_home_dir(owner_user_id: int | None) -> str | None:
+    """Look up the owner's auth status and return the effective vault path.
+
+    None means: no owner, no fallback, and no paired credential — the caller
+    should treat this as 'cannot dispatch' (typically: park in BLOCKED_ON_AUTH).
+    """
+    from sqlalchemy import select
+
+    from shared.database import async_session
+    from shared.models import User
+
+    owner_status = "never_paired"
+    if owner_user_id is not None:
+        async with async_session() as s:
+            result = await s.execute(
+                select(User).where(User.id == owner_user_id)
+            )
+            user = result.scalar_one_or_none()
+        if user is not None:
+            owner_status = user.claude_auth_status
+
+    target = effective_user_id_for(owner_user_id, owner_status)
+    if target is None:
+        return None
+    return ensure_vault_dir(target)
+
+
 _AUTH_FAILURE_PATTERNS = (
     "unauthorized",
     "expired",

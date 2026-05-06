@@ -18,19 +18,19 @@ from agent.tools import create_default_registry
 from shared.task_channel import task_channel
 
 
-def home_dir_for_task(task) -> str | None:
-    """Return the per-user vault HOME for a task, or None if no owner.
+async def home_dir_for_task(task) -> str | None:
+    """Return the effective vault HOME for a task.
 
-    Tasks with no ``created_by_user_id`` (system-driven flows like PO
-    analysis or repo summary) inherit the container's HOME — preserving
-    legacy single-credential behavior for orphan tasks.
+    Resolution order:
+      1. If the owner has paired their own Claude credentials → owner's vault.
+      2. Otherwise, if a fallback user is configured → fallback's vault.
+      3. Otherwise → None (caller falls back to legacy container HOME, used by
+         system-driven flows like repo summary).
     """
-    user_id = getattr(task, "created_by_user_id", None)
-    if user_id is None:
-        return None
-    from orchestrator.claude_auth import ensure_vault_dir
+    from orchestrator.claude_auth import resolve_home_dir
 
-    return ensure_vault_dir(user_id)
+    user_id = getattr(task, "created_by_user_id", None)
+    return await resolve_home_dir(user_id)
 
 
 def _format_tool_args(tool_name: str, args: dict) -> str:
