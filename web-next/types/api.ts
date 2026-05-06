@@ -86,6 +86,8 @@ export interface UserData {
   display_name: string;
   created_at?: string | null;
   last_login?: string | null;
+  claude_auth_status?: 'paired' | 'expired' | 'never_paired';
+  claude_paired_at?: string | null;
 }
 export interface MemoryEntityDetail {
   entity: MemoryEntitySummary;
