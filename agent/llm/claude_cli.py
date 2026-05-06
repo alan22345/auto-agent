@@ -35,14 +35,19 @@ class ClaudeCLIProvider(LLMProvider):
     max_context_tokens = 200_000
     is_passthrough = True
 
-    def __init__(self, timeout: int = 1200):
+    def __init__(self, timeout: int = 1200, home_dir: str | None = None):
         self._timeout = timeout
         self._session_id: str | None = None
         self._cwd: str | None = None
+        self._home_dir: str | None = home_dir
 
     def set_cwd(self, cwd: str) -> None:
         """Set the working directory for CLI invocations."""
         self._cwd = cwd
+
+    def set_home_dir(self, home_dir: str) -> None:
+        """Set HOME for CLI invocations — selects the user's credential vault."""
+        self._home_dir = home_dir
 
     def set_session(self, session_id: str, resume: bool = False) -> None:
         """Configure session for multi-phase tasks."""
@@ -101,12 +106,17 @@ class ClaudeCLIProvider(LLMProvider):
 
         cmd.append(prompt)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        kwargs: dict = dict(
             cwd=self._cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if self._home_dir is not None:
+            import os
+
+            kwargs["env"] = {**os.environ, "HOME": self._home_dir}
+
+        proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
 
         try:
             stdout, stderr = await asyncio.wait_for(

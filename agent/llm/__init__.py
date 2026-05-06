@@ -15,6 +15,7 @@ MODEL_TIERS = {
 def get_provider(
     model_override: str | None = None,
     provider_override: str | None = None,
+    home_dir: str | None = None,
 ) -> LLMProvider:
     """Return the configured LLM provider instance.
 
@@ -55,6 +56,6 @@ def get_provider(
     elif provider == "claude_cli":
         from agent.llm.claude_cli import ClaudeCLIProvider
 
-        return ClaudeCLIProvider()
+        return ClaudeCLIProvider(home_dir=home_dir)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
