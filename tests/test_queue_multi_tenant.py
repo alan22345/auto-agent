@@ -37,7 +37,7 @@ def _scalars_result(rows: list[Task]) -> MagicMock:
 
 def _make_task(
     *,
-    id: int = 1,
+    task_id: int = 1,
     repo_id: int | None = None,
     status: TaskStatus = TaskStatus.QUEUED,
     complexity: TaskComplexity = TaskComplexity.SIMPLE,
@@ -45,7 +45,7 @@ def _make_task(
     title: str = "t",
 ) -> Task:
     return Task(
-        id=id,
+        id=task_id,
         title=title,
         source=TaskSource.MANUAL,
         repo_id=repo_id,
@@ -115,8 +115,8 @@ async def test_next_eligible_skips_repo_blocked_tasks(monkeypatch):
     session = AsyncMock()
     # Call order: count_active → distinct active repo_ids → queued tasks
     queued = [
-        _make_task(id=2, title="head-of-line", repo_id=1, priority=100),
-        _make_task(id=3, title="should-run", repo_id=2, priority=100),
+        _make_task(task_id=2, title="head-of-line", repo_id=1, priority=100),
+        _make_task(task_id=3, title="should-run", repo_id=2, priority=100),
     ]
     session.execute = AsyncMock(
         side_effect=[
@@ -143,8 +143,8 @@ async def test_next_eligible_picks_repoless_task_even_when_repos_busy(monkeypatc
     monkeypatch.setattr(q.settings, "max_concurrent_workers", 5)
     session = AsyncMock()
     queued = [
-        _make_task(id=2, title="head-of-line", repo_id=1),
-        _make_task(id=3, title="repoless", repo_id=None),
+        _make_task(task_id=2, title="head-of-line", repo_id=1),
+        _make_task(task_id=3, title="repoless", repo_id=None),
     ]
     session.execute = AsyncMock(
         side_effect=[

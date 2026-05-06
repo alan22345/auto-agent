@@ -12,11 +12,15 @@ FIFO across all users. Priority (lower = first) breaks ties; default 100.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
 from shared.models import Task, TaskStatus
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # Statuses that count as "active" (occupying a slot)
 ACTIVE_STATUSES = {
@@ -53,9 +57,10 @@ async def can_start_task(session: AsyncSession, task: Task) -> bool:
     """Can this specific task start right now?"""
     if await count_active(session) >= settings.max_concurrent_workers:
         return False
-    if task.repo_id is not None and await _repo_has_active_task(session, task.repo_id):
-        return False
-    return True
+    return not (
+        task.repo_id is not None
+        and await _repo_has_active_task(session, task.repo_id)
+    )
 
 
 async def next_eligible_task(session: AsyncSession) -> Task | None:

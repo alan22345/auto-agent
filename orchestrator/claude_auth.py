@@ -62,7 +62,7 @@ async def probe_credentials(
         _stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
         )
-    except (asyncio.TimeoutError, FileNotFoundError):
+    except (TimeoutError, FileNotFoundError):
         return "expired"
 
     if proc.returncode == 0:

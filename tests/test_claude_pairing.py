@@ -6,7 +6,6 @@ from pathlib import Path
 
 from orchestrator import claude_pairing as cp
 
-
 FAKE_CLAUDE = """\
 #!/usr/bin/env bash
 set -e
@@ -33,7 +32,10 @@ def _install_fake_claude(tmp_path, monkeypatch):
 
 async def test_pairing_full_round_trip(tmp_path, monkeypatch):
     _install_fake_claude(tmp_path, monkeypatch)
-    monkeypatch.setattr(cp.settings, "users_data_dir", str(tmp_path / "vaults"))
+    monkeypatch.setattr(
+        "orchestrator.claude_auth.settings.users_data_dir",
+        str(tmp_path / "vaults"),
+    )
 
     session = await cp.start_pairing(user_id=42)
 
@@ -58,7 +60,10 @@ async def test_pairing_full_round_trip(tmp_path, monkeypatch):
 
 async def test_pairing_session_registry_ttl(tmp_path, monkeypatch):
     _install_fake_claude(tmp_path, monkeypatch)
-    monkeypatch.setattr(cp.settings, "users_data_dir", str(tmp_path / "vaults"))
+    monkeypatch.setattr(
+        "orchestrator.claude_auth.settings.users_data_dir",
+        str(tmp_path / "vaults"),
+    )
     session = await cp.start_pairing(user_id=1)
     looked_up = cp.get_pairing(session.pairing_id)
     assert looked_up is session

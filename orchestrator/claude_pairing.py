@@ -18,12 +18,10 @@ import select
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
 
 import ptyprocess
 
 from orchestrator.claude_auth import ensure_vault_dir
-from shared.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +74,7 @@ class PairingSession:
                 return
             self._buffer += chunk.decode("utf-8", errors="replace")
 
-    async def read_line(self, timeout: float = 1.0) -> Optional[str]:
+    async def read_line(self, timeout: float = 1.0) -> str | None:
         """Read one line from the PTY, with timeout. Returns None on timeout."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
@@ -144,7 +142,7 @@ async def start_pairing(user_id: int) -> PairingSession:
     return session
 
 
-def get_pairing(pairing_id: str) -> Optional[PairingSession]:
+def get_pairing(pairing_id: str) -> PairingSession | None:
     _gc_expired()
     return _registry.get(pairing_id)
 
