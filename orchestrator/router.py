@@ -307,9 +307,26 @@ async def list_users(
 
 @router.post("/tasks", response_model=TaskData)
 async def create_task(
-    req: CreateTaskRequest, session: AsyncSession = Depends(get_session)
+    req: CreateTaskRequest,
+    session: AsyncSession = Depends(get_session),
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
 ) -> TaskData:
     _check_rate_limit()
+
+    # Derive ownership from the authenticated session when present, so the
+    # frontend doesn't have to pass it (and can't spoof another user). Webhook
+    # callers (Slack/Telegram/Linear) construct Task rows directly without
+    # going through this endpoint, so this only affects UI-driven creation.
+    authed_user_id: int | None = None
+    if auto_agent_session or authorization:
+        try:
+            payload = _verify_cookie_or_header(auto_agent_session, authorization)
+            authed_user_id = payload["user_id"]
+        except HTTPException:
+            authed_user_id = None
+    owner_user_id = authed_user_id or req.created_by_user_id
+
     # Dedup check: exact source_id → exact title
     dup = await find_duplicate_by_source_id(session, req.source_id)
     if not dup:
@@ -326,12 +343,9 @@ async def create_task(
     # Reject only if the user hasn't paired AND there's no fallback configured.
     # When a fallback is set (e.g. admin's user_id), unpaired users transparently
     # share the admin's Claude credentials.
-    if (
-        req.created_by_user_id is not None
-        and settings.fallback_claude_user_id is None
-    ):
+    if owner_user_id is not None and settings.fallback_claude_user_id is None:
         user_q = await session.execute(
-            select(User).where(User.id == req.created_by_user_id)
+            select(User).where(User.id == owner_user_id)
         )
         user_row = user_q.scalar_one_or_none()
         if user_row is not None and user_row.claude_auth_status != "paired":
@@ -348,7 +362,7 @@ async def create_task(
         source=req.source,
         source_id=req.source_id,
         repo_id=repo.id if repo else None,
-        created_by_user_id=req.created_by_user_id,
+        created_by_user_id=owner_user_id,
     )
     session.add(task)
     await session.commit()
