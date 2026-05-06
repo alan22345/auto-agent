@@ -26,7 +26,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
-from agent.lifecycle.factory import create_agent
+from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.prompts import (
     GRILL_DONE_MARKER,
     GRILL_DONE_QUESTION_SENTINEL,
@@ -209,6 +209,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             readonly=True,
             max_turns=30,
             include_methodology=True,
+            home_dir=home_dir_for_task(task),
         )
 
         # Track grill state in a local boolean. After GRILL_DONE we flip it

@@ -18,6 +18,21 @@ from agent.tools import create_default_registry
 from shared.task_channel import task_channel
 
 
+def home_dir_for_task(task) -> str | None:
+    """Return the per-user vault HOME for a task, or None if no owner.
+
+    Tasks with no ``created_by_user_id`` (system-driven flows like PO
+    analysis or repo summary) inherit the container's HOME — preserving
+    legacy single-credential behavior for orphan tasks.
+    """
+    user_id = getattr(task, "created_by_user_id", None)
+    if user_id is None:
+        return None
+    from orchestrator.claude_auth import ensure_vault_dir
+
+    return ensure_vault_dir(user_id)
+
+
 def _format_tool_args(tool_name: str, args: dict) -> str:
     """Format tool args into a human-readable preview for the streaming UI."""
     if tool_name == "file_read" or tool_name == "file_write" or tool_name == "file_edit":
@@ -47,6 +62,7 @@ def create_agent(
     task_description: str | None = None,
     repo_name: str | None = None,
     complexity: str | None = None,
+    home_dir: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -58,7 +74,7 @@ def create_agent(
                 making progress, and streams tool calls / thinking to
                 the UI.
     """
-    provider = get_provider(model_override=model_tier)
+    provider = get_provider(model_override=model_tier, home_dir=home_dir)
     tools = create_default_registry(readonly=readonly)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
@@ -107,4 +123,5 @@ def create_agent(
         get_guidance=get_guidance,
         repo_name=repo_name,
         complexity=complexity,
+        home_dir=home_dir,
     )
