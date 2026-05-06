@@ -37,7 +37,7 @@ from integrations.telegram.main import (
 )
 from orchestrator.classifier import classify_task
 from orchestrator.metrics import router as metrics_router
-from orchestrator.queue import can_start, next_queued_task
+from orchestrator.queue import can_start_task, next_eligible_task
 from orchestrator.repo_sync import match_repo, sync_repos
 from orchestrator.router import router as api_router
 from orchestrator.scheduler import run_scheduler
@@ -268,7 +268,7 @@ async def on_task_classified(event: Event) -> None:
             if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
-        if force_start or await can_start(session, task.complexity):
+        if force_start or await can_start_task(session, task):
             if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
                 task = await transition(session, task, TaskStatus.QUEUED)
                 task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
@@ -914,38 +914,39 @@ async def on_task_finished(event: Event) -> None:
 
 
 async def _try_start_queued(session) -> None:
-    for complexity in TaskComplexity:
-        if await can_start(session, complexity):
-            task = await next_queued_task(session, complexity)
-            if not task:
-                continue
+    """Start as many queued tasks as fit in the global pool with per-repo cap."""
+    while True:
+        task = await next_eligible_task(session)
+        if task is None:
+            return
 
-            # Respect freeform toggle: if the task is freeform but the repo's
-            # freeform config is now disabled, skip it — the user turned it off
-            # and expects no more freeform tasks to run. The task stays QUEUED
-            # and will start if freeform is re-enabled later.
-            if task.freeform_mode and task.repo_id:
-                from sqlalchemy import select as _sel
-                cfg_result = await session.execute(
-                    _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+        # Respect freeform toggle: if the task is freeform but the repo's
+        # freeform config is now disabled, skip and stop the loop — re-enabled
+        # freeform will trigger another start attempt later.
+        if task.freeform_mode and task.repo_id:
+            from sqlalchemy import select as _sel
+            cfg_result = await session.execute(
+                _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+            )
+            cfg = cfg_result.scalar_one_or_none()
+            if not cfg or not cfg.enabled:
+                log.info(
+                    f"Skipping freeform task #{task.id}: repo freeform is disabled"
                 )
-                cfg = cfg_result.scalar_one_or_none()
-                if not cfg or not cfg.enabled:
-                    log.info(
-                        f"Skipping freeform task #{task.id}: repo freeform is disabled"
-                    )
-                    continue
+                return
 
-            if complexity == TaskComplexity.COMPLEX:
-                task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
-            else:
-                task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
+        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+            task = await transition(
+                session, task, TaskStatus.PLANNING, "Slot opened, starting planning"
+            )
             await session.commit()
-
-            if complexity == TaskComplexity.COMPLEX:
-                await publish(task_start_planning(task.id))
-            else:
-                await publish(task_start_coding(task.id))
+            await publish(task_start_planning(task.id))
+        else:
+            task = await transition(
+                session, task, TaskStatus.CODING, "Slot opened, starting coding"
+            )
+            await session.commit()
+            await publish(task_start_coding(task.id))
 
 
 async def on_start_queued_task(event: Event) -> None:
@@ -955,7 +956,7 @@ async def on_start_queued_task(event: Event) -> None:
         if not task or task.status != TaskStatus.QUEUED:
             return
 
-        if not await can_start(session, task.complexity):
+        if not await can_start_task(session, task):
             log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
             return
 
