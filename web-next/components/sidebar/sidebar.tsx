@@ -17,6 +17,7 @@ import {
 import { cn } from '@/lib/utils';
 import { logout } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
+import { OrgSwitcher } from '@/components/org-switcher';
 
 type Tab = { href: string; label: string; icon: LucideIcon };
 
@@ -122,6 +123,9 @@ export function Sidebar({ username }: { username: string }) {
         ) : (
           <>
             <div className="mb-2 text-muted-foreground">{username}</div>
+            <div className="mb-2">
+              <OrgSwitcher />
+            </div>
             <Button
               size="sm"
               variant="secondary"
