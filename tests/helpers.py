@@ -13,6 +13,8 @@ from sqlalchemy import select
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from shared.models import Organization, Plan, Task, TaskStatus
+
 _UNSET = object()
 
 

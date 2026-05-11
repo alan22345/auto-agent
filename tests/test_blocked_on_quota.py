@@ -105,7 +105,7 @@ def test_conversation_handle_clarification_response_catches_quota_exceeded() -> 
 
 def test_quota_exceeded_is_imported_in_all_lifecycle_modules() -> None:
     """All four lifecycle modules must import QuotaExceeded."""
-    import importlib, sys  # noqa: E401
+    import importlib
 
     modules = [
         "agent.lifecycle.coding",
