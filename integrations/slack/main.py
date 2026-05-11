@@ -50,8 +50,13 @@ ORCHESTRATOR_URL = settings.orchestrator_url
 # ---------------------------------------------------------------------------
 
 
-async def _user_for_slack_id(slack_user_id: str) -> dict | None:
-    """Look up the auto-agent user linked to a Slack user_id."""
+async def _user_for_slack_id(slack_user_id: str, *, org_id: int | None = None) -> dict | None:
+    """Look up the auto-agent user linked to a Slack user_id.
+
+    ``org_id`` is accepted for forward-compatibility (E4 will add real
+    org-scoped filtering). For now it is a no-op — the lookup is by
+    slack_user_id only.
+    """
     from sqlalchemy import select
 
     from shared.database import async_session
@@ -71,7 +76,7 @@ async def _user_for_slack_id(slack_user_id: str) -> dict | None:
         }
 
 
-async def _autolink_slack_user(slack_user_id: str) -> dict | None:
+async def _autolink_slack_user(slack_user_id: str, *, org_id: int | None = None) -> dict | None:
     """First-DM convenience: try to match this Slack user to an auto-agent
     user by Slack handle / email local-part and link them automatically.
 
@@ -290,6 +295,22 @@ async def send_slack_dm(
 # ---------------------------------------------------------------------------
 
 
+async def _org_for_team(team_id: str) -> int | None:
+    """Resolve a Slack team_id to an auto-agent org_id. Returns None if
+    we don't have an installation for that team."""
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        result = await session.execute(
+            _t(
+                "SELECT org_id FROM slack_installations "
+                "WHERE team_id = :team_id"
+            ),
+            {"team_id": team_id},
+        )
+        row = result.first()
+        return row.org_id if row else None
+
+
 async def _handle_dm_event(event: dict[str, Any]) -> None:
     """Route a DM message event from Slack."""
     if event.get("subtype") or event.get("bot_id"):
@@ -299,6 +320,16 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
     text: str = (event.get("text") or "").strip()
     if not text:
         return
+
+    # NEW: resolve org_id from team_id. Drop events from unknown teams
+    # in multi-team mode (no install for this workspace → silent ignore).
+    team_id = event.get("team") or event.get("team_id")
+    org_id: int | None = None
+    if team_id:
+        org_id = await _org_for_team(team_id)
+        if org_id is None and not settings.slack_bot_token:
+            log.info("slack_event_dropped_unknown_team team_id=%s", team_id)
+            return
 
     slack_user_id: str = event.get("user", "")
     if not slack_user_id:
@@ -316,14 +347,15 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                 "Paste this into Settings → Slack in auto-agent to link "
                 "your account."
             ),
+            org_id=org_id,
         )
         return
 
-    user = await _user_for_slack_id(slack_user_id)
+    user = await _user_for_slack_id(slack_user_id, org_id=org_id)
     if user is None:
         # First DM from this Slack user — try to auto-link by matching
         # their Slack handle / email against an auto-agent username.
-        user = await _autolink_slack_user(slack_user_id)
+        user = await _autolink_slack_user(slack_user_id, org_id=org_id)
         if user is None:
             log.info(f"Ignoring DM from unlinked Slack user: {slack_user_id}")
             await send_slack_dm(
@@ -334,6 +366,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                     "intercepts those) and I'll print your Slack user ID. "
                     "Paste it into Settings → Slack to link."
                 ),
+                org_id=org_id,
             )
             return
         # Welcome message on successful auto-link.
@@ -346,6 +379,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                 "what's running, approve a plan, etc. Say `reset` any time "
                 "to clear our conversation."
             ),
+            org_id=org_id,
         )
 
     log.info(f"Slack DM from {user['username']}: {text[:80]}...")
@@ -361,7 +395,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
             await _post_task_feedback(
                 task_id, text, sender=f"slack:{user['username']}"
             )
-            await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.")
+            await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.", org_id=org_id)
             return
 
     # Everything else flows through the conversational assistant — it
@@ -371,13 +405,13 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
 
     try:
         reply = await converse(
-            slack_user_id=slack_user_id, user_id=user["id"], text=text
+            slack_user_id=slack_user_id, user_id=user["id"], text=text, org_id=org_id
         )
     except Exception as e:
         log.exception("slack assistant crashed")
         reply = f"(internal error: {e})"
     if reply:
-        await send_slack_dm(slack_user_id, reply)
+        await send_slack_dm(slack_user_id, reply, org_id=org_id)
 
 
 async def inbound_loop() -> None:

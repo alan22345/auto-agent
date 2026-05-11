@@ -123,3 +123,66 @@ async def test_send_slack_dm_uses_per_org_bot_token(monkeypatch):
 
     assert init_calls == ["xoxb-org42"]
     assert posts and posts[0]["channel"] == "D1"
+
+
+@pytest.mark.asyncio
+async def test_handle_dm_resolves_org_id_from_team(monkeypatch):
+    """DM events arrive tagged with `team`/`team_id`. The handler must
+    resolve that to an org_id BEFORE looking up the linked user."""
+    monkeypatch.setattr(slack_main.settings, "slack_bot_token", "")
+
+    captured_org = {}
+
+    async def fake_org_for_team(team_id):
+        return 42 if team_id == "T42" else None
+
+    async def fake_user_for_slack(slack_user_id, *, org_id=None):
+        captured_org["user_org"] = org_id
+        return {"id": 1, "username": "alice", "display_name": "Alice"}
+
+    async def fake_send(slack_user_id, msg, *, task_id=None, org_id=None):
+        return None
+
+    async def fake_converse(slack_user_id, user_id, text, *, org_id=None):
+        captured_org["converse_org"] = org_id
+        return ""
+
+    monkeypatch.setattr(slack_main, "_org_for_team", fake_org_for_team, raising=False)
+    monkeypatch.setattr(slack_main, "_user_for_slack_id", fake_user_for_slack)
+    monkeypatch.setattr(slack_main, "send_slack_dm", fake_send)
+
+    import sys
+    import types
+    mod = types.ModuleType("agent.slack_assistant")
+    mod.converse = fake_converse
+    sys.modules["agent.slack_assistant"] = mod
+
+    await slack_main._handle_dm_event(
+        {
+            "team": "T42",
+            "channel_type": "im",
+            "user": "U1",
+            "text": "hello",
+        }
+    )
+    assert captured_org["user_org"] == 42
+    assert captured_org["converse_org"] == 42
+
+
+@pytest.mark.asyncio
+async def test_handle_dm_drops_unknown_team(monkeypatch):
+    """Events from a workspace we don't have an installation for are dropped."""
+    monkeypatch.setattr(slack_main.settings, "slack_bot_token", "")
+
+    async def fake_org_for_team(team_id):
+        return None
+
+    monkeypatch.setattr(
+        slack_main, "_org_for_team", fake_org_for_team, raising=False
+    )
+
+    result = await slack_main._handle_dm_event(
+        {"team": "T_UNKNOWN", "channel_type": "im",
+         "user": "U1", "text": "hello"}
+    )
+    assert result is None
