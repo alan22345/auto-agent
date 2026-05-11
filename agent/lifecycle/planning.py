@@ -42,6 +42,7 @@ from shared.events import (
     task_plan_ready,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 
 log = setup_logging("agent.lifecycle.planning")
 
@@ -371,6 +372,10 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
         await publish(task_plan_ready(task_id, plan=output))
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
+        cleanup_workspace(task_id, organization_id=task.organization_id)
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))

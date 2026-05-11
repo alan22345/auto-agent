@@ -39,6 +39,7 @@ from shared.events import (
     task_review_complete,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 
 log = setup_logging("agent.lifecycle.review")
 
@@ -259,6 +260,9 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 )
             )
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
     except Exception as e:
         log.exception(f"Independent review failed for task #{task_id}")
         await publish(
@@ -413,6 +417,9 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
             )
         )
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
     except Exception as e:
         log.exception(f"PR review response failed for task #{task_id}")
         await transition_task(task_id, "blocked", f"Failed to address review: {e}")
