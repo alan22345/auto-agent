@@ -11,15 +11,27 @@ from shared.models import Task, TaskComplexity, TaskHistory, TaskStatus
 TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.INTAKE: {TaskStatus.CLASSIFYING},
     TaskStatus.CLASSIFYING: {TaskStatus.QUEUED, TaskStatus.FAILED},
-    TaskStatus.QUEUED: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.DONE},
-    TaskStatus.PLANNING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED},
+    TaskStatus.QUEUED: {
+        TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.DONE,
+        TaskStatus.BLOCKED_ON_AUTH, TaskStatus.BLOCKED_ON_QUOTA,
+    },
+    TaskStatus.PLANNING: {
+        TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.BLOCKED_ON_QUOTA,
+    },
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
     TaskStatus.AWAITING_CLARIFICATION: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},  # user replied
-    TaskStatus.CODING: {TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE},
+    TaskStatus.CODING: {
+        TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE,
+        TaskStatus.BLOCKED_ON_QUOTA,
+    },
     TaskStatus.PR_CREATED: {TaskStatus.AWAITING_CI},
     TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED},  # CI pass/fail
     TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING},  # approved or request changes
     TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},
+    TaskStatus.BLOCKED_ON_AUTH: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
+    TaskStatus.BLOCKED_ON_QUOTA: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},
 }
