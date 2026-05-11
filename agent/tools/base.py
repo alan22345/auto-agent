@@ -31,6 +31,9 @@ class ToolContext:
     # Optional async sink for tools that emit progress events to a streaming
     # caller (e.g. web_search emits 'source' events as Brave results arrive).
     event_sink: Callable[[dict], Awaitable[None]] | None = None
+    # Carried from the parent AgentLoop so nested subagents can inherit quota
+    # accounting without re-constructing a UsageSink from scratch.
+    usage_sink: object | None = None  # UsageSink | None — typed as object to avoid circular import
 
     def resolve(self, path: str) -> str | None:
         """Resolve a path against the workspace, refusing escapes.

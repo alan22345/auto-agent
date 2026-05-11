@@ -271,6 +271,7 @@ class AgentLoop:
             workspace=self._workspace,
             readonly=False,
             event_sink=self._event_sink,
+            usage_sink=self._usage_sink,
         )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()

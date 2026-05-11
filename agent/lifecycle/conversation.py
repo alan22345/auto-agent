@@ -95,6 +95,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(message, resume=True)
         output = result.output
@@ -182,6 +183,7 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(
             (
