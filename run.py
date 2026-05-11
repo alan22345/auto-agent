@@ -27,6 +27,7 @@ from sqlalchemy import select as sa_select
 from agent.architect_analyzer import run_architecture_loop
 from agent.main import event_loop as agent_event_loop
 from agent.po_analyzer import run_po_analysis_loop
+from integrations.slack.oauth import router as slack_oauth_router
 from integrations.telegram.main import (
     inbound_loop as telegram_inbound_loop,
 )
@@ -196,6 +197,7 @@ app.include_router(api_router, prefix="/api")
 app.include_router(orgs_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
+app.include_router(slack_oauth_router, prefix="/api")
 
 # Webhooks
 app.include_router(github_webhook_router, prefix="/api")

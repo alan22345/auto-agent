@@ -23,9 +23,11 @@ import inspect
 
 import pytest
 
+from integrations.slack import oauth as slack_oauth_module
 from orchestrator import orgs as orgs_module
 from orchestrator import router as router_module
 from orchestrator.auth import current_org_id as current_org_id_dep
+from orchestrator.auth import current_org_id_admin_dep
 
 # Endpoints that are intentionally NOT scoped by org. Each entry is the
 # (method, path) tuple and a one-line reason. Adding new entries here
@@ -67,6 +69,9 @@ UNSCOPED_ALLOWLIST: dict[tuple[str, str], str] = {
     ("POST", "/me/current-org"):  "membership check is the gate; not active-org-scoped",
     # Org members list — uses current_org_id dep but path includes org_id;
     # treat as scoped (the dep IS there; this entry catches the path-param check).
+    # Slack OAuth callback: org_id is embedded in the signed `state`
+    # parameter (HMAC), not the JWT cookie.
+    ("GET", "/api/integrations/slack/oauth/callback"):  "org_id from signed state parameter",
 }
 
 
@@ -76,14 +81,14 @@ def _route_methods(route) -> list[str]:
 
 
 def _depends_on_current_org_id(endpoint) -> bool:
-    """True if ``endpoint``'s signature includes ``Depends(current_org_id)``."""
+    """True if ``endpoint``'s signature includes ``Depends(current_org_id)`` or similar scoping deps."""
     sig = inspect.signature(endpoint)
     for param in sig.parameters.values():
         default = param.default
         # FastAPI's Depends wraps the dependency; the underlying callable
         # sits on ``.dependency``.
         dep = getattr(default, "dependency", None)
-        if dep is current_org_id_dep:
+        if dep is current_org_id_dep or dep is current_org_id_admin_dep:
             return True
     return False
 
@@ -104,7 +109,7 @@ def _iter_routes(*modules):
 def test_every_tenant_endpoint_is_scoped():
     """Every route must either Depends(current_org_id) or be in the allowlist."""
     failures: list[str] = []
-    for method, path, endpoint in _iter_routes(router_module, orgs_module):
+    for method, path, endpoint in _iter_routes(router_module, orgs_module, slack_oauth_module):
         key = (method, path)
         if key in UNSCOPED_ALLOWLIST:
             continue
@@ -121,7 +126,7 @@ def test_every_tenant_endpoint_is_scoped():
 
 def test_allowlist_does_not_contain_phantom_routes():
     """Catch typos — every UNSCOPED_ALLOWLIST entry must match a real route."""
-    actual = {(m, p) for m, p, _ in _iter_routes(router_module, orgs_module)}
+    actual = {(m, p) for m, p, _ in _iter_routes(router_module, orgs_module, slack_oauth_module)}
     phantom = [str(key) for key in UNSCOPED_ALLOWLIST if key not in actual]
     assert not phantom, (
         "These allowlist entries don't match any registered route — "
