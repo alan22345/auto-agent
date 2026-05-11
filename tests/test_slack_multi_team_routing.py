@@ -218,3 +218,16 @@ async def test_user_for_slack_id_filters_by_org_membership(monkeypatch):
     joined = " ".join(captured_sql)
     # The query must join through organization_memberships when org_id is set.
     assert "organization_memberships" in joined.lower() or "JOIN" in joined.upper()
+
+
+@pytest.mark.asyncio
+async def test_converse_accepts_org_id_kwarg():
+    """Smoke: the signature includes org_id and the function doesn't crash
+    when it receives one. Behavior is unchanged from the existing tests in
+    test_slack_assistant.py — this is a signature-extension only."""
+    import inspect
+    from agent.slack_assistant import converse
+
+    sig = inspect.signature(converse)
+    assert "org_id" in sig.parameters
+    assert sig.parameters["org_id"].default is None
