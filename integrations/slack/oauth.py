@@ -17,11 +17,14 @@ import hmac
 import json
 import logging
 import secrets as pysecrets
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
+from integrations.slack.installation_store import PostgresInstallationStore
 from orchestrator.auth import current_org_id_admin_dep
 from shared.config import settings
 
@@ -80,4 +83,45 @@ async def slack_install(
     )
     return RedirectResponse(
         url=f"https://slack.com/oauth/v2/authorize?{qs}", status_code=302
+    )
+
+
+@router.get("/api/integrations/slack/oauth/callback")
+async def slack_oauth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+):
+    payload = _verify_state(state)
+    org_id = int(payload["org_id"])
+
+    if not settings.slack_client_id or not settings.slack_client_secret:
+        raise HTTPException(500, "Slack OAuth credentials not configured")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://slack.com/api/oauth.v2.access",
+            data={
+                "client_id": settings.slack_client_id,
+                "client_secret": settings.slack_client_secret,
+                "code": code,
+            },
+        )
+    body = resp.json()
+    if not body.get("ok"):
+        log.warning("slack_oauth_exchange_failed body=%s", body)
+        raise HTTPException(400, f"Slack OAuth failed: {body.get('error')}")
+
+    install = SimpleNamespace(
+        team_id=body["team"]["id"],
+        team_name=body["team"].get("name"),
+        bot_token=body["access_token"],
+        bot_user_id=body["bot_user_id"],
+        app_token=None,
+        user_id=body.get("authed_user", {}).get("id"),
+    )
+    store = PostgresInstallationStore(org_id=org_id)
+    await store.async_save(install)
+
+    return RedirectResponse(
+        url="/settings/integrations/slack?connected=1", status_code=302
     )
