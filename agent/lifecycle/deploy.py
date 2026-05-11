@@ -52,7 +52,9 @@ async def handle_deploy_preview(task_id: int) -> None:
 
     from shared.github_auth import get_github_token
 
-    if task.pr_url and await get_github_token(user_id=task.created_by_user_id):
+    if task.pr_url and await get_github_token(
+        user_id=task.created_by_user_id, organization_id=task.organization_id,
+    ):
         deployed = await _try_github_workflow_deploy(task_id, task, branch_name)
         if deployed:
             return
@@ -72,7 +74,9 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
 
     from shared.github_auth import get_github_token
 
-    token = await get_github_token(user_id=task.created_by_user_id)
+    token = await get_github_token(
+        user_id=task.created_by_user_id, organization_id=task.organization_id,
+    )
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",

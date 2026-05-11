@@ -381,8 +381,9 @@ async def test_secret_put_calls_secrets_set_with_caller_user_id():
 
     captured = {}
 
-    async def _fake_set(uid, key, value, *, session=None):
+    async def _fake_set(uid, key, value, *, org_id=None, session=None):
         captured["uid"] = uid
+        captured["org_id"] = org_id
         captured["key"] = key
         captured["value"] = value
 
@@ -395,7 +396,9 @@ async def test_secret_put_calls_secrets_set_with_caller_user_id():
                 cookies={COOKIE_NAME: cookie},
             )
     assert r.status_code == 200
-    assert captured == {"uid": 11, "key": "github_pat", "value": "ghp_xxx"}
+    assert captured == {
+        "uid": 11, "org_id": 1, "key": "github_pat", "value": "ghp_xxx",
+    }
 
 
 async def test_unknown_secret_key_returns_404():
@@ -423,8 +426,9 @@ async def test_secret_list_uses_caller_user_id():
 
     captured = {}
 
-    async def _fake_list_keys(uid, *, session=None):
+    async def _fake_list_keys(uid, *, org_id=None, session=None):
         captured["uid"] = uid
+        captured["org_id"] = org_id
         return ["github_pat"]
 
     with patch("shared.secrets.list_keys", new=_fake_list_keys):
@@ -434,3 +438,4 @@ async def test_secret_list_uses_caller_user_id():
     assert r.status_code == 200
     assert r.json() == {"keys": ["github_pat"]}
     assert captured["uid"] == 11
+    assert captured["org_id"] == 1

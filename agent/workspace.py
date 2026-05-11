@@ -46,6 +46,7 @@ async def clone_repo(
     fallback_branch: str | None = None,
     *,
     user_id: int | None = None,
+    organization_id: int | None = None,
 ) -> str:
     """Clone a repo into an isolated workspace directory. Returns the workspace path.
 
@@ -73,7 +74,7 @@ async def clone_repo(
     # username, PATs are happy either way.
     from shared.github_auth import get_github_token
 
-    gh_token = await get_github_token(user_id=user_id)
+    gh_token = await get_github_token(user_id=user_id, organization_id=organization_id)
     authed_url = repo_url
     if gh_token and "github.com" in authed_url:
         authed_url = authed_url.replace(

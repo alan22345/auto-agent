@@ -26,7 +26,7 @@ async def test_user_pat_wins_over_app_and_env():
         patch.object(github_auth.settings, "github_app_installation_id", "67890"),
         patch.object(github_auth.settings, "github_token", "ghp_env"),
     ):
-        token = await github_auth.get_github_token(user_id=42)
+        token = await github_auth.get_github_token(user_id=42, organization_id=1)
     assert token == "ghu_user_pat"
 
 
@@ -36,7 +36,7 @@ async def test_user_with_no_pat_falls_through_to_env_when_no_app():
         patch.object(github_auth.settings, "github_app_id", ""),
         patch.object(github_auth.settings, "github_token", "ghp_env"),
     ):
-        token = await github_auth.get_github_token(user_id=42)
+        token = await github_auth.get_github_token(user_id=42, organization_id=1)
     assert token == "ghp_env"
 
 
@@ -60,7 +60,7 @@ async def test_user_pat_lookup_failure_falls_through_silently():
         patch.object(github_auth.settings, "github_app_id", ""),
         patch.object(github_auth.settings, "github_token", "ghp_env"),
     ):
-        token = await github_auth.get_github_token(user_id=42)
+        token = await github_auth.get_github_token(user_id=42, organization_id=1)
     assert token == "ghp_env"
 
 
@@ -71,5 +71,5 @@ async def test_empty_user_pat_falls_through_to_app_or_env():
         patch.object(github_auth.settings, "github_app_id", ""),
         patch.object(github_auth.settings, "github_token", "ghp_env"),
     ):
-        token = await github_auth.get_github_token(user_id=42)
+        token = await github_auth.get_github_token(user_id=42, organization_id=1)
     assert token == "ghp_env"

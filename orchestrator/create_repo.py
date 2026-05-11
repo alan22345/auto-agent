@@ -161,11 +161,12 @@ async def create_repo_and_scaffold_task(
     loop: bool = True,
     *,
     user_id: int | None = None,
+    organization_id: int | None = None,
 ) -> tuple[Repo, Task]:
     """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task."""
     from shared.github_auth import get_github_token
 
-    if not await get_github_token(user_id=user_id):
+    if not await get_github_token(user_id=user_id, organization_id=organization_id):
         raise CreateRepoError(
             "No GitHub auth configured — set GITHUB_TOKEN, or configure a "
             "GitHub App via GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + "
@@ -199,14 +200,23 @@ async def create_repo_and_scaffold_task(
     await asyncio.sleep(2)
 
     # 4. Insert Repo rows (full name + short alias, mirroring repo_sync.py)
-    full_repo = Repo(name=full_name, url=clone_url, default_branch=default_branch)
+    full_repo = Repo(
+        name=full_name, url=clone_url, default_branch=default_branch,
+        organization_id=organization_id,
+    )
     session.add(full_repo)
 
-    # Short alias only if not colliding
+    # Short alias only if not colliding *within the caller's org*
     short_repo = None
-    existing_short = await session.execute(select(Repo).where(Repo.name == name))
+    short_lookup_q = select(Repo).where(Repo.name == name)
+    if organization_id is not None:
+        short_lookup_q = short_lookup_q.where(Repo.organization_id == organization_id)
+    existing_short = await session.execute(short_lookup_q)
     if existing_short.scalar_one_or_none() is None:
-        short_repo = Repo(name=name, url=clone_url, default_branch=default_branch)
+        short_repo = Repo(
+            name=name, url=clone_url, default_branch=default_branch,
+            organization_id=organization_id,
+        )
         session.add(short_repo)
 
     await session.flush()  # populate IDs
@@ -226,6 +236,7 @@ async def create_repo_and_scaffold_task(
         dev_branch=default_branch,
         analysis_cron="*/30 * * * *" if loop else "0 9 * * 1",
         auto_approve_suggestions=loop,
+        organization_id=organization_id,
     )
     session.add(config)
 
@@ -257,6 +268,8 @@ async def create_repo_and_scaffold_task(
         complexity=TaskComplexity.COMPLEX,
         repo_id=primary_repo.id,
         freeform_mode=True,
+        organization_id=organization_id,
+        created_by_user_id=user_id,
     )
     session.add(task)
     await session.commit()

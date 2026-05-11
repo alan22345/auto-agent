@@ -119,7 +119,11 @@ async def _mint_installation_token() -> _CachedToken:
     return _CachedToken(value=token, expires_at=expires_at)
 
 
-async def get_github_token(user_id: int | None = None) -> str:
+async def get_github_token(
+    user_id: int | None = None,
+    *,
+    organization_id: int | None = None,
+) -> str:
     """Return a usable GitHub token.
 
     Async because the App path performs an HTTP call (and the per-user
@@ -127,21 +131,32 @@ async def get_github_token(user_id: int | None = None) -> str:
     callers should still guard on truthiness.
 
     Resolution order (highest priority first):
-        1. ``user_secrets[user_id, "github_pat"]`` if ``user_id`` is set.
+        1. ``user_secrets[user_id, organization_id, "github_pat"]`` if
+           both ``user_id`` AND ``organization_id`` are set.
         2. GitHub App installation token if app credentials are configured.
         3. Legacy env-var PAT (``settings.github_token``).
+
+    Phase 2: ``organization_id`` is required to look up a per-user PAT
+    because secrets are now keyed by (user, org). Passing only ``user_id``
+    skips the per-user lookup and falls through to the App/env path —
+    used by pollers that have no tenant context.
     """
     global _cached
 
-    if user_id is not None:
+    if user_id is not None and organization_id is not None:
         try:
             # Local import — ``shared.secrets`` imports config + database,
             # which would form an import cycle if hoisted to module top.
             from shared import secrets as _secrets
 
-            pat = await _secrets.get(user_id, "github_pat")
+            pat = await _secrets.get(
+                user_id, "github_pat", org_id=organization_id,
+            )
         except Exception as e:
-            log.warning("github_user_pat_lookup_failed user_id=%s err=%s", user_id, e)
+            log.warning(
+                "github_user_pat_lookup_failed user_id=%s org_id=%s err=%s",
+                user_id, organization_id, e,
+            )
             pat = None
         if pat:
             _log_mode_once("user_pat")
