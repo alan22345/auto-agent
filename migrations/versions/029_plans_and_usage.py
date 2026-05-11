@@ -27,6 +27,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'blocked_on_quota'")
+
     plans = op.create_table(
         "plans",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -98,6 +100,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Note: Postgres does not support removing an enum value; 'blocked_on_quota'
+    # remains in the taskstatus type after downgrade. Harmless — no rows reference
+    # it without the Phase 4 quota gate.
     op.drop_index("ix_usage_events_org_time", "usage_events")
     op.drop_table("usage_events")
     op.drop_constraint("fk_organizations_plan_id", "organizations", type_="foreignkey")

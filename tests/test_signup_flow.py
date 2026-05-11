@@ -17,7 +17,7 @@ from orchestrator.auth import hash_password, verify_token
 from orchestrator.router import COOKIE_NAME
 from orchestrator.router import router as api_router
 from shared.database import get_session
-from shared.models import Organization, OrganizationMembership, User
+from shared.models import Organization, OrganizationMembership, Plan, User
 
 # ---------------------------------------------------------------------------
 # App scaffolding (mirrors tests/test_auth_cookie.py)
@@ -60,6 +60,9 @@ class _Result:
         self._rows = rows
 
     def scalar_one_or_none(self):
+        return self._value
+
+    def scalar_one(self):
         return self._value
 
     def all(self):
@@ -135,11 +138,14 @@ def _override(app: FastAPI, sessions):
 
 async def test_signup_creates_user_and_dispatches_email():
     app = _build_app()
-    # Two execute calls during signup: collision-check (no row) +
-    # username-allocation lookup (no row). After Phase 2 the signup also
-    # adds an Organization + OrganizationMembership row alongside the
-    # User row, but neither triggers an execute.
-    session = _SessionStub([_Result(None), _Result(None)])
+    # Three execute calls during signup: collision-check (no row) +
+    # username-allocation lookup (no row) + free-plan lookup (Phase 4).
+    # After Phase 2 the signup also adds Organization + OrganizationMembership
+    # alongside the User row, but those don't trigger an execute.
+    free_plan = MagicMock(spec=Plan)
+    free_plan.id = 1
+    free_plan.name = "free"
+    session = _SessionStub([_Result(None), _Result(None), _Result(free_plan)])
     _override(app, [session])
 
     sent = []
@@ -222,7 +228,10 @@ async def test_signup_succeeds_when_email_dispatch_fails():
     """Resend outage shouldn't block account creation. The verify URL is
     logged so the operator can recover."""
     app = _build_app()
-    session = _SessionStub([_Result(None), _Result(None)])
+    free_plan = MagicMock(spec=Plan)
+    free_plan.id = 1
+    free_plan.name = "free"
+    session = _SessionStub([_Result(None), _Result(None), _Result(free_plan)])
     _override(app, [session])
 
     async def _boom(to, token):

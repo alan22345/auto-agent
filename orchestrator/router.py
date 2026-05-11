@@ -48,6 +48,7 @@ from shared.models import (
     FreeformConfig,
     Organization,
     OrganizationMembership,
+    Plan,
     Repo,
     ScheduledTask,
     Suggestion,
@@ -463,7 +464,9 @@ async def signup(
     # The slug is the email-local part plus a 4-char random suffix to avoid
     # collisions between e.g. alice@a.com and alice@b.com.
     org_slug = f"{_username_from_email(local)[:24]}-{_stdlib_secrets.token_hex(2)}"
-    org = Organization(name=req.display_name.strip(), slug=org_slug)
+    free_plan_q = await session.execute(select(Plan).where(Plan.name == "free"))
+    free_plan = free_plan_q.scalar_one()  # migration 029 guarantees one row exists
+    org = Organization(name=req.display_name.strip(), slug=org_slug, plan_id=free_plan.id)
     session.add(org)
     await session.flush()  # populate org.id before referencing
 
