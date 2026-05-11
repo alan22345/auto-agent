@@ -17,9 +17,10 @@ new model, add it to the registry below — don't bypass it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Select
+if TYPE_CHECKING:
+    from sqlalchemy import Select
 
 from shared.models import (
     FreeformConfig,

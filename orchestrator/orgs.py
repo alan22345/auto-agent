@@ -9,17 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from orchestrator.auth import (
-    COOKIE_NAME,
-    create_token,
-    current_org_id as current_org_id_dep,
-    current_user_id,
-)
+from orchestrator.auth import COOKIE_NAME, create_token, current_user_id
+from orchestrator.auth import current_org_id as current_org_id_dep
 from shared.database import get_session
 from shared.models import Organization, OrganizationMembership, User
 
