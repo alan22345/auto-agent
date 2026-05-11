@@ -35,6 +35,7 @@ from integrations.telegram.main import (
 )
 from orchestrator.classifier import classify_task
 from orchestrator.metrics import router as metrics_router
+from orchestrator.orgs import router as orgs_router
 from orchestrator.queue import can_start_task, next_eligible_task
 from orchestrator.repo_sync import match_repo, sync_repos
 from orchestrator.router import router as api_router
@@ -192,6 +193,7 @@ async def jwt_auth_middleware(request, call_next):
 
 # API
 app.include_router(api_router, prefix="/api")
+app.include_router(orgs_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
 
