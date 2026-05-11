@@ -71,6 +71,7 @@ from shared.types import (
     LoginRequest,
     LoginResponse,
     OutcomeResponse,
+    PlanRead,
     RepoData,
     RepoResponse,
     ScheduleResponse,
@@ -83,6 +84,7 @@ from shared.types import (
     TaskData,
     TaskMessageData,
     TaskMessagePost,
+    UsageSummary,
     UserData,
 )
 
@@ -1268,6 +1270,25 @@ async def record_task_outcome(
         task_id=task_id,
         pr_approved=outcome.pr_approved,
         review_rounds=outcome.review_rounds,
+    )
+
+
+@router.get("/usage/summary", response_model=UsageSummary)
+async def get_usage_summary(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> UsageSummary:
+    """Today's usage for the caller's current org + the plan caps."""
+    plan = await quotas.get_plan_for_org(session, org_id)
+    active = await quotas.count_active_tasks_for_org(session, org_id)
+    today_n = await quotas.count_tasks_created_today(session, org_id)
+    in_tok, out_tok = await quotas.sum_tokens_today(session, org_id)
+    return UsageSummary(
+        plan=PlanRead.model_validate(plan, from_attributes=True),
+        active_tasks=active,
+        tasks_today=today_n,
+        input_tokens_today=in_tok,
+        output_tokens_today=out_tok,
     )
 
 

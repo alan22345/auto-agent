@@ -308,6 +308,28 @@ class SecretTestResponse(BaseModel):
     detail: str = ""
 
 
+# --- Usage / quota types ---
+
+
+class PlanRead(BaseModel):
+    id: int
+    name: str
+    max_concurrent_tasks: int
+    max_tasks_per_day: int
+    max_input_tokens_per_day: int
+    max_output_tokens_per_day: int
+
+    model_config = {"from_attributes": True}
+
+
+class UsageSummary(BaseModel):
+    plan: PlanRead
+    active_tasks: int
+    tasks_today: int
+    input_tokens_today: int
+    output_tokens_today: int
+
+
 # --- Memory tab types ---
 
 KindLiteral = Literal["decision", "architecture", "gotcha", "status", "preference", "fact"]
