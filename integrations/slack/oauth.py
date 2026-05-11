@@ -9,6 +9,7 @@ time because the user might come back in a different browser window
 
 Scopes requested: chat:write, im:write, im:history, users:read.
 """
+
 from __future__ import annotations
 
 import base64
@@ -81,9 +82,7 @@ async def slack_install(
             "state": state,
         }
     )
-    return RedirectResponse(
-        url=f"https://slack.com/oauth/v2/authorize?{qs}", status_code=302
-    )
+    return RedirectResponse(url=f"https://slack.com/oauth/v2/authorize?{qs}", status_code=302)
 
 
 @router.get("/api/integrations/slack/oauth/callback")
@@ -122,6 +121,31 @@ async def slack_oauth_callback(
     store = PostgresInstallationStore(org_id=org_id)
     await store.async_save(install)
 
-    return RedirectResponse(
-        url="/settings/integrations/slack?connected=1", status_code=302
-    )
+    return RedirectResponse(url="/settings/integrations/slack?connected=1", status_code=302)
+
+
+@router.get("/api/integrations/slack")
+async def slack_install_state(
+    org_id: int = Depends(current_org_id_admin_dep),
+):
+    store = PostgresInstallationStore(org_id=org_id)
+    info = await store.find_by_org_id(org_id)
+    if info is None:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "team_id": info["team_id"],
+        "team_name": info["team_name"],
+    }
+
+
+@router.post("/api/integrations/slack/uninstall")
+async def slack_uninstall(
+    org_id: int = Depends(current_org_id_admin_dep),
+):
+    store = PostgresInstallationStore(org_id=org_id)
+    info = await store.find_by_org_id(org_id)
+    if info is None:
+        raise HTTPException(404, "Not installed")
+    await store.async_delete_installation(team_id=info["team_id"])
+    return {"ok": True}

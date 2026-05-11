@@ -2,7 +2,10 @@
 
 `/api/integrations/slack/install` builds a signed state, then 302s to
 slack.com/oauth/v2/authorize with the right scopes and client_id."""
+
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -70,12 +73,11 @@ async def test_callback_exchanges_code_and_saves(app, monkeypatch):
         m.status_code = 200
         return m
 
-    with patch(
-        "integrations.slack.oauth.httpx.AsyncClient.post", new=fake_post
-    ), patch.object(PostgresInstallationStore, "async_save", new=save_mock):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as c:
+    with (
+        patch("integrations.slack.oauth.httpx.AsyncClient.post", new=fake_post),
+        patch.object(PostgresInstallationStore, "async_save", new=save_mock),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             resp = await c.get(
                 "/api/integrations/slack/oauth/callback",
                 params={"code": "abc", "state": state},
@@ -92,11 +94,83 @@ async def test_callback_exchanges_code_and_saves(app, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_callback_rejects_tampered_state(app):
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(
             "/api/integrations/slack/oauth/callback",
             params={"code": "abc", "state": "tampered.bad"},
         )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_install_returns_connected_state(app, monkeypatch):
+    from integrations.slack.installation_store import PostgresInstallationStore
+    from orchestrator import auth
+
+    async def fake_admin():
+        return 42
+
+    app.dependency_overrides[auth.current_org_id_admin_dep] = fake_admin
+
+    find_mock = AsyncMock(
+        return_value={
+            "team_id": "T999",
+            "team_name": "acme",
+            "bot_user_id": "UBOT",
+        }
+    )
+
+    with patch.object(PostgresInstallationStore, "find_by_org_id", new=find_mock):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.get("/api/integrations/slack")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "connected": True,
+        "team_id": "T999",
+        "team_name": "acme",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_install_returns_not_connected(app, monkeypatch):
+    from integrations.slack.installation_store import PostgresInstallationStore
+    from orchestrator import auth
+
+    async def fake_admin():
+        return 42
+
+    app.dependency_overrides[auth.current_org_id_admin_dep] = fake_admin
+
+    find_mock = AsyncMock(return_value=None)
+
+    with patch.object(PostgresInstallationStore, "find_by_org_id", new=find_mock):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.get("/api/integrations/slack")
+    assert resp.json() == {"connected": False}
+
+
+@pytest.mark.asyncio
+async def test_uninstall_deletes_row(app, monkeypatch):
+    from integrations.slack.installation_store import PostgresInstallationStore
+    from orchestrator import auth
+
+    async def fake_admin():
+        return 42
+
+    app.dependency_overrides[auth.current_org_id_admin_dep] = fake_admin
+
+    delete_mock = AsyncMock()
+    find_mock = AsyncMock(
+        return_value={"team_id": "T999", "team_name": "acme", "bot_user_id": "UB"}
+    )
+
+    with (
+        patch.object(PostgresInstallationStore, "async_delete_installation", new=delete_mock),
+        patch.object(PostgresInstallationStore, "find_by_org_id", new=find_mock),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post("/api/integrations/slack/uninstall")
+    assert resp.status_code == 200
+    delete_mock.assert_awaited_once_with(team_id="T999")
