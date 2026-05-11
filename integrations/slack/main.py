@@ -20,8 +20,12 @@ from typing import Any
 import httpx
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy import text
 
+from shared import installation_crypto
 from shared.config import settings
+from shared.database import async_session
 from shared.events import (
     Event,
     POEventType,
@@ -215,24 +219,62 @@ def _get_app() -> AsyncApp:
     return _app
 
 
+async def _bot_token_for_org(org_id: int) -> str | None:
+    """Decrypt and return the bot token for the given org's slack install.
+
+    Returns None when no install exists for this org — caller falls back
+    to settings.slack_bot_token (legacy single-tenant) if available."""
+    async with async_session() as session:
+        result = await session.execute(
+            text(
+                "SELECT bot_token_enc FROM slack_installations "
+                "WHERE org_id = :org_id"
+            ),
+            {"org_id": org_id},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return await installation_crypto.decrypt(
+            row.bot_token_enc, session=session
+        )
+
+
 async def send_slack_dm(
     slack_user_id: str,
     text: str,
     *,
     task_id: int | None = None,
+    org_id: int | None = None,
 ) -> None:
-    """Send a Slack DM to ``slack_user_id``. Opens the IM channel on the
-    fly via ``conversations.open`` (idempotent). When ``task_id`` is set,
-    binds the message ts to the task so reply-threading routes back into
-    the task's message stream.
+    """Send a Slack DM to `slack_user_id` in org `org_id`'s workspace.
+
+    Resolution:
+      * If `org_id` is set and that org has an installation → per-org bot token.
+      * Else if `settings.slack_bot_token` is set → legacy single-tenant.
+      * Else: log and bail.
     """
-    if not settings.slack_bot_token or not slack_user_id:
+    if not slack_user_id:
         return
+
+    bot_token: str | None = None
+    if org_id is not None:
+        bot_token = await _bot_token_for_org(org_id)
+    if bot_token is None and settings.slack_bot_token:
+        bot_token = settings.slack_bot_token
+    if not bot_token:
+        log.info(
+            "send_slack_dm_no_token org_id=%s slack_user_id=%s — "
+            "org hasn't installed Slack and no legacy token configured",
+            org_id, slack_user_id,
+        )
+        return
+
     try:
-        app = _get_app()
-        open_resp = await app.client.conversations_open(users=slack_user_id)
+        client = AsyncWebClient(token=bot_token)
+        open_resp = await client.conversations_open(users=slack_user_id)
         channel = open_resp["channel"]["id"]
-        post_resp = await app.client.chat_postMessage(
+        post_resp = await client.chat_postMessage(
             channel=channel, text=text, mrkdwn=True
         )
         ts = post_resp.get("ts")
