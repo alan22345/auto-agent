@@ -208,7 +208,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     except Exception as e:
         log.exception(f"Coding failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
-        cleanup_workspace(task_id)
+        cleanup_workspace(task_id, organization_id=task.organization_id)
 
 
 async def _handle_coding_single(

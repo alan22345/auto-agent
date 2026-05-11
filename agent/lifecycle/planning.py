@@ -199,7 +199,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
     session_id = _session_id(task_id, task.created_at)
     log.info(f"Planning task #{task_id} in {task.repo_name} (session={session_id})")
-    workspace = await clone_repo(repo.url, task_id, repo.default_branch)
+    workspace = await clone_repo(repo.url, task_id, repo.default_branch, organization_id=task.organization_id)
 
     _active_planning.add(task_id)
     try:
@@ -374,7 +374,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
-        cleanup_workspace(task_id)
+        cleanup_workspace(task_id, organization_id=task.organization_id)
     finally:
         _active_planning.discard(task_id)
 
