@@ -69,19 +69,23 @@ def test_downgrade_from_029_to_028_drops_plans_and_column() -> None:
     _skip_if_no_db()
     cfg, sync_url = _alembic_cfg()
     command.upgrade(cfg, "029")
-    command.downgrade(cfg, "028")
+    try:
+        command.downgrade(cfg, "028")
 
-    engine = sa.create_engine(sync_url)
-    # Use separate connections for the two checks: the ProgrammingError on the
-    # first query aborts the psycopg2 transaction, making the second query fail
-    # with InFailedSqlTransaction if they share a connection.
-    with engine.begin() as conn, pytest.raises(sa.exc.ProgrammingError):
-        conn.execute(sa.text("SELECT 1 FROM plans")).fetchone()
-    with engine.begin() as conn:
-        cols = conn.execute(
-            sa.text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name='organizations'"
-            )
-        ).fetchall()
-        assert "plan_id" not in {c[0] for c in cols}
+        engine = sa.create_engine(sync_url)
+        # Use separate connections for the two checks: the ProgrammingError on the
+        # first query aborts the psycopg2 transaction, making the second query fail
+        # with InFailedSqlTransaction if they share a connection.
+        with engine.begin() as conn, pytest.raises(sa.exc.ProgrammingError):
+            conn.execute(sa.text("SELECT 1 FROM plans")).fetchone()
+        with engine.begin() as conn:
+            cols = conn.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='organizations'"
+                )
+            ).fetchall()
+            assert "plan_id" not in {c[0] for c in cols}
+    finally:
+        # Restore the DB to 029 so subsequent tests see the Phase 4 schema.
+        command.upgrade(cfg, "029")
