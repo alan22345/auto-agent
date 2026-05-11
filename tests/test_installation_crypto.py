@@ -46,3 +46,11 @@ async def test_encrypt_raises_without_passphrase(monkeypatch):
     session = MagicMock()
     with pytest.raises(RuntimeError, match="SECRETS_PASSPHRASE"):
         await installation_crypto.encrypt("x", session=session)
+
+
+@pytest.mark.asyncio
+async def test_decrypt_raises_without_passphrase(monkeypatch):
+    monkeypatch.setattr(installation_crypto.settings, "secrets_passphrase", "")
+    session = MagicMock()
+    with pytest.raises(RuntimeError, match="SECRETS_PASSPHRASE"):
+        await installation_crypto.decrypt(b"x", session=session)
