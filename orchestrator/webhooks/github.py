@@ -172,6 +172,8 @@ async def github_webhook(
         await _handle_pull_request(payload)
     elif x_github_event == "status":
         await _handle_commit_status(payload)
+    elif x_github_event == "installation":
+        await _handle_installation_event(payload)
     else:
         log.debug(f"Ignoring GitHub event: {x_github_event}")
 
@@ -398,3 +400,33 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
 
             await publish(task_failed(task.id, error="PR closed without merging"))
             log.info(f"PR closed without merge for task #{task.id} (webhook)")
+
+
+# ---------------------------------------------------------------------------
+# GitHub App installation lifecycle
+# ---------------------------------------------------------------------------
+
+
+async def _handle_installation_event(payload: dict[str, Any]) -> None:
+    """When GitHub fires installation.deleted (or suspend), drop the
+    github_installations row so token mints fail-fast instead of
+    refreshing against a dead installation."""
+    action = payload.get("action")
+    install = payload.get("installation", {})
+    install_id = install.get("id")
+    if not install_id:
+        return
+    if action in ("deleted", "suspend"):
+        async with async_session() as session:
+            await session.execute(
+                sa_text(
+                    "DELETE FROM github_installations "
+                    "WHERE installation_id = :install_id"
+                ),
+                {"install_id": int(install_id)},
+            )
+            await session.commit()
+        log.info(
+            "github_installation_uninstalled installation_id=%s",
+            install_id,
+        )
