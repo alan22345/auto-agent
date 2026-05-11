@@ -7,6 +7,8 @@ picks repos, and gets bounced back with ?installation_id=N&state=...
 We don't exchange a code — GitHub gives us the installation_id directly."""
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -122,3 +124,80 @@ async def test_callback_rejects_tampered_state(app):
             params={"installation_id": "1", "state": "bad.state"},
         )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_install_returns_connected(app, monkeypatch):
+    from orchestrator import auth
+
+    async def fake_admin():
+        return 42
+
+    app.dependency_overrides[auth.current_org_id_admin_dep] = fake_admin
+
+    row = MagicMock(
+        installation_id=12345, account_login="acme-inc", account_type="Organization"
+    )
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, *a, **k):
+            return MagicMock(first=lambda: row)
+
+    with patch(
+        "integrations.github.oauth.async_session", return_value=FakeSession()
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            resp = await c.get("/api/integrations/github")
+
+    body = resp.json()
+    assert body == {
+        "connected": True,
+        "installation_id": 12345,
+        "account_login": "acme-inc",
+        "account_type": "Organization",
+    }
+
+
+@pytest.mark.asyncio
+async def test_uninstall_deletes_row(app, monkeypatch):
+    from orchestrator import auth
+
+    async def fake_admin():
+        return 42
+
+    app.dependency_overrides[auth.current_org_id_admin_dep] = fake_admin
+
+    calls = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, sql, params=None):
+            calls.append(str(sql))
+            return MagicMock()
+
+        async def commit(self):
+            return None
+
+    with patch(
+        "integrations.github.oauth.async_session", return_value=FakeSession()
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            resp = await c.post("/api/integrations/github/uninstall")
+
+    assert resp.status_code == 200
+    assert any("DELETE FROM github_installations" in s for s in calls)

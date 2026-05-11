@@ -29,6 +29,32 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/integrations/github")
+async def github_install_state(
+    org_id: int = Depends(current_org_id_admin_dep),
+):
+    async with async_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT installation_id, account_login, account_type
+                FROM github_installations
+                WHERE org_id = :org_id
+                """
+            ),
+            {"org_id": org_id},
+        )
+        row = result.first()
+    if row is None:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "installation_id": row.installation_id,
+        "account_login": row.account_login,
+        "account_type": row.account_type,
+    }
+
+
 @router.get("/integrations/github/install")
 async def github_install(
     org_id: int = Depends(current_org_id_admin_dep),
@@ -121,3 +147,17 @@ async def github_oauth_callback(
     return RedirectResponse(
         url="/settings/integrations/github?connected=1", status_code=302
     )
+
+
+@router.post("/integrations/github/uninstall")
+async def github_uninstall(
+    org_id: int = Depends(current_org_id_admin_dep),
+):
+    async with async_session() as session:
+        await session.execute(
+            text("DELETE FROM github_installations WHERE org_id = :org_id"),
+            {"org_id": org_id},
+        )
+        await session.commit()
+    log.info("github_installation_deleted org_id=%s", org_id)
+    return {"ok": True}
