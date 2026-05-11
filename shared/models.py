@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -44,6 +45,7 @@ class TaskStatus(str, enum.Enum):
     AWAITING_REVIEW = "awaiting_review"
     DONE = "done"
     BLOCKED_ON_AUTH = "blocked_on_auth"
+    BLOCKED_ON_QUOTA = "blocked_on_quota"
     BLOCKED = "blocked"
     FAILED = "failed"
 
@@ -79,6 +81,22 @@ class Organization(Base):
     name = Column(String(255), nullable=False)
     slug = Column(String(64), nullable=False, unique=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    plan_id = Column(Integer, ForeignKey("plans.id"), nullable=False)
+
+    plan = relationship("Plan", lazy="joined")
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), nullable=False, unique=True)
+    max_concurrent_tasks = Column(Integer, nullable=False)
+    max_tasks_per_day = Column(Integer, nullable=False)
+    max_input_tokens_per_day = Column(BigInteger, nullable=False)
+    max_output_tokens_per_day = Column(BigInteger, nullable=False)
+    max_members = Column(Integer, nullable=False)
+    monthly_price_cents = Column(Integer, nullable=False, default=0)
 
 
 class OrganizationMembership(Base):
@@ -195,6 +213,20 @@ class TaskMessage(Base):
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     read_by_agent_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    kind = Column(String(32), nullable=False)
+    model = Column(String(64), nullable=True)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cost_cents = Column(Numeric(10, 4), nullable=False, default=0)
+    occurred_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class TaskOutcome(Base):
