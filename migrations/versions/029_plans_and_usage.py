@@ -27,6 +27,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # SQLAlchemy's Enum(TaskStatus) serializes Python enum members by NAME
+    # (uppercase), not value. The Postgres taskstatus enum has been mixing
+    # uppercase (from migration 001) with lowercase (from 003, 022) — a
+    # long-standing inconsistency. Add the uppercase variant the ORM actually
+    # queries; keep the lowercase one too for consistency with the 022 pattern
+    # (harmless dead value).
+    op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'BLOCKED_ON_QUOTA'")
     op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'blocked_on_quota'")
 
     plans = op.create_table(
