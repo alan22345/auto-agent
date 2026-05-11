@@ -43,3 +43,53 @@ async def test_save_inserts_row_with_encrypted_token():
     call_args_list = session.execute.await_args_list
     sql_strings = [str(c.args[0]) for c in call_args_list]
     assert any("INSERT" in s and "slack_installations" in s for s in sql_strings)
+
+
+@pytest.mark.asyncio
+async def test_find_bot_returns_decrypted_token():
+    store = PostgresInstallationStore()  # no org_id needed for lookup
+
+    row = MagicMock()
+    row.bot_token_enc = b"CIPHER"
+    row.bot_user_id = "UBOTID"
+    row.team_id = "T123"
+
+    session = MagicMock()
+    session.execute = AsyncMock(
+        return_value=MagicMock(first=lambda: row)
+    )
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "integrations.slack.installation_store.async_session",
+        return_value=session_cm,
+    ), patch(
+        "integrations.slack.installation_store.installation_crypto.decrypt",
+        new=AsyncMock(return_value="xoxb-plain"),
+    ):
+        bot = await store.async_find_bot(team_id="T123")
+
+    assert bot is not None
+    assert bot.bot_token == "xoxb-plain"
+    assert bot.bot_user_id == "UBOTID"
+    assert bot.team_id == "T123"
+
+
+@pytest.mark.asyncio
+async def test_find_bot_returns_none_for_unknown_team():
+    store = PostgresInstallationStore()
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(first=lambda: None))
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "integrations.slack.installation_store.async_session",
+        return_value=session_cm,
+    ):
+        bot = await store.async_find_bot(team_id="T_UNKNOWN")
+    assert bot is None

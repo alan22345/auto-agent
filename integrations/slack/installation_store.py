@@ -104,8 +104,30 @@ class PostgresInstallationStore:
         team_id: str | None = None,
         is_enterprise_install: bool | None = None,
     ) -> BotInstallation | None:
-        # Implemented in Task B2.
-        raise NotImplementedError
+        if not team_id:
+            return None
+        async with async_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT bot_token_enc, bot_user_id, team_id
+                    FROM slack_installations
+                    WHERE team_id = :team_id
+                    """
+                ),
+                {"team_id": team_id},
+            )
+            row = result.first()
+            if row is None:
+                return None
+            bot_token = await installation_crypto.decrypt(
+                row.bot_token_enc, session=session
+            )
+            return BotInstallation(
+                bot_token=bot_token,
+                bot_user_id=row.bot_user_id,
+                team_id=row.team_id,
+            )
 
     async def async_delete_installation(
         self,
