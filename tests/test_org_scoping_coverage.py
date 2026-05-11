@@ -23,6 +23,7 @@ import inspect
 
 import pytest
 
+from integrations.github import oauth as github_oauth_module
 from integrations.slack import oauth as slack_oauth_module
 from orchestrator import orgs as orgs_module
 from orchestrator import router as router_module
@@ -72,6 +73,9 @@ UNSCOPED_ALLOWLIST: dict[tuple[str, str], str] = {
     # Slack OAuth callback: org_id is embedded in the signed `state`
     # parameter (HMAC), not the JWT cookie.
     ("GET", "/integrations/slack/oauth/callback"):  "org_id from signed state parameter",
+    # GitHub OAuth callback: org_id is embedded in the signed `state`
+    # parameter (HMAC), not the JWT cookie.
+    ("GET", "/integrations/github/oauth/callback"):  "org_id from signed state parameter",
 }
 
 
@@ -109,7 +113,7 @@ def _iter_routes(*modules):
 def test_every_tenant_endpoint_is_scoped():
     """Every route must either Depends(current_org_id) or be in the allowlist."""
     failures: list[str] = []
-    for method, path, endpoint in _iter_routes(router_module, orgs_module, slack_oauth_module):
+    for method, path, endpoint in _iter_routes(router_module, orgs_module, github_oauth_module, slack_oauth_module):
         key = (method, path)
         if key in UNSCOPED_ALLOWLIST:
             continue
@@ -126,7 +130,7 @@ def test_every_tenant_endpoint_is_scoped():
 
 def test_allowlist_does_not_contain_phantom_routes():
     """Catch typos — every UNSCOPED_ALLOWLIST entry must match a real route."""
-    actual = {(m, p) for m, p, _ in _iter_routes(router_module, orgs_module, slack_oauth_module)}
+    actual = {(m, p) for m, p, _ in _iter_routes(router_module, orgs_module, github_oauth_module, slack_oauth_module)}
     phantom = [str(key) for key in UNSCOPED_ALLOWLIST if key not in actual]
     assert not phantom, (
         "These allowlist entries don't match any registered route — "
