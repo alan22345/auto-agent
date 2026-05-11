@@ -55,6 +55,18 @@ log = setup_logging("web-ui")
 ORCHESTRATOR_URL = settings.orchestrator_url
 BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
 
+
+def _ws_session_cookie(ws: "WebSocket") -> dict[str, str]:
+    """Return the cookies dict to forward on internal HTTP calls.
+
+    Phase 2 — the orchestrator's tenant-scoped endpoints depend on
+    ``current_org_id_dep``, which reads the JWT from the session cookie.
+    The WS handler must forward the same cookie to the localhost
+    orchestrator so the dependency resolves the caller's active org.
+    """
+    token = ws.cookies.get("auto_agent_session", "")
+    return {"auto_agent_session": token} if token else {}
+
 app = FastAPI(title="Auto-Agent Chat")
 # Note: this module's standalone `app` is only used by tests that want the
 # WS handlers in isolation. The production process is run.py. The legacy
@@ -139,10 +151,19 @@ async def memory_upload(
     return {"source_id": source_id, "char_count": len(text)}
 
 
-async def broadcast(message: dict) -> None:
-    """Send a message to all connected websocket clients."""
+async def broadcast(message: dict, *, org_id: int | None = None) -> None:
+    """Send a message to every connected websocket client.
+
+    When ``org_id`` is provided, only clients whose ``current_org_id``
+    matches receive the message. Passing ``None`` falls back to the
+    pre-Phase-2 behaviour of broadcasting to everyone — used for
+    system-level signals that genuinely have no tenant, but every
+    new callsite for tenant data MUST pass an org_id.
+    """
     dead: set[WebSocket] = set()
-    for ws in connected_clients:
+    for ws, ctx in list(connected_clients.items()):
+        if org_id is not None and ctx.get("current_org_id") != org_id:
+            continue
         try:
             await ws.send_json(message)
         except Exception:
@@ -171,11 +192,23 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     user_id = payload["user_id"]
     username = payload["username"]
-    connected_clients[ws] = {"user_id": user_id, "username": username}
+    current_org_id = payload.get("current_org_id")
+    if current_org_id is None:
+        await ws.send_json({
+            "type": "error",
+            "message": "Session predates the org model — please log in again",
+        })
+        await ws.close(code=4401)
+        return
+    connected_clients[ws] = {
+        "user_id": user_id,
+        "username": username,
+        "current_org_id": current_org_id,
+    }
 
     # Send current task list on connect
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
             resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
             if resp.status_code == 200:
                 tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
@@ -221,7 +254,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             elif msg_type == "load_history":
                 task_id = data.get("task_id")
                 if task_id:
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
                         hist_resp, msg_resp = await asyncio.gather(
                             client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/history"),
                             client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages"),
@@ -244,7 +277,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 message = data.get("message", "").strip()
                 if task_id and message:
                     headers = {"X-Sender": username} if username else {}
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
                         await client.post(
                             f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages",
                             json={"content": message},
@@ -258,7 +291,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         "username": username,
                     })
             elif msg_type == "refresh":
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
                     resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
                     if resp.status_code == 200:
                         tasks = [TaskData.model_validate(t).model_dump() for t in resp.json()]
@@ -314,7 +347,7 @@ async def _handle_create_task(ws: WebSocket, data: dict, user_id: int | None = N
     if user_id is not None:
         task_payload["created_by_user_id"] = user_id
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks",
             json=task_payload,
@@ -352,7 +385,7 @@ async def _handle_send_message(
                 }
             )
             return
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
             resp = await client.patch(
                 f"{ORCHESTRATOR_URL}/repos/{repo_name}/branch",
                 json={"default_branch": new_branch},
@@ -378,7 +411,7 @@ async def _handle_send_message(
         }
         if user_id is not None:
             auto_payload["created_by_user_id"] = user_id
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/tasks",
                 json=auto_payload,
@@ -395,7 +428,7 @@ async def _handle_send_message(
         return
 
     # Persist the message in task history so it survives page refresh
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/message",
             json={"message": text, "username": username or "unknown"},
@@ -411,7 +444,7 @@ async def _handle_approve(ws: WebSocket, data: dict) -> None:
     if not task_id:
         return
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
             json={"approved": True},
@@ -427,7 +460,7 @@ async def _handle_mark_done(ws: WebSocket, data: dict) -> None:
     if not task_id:
         return
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/done")
         if resp.status_code == 200:
             await broadcast({"type": "system", "message": f"Task #{task_id} marked as done"})
@@ -441,7 +474,7 @@ async def _handle_reject(ws: WebSocket, data: dict) -> None:
     if not task_id:
         return
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
             json={"approved": False, "feedback": feedback},
@@ -459,7 +492,7 @@ async def _handle_approve_suggestion(ws: WebSocket, data: dict) -> None:
     suggestion_id = data.get("suggestion_id")
     if not suggestion_id:
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/suggestions/{suggestion_id}/approve")
         if resp.status_code == 200:
             task = resp.json()
@@ -479,7 +512,7 @@ async def _handle_reject_suggestion(ws: WebSocket, data: dict) -> None:
     suggestion_id = data.get("suggestion_id")
     if not suggestion_id:
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/suggestions/{suggestion_id}/reject")
         if resp.status_code == 200:
             await broadcast({"type": "system", "message": f"Suggestion #{suggestion_id} rejected"})
@@ -493,7 +526,7 @@ async def _handle_promote_task(ws: WebSocket, data: dict) -> None:
     task_id = data.get("task_id")
     if not task_id:
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/promote")
         if resp.status_code == 200:
             result = resp.json()
@@ -513,7 +546,7 @@ async def _handle_revert_task(ws: WebSocket, data: dict) -> None:
     task_id = data.get("task_id")
     if not task_id:
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/{task_id}/revert")
         if resp.status_code == 200:
             result = resp.json()
@@ -542,7 +575,7 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
     if not repo_name:
         await ws.send_json({"type": "error", "message": "repo_name is required"})
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/freeform/config",
             json={
@@ -579,7 +612,7 @@ async def _handle_create_repo(ws: WebSocket, data: dict) -> None:
     if not description:
         await ws.send_json({"type": "error", "message": "Description is required"})
         return
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws), timeout=180) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/freeform/create-repo",
             json={"description": description, "org": org, "private": True, "loop": loop},
@@ -604,7 +637,7 @@ async def _handle_trigger_analysis(ws: WebSocket, data: dict) -> None:
     if not repo_name:
         await ws.send_json({"type": "error", "message": "repo_name is required"})
         return
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/analyze/{repo_name}")
         if resp.status_code == 200:
             await broadcast({"type": "system", "message": f"PO analysis triggered for {repo_name}"})
@@ -620,7 +653,7 @@ async def _handle_load_suggestions(ws: WebSocket, data: dict) -> None:
         params["status"] = status
     if repo_name:
         params["repo_name"] = repo_name
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/suggestions", params=params)
         if resp.status_code == 200:
             await ws.send_json({"type": "suggestion_list", "suggestions": resp.json()})
@@ -628,7 +661,7 @@ async def _handle_load_suggestions(ws: WebSocket, data: dict) -> None:
 
 async def _handle_load_freeform_tasks(ws: WebSocket, data: dict) -> None:
     """Load completed freeform tasks for the dev changes panel."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
         if resp.status_code == 200:
             all_tasks = resp.json()
@@ -637,7 +670,7 @@ async def _handle_load_freeform_tasks(ws: WebSocket, data: dict) -> None:
 
 
 async def _handle_load_freeform_config(ws: WebSocket, data: dict) -> None:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(cookies=_ws_session_cookie(ws)) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
         if resp.status_code == 200:
             await ws.send_json({"type": "freeform_config_list", "configs": resp.json()})
