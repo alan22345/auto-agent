@@ -85,3 +85,48 @@ class TestCurrentOrgIdDep:
         with pytest.raises(HTTPException) as exc:
             current_org_id(authorization=None, auto_agent_session=None)
         assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_current_org_id_admin_dep_blocks_member(monkeypatch):
+    """A user with role='member' on an org gets 403 from the admin dep."""
+    from orchestrator.auth import current_org_id_admin_dep
+
+    async def fake_role(*, user_id, org_id):
+        return "member"
+
+    monkeypatch.setattr(
+        "orchestrator.auth._role_in_org", fake_role, raising=False
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await current_org_id_admin_dep(user_id=5, org_id=10)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_current_org_id_admin_dep_allows_owner(monkeypatch):
+    from orchestrator.auth import current_org_id_admin_dep
+
+    async def fake_role(*, user_id, org_id):
+        return "owner"
+
+    monkeypatch.setattr(
+        "orchestrator.auth._role_in_org", fake_role, raising=False
+    )
+    out = await current_org_id_admin_dep(user_id=5, org_id=10)
+    assert out == 10
+
+
+@pytest.mark.asyncio
+async def test_current_org_id_admin_dep_allows_admin(monkeypatch):
+    from orchestrator.auth import current_org_id_admin_dep
+
+    async def fake_role(*, user_id, org_id):
+        return "admin"
+
+    monkeypatch.setattr(
+        "orchestrator.auth._role_in_org", fake_role, raising=False
+    )
+    out = await current_org_id_admin_dep(user_id=5, org_id=10)
+    assert out == 10

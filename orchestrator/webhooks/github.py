@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared import installation_crypto
 from shared.config import settings
 from shared.database import async_session
 from shared.events import (
@@ -40,8 +43,20 @@ router = APIRouter()
 _webhook_secret_warned = False
 
 
+def _verify_signature_against(payload: bytes, signature: str, secret: str) -> bool:
+    """Verify GitHub HMAC-SHA256 signature against the given secret."""
+    expected = "sha256=" + hmac.new(
+        secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
 def _verify_signature(payload: bytes, signature: str) -> bool:
-    """Verify GitHub HMAC-SHA256 signature."""
+    """Verify GitHub HMAC-SHA256 signature using the env-level secret.
+
+    Kept for backward compatibility; the route handler now uses
+    _verify_signature_against with per-org secret resolution.
+    """
     global _webhook_secret_warned
     if not settings.github_webhook_secret:
         if not _webhook_secret_warned:
@@ -51,12 +66,38 @@ def _verify_signature(payload: bytes, signature: str) -> bool:
             )
             _webhook_secret_warned = True
         return True
-    expected = "sha256=" + hmac.new(
-        settings.github_webhook_secret.encode(),
-        payload,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return _verify_signature_against(payload, signature, settings.github_webhook_secret)
+
+
+async def _secret_for_repo_full_name(*, full_name: str) -> str | None:
+    """Resolve the per-org webhook secret for a repo's full_name.
+
+    full_name: "<owner>/<name>" as GitHub sends it in payloads.
+
+    Looks up the repo by name (the part after the slash matches our
+    Repo.name); finds its org_id; reads webhook_secrets[(org_id, "github")].
+    Returns None if no per-org override exists — caller falls back to
+    settings.github_webhook_secret.
+    """
+    _, _, name = full_name.partition("/")
+    async with async_session() as session:
+        result = await session.execute(
+            sa_text(
+                """
+                SELECT ws.secret_enc
+                FROM repos r
+                JOIN webhook_secrets ws ON ws.org_id = r.organization_id
+                                       AND ws.source = 'github'
+                WHERE r.name = :name
+                LIMIT 1
+                """
+            ),
+            {"name": name},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return await installation_crypto.decrypt(row.secret_enc, session=session)
 
 
 async def _find_task_by_pr_url(session: AsyncSession, pr_url: str) -> Task | None:
@@ -84,10 +125,40 @@ async def github_webhook(
     """Handle incoming GitHub webhook events."""
     body = await request.body()
 
-    if not _verify_signature(body, x_hub_signature_256):
-        raise HTTPException(403, "Invalid signature")
+    try:
+        body_json: dict[str, Any] = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        body_json = {}
 
-    payload: dict[str, Any] = await request.json()
+    full_name = body_json.get("repository", {}).get("full_name", "")
+
+    secret: str | None = None
+    if full_name:
+        try:
+            secret = await _secret_for_repo_full_name(full_name=full_name)
+        except Exception as e:
+            log.warning(
+                "webhook_secret_lookup_failed full_name=%s err=%s",
+                full_name,
+                e,
+            )
+            secret = None
+    if not secret:
+        secret = settings.github_webhook_secret
+
+    if secret:
+        if not _verify_signature_against(body, x_hub_signature_256, secret):
+            raise HTTPException(403, "Invalid signature")
+    else:
+        global _webhook_secret_warned
+        if not _webhook_secret_warned:
+            log.warning(
+                "No webhook secret configured (env or per-org) — "
+                "signature verification disabled."
+            )
+            _webhook_secret_warned = True
+
+    payload: dict[str, Any] = body_json
 
     if x_github_event == "check_suite":
         await _handle_check_suite(payload)
@@ -101,6 +172,8 @@ async def github_webhook(
         await _handle_pull_request(payload)
     elif x_github_event == "status":
         await _handle_commit_status(payload)
+    elif x_github_event == "installation":
+        await _handle_installation_event(payload)
     else:
         log.debug(f"Ignoring GitHub event: {x_github_event}")
 
@@ -327,3 +400,33 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
 
             await publish(task_failed(task.id, error="PR closed without merging"))
             log.info(f"PR closed without merge for task #{task.id} (webhook)")
+
+
+# ---------------------------------------------------------------------------
+# GitHub App installation lifecycle
+# ---------------------------------------------------------------------------
+
+
+async def _handle_installation_event(payload: dict[str, Any]) -> None:
+    """When GitHub fires installation.deleted (or suspend), drop the
+    github_installations row so token mints fail-fast instead of
+    refreshing against a dead installation."""
+    action = payload.get("action")
+    install = payload.get("installation", {})
+    install_id = install.get("id")
+    if not install_id:
+        return
+    if action in ("deleted", "suspend"):
+        async with async_session() as session:
+            await session.execute(
+                sa_text(
+                    "DELETE FROM github_installations "
+                    "WHERE installation_id = :install_id"
+                ),
+                {"install_id": int(install_id)},
+            )
+            await session.commit()
+        log.info(
+            "github_installation_uninstalled installation_id=%s",
+            install_id,
+        )

@@ -20,8 +20,12 @@ from typing import Any
 import httpx
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy import text
 
+from shared import installation_crypto
 from shared.config import settings
+from shared.database import async_session
 from shared.events import (
     Event,
     POEventType,
@@ -46,17 +50,35 @@ ORCHESTRATOR_URL = settings.orchestrator_url
 # ---------------------------------------------------------------------------
 
 
-async def _user_for_slack_id(slack_user_id: str) -> dict | None:
-    """Look up the auto-agent user linked to a Slack user_id."""
+async def _user_for_slack_id(slack_user_id: str, *, org_id: int | None = None) -> dict | None:
+    """Look up the auto-agent user linked to a Slack user_id.
+
+    When ``org_id`` is set, additionally require that the user is a
+    member of that org (multi-tenant safety). When ``org_id`` is None
+    (legacy single-tenant path), no membership filter is applied —
+    matches behaviour before Phase 3.
+    """
     from sqlalchemy import select
 
-    from shared.database import async_session
-    from shared.models import User
+    from shared.models import OrganizationMembership, User
 
     async with async_session() as session:
-        result = await session.execute(
-            select(User).where(User.slack_user_id == str(slack_user_id))
-        )
+        if org_id is None:
+            result = await session.execute(
+                select(User).where(User.slack_user_id == str(slack_user_id))
+            )
+        else:
+            result = await session.execute(
+                select(User)
+                .join(
+                    OrganizationMembership,
+                    OrganizationMembership.user_id == User.id,
+                )
+                .where(
+                    User.slack_user_id == str(slack_user_id),
+                    OrganizationMembership.org_id == org_id,
+                )
+            )
         user = result.scalar_one_or_none()
         if user is None:
             return None
@@ -67,7 +89,7 @@ async def _user_for_slack_id(slack_user_id: str) -> dict | None:
         }
 
 
-async def _autolink_slack_user(slack_user_id: str) -> dict | None:
+async def _autolink_slack_user(slack_user_id: str, *, org_id: int | None = None) -> dict | None:
     """First-DM convenience: try to match this Slack user to an auto-agent
     user by Slack handle / email local-part and link them automatically.
 
@@ -78,12 +100,14 @@ async def _autolink_slack_user(slack_user_id: str) -> dict | None:
       2. Slack ``profile.display_name`` lowercased
       3. The local-part of the user's email address
 
+    When ``org_id`` is set, only considers users who are already members of
+    that org — prevents cross-org auto-linking in multi-tenant deployments.
+
     Returns the linked user dict on success, None on no-match or ambiguity.
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
-    from shared.database import async_session
-    from shared.models import User
+    from shared.models import OrganizationMembership, User
 
     try:
         info = await _get_app().client.users_info(user=slack_user_id)
@@ -110,11 +134,22 @@ async def _autolink_slack_user(slack_user_id: str) -> dict | None:
 
     async with async_session() as session:
         for cand in candidates:
-            from sqlalchemy import func
-
-            result = await session.execute(
-                select(User).where(func.lower(User.username) == cand)
-            )
+            if org_id is None:
+                result = await session.execute(
+                    select(User).where(func.lower(User.username) == cand)
+                )
+            else:
+                result = await session.execute(
+                    select(User)
+                    .join(
+                        OrganizationMembership,
+                        OrganizationMembership.user_id == User.id,
+                    )
+                    .where(
+                        func.lower(User.username) == cand,
+                        OrganizationMembership.org_id == org_id,
+                    )
+                )
             user = result.scalar_one_or_none()
             if user is None:
                 continue
@@ -183,12 +218,57 @@ _app: AsyncApp | None = None
 
 
 def _get_app() -> AsyncApp:
-    """Lazy-build the AsyncApp so importing this module doesn't crash when
-    Slack is unconfigured (e.g. in tests / dev without tokens)."""
+    """Build the slack-bolt async app.
+
+    Two modes:
+      * Multi-team (default once Phase 3 is rolled out): installation
+        store backed by Postgres; bot tokens resolved per-team_id.
+      * Legacy single-tenant: settings.slack_bot_token only — used by
+        the dev VM until the distributed app is registered.
+
+    The mode is decided lazily on first call. Tests reset _app=None to
+    rebuild with different settings.
+    """
     global _app
-    if _app is None:
+    if _app is not None:
+        return _app
+
+    if settings.slack_bot_token:
+        # Legacy path — single-workspace deploy. Keep working until the
+        # distributed app is registered.
         _app = AsyncApp(token=settings.slack_bot_token)
+    else:
+        # Phase 3 path — distributed app. signing_secret defaults to ""
+        # (not None) to satisfy slack-bolt's type check while still
+        # allowing Socket Mode (no public webhook endpoint).
+        from integrations.slack.installation_store import PostgresInstallationStore
+
+        _app = AsyncApp(
+            signing_secret="",
+            installation_store=PostgresInstallationStore(),
+        )
     return _app
+
+
+async def _bot_token_for_org(org_id: int) -> str | None:
+    """Decrypt and return the bot token for the given org's slack install.
+
+    Returns None when no install exists for this org — caller falls back
+    to settings.slack_bot_token (legacy single-tenant) if available."""
+    async with async_session() as session:
+        result = await session.execute(
+            text(
+                "SELECT bot_token_enc FROM slack_installations "
+                "WHERE org_id = :org_id"
+            ),
+            {"org_id": org_id},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return await installation_crypto.decrypt(
+            row.bot_token_enc, session=session
+        )
 
 
 async def send_slack_dm(
@@ -196,19 +276,36 @@ async def send_slack_dm(
     text: str,
     *,
     task_id: int | None = None,
+    org_id: int | None = None,
 ) -> None:
-    """Send a Slack DM to ``slack_user_id``. Opens the IM channel on the
-    fly via ``conversations.open`` (idempotent). When ``task_id`` is set,
-    binds the message ts to the task so reply-threading routes back into
-    the task's message stream.
+    """Send a Slack DM to `slack_user_id` in org `org_id`'s workspace.
+
+    Resolution:
+      * If `org_id` is set and that org has an installation → per-org bot token.
+      * Else if `settings.slack_bot_token` is set → legacy single-tenant.
+      * Else: log and bail.
     """
-    if not settings.slack_bot_token or not slack_user_id:
+    if not slack_user_id:
         return
+
+    bot_token: str | None = None
+    if org_id is not None:
+        bot_token = await _bot_token_for_org(org_id)
+    if bot_token is None and settings.slack_bot_token:
+        bot_token = settings.slack_bot_token
+    if not bot_token:
+        log.info(
+            "send_slack_dm_no_token org_id=%s slack_user_id=%s — "
+            "org hasn't installed Slack and no legacy token configured",
+            org_id, slack_user_id,
+        )
+        return
+
     try:
-        app = _get_app()
-        open_resp = await app.client.conversations_open(users=slack_user_id)
+        client = AsyncWebClient(token=bot_token)
+        open_resp = await client.conversations_open(users=slack_user_id)
         channel = open_resp["channel"]["id"]
-        post_resp = await app.client.chat_postMessage(
+        post_resp = await client.chat_postMessage(
             channel=channel, text=text, mrkdwn=True
         )
         ts = post_resp.get("ts")
@@ -224,6 +321,22 @@ async def send_slack_dm(
 # ---------------------------------------------------------------------------
 
 
+async def _org_for_team(team_id: str) -> int | None:
+    """Resolve a Slack team_id to an auto-agent org_id. Returns None if
+    we don't have an installation for that team."""
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        result = await session.execute(
+            _t(
+                "SELECT org_id FROM slack_installations "
+                "WHERE team_id = :team_id"
+            ),
+            {"team_id": team_id},
+        )
+        row = result.first()
+        return row.org_id if row else None
+
+
 async def _handle_dm_event(event: dict[str, Any]) -> None:
     """Route a DM message event from Slack."""
     if event.get("subtype") or event.get("bot_id"):
@@ -233,6 +346,16 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
     text: str = (event.get("text") or "").strip()
     if not text:
         return
+
+    # NEW: resolve org_id from team_id. Drop events from unknown teams
+    # in multi-team mode (no install for this workspace → silent ignore).
+    team_id = event.get("team") or event.get("team_id")
+    org_id: int | None = None
+    if team_id:
+        org_id = await _org_for_team(team_id)
+        if org_id is None and not settings.slack_bot_token:
+            log.info("slack_event_dropped_unknown_team team_id=%s", team_id)
+            return
 
     slack_user_id: str = event.get("user", "")
     if not slack_user_id:
@@ -250,14 +373,15 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                 "Paste this into Settings → Slack in auto-agent to link "
                 "your account."
             ),
+            org_id=org_id,
         )
         return
 
-    user = await _user_for_slack_id(slack_user_id)
+    user = await _user_for_slack_id(slack_user_id, org_id=org_id)
     if user is None:
         # First DM from this Slack user — try to auto-link by matching
         # their Slack handle / email against an auto-agent username.
-        user = await _autolink_slack_user(slack_user_id)
+        user = await _autolink_slack_user(slack_user_id, org_id=org_id)
         if user is None:
             log.info(f"Ignoring DM from unlinked Slack user: {slack_user_id}")
             await send_slack_dm(
@@ -268,6 +392,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                     "intercepts those) and I'll print your Slack user ID. "
                     "Paste it into Settings → Slack to link."
                 ),
+                org_id=org_id,
             )
             return
         # Welcome message on successful auto-link.
@@ -280,6 +405,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
                 "what's running, approve a plan, etc. Say `reset` any time "
                 "to clear our conversation."
             ),
+            org_id=org_id,
         )
 
     log.info(f"Slack DM from {user['username']}: {text[:80]}...")
@@ -295,7 +421,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
             await _post_task_feedback(
                 task_id, text, sender=f"slack:{user['username']}"
             )
-            await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.")
+            await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.", org_id=org_id)
             return
 
     # Everything else flows through the conversational assistant — it
@@ -305,13 +431,13 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
 
     try:
         reply = await converse(
-            slack_user_id=slack_user_id, user_id=user["id"], text=text
+            slack_user_id=slack_user_id, user_id=user["id"], text=text, org_id=org_id
         )
     except Exception as e:
         log.exception("slack assistant crashed")
         reply = f"(internal error: {e})"
     if reply:
-        await send_slack_dm(slack_user_id, reply)
+        await send_slack_dm(slack_user_id, reply, org_id=org_id)
 
 
 async def inbound_loop() -> None:
@@ -328,7 +454,7 @@ async def inbound_loop() -> None:
     app = _get_app()
 
     @app.event("message")
-    async def _on_message(event: dict, ack):  # noqa: ANN001
+    async def _on_message(event: dict, ack):
         await ack()
         try:
             await _handle_dm_event(event)
@@ -349,7 +475,7 @@ async def inbound_loop() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fmt_task_created(p, info, _ff, _tid):  # noqa: ANN001
+def _fmt_task_created(p, info, _ff, _tid):
     return f"📋 *New task created*\n{info}"
 
 
@@ -430,29 +556,55 @@ _NOTIFICATION_FORMATTERS = {
 }
 
 
-async def _notify_user(event: Event) -> None:
-    formatter = _NOTIFICATION_FORMATTERS.get(event.type)
+async def _fetch_task_for_notification(task_id: int) -> dict | None:
+    """Fetch a task from the orchestrator API for notification purposes.
+
+    Returns a plain dict with the fields notification helpers need, or
+    None when the task cannot be fetched (non-200 / network error).
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
+            if resp.status_code == 200:
+                task = TaskData.model_validate(resp.json())
+                return {
+                    "id": task.id,
+                    "title": task.title,
+                    "freeform_mode": task.freeform_mode,
+                    "organization_id": task.organization_id,
+                }
+    except Exception:
+        pass
+    return None
+
+
+async def _notify_task_event(event_type: str, payload: dict) -> None:
+    """Handle a single task event notification (unit-testable core).
+
+    Looks up the task (to get org_id and display info), resolves the
+    target Slack user, and calls send_slack_dm with org_id set so the
+    right per-workspace bot token is selected.
+    """
+    formatter = _NOTIFICATION_FORMATTERS.get(event_type)
     if formatter is None:
         return
 
+    task_id: int | None = payload.get("task_id")
+
     task_info = ""
     is_freeform = False
-    if event.task_id:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{ORCHESTRATOR_URL}/tasks/{event.task_id}"
-                )
-                if resp.status_code == 200:
-                    task = TaskData.model_validate(resp.json())
-                    task_info = f"Task #{task.id}: {task.title[:80]}"
-                    is_freeform = bool(task.freeform_mode)
-        except Exception:
-            pass
+    org_id: int | None = None
+
+    if task_id is not None:
+        task_data = await _fetch_task_for_notification(task_id)
+        if task_data:
+            task_info = f"Task #{task_data['id']}: {task_data['title'][:80]}"
+            is_freeform = bool(task_data["freeform_mode"])
+            org_id = task_data["organization_id"]
 
     target_user_id: str | None
-    if event.task_id is not None:
-        target_user_id = await _slack_user_id_for_task(event.task_id)
+    if task_id is not None:
+        target_user_id = await _slack_user_id_for_task(task_id)
         if target_user_id is None:
             return  # owner hasn't linked Slack — skip silently
     else:
@@ -460,8 +612,17 @@ async def _notify_user(event: Event) -> None:
         if not target_user_id:
             return
 
-    message = formatter(event.payload or {}, task_info, is_freeform, event.task_id)
-    await send_slack_dm(target_user_id, message, task_id=event.task_id)
+    message = formatter(payload, task_info, is_freeform, task_id)
+    await send_slack_dm(target_user_id, message, task_id=task_id, org_id=org_id)
+
+
+async def _notify_user(event: Event) -> None:
+    """Dispatch a Redis event to the appropriate Slack DM."""
+    payload = event.payload or {}
+    if event.task_id is not None:
+        payload = dict(payload)
+        payload.setdefault("task_id", event.task_id)
+    await _notify_task_event(event.type, payload)
 
 
 async def notification_loop() -> None:

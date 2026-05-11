@@ -2,6 +2,7 @@ import enum
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -370,6 +371,59 @@ class UserSecret(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+    )
+
+
+class SlackInstallation(Base):
+    """A customer org's Slack workspace install — 1:1 with organizations."""
+
+    __tablename__ = "slack_installations"
+
+    org_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False,
+    )
+    team_id = Column(String(32), nullable=False, unique=True)
+    team_name = Column(String(255), nullable=True)
+    bot_token_enc = Column(LargeBinary, nullable=False)
+    bot_user_id = Column(String(32), nullable=False)
+    app_token_enc = Column(LargeBinary, nullable=True)
+    installed_by_slack_user_id = Column(String(32), nullable=True)
+    installed_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class GitHubInstallation(Base):
+    """A customer org's GitHub App install — 1:1 with organizations."""
+
+    __tablename__ = "github_installations"
+
+    org_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False,
+    )
+    installation_id = Column(BigInteger, nullable=False, unique=True)
+    account_login = Column(String(128), nullable=False)
+    account_type = Column(String(32), nullable=False)
+    installed_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class WebhookSecret(Base):
+    """Per-org override for inbound webhook HMAC verification."""
+
+    __tablename__ = "webhook_secrets"
+
+    org_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False,
+    )
+    source = Column(String(32), primary_key=True, nullable=False)
+    secret_enc = Column(LargeBinary, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
 

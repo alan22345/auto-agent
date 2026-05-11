@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Slack user ID so those events ping you only.
     slack_admin_user_id: str = ""
 
+    # --- Phase 3: per-org Slack OAuth ---
+    slack_client_id: str | None = None
+    slack_client_secret: str | None = None
+    slack_oauth_state_secret: str | None = None
+    # GitHub App slug used to build the install URL
+    # (e.g. https://github.com/apps/auto-agent/installations/new)
+    github_app_slug: str | None = None
+
     # Linear
     linear_api_key: str = ""
     linear_team_id: str = ""

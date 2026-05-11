@@ -7,7 +7,8 @@ import time
 
 import bcrypt
 import jwt
-from fastapi import Cookie, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException
+from sqlalchemy import select
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "auto-agent-jwt-secret-change-me")
 JWT_ALGORITHM = "HS256"
@@ -99,3 +100,32 @@ def current_org_id(
             detail="Session predates the org model — please log in again",
         )
     return int(org_id)
+
+
+async def _role_in_org(*, user_id: int, org_id: int) -> str | None:
+    """Look up a user's role in an organization."""
+    from shared.database import async_session
+    from shared.models import OrganizationMembership
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(OrganizationMembership.role).where(
+                OrganizationMembership.user_id == user_id,
+                OrganizationMembership.org_id == org_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+
+async def current_org_id_admin_dep(
+    user_id: int = Depends(current_user_id),
+    org_id: int = Depends(current_org_id),
+) -> int:
+    """Require the caller to be `owner` or `admin` of the current org.
+
+    Raises 403 if the user does not have owner or admin role.
+    """
+    role = await _role_in_org(user_id=user_id, org_id=org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(403, "Org admin role required")
+    return org_id

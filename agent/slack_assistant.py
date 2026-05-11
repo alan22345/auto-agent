@@ -393,8 +393,16 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def converse(slack_user_id: str, user_id: int, text: str) -> str:
-    """Process one user DM. Returns the assistant's textual reply."""
+async def converse(slack_user_id: str, user_id: int, text: str, *, org_id: int | None = None) -> str:
+    """Process one user DM. Returns the assistant's textual reply.
+
+    ``org_id`` is accepted for forward-compatibility (E5 will use it to
+    scope API calls to the correct organisation). For now it is a no-op.
+    """
+    log.info(
+        "slack_converse user_id=%s org_id=%s slack_user_id=%s",
+        user_id, org_id, slack_user_id,
+    )
     if text.lower().strip() in ("reset", "clear"):
         reset_session(slack_user_id)
         return "Cleared our conversation. Starting fresh."
