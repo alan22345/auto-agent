@@ -101,5 +101,5 @@ async def test_would_exceed_token_cap(session) -> None:
     assert not await quotas.would_exceed_token_cap(session, org.id, est_input=50_000, est_output=0)
 
 
-def test_quota_exceeded_is_exception() -> None:
+async def test_quota_exceeded_is_exception() -> None:
     assert issubclass(quotas.QuotaExceeded, Exception)
