@@ -93,3 +93,45 @@ async def test_find_bot_returns_none_for_unknown_team():
     ):
         bot = await store.async_find_bot(team_id="T_UNKNOWN")
     assert bot is None
+
+
+@pytest.mark.asyncio
+async def test_delete_installation_by_team_id():
+    store = PostgresInstallationStore()
+
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "integrations.slack.installation_store.async_session",
+        return_value=session_cm,
+    ):
+        await store.async_delete_installation(team_id="T123")
+
+    args, _ = session.execute.call_args
+    assert "DELETE FROM slack_installations" in str(args[0])
+
+
+@pytest.mark.asyncio
+async def test_find_by_org_id_returns_team_name():
+    store = PostgresInstallationStore(org_id=42)
+
+    row = MagicMock(team_id="T123", team_name="acme", bot_user_id="UB")
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(first=lambda: row))
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "integrations.slack.installation_store.async_session",
+        return_value=session_cm,
+    ):
+        info = await store.find_by_org_id(42)
+    assert info is not None
+    assert info["team_id"] == "T123"
+    assert info["team_name"] == "acme"

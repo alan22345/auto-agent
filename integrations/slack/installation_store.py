@@ -136,5 +136,34 @@ class PostgresInstallationStore:
         team_id: str | None = None,
         user_id: str | None = None,
     ) -> None:
-        # Implemented in Task B3.
-        raise NotImplementedError
+        if not team_id:
+            return
+        async with async_session() as session:
+            await session.execute(
+                text("DELETE FROM slack_installations WHERE team_id = :team_id"),
+                {"team_id": team_id},
+            )
+            await session.commit()
+        log.info("slack_installation_deleted team_id=%s", team_id)
+
+    async def find_by_org_id(self, org_id: int) -> dict | None:
+        """Used by the settings UI to render 'Connected to <workspace>'."""
+        async with async_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT team_id, team_name, bot_user_id
+                    FROM slack_installations
+                    WHERE org_id = :org_id
+                    """
+                ),
+                {"org_id": org_id},
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return {
+                "team_id": row.team_id,
+                "team_name": row.team_name,
+                "bot_user_id": row.bot_user_id,
+            }
