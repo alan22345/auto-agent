@@ -186,3 +186,35 @@ async def test_handle_dm_drops_unknown_team(monkeypatch):
          "user": "U1", "text": "hello"}
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_user_for_slack_id_filters_by_org_membership(monkeypatch):
+    """A user must be a member of the org their event came from. If not,
+    return None (treat as unlinked) — never silently bind across orgs."""
+
+    # Simulate: User row exists with slack_user_id=U_ALICE; user is NOT
+    # a member of org 42. The DB returns no row from the JOIN.
+    captured_sql = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, sql, params=None):
+            captured_sql.append(str(sql))
+            m = MagicMock()
+            m.first = lambda: None
+            m.scalar_one_or_none = lambda: None
+            return m
+
+    monkeypatch.setattr(slack_main, "async_session", lambda: FakeSession())
+
+    user = await slack_main._user_for_slack_id("U_ALICE", org_id=42)
+    assert user is None
+    joined = " ".join(captured_sql)
+    # The query must join through organization_memberships when org_id is set.
+    assert "organization_memberships" in joined.lower() or "JOIN" in joined.upper()

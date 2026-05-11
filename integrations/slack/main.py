@@ -53,19 +53,32 @@ ORCHESTRATOR_URL = settings.orchestrator_url
 async def _user_for_slack_id(slack_user_id: str, *, org_id: int | None = None) -> dict | None:
     """Look up the auto-agent user linked to a Slack user_id.
 
-    ``org_id`` is accepted for forward-compatibility (E4 will add real
-    org-scoped filtering). For now it is a no-op — the lookup is by
-    slack_user_id only.
+    When ``org_id`` is set, additionally require that the user is a
+    member of that org (multi-tenant safety). When ``org_id`` is None
+    (legacy single-tenant path), no membership filter is applied —
+    matches behaviour before Phase 3.
     """
     from sqlalchemy import select
 
-    from shared.database import async_session
-    from shared.models import User
+    from shared.models import OrganizationMembership, User
 
     async with async_session() as session:
-        result = await session.execute(
-            select(User).where(User.slack_user_id == str(slack_user_id))
-        )
+        if org_id is None:
+            result = await session.execute(
+                select(User).where(User.slack_user_id == str(slack_user_id))
+            )
+        else:
+            result = await session.execute(
+                select(User)
+                .join(
+                    OrganizationMembership,
+                    OrganizationMembership.user_id == User.id,
+                )
+                .where(
+                    User.slack_user_id == str(slack_user_id),
+                    OrganizationMembership.org_id == org_id,
+                )
+            )
         user = result.scalar_one_or_none()
         if user is None:
             return None
@@ -87,12 +100,14 @@ async def _autolink_slack_user(slack_user_id: str, *, org_id: int | None = None)
       2. Slack ``profile.display_name`` lowercased
       3. The local-part of the user's email address
 
+    When ``org_id`` is set, only considers users who are already members of
+    that org — prevents cross-org auto-linking in multi-tenant deployments.
+
     Returns the linked user dict on success, None on no-match or ambiguity.
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
-    from shared.database import async_session
-    from shared.models import User
+    from shared.models import OrganizationMembership, User
 
     try:
         info = await _get_app().client.users_info(user=slack_user_id)
@@ -119,11 +134,22 @@ async def _autolink_slack_user(slack_user_id: str, *, org_id: int | None = None)
 
     async with async_session() as session:
         for cand in candidates:
-            from sqlalchemy import func
-
-            result = await session.execute(
-                select(User).where(func.lower(User.username) == cand)
-            )
+            if org_id is None:
+                result = await session.execute(
+                    select(User).where(func.lower(User.username) == cand)
+                )
+            else:
+                result = await session.execute(
+                    select(User)
+                    .join(
+                        OrganizationMembership,
+                        OrganizationMembership.user_id == User.id,
+                    )
+                    .where(
+                        func.lower(User.username) == cand,
+                        OrganizationMembership.org_id == org_id,
+                    )
+                )
             user = result.scalar_one_or_none()
             if user is None:
                 continue
