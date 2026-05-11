@@ -36,7 +36,7 @@ _USERNAME = "ws_test_user"
 
 
 def _valid_token() -> str:
-    return create_token(_USER_ID, _USERNAME)
+    return create_token(_USER_ID, _USERNAME, current_org_id=1)
 
 
 def _mock_task_list_response():

@@ -17,7 +17,7 @@ from orchestrator.auth import hash_password, verify_token
 from orchestrator.router import COOKIE_NAME
 from orchestrator.router import router as api_router
 from shared.database import get_session
-from shared.models import User
+from shared.models import Organization, OrganizationMembership, User
 
 # ---------------------------------------------------------------------------
 # App scaffolding (mirrors tests/test_auth_cookie.py)
@@ -74,8 +74,10 @@ class _SessionStub:
         self._responses = list(responses)
         self.added = []
         self.commits = 0
+        self.flushes = 0
         self.refreshes = 0
         self._last_user: User | None = None
+        self._last_org: Organization | None = None
 
     async def execute(self, *_a, **_kw):
         if not self._responses:
@@ -86,12 +88,26 @@ class _SessionStub:
         self.added.append(obj)
         if isinstance(obj, User):
             self._last_user = obj
+        elif isinstance(obj, Organization):
+            self._last_org = obj
+
+    async def flush(self):
+        # SQLAlchemy assigns autoincrement PKs during flush; the production
+        # signup path now relies on this so the org has an ``id`` before the
+        # membership row references it.
+        self.flushes += 1
+        if self._last_org is not None and getattr(self._last_org, "id", None) is None:
+            self._last_org.id = 7
+        if self._last_user is not None and getattr(self._last_user, "id", None) is None:
+            self._last_user.id = 99
 
     async def commit(self):
         self.commits += 1
         # Simulate primary-key allocation on the most-recently-added User
         if self._last_user is not None and getattr(self._last_user, "id", None) is None:
             self._last_user.id = 99
+        if self._last_org is not None and getattr(self._last_org, "id", None) is None:
+            self._last_org.id = 7
 
     async def refresh(self, obj):
         self.refreshes += 1
@@ -120,7 +136,9 @@ def _override(app: FastAPI, sessions):
 async def test_signup_creates_user_and_dispatches_email():
     app = _build_app()
     # Two execute calls during signup: collision-check (no row) +
-    # username-allocation lookup (no row).
+    # username-allocation lookup (no row). After Phase 2 the signup also
+    # adds an Organization + OrganizationMembership row alongside the
+    # User row, but neither triggers an execute.
     session = _SessionStub([_Result(None), _Result(None)])
     _override(app, [session])
 
@@ -145,13 +163,19 @@ async def test_signup_creates_user_and_dispatches_email():
     assert body["email"] == "alice@example.com"
     assert body["verification_sent"] is True
     assert body["user_id"] == 99
-    # User row was added with the hashed password and a signup token.
-    assert len(session.added) == 1
-    user = session.added[0]
+    # Phase 2 — signup creates Organization + User + OrganizationMembership.
+    types_added = [type(o).__name__ for o in session.added]
+    assert types_added == ["Organization", "User", "OrganizationMembership"]
+    org, user, membership = session.added
     assert user.email == "alice@example.com"
     assert user.display_name == "Alice"
     assert user.signup_token is not None and len(user.signup_token) >= 32
     assert user.email_verified_at is None
+    assert org.name == "Alice"
+    assert org.slug.startswith("alice")
+    assert membership.role == "owner"
+    assert membership.user_id == user.id
+    assert membership.org_id == org.id
     # Email dispatched with the same token that's now on the user row.
     assert len(sent) == 1
     assert sent[0] == ("alice@example.com", user.signup_token)
@@ -227,7 +251,13 @@ async def test_verify_token_marks_email_verified_and_sets_cookie():
     user.email = "a@b.co"
     user.email_verified_at = None
     user.signup_token = "tok123"
-    session = _SessionStub([_Result(user)])
+    # Two executes during verify: lookup user by token, then resolve
+    # the user's active org membership.
+    membership = MagicMock(spec=OrganizationMembership)
+    membership.org_id = 11
+    membership.user_id = 7
+    membership.last_active_at = None
+    session = _SessionStub([_Result(user), _Result(membership)])
     _override(app, [session])
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -292,7 +322,7 @@ async def test_login_succeeds_for_verified_email():
         email="a@b.co",
         email_verified_at=datetime.now(UTC),
     )
-    session = _SessionStub([_Result(user)])
+    session = _login_session(user)
     _override(app, [session])
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.post(
@@ -306,7 +336,7 @@ async def test_login_succeeds_for_legacy_user_without_email():
     """Admin/seeded users (email=NULL) bypass verification gating."""
     app = _build_app()
     user = _make_user(email=None, email_verified_at=None)
-    session = _SessionStub([_Result(user)])
+    session = _login_session(user)
     _override(app, [session])
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.post(
@@ -321,8 +351,16 @@ async def test_login_succeeds_for_legacy_user_without_email():
 # ---------------------------------------------------------------------------
 
 
-def _login_session(user):
-    return _SessionStub([_Result(user)])
+def _login_session(user, *, org_id: int = 1):
+    """Pre-load a session for one /auth/login round-trip.
+
+    Login does two executes after Phase 2: user lookup + membership lookup.
+    """
+    membership = MagicMock(spec=OrganizationMembership)
+    membership.org_id = org_id
+    membership.user_id = user.id
+    membership.last_active_at = None
+    return _SessionStub([_Result(user), _Result(membership)])
 
 
 async def _login(c, user, session):

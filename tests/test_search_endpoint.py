@@ -26,8 +26,8 @@ def _make_app() -> FastAPI:
     return app
 
 
-def _bearer(user_id: int = 1, username: str = "alice") -> dict[str, str]:
-    return {"Authorization": f"Bearer {create_token(user_id, username)}"}
+def _bearer(user_id: int = 1, username: str = "alice", org_id: int = 1) -> dict[str, str]:
+    return {"Authorization": f"Bearer {create_token(user_id, username, current_org_id=org_id)}"}
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ from shared.events import (
 )
 from shared.models import (
     FreeformConfig,
+    Organization,
+    OrganizationMembership,
     Repo,
     ScheduledTask,
     Suggestion,
@@ -199,6 +201,37 @@ def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> d
 # --- Auth endpoints ---
 
 
+async def _resolve_active_org_id(session: AsyncSession, user: User) -> int:
+    """Pick the user's active org for a fresh session.
+
+    Strategy: most-recently-active membership wins; ties broken by oldest
+    membership (the org they joined first / signed up with). Bumps the
+    membership's ``last_active_at`` so the next login lands in the same
+    org by default.
+
+    Raises 403 if the user has no memberships — this should be unreachable
+    after Phase 2 migration backfill, but failing loud beats silently
+    handing out a token with no tenant.
+    """
+    result = await session.execute(
+        select(OrganizationMembership)
+        .where(OrganizationMembership.user_id == user.id)
+        .order_by(
+            OrganizationMembership.last_active_at.desc().nullslast(),
+            OrganizationMembership.created_at.asc(),
+        )
+        .limit(1)
+    )
+    membership = result.scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(
+            status_code=403,
+            detail="User has no organization memberships — contact support",
+        )
+    membership.last_active_at = datetime.now(UTC)
+    return int(membership.org_id)
+
+
 @router.post("/auth/login")
 async def login(req: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)):
     # Allow login by either username (legacy admin) or email (self-serve).
@@ -218,8 +251,9 @@ async def login(req: LoginRequest, response: Response, session: AsyncSession = D
             detail="Email not verified. Check your inbox for the verification link.",
         )
     user.last_login = datetime.now(UTC)
+    org_id = await _resolve_active_org_id(session, user)
     await session.commit()
-    token = create_token(user_id=user.id, username=user.username)
+    token = create_token(user_id=user.id, username=user.username, current_org_id=org_id)
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
@@ -380,6 +414,14 @@ async def signup(
     username = await _allocate_username(session, _username_from_email(local))
     token = _stdlib_secrets.token_urlsafe(32)
 
+    # Phase 2 — every signup gets a personal org with the user as owner.
+    # The slug is the email-local part plus a 4-char random suffix to avoid
+    # collisions between e.g. alice@a.com and alice@b.com.
+    org_slug = f"{_username_from_email(local)[:24]}-{_stdlib_secrets.token_hex(2)}"
+    org = Organization(name=req.display_name.strip(), slug=org_slug)
+    session.add(org)
+    await session.flush()  # populate org.id before referencing
+
     user = User(
         username=username,
         password_hash=hash_password(req.password),
@@ -387,8 +429,14 @@ async def signup(
         email=email,
         email_verified_at=None,
         signup_token=token,
+        organization_id=org.id,
     )
     session.add(user)
+    await session.flush()
+
+    session.add(OrganizationMembership(
+        org_id=org.id, user_id=user.id, role="owner",
+    ))
     await session.commit()
     await session.refresh(user)
 
@@ -423,9 +471,12 @@ async def verify_email(
     user.email_verified_at = datetime.now(UTC)
     user.signup_token = None
     user.last_login = datetime.now(UTC)
+    org_id = await _resolve_active_org_id(session, user)
     await session.commit()
 
-    jwt = create_token(user_id=user.id, username=user.username)
+    jwt = create_token(
+        user_id=user.id, username=user.username, current_org_id=org_id,
+    )
     response.set_cookie(
         key=COOKIE_NAME,
         value=jwt,
