@@ -1,7 +1,7 @@
 # Handover — multi-tenant SaaS, after Phase 3
 
 **Date:** 2026-05-11
-**Branch:** `feat/phase-3-per-org-integrations` — **PR: TBD** (will be updated once PR is opened)
+**Branch:** `feat/phase-3-per-org-integrations` — **PR: https://github.com/alan22345/auto-agent/pull/40**
 **Phase 2 status:** merged to `main` at `9a5c2c1` (PR #39). Phase 3 is NOT yet deployed.
 **Baseline:** 762 tests passing at Phase 2 merge. Phase 3 adds 46 → **808 tests, 0 failures**.
 
