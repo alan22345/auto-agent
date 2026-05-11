@@ -454,7 +454,7 @@ async def inbound_loop() -> None:
     app = _get_app()
 
     @app.event("message")
-    async def _on_message(event: dict, ack):  # noqa: ANN001
+    async def _on_message(event: dict, ack):
         await ack()
         try:
             await _handle_dm_event(event)
@@ -475,7 +475,7 @@ async def inbound_loop() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fmt_task_created(p, info, _ff, _tid):  # noqa: ANN001
+def _fmt_task_created(p, info, _ff, _tid):
     return f"📋 *New task created*\n{info}"
 
 
@@ -556,29 +556,55 @@ _NOTIFICATION_FORMATTERS = {
 }
 
 
-async def _notify_user(event: Event) -> None:
-    formatter = _NOTIFICATION_FORMATTERS.get(event.type)
+async def _fetch_task_for_notification(task_id: int) -> dict | None:
+    """Fetch a task from the orchestrator API for notification purposes.
+
+    Returns a plain dict with the fields notification helpers need, or
+    None when the task cannot be fetched (non-200 / network error).
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
+            if resp.status_code == 200:
+                task = TaskData.model_validate(resp.json())
+                return {
+                    "id": task.id,
+                    "title": task.title,
+                    "freeform_mode": task.freeform_mode,
+                    "organization_id": task.organization_id,
+                }
+    except Exception:
+        pass
+    return None
+
+
+async def _notify_task_event(event_type: str, payload: dict) -> None:
+    """Handle a single task event notification (unit-testable core).
+
+    Looks up the task (to get org_id and display info), resolves the
+    target Slack user, and calls send_slack_dm with org_id set so the
+    right per-workspace bot token is selected.
+    """
+    formatter = _NOTIFICATION_FORMATTERS.get(event_type)
     if formatter is None:
         return
 
+    task_id: int | None = payload.get("task_id")
+
     task_info = ""
     is_freeform = False
-    if event.task_id:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{ORCHESTRATOR_URL}/tasks/{event.task_id}"
-                )
-                if resp.status_code == 200:
-                    task = TaskData.model_validate(resp.json())
-                    task_info = f"Task #{task.id}: {task.title[:80]}"
-                    is_freeform = bool(task.freeform_mode)
-        except Exception:
-            pass
+    org_id: int | None = None
+
+    if task_id is not None:
+        task_data = await _fetch_task_for_notification(task_id)
+        if task_data:
+            task_info = f"Task #{task_data['id']}: {task_data['title'][:80]}"
+            is_freeform = bool(task_data["freeform_mode"])
+            org_id = task_data["organization_id"]
 
     target_user_id: str | None
-    if event.task_id is not None:
-        target_user_id = await _slack_user_id_for_task(event.task_id)
+    if task_id is not None:
+        target_user_id = await _slack_user_id_for_task(task_id)
         if target_user_id is None:
             return  # owner hasn't linked Slack — skip silently
     else:
@@ -586,8 +612,17 @@ async def _notify_user(event: Event) -> None:
         if not target_user_id:
             return
 
-    message = formatter(event.payload or {}, task_info, is_freeform, event.task_id)
-    await send_slack_dm(target_user_id, message, task_id=event.task_id)
+    message = formatter(payload, task_info, is_freeform, task_id)
+    await send_slack_dm(target_user_id, message, task_id=task_id, org_id=org_id)
+
+
+async def _notify_user(event: Event) -> None:
+    """Dispatch a Redis event to the appropriate Slack DM."""
+    payload = event.payload or {}
+    if event.task_id is not None:
+        payload = dict(payload)
+        payload.setdefault("task_id", event.task_id)
+    await _notify_task_event(event.type, payload)
 
 
 async def notification_loop() -> None:
