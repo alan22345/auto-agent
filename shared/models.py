@@ -12,6 +12,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -64,11 +65,59 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class Repo(Base):
-    __tablename__ = "repos"
+class Organization(Base):
+    """A tenant. Every customer-facing row belongs to exactly one org.
+
+    Created on signup (one personal org per user) or via the admin path.
+    Membership is many-to-many through ``OrganizationMembership``.
+    """
+
+    __tablename__ = "organizations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False, unique=True)
+    name = Column(String(255), nullable=False)
+    slug = Column(String(64), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class OrganizationMembership(Base):
+    """User<->org join with a role.
+
+    ``role`` is one of ``owner`` (exactly one per org, the creator),
+    ``admin`` (manage members + integrations), or ``member`` (everyday
+    use). ``last_active_at`` is bumped on login + org-switch and is used
+    to resolve the user's active org on a fresh session.
+    """
+
+    __tablename__ = "organization_memberships"
+
+    org_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    role = Column(String(32), nullable=False, default="member")
+    last_active_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class Repo(Base):
+    __tablename__ = "repos"
+    # Uniqueness moves from global Repo.name to (organization_id, name) so
+    # two orgs can each have a repo called "backend" without colliding.
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="ix_repos_org_name"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
     url = Column(String(512), nullable=False)
     default_branch = Column(String(128), default="main")
     summary = Column(Text, nullable=True)  # Cached repo summary for context injection
@@ -76,6 +125,9 @@ class Repo(Base):
     ci_checks = Column(Text, nullable=True)  # Extracted CI check commands from workflow files
     harness_onboarded = Column(Boolean, default=False)  # Whether harness engineering PR has been raised
     harness_pr_url = Column(String(512), nullable=True)  # URL of the harness onboarding PR
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     tasks = relationship("Task", back_populates="repo")
@@ -108,6 +160,9 @@ class Task(Base):
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips before the agent
     # writes a plan. NULL = not yet started; [] = grilling complete or skipped.
     intake_qa = Column(JSONB, nullable=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -169,6 +224,9 @@ class ScheduledTask(Base):
     repo_name = Column(String(255), nullable=True)
     enabled = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -185,6 +243,9 @@ class Suggestion(Base):
     priority = Column(Integer, default=3)  # 1=critical, 5=nice-to-have
     status = Column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     repo = relationship("Repo")
@@ -242,6 +303,9 @@ class FreeformConfig(Base):
     architecture_cron = Column(String(100), default="0 9 * * 1", nullable=False)
     last_architecture_at = Column(DateTime(timezone=True), nullable=True)
     architecture_knowledge = Column(Text, nullable=True)  # Agent's accumulated depth map
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     repo = relationship("Repo")
@@ -272,16 +336,34 @@ class User(Base):
     email = Column(String(255), nullable=True, unique=True)
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
     signup_token = Column(String(64), nullable=True, unique=True)
+    # Backfilled to the default org in migration 026. After 027 this is
+    # NOT NULL. Note: per-user multi-org membership lives on
+    # ``organization_memberships``; this column records the user's
+    # "home" org for backwards-compatible queries that haven't been
+    # migrated to the membership table.
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
 
 
 class UserSecret(Base):
-    """Per-user encrypted secret. Read/written via shared/secrets.py — never
-    instantiate directly. ``value_enc`` is pgcrypto-encrypted ciphertext."""
+    """Per-user, per-org encrypted secret. Read/written via shared/secrets.py
+    — never instantiate directly. ``value_enc`` is pgcrypto-encrypted
+    ciphertext.
+
+    Migration 026 extended the primary key from ``(user_id, key)`` to
+    ``(user_id, organization_id, key)`` so a user in two orgs can carry
+    different credentials per org without collision.
+    """
     __tablename__ = "user_secrets"
 
     user_id = Column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True, nullable=False,
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"),
+        primary_key=True, nullable=False, index=True,
     )
     key = Column(String(64), primary_key=True, nullable=False)
     value_enc = Column(LargeBinary, nullable=False)
@@ -297,6 +379,9 @@ class SearchSession(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+    )
     title = Column(String(512), nullable=False, default="New search")
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(
