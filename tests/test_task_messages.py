@@ -24,12 +24,13 @@ class TestPostTaskMessage:
     @pytest.mark.asyncio
     async def test_empty_content_rejected(self):
         session = AsyncMock(spec=AsyncSession)
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())):
+        with patch("orchestrator.router._get_task_in_org", AsyncMock(return_value=_mock_task())):
             with pytest.raises(HTTPException) as exc:
                 await post_task_message(
                     task_id=1,
                     req=TaskMessagePost(content="   "),
                     session=session,
+                    org_id=1,
                     authorization=None,
                     x_sender=None,
                 )
@@ -38,12 +39,13 @@ class TestPostTaskMessage:
     @pytest.mark.asyncio
     async def test_unknown_task_rejected(self):
         session = AsyncMock(spec=AsyncSession)
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=None)):
+        with patch("orchestrator.router._get_task_in_org", AsyncMock(return_value=None)):
             with pytest.raises(HTTPException) as exc:
                 await post_task_message(
                     task_id=999,
                     req=TaskMessagePost(content="hello"),
                     session=session,
+                    org_id=1,
                     authorization=None,
                     x_sender=None,
                 )
@@ -59,11 +61,12 @@ class TestPostTaskMessage:
             msg.created_at = None
         session.refresh = refresh_stub
 
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())):
+        with patch("orchestrator.router._get_task_in_org", AsyncMock(return_value=_mock_task())):
             result = await post_task_message(
                 task_id=1,
                 req=TaskMessagePost(content="stop doing that"),
                 session=session,
+                org_id=1,
                 authorization=None,
                 x_sender="telegram:12345",
             )
@@ -82,9 +85,9 @@ class TestListTaskMessages:
     @pytest.mark.asyncio
     async def test_unknown_task_404(self):
         session = AsyncMock(spec=AsyncSession)
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=None)):
+        with patch("orchestrator.router._get_task_in_org", AsyncMock(return_value=None)):
             with pytest.raises(HTTPException) as exc:
-                await list_task_messages(task_id=999, session=session)
+                await list_task_messages(task_id=999, session=session, org_id=1)
             assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -98,7 +101,7 @@ class TestListTaskMessages:
         exec_result.scalars.return_value = scalars_mock
         session.execute = AsyncMock(return_value=exec_result)
 
-        with patch("orchestrator.router.get_task", AsyncMock(return_value=_mock_task())):
-            result = await list_task_messages(task_id=1, session=session)
+        with patch("orchestrator.router._get_task_in_org", AsyncMock(return_value=_mock_task())):
+            result = await list_task_messages(task_id=1, session=session, org_id=1)
 
         assert [m.content for m in result] == ["first", "second"]

@@ -153,6 +153,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         repo.url, task_id, base_branch,
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
     )
 
     # Reuse existing branch or generate new one
@@ -467,6 +468,7 @@ async def _finish_coding(
     pr_url = await review.create_pr(
         workspace, title, pr_body, base_branch, branch_name,
         user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
     )
     log.info(f"PR created: {pr_url}")
     if not pr_url.startswith("http"):

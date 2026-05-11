@@ -28,12 +28,21 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_token(
     user_id: int,
     username: str,
+    *,
+    current_org_id: int,
     expires_seconds: int = DEFAULT_EXPIRY,
 ) -> str:
-    """Create a JWT token."""
+    """Create a JWT token.
+
+    ``current_org_id`` is required from Phase 2 onward — every authenticated
+    request must know which tenant it operates against. Callers that pre-date
+    Phase 2 will fail at this signature change, which is intentional: a
+    silent default would be a security hole.
+    """
     payload = {
         "user_id": user_id,
         "username": username,
+        "current_org_id": current_org_id,
         "exp": int(time.time()) + expires_seconds,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -69,3 +78,24 @@ def current_user_id(
 ) -> int:
     """FastAPI dependency that extracts the authenticated user_id."""
     return verify_cookie_or_header(auto_agent_session, authorization)["user_id"]
+
+
+def current_org_id(
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> int:
+    """FastAPI dependency that extracts the user's active organization_id.
+
+    Raises 401 if the token has no ``current_org_id`` — that means it was
+    issued by pre-Phase-2 code and the user must re-authenticate. Failing
+    loud here prevents a stale session from inadvertently bypassing
+    org-scoped queries.
+    """
+    payload = verify_cookie_or_header(auto_agent_session, authorization)
+    org_id = payload.get("current_org_id")
+    if org_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Session predates the org model — please log in again",
+        )
+    return int(org_id)

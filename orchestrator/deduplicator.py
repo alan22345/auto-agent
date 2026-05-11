@@ -26,23 +26,40 @@ LIVE_STATUSES = {
 }
 
 
-async def find_duplicate_by_source_id(session: AsyncSession, source_id: str) -> Task | None:
+async def find_duplicate_by_source_id(
+    session: AsyncSession,
+    source_id: str,
+    *,
+    organization_id: int | None = None,
+) -> Task | None:
+    """Find a live task with the same source_id, optionally scoped to an org.
+
+    Cross-org dedup must NOT collapse: two tenants receiving the same Slack
+    message ID (rare but possible) should each get their own task.
+    """
     if not source_id:
         return None
-    result = await session.execute(
-        select(Task).where(
-            Task.source_id == source_id,
-            Task.status.in_(LIVE_STATUSES),
-        )
+    q = select(Task).where(
+        Task.source_id == source_id,
+        Task.status.in_(LIVE_STATUSES),
     )
+    if organization_id is not None:
+        q = q.where(Task.organization_id == organization_id)
+    result = await session.execute(q)
     return result.scalar_one_or_none()
 
 
-async def find_duplicate_by_title(session: AsyncSession, title: str) -> Task | None:
-    result = await session.execute(
-        select(Task).where(
-            Task.title == title,
-            Task.status.in_(LIVE_STATUSES),
-        )
+async def find_duplicate_by_title(
+    session: AsyncSession,
+    title: str,
+    *,
+    organization_id: int | None = None,
+) -> Task | None:
+    q = select(Task).where(
+        Task.title == title,
+        Task.status.in_(LIVE_STATUSES),
     )
+    if organization_id is not None:
+        q = q.where(Task.organization_id == organization_id)
+    result = await session.execute(q)
     return result.scalar_one_or_none()

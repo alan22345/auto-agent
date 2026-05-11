@@ -53,6 +53,9 @@ class TaskData(BaseModel):
     intake_qa: list[dict] | None = None
     created_at: str | None = None
     created_by_user_id: int | None = None
+    # Phase 2 — tenant id. Optional in the wire schema until migration 027
+    # flips the DB column to NOT NULL, so legacy rows still serialize cleanly.
+    organization_id: int | None = None
     # Structured intent (extracted by LLM after classification)
     change_type: str | None = None          # "bugfix", "feature", "refactor", "config", "docs"
     target_areas: str | None = None         # comma-separated file paths or module areas

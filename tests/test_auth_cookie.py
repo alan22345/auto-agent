@@ -14,7 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from orchestrator.auth import hash_password, verify_token
 from orchestrator.router import router as api_router
 from shared.database import get_session
-from shared.models import User
+from shared.models import OrganizationMembership, User
 
 COOKIE_NAME = "auto_agent_session"
 
@@ -74,11 +74,24 @@ def _make_user(user_id: int = 1, username: str = "cookie_user") -> MagicMock:
 
 
 def _mock_session_for_login(user: MagicMock):
-    """Return an async session mock that returns *user* on the first execute."""
+    """Return an async session mock for /auth/login.
+
+    Login does two executes now: lookup the user, then resolve the user's
+    active org membership. The second execute returns a fake membership
+    with org_id=1.
+    """
     session = AsyncMock()
-    result = MagicMock()
-    result.scalar_one_or_none.return_value = user
-    session.execute = AsyncMock(return_value=result)
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+
+    membership = MagicMock(spec=OrganizationMembership)
+    membership.org_id = 1
+    membership.user_id = user.id
+    membership.last_active_at = None
+    membership_result = MagicMock()
+    membership_result.scalar_one_or_none.return_value = membership
+
+    session.execute = AsyncMock(side_effect=[user_result, membership_result])
     session.commit = AsyncMock()
     return session
 

@@ -15,10 +15,18 @@ from sqlalchemy import select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from orchestrator.auth import create_token, hash_password, verify_password, verify_token
+from orchestrator.auth import (
+    create_token,
+    current_org_id as current_org_id_dep,
+    current_user_id,
+    hash_password,
+    verify_password,
+    verify_token,
+)
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
+from orchestrator.scoping import scoped
 from orchestrator.state_machine import InvalidTransition, get_task, transition
 from shared.config import settings
 from shared.database import get_session
@@ -38,6 +46,8 @@ from shared.events import (
 )
 from shared.models import (
     FreeformConfig,
+    Organization,
+    OrganizationMembership,
     Repo,
     ScheduledTask,
     Suggestion,
@@ -196,7 +206,75 @@ def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> d
     return _verify_auth_header(authorization)
 
 
+async def _get_task_in_org(
+    session: AsyncSession, task_id: int, org_id: int,
+) -> Task | None:
+    """Return the task only if it belongs to the caller's org. None otherwise.
+
+    Calls that look up a single task by ID must go through this helper
+    rather than ``select(Task).where(Task.id == task_id)`` so the org
+    filter is never omitted.
+    """
+    result = await session.execute(
+        scoped(select(Task).where(Task.id == task_id), Task, org_id=org_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _get_repo_in_org(
+    session: AsyncSession, *, repo_id: int | None = None, name: str | None = None,
+    org_id: int,
+) -> Repo | None:
+    """Return the repo only if it belongs to the caller's org. None otherwise.
+
+    Accepts either ``repo_id`` or ``name`` (mutually exclusive). The name
+    lookup also tolerates a ``owner/repo`` suffix match for backwards
+    compatibility with how some legacy callers identify repos.
+    """
+    if repo_id is not None:
+        q = select(Repo).where(Repo.id == repo_id)
+    elif name is not None:
+        q = select(Repo).where(
+            (Repo.name == name) | (Repo.name.endswith(f"/{name}"))
+        )
+    else:
+        raise ValueError("repo_id or name is required")
+    result = await session.execute(scoped(q, Repo, org_id=org_id))
+    return result.scalar_one_or_none()
+
+
 # --- Auth endpoints ---
+
+
+async def _resolve_active_org_id(session: AsyncSession, user: User) -> int:
+    """Pick the user's active org for a fresh session.
+
+    Strategy: most-recently-active membership wins; ties broken by oldest
+    membership (the org they joined first / signed up with). Bumps the
+    membership's ``last_active_at`` so the next login lands in the same
+    org by default.
+
+    Raises 403 if the user has no memberships — this should be unreachable
+    after Phase 2 migration backfill, but failing loud beats silently
+    handing out a token with no tenant.
+    """
+    result = await session.execute(
+        select(OrganizationMembership)
+        .where(OrganizationMembership.user_id == user.id)
+        .order_by(
+            OrganizationMembership.last_active_at.desc().nullslast(),
+            OrganizationMembership.created_at.asc(),
+        )
+        .limit(1)
+    )
+    membership = result.scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(
+            status_code=403,
+            detail="User has no organization memberships — contact support",
+        )
+    membership.last_active_at = datetime.now(UTC)
+    return int(membership.org_id)
 
 
 @router.post("/auth/login")
@@ -218,8 +296,9 @@ async def login(req: LoginRequest, response: Response, session: AsyncSession = D
             detail="Email not verified. Check your inbox for the verification link.",
         )
     user.last_login = datetime.now(UTC)
+    org_id = await _resolve_active_org_id(session, user)
     await session.commit()
-    token = create_token(user_id=user.id, username=user.username)
+    token = create_token(user_id=user.id, username=user.username, current_org_id=org_id)
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
@@ -380,6 +459,14 @@ async def signup(
     username = await _allocate_username(session, _username_from_email(local))
     token = _stdlib_secrets.token_urlsafe(32)
 
+    # Phase 2 — every signup gets a personal org with the user as owner.
+    # The slug is the email-local part plus a 4-char random suffix to avoid
+    # collisions between e.g. alice@a.com and alice@b.com.
+    org_slug = f"{_username_from_email(local)[:24]}-{_stdlib_secrets.token_hex(2)}"
+    org = Organization(name=req.display_name.strip(), slug=org_slug)
+    session.add(org)
+    await session.flush()  # populate org.id before referencing
+
     user = User(
         username=username,
         password_hash=hash_password(req.password),
@@ -387,8 +474,14 @@ async def signup(
         email=email,
         email_verified_at=None,
         signup_token=token,
+        organization_id=org.id,
     )
     session.add(user)
+    await session.flush()
+
+    session.add(OrganizationMembership(
+        org_id=org.id, user_id=user.id, role="owner",
+    ))
     await session.commit()
     await session.refresh(user)
 
@@ -423,9 +516,12 @@ async def verify_email(
     user.email_verified_at = datetime.now(UTC)
     user.signup_token = None
     user.last_login = datetime.now(UTC)
+    org_id = await _resolve_active_org_id(session, user)
     await session.commit()
 
-    jwt = create_token(user_id=user.id, username=user.username)
+    jwt = create_token(
+        user_id=user.id, username=user.username, current_org_id=org_id,
+    )
     response.set_cookie(
         key=COOKIE_NAME,
         value=jwt,
@@ -490,7 +586,9 @@ async def list_my_secrets(
     payload = _verify_cookie_or_header(auto_agent_session, authorization)
     from shared import secrets as _user_secrets
 
-    keys = await _user_secrets.list_keys(payload["user_id"], session=session)
+    keys = await _user_secrets.list_keys(
+        payload["user_id"], org_id=payload["current_org_id"], session=session,
+    )
     return SecretListResponse(keys=keys)
 
 
@@ -508,12 +606,17 @@ async def put_my_secret(
     if key not in _user_secrets.SECRET_KEYS:
         raise HTTPException(404, "Unknown secret key")
 
+    org_id = payload["current_org_id"]
     if body.value is None or body.value == "":
-        await _user_secrets.delete(payload["user_id"], key, session=session)
+        await _user_secrets.delete(
+            payload["user_id"], key, org_id=org_id, session=session,
+        )
         await session.commit()
         return {"ok": True, "cleared": True}
 
-    await _user_secrets.set(payload["user_id"], key, body.value, session=session)
+    await _user_secrets.set(
+        payload["user_id"], key, body.value, org_id=org_id, session=session,
+    )
     await session.commit()
     return {"ok": True, "cleared": False}
 
@@ -531,7 +634,9 @@ async def delete_my_secret(
     if key not in _user_secrets.SECRET_KEYS:
         raise HTTPException(404, "Unknown secret key")
 
-    await _user_secrets.delete(payload["user_id"], key, session=session)
+    await _user_secrets.delete(
+        payload["user_id"], key, org_id=payload["current_org_id"], session=session,
+    )
     await session.commit()
     return Response(status_code=204)
 
@@ -551,7 +656,9 @@ async def test_my_secret(
     if key not in _user_secrets.SECRET_KEYS:
         raise HTTPException(404, "Unknown secret key")
 
-    value = await _user_secrets.get(payload["user_id"], key, session=session)
+    value = await _user_secrets.get(
+        payload["user_id"], key, org_id=payload["current_org_id"], session=session,
+    )
     if not value:
         return SecretTestResponse(ok=False, detail="Not set")
 
@@ -657,31 +764,47 @@ async def create_task(
 ) -> TaskData:
     _check_rate_limit()
 
-    # Derive ownership from the authenticated session when present, so the
-    # frontend doesn't have to pass it (and can't spoof another user). Webhook
-    # callers (Slack/Telegram/Linear) construct Task rows directly without
-    # going through this endpoint, so this only affects UI-driven creation.
+    # Derive ownership + active org from the authenticated session when
+    # present, so the frontend doesn't have to pass them. Webhook callers
+    # (Slack/Telegram/Linear) construct Task rows directly without going
+    # through this endpoint, so for those code paths org_id is supplied
+    # by the caller via req.organization_id (or defaults to the legacy
+    # behaviour: no scoping until migration 027 flips NOT NULL).
     authed_user_id: int | None = None
+    caller_org_id: int | None = None
     if auto_agent_session or authorization:
         try:
             payload = _verify_cookie_or_header(auto_agent_session, authorization)
             authed_user_id = payload["user_id"]
+            caller_org_id = payload.get("current_org_id")
         except HTTPException:
             authed_user_id = None
     owner_user_id = authed_user_id or req.created_by_user_id
 
-    # Dedup check: exact source_id → exact title
-    dup = await find_duplicate_by_source_id(session, req.source_id)
+    # Dedup check: scoped to caller's org when known so two tenants
+    # receiving the same Slack message ID don't dedupe each other.
+    dup = await find_duplicate_by_source_id(
+        session, req.source_id, organization_id=caller_org_id,
+    )
     if not dup:
-        dup = await find_duplicate_by_title(session, req.title)
+        dup = await find_duplicate_by_title(
+            session, req.title, organization_id=caller_org_id,
+        )
     if dup:
         return _task_to_response(dup)
 
-    # Resolve repo
+    # Resolve repo — only repos in the caller's org are visible.
     repo = None
     if req.repo_name:
-        result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
-        repo = result.scalar_one_or_none()
+        if caller_org_id is not None:
+            repo = await _get_repo_in_org(
+                session, name=req.repo_name, org_id=caller_org_id,
+            )
+        else:
+            result = await session.execute(
+                select(Repo).where(Repo.name == req.repo_name)
+            )
+            repo = result.scalar_one_or_none()
 
     # Reject only if the user hasn't paired AND there's no fallback configured.
     # When a fallback is set (e.g. admin's user_id), unpaired users transparently
@@ -706,6 +829,7 @@ async def create_task(
         source_id=req.source_id,
         repo_id=repo.id if repo else None,
         created_by_user_id=owner_user_id,
+        organization_id=caller_org_id,
     )
     session.add(task)
     await session.commit()
@@ -721,8 +845,11 @@ async def create_task(
 async def list_tasks(
     status: TaskStatus | None = None,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> list[TaskData]:
-    query = select(Task).order_by(Task.created_at.desc()).limit(50)
+    query = scoped(select(Task), Task, org_id=org_id).order_by(
+        Task.created_at.desc(),
+    ).limit(50)
     if status:
         query = query.where(Task.status == status)
     result = await session.execute(query)
@@ -730,16 +857,24 @@ async def list_tasks(
 
 
 @router.get("/tasks/{task_id}", response_model=TaskData)
-async def get_task_detail(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
-    task = await get_task(session, task_id)
+async def get_task_detail(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     return _task_to_response(task)
 
 
 @router.delete("/tasks/{task_id}")
-async def delete_task(task_id: int, session: AsyncSession = Depends(get_session)) -> dict:
-    task = await get_task(session, task_id)
+async def delete_task(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     # Delete history first (FK constraint)
@@ -764,13 +899,14 @@ async def set_task_priority(
     task_id: int,
     req: PriorityRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
     """Set a task's queue priority. Lower number = picked up first.
 
     0 = jump to front, 100 = normal (default), 999 = lowest.
     Only affects QUEUED tasks — tasks already in progress are unaffected.
     """
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     task.priority = req.priority
@@ -780,8 +916,12 @@ async def set_task_priority(
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskData)
-async def cancel_task(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
-    task = await get_task(session, task_id)
+async def cancel_task(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if task.status in (TaskStatus.DONE, TaskStatus.FAILED):
@@ -809,8 +949,9 @@ async def transition_task(
     task_id: int,
     req: TransitionRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     try:
@@ -833,12 +974,12 @@ async def assign_repo(
     task_id: int,
     req: AssignRepoRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
-    repo = result.scalar_one_or_none()
+    repo = await _get_repo_in_org(session, name=req.repo_name, org_id=org_id)
     if not repo:
         raise HTTPException(404, f"Repo '{req.repo_name}' not found")
     task.repo_id = repo.id
@@ -856,8 +997,9 @@ async def set_branch_name(
     task_id: int,
     req: BranchUpdate,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     task.branch_name = req.branch_name
@@ -876,8 +1018,9 @@ async def update_subtasks(
     task_id: int,
     req: SubtaskUpdate,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     task.subtasks = req.subtasks
@@ -897,9 +1040,10 @@ async def update_intake_qa(
     task_id: int,
     req: IntakeQaUpdate,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
     """Replace the task's grill Q&A list (used by the agent during the grill phase)."""
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     task.intake_qa = req.intake_qa
@@ -912,9 +1056,10 @@ async def update_intake_qa(
 async def list_task_messages(
     task_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> list[TaskMessageData]:
     """Return all user-posted messages for a task, oldest first."""
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     result = await session.execute(
@@ -940,6 +1085,7 @@ async def post_task_message(
     task_id: int,
     req: TaskMessagePost,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
     authorization: str = Header(None),
     x_sender: str = Header(None),
 ) -> TaskMessageData:
@@ -950,7 +1096,7 @@ async def post_task_message(
     2. `X-Sender` header (used by internal callers like the Telegram bridge).
     3. Falls back to "anonymous".
     """
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
 
@@ -995,8 +1141,12 @@ async def post_task_message(
 
 
 @router.post("/tasks/{task_id}/done", response_model=TaskData)
-async def mark_task_done(task_id: int, session: AsyncSession = Depends(get_session)) -> TaskData:
-    task = await get_task(session, task_id)
+async def mark_task_done(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if task.status == TaskStatus.DONE:
@@ -1025,9 +1175,10 @@ async def add_task_message(
     task_id: int,
     req: TaskMessageRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Persist a human message in the task's history."""
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     session.add(
@@ -1047,8 +1198,9 @@ async def approve_task(
     task_id: int,
     req: ApprovalRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if task.status != TaskStatus.AWAITING_APPROVAL:
@@ -1079,8 +1231,9 @@ async def record_task_outcome(
     task_id: int,
     req: RecordOutcomeRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> OutcomeResponse:
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     outcome = await record_outcome(
@@ -1095,13 +1248,19 @@ async def record_task_outcome(
 
 
 @router.get("/feedback/summary", response_model=FeedbackSummary)
-async def feedback_summary(session: AsyncSession = Depends(get_session)) -> FeedbackSummary:
-    return await get_feedback_summary(session)
+async def feedback_summary(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> FeedbackSummary:
+    return await get_feedback_summary(session, organization_id=org_id)
 
 
 @router.get("/feedback/patterns", response_model=PatternsResponse)
-async def feedback_patterns(session: AsyncSession = Depends(get_session)) -> PatternsResponse:
-    analysis = await analyze_patterns(session)
+async def feedback_patterns(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> PatternsResponse:
+    analysis = await analyze_patterns(session, organization_id=org_id)
     return PatternsResponse(analysis=analysis)
 
 
@@ -1112,6 +1271,7 @@ async def feedback_patterns(session: AsyncSession = Depends(get_session)) -> Pat
 async def create_schedule(
     req: CreateScheduleRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> ScheduleResponse:
     schedule = ScheduledTask(
         name=req.name,
@@ -1119,6 +1279,7 @@ async def create_schedule(
         task_title=req.task_title,
         task_description=req.task_description,
         repo_name=req.repo_name,
+        organization_id=org_id,
     )
     session.add(schedule)
     await session.commit()
@@ -1127,16 +1288,30 @@ async def create_schedule(
 
 
 @router.get("/schedules", response_model=list[ScheduleResponse])
-async def list_schedules(session: AsyncSession = Depends(get_session)) -> list[ScheduleResponse]:
-    result = await session.execute(select(ScheduledTask).order_by(ScheduledTask.name))
+async def list_schedules(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[ScheduleResponse]:
+    result = await session.execute(
+        scoped(select(ScheduledTask), ScheduledTask, org_id=org_id).order_by(
+            ScheduledTask.name,
+        )
+    )
     return [_schedule_to_response(s) for s in result.scalars().all()]
 
 
 @router.delete("/schedules/{schedule_id}", response_model=DeleteResponse)
 async def delete_schedule(
-    schedule_id: int, session: AsyncSession = Depends(get_session)
+    schedule_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> DeleteResponse:
-    result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == schedule_id))
+    result = await session.execute(
+        scoped(
+            select(ScheduledTask).where(ScheduledTask.id == schedule_id),
+            ScheduledTask, org_id=org_id,
+        )
+    )
     schedule = result.scalar_one_or_none()
     if not schedule:
         raise HTTPException(404, "Schedule not found")
@@ -1147,9 +1322,16 @@ async def delete_schedule(
 
 @router.post("/schedules/{schedule_id}/toggle", response_model=ToggleResponse)
 async def toggle_schedule(
-    schedule_id: int, session: AsyncSession = Depends(get_session)
+    schedule_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> ToggleResponse:
-    result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == schedule_id))
+    result = await session.execute(
+        scoped(
+            select(ScheduledTask).where(ScheduledTask.id == schedule_id),
+            ScheduledTask, org_id=org_id,
+        )
+    )
     schedule = result.scalar_one_or_none()
     if not schedule:
         raise HTTPException(404, "Schedule not found")
@@ -1163,9 +1345,14 @@ async def toggle_schedule(
 
 @router.post("/repos", response_model=RepoResponse)
 async def register_repo(
-    req: RegisterRepoRequest, session: AsyncSession = Depends(get_session)
+    req: RegisterRepoRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> RepoResponse:
-    repo = Repo(name=req.name, url=req.url, default_branch=req.default_branch)
+    repo = Repo(
+        name=req.name, url=req.url, default_branch=req.default_branch,
+        organization_id=org_id,
+    )
     session.add(repo)
     await session.commit()
     await session.refresh(repo)
@@ -1173,8 +1360,13 @@ async def register_repo(
 
 
 @router.get("/repos", response_model=list[RepoData])
-async def list_repos(session: AsyncSession = Depends(get_session)) -> list[RepoData]:
-    result = await session.execute(select(Repo).order_by(Repo.name))
+async def list_repos(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[RepoData]:
+    result = await session.execute(
+        scoped(select(Repo), Repo, org_id=org_id).order_by(Repo.name)
+    )
     return [
         RepoData(
             id=r.id,
@@ -1196,6 +1388,7 @@ async def update_repo_branch(
     repo_name: str,
     req: dict,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Update a repo's default branch. Updates all entries matching the name
     (both short name like 'cardamon' and full name like 'org/cardamon').
@@ -1209,9 +1402,14 @@ async def update_repo_branch(
             400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
         )
 
-    # Find all repo entries that match (short name, full name with org/)
+    # Find all repo entries that match (short name, full name with org/), scoped to caller's org
     result = await session.execute(
-        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
+        scoped(
+            select(Repo).where(
+                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
+            ),
+            Repo, org_id=org_id,
+        )
     )
     repos = result.scalars().all()
     if not repos:
@@ -1236,12 +1434,18 @@ async def update_repo_branch(
 async def refresh_repo_ci_checks(
     repo_name: str,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Re-extract CI checks from a repo's workflow files."""
     from orchestrator.ci_extractor import extract_ci_checks
 
     result = await session.execute(
-        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
+        scoped(
+            select(Repo).where(
+                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
+            ),
+            Repo, org_id=org_id,
+        )
     )
     repos = result.scalars().all()
     if not repos:
@@ -1260,10 +1464,10 @@ async def update_repo_harness(
     repo_id: int,
     req: dict,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Mark a repo as harness-onboarded and store the PR URL."""
-    result = await session.execute(select(Repo).where(Repo.id == repo_id))
-    repo = result.scalar_one_or_none()
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
     if not repo:
         raise HTTPException(404, "Repo not found")
     repo.harness_onboarded = req.get("harness_onboarded", False)
@@ -1277,13 +1481,19 @@ async def trigger_harness_onboarding(
     repo_name: str,
     force: bool = False,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Trigger harness engineering onboarding for a repo. Returns immediately.
 
     Pass ?force=true to re-onboard a repo that was already onboarded.
     """
     result = await session.execute(
-        select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}")))
+        scoped(
+            select(Repo).where(
+                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
+            ),
+            Repo, org_id=org_id,
+        )
     )
     repo = result.scalars().first()
     if not repo:
@@ -1306,8 +1516,14 @@ async def trigger_harness_onboarding(
 
 @router.get("/tasks/{task_id}/history")
 async def get_task_history(
-    task_id: int, session: AsyncSession = Depends(get_session)
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> list[dict]:
+    # Scope by joining through the parent Task to enforce org boundary.
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
     result = await session.execute(
         select(TaskHistory)
         .where(TaskHistory.task_id == task_id)
@@ -1329,9 +1545,9 @@ async def update_repo_summary(
     repo_id: int,
     req: dict,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
-    result = await session.execute(select(Repo).where(Repo.id == repo_id))
-    repo = result.scalar_one_or_none()
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
     if not repo:
         raise HTTPException(404, "Repo not found")
     repo.summary = req.get("summary", "")
@@ -1341,9 +1557,13 @@ async def update_repo_summary(
 
 
 @router.delete("/repos/{repo_name}")
-async def delete_repo(repo_name: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def delete_repo(
+    repo_name: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
     """Remove a repo and its associated FreeformConfig + pending suggestions."""
-    repo = await _get_repo_by_name(session, repo_name)
+    repo = await _get_repo_in_org(session, name=repo_name, org_id=org_id)
     if not repo:
         raise HTTPException(404, f"Repo '{repo_name}' not found")
 
@@ -1421,16 +1641,22 @@ class FreeformConfigRequest(BaseModel):
 async def upsert_freeform_config(
     req: FreeformConfigRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> FreeformConfigData:
     """Enable or update freeform mode for a repo."""
-    repo = await _get_repo_by_name(session, req.repo_name)
+    repo = await _get_repo_in_org(session, name=req.repo_name, org_id=org_id)
     if not repo:
         raise HTTPException(404, f"Repo '{req.repo_name}' not found")
 
     # Default prod_branch to the repo's default branch if caller didn't specify
     prod_branch = req.prod_branch or repo.default_branch or "main"
 
-    result = await session.execute(select(FreeformConfig).where(FreeformConfig.repo_id == repo.id))
+    result = await session.execute(
+        scoped(
+            select(FreeformConfig).where(FreeformConfig.repo_id == repo.id),
+            FreeformConfig, org_id=org_id,
+        )
+    )
     config = result.scalar_one_or_none()
     if config:
         config.enabled = req.enabled
@@ -1454,6 +1680,7 @@ async def upsert_freeform_config(
             po_goal=req.po_goal,
             architecture_mode=req.architecture_mode,
             architecture_cron=req.architecture_cron,
+            organization_id=org_id,
         )
         session.add(config)
     await session.commit()
@@ -1464,12 +1691,19 @@ async def upsert_freeform_config(
 @router.get("/freeform/config", response_model=list[FreeformConfigData])
 async def list_freeform_configs(
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> list[FreeformConfigData]:
-    result = await session.execute(select(FreeformConfig))
+    result = await session.execute(
+        scoped(select(FreeformConfig), FreeformConfig, org_id=org_id)
+    )
     configs = result.scalars().all()
     out = []
     for c in configs:
-        repo_result = await session.execute(select(Repo).where(Repo.id == c.repo_id))
+        repo_result = await session.execute(
+            scoped(
+                select(Repo).where(Repo.id == c.repo_id), Repo, org_id=org_id,
+            )
+        )
         repo = repo_result.scalar_one_or_none()
         out.append(_freeform_config_to_response(c, repo.name if repo else None))
     return out
@@ -1479,8 +1713,14 @@ async def list_freeform_configs(
 async def delete_freeform_config(
     config_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
-    result = await session.execute(select(FreeformConfig).where(FreeformConfig.id == config_id))
+    result = await session.execute(
+        scoped(
+            select(FreeformConfig).where(FreeformConfig.id == config_id),
+            FreeformConfig, org_id=org_id,
+        )
+    )
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(404, "Config not found")
@@ -1517,10 +1757,12 @@ async def create_repo_from_description(
         raise HTTPException(400, "description is required")
 
     user_id: int | None = None
+    caller_org_id: int | None = None
     if auto_agent_session or authorization:
         try:
             payload = _verify_cookie_or_header(auto_agent_session, authorization)
             user_id = payload.get("user_id")
+            caller_org_id = payload.get("current_org_id")
         except HTTPException:
             user_id = None
 
@@ -1532,6 +1774,7 @@ async def create_repo_from_description(
             private=req.private,
             loop=req.loop,
             user_id=user_id,
+            organization_id=caller_org_id,
         )
     except CreateRepoError as e:
         raise HTTPException(400, str(e))
@@ -1551,9 +1794,10 @@ async def create_repo_from_description(
 async def trigger_po_analysis(
     repo_name: str,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Manually trigger a PO analysis for a repo."""
-    repo = await _get_repo_by_name(session, repo_name)
+    repo = await _get_repo_in_org(session, name=repo_name, org_id=org_id)
     if not repo:
         raise HTTPException(404, f"Repo '{repo_name}' not found")
 
@@ -1566,12 +1810,15 @@ async def list_suggestions(
     status: str | None = None,
     repo_name: str | None = None,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> list[SuggestionData]:
-    query = select(Suggestion).order_by(Suggestion.created_at.desc()).limit(100)
+    query = scoped(select(Suggestion), Suggestion, org_id=org_id).order_by(
+        Suggestion.created_at.desc(),
+    ).limit(100)
     if status:
         query = query.where(Suggestion.status == status)
     if repo_name:
-        repo = await _get_repo_by_name(session, repo_name)
+        repo = await _get_repo_in_org(session, name=repo_name, org_id=org_id)
         if repo:
             query = query.where(Suggestion.repo_id == repo.id)
     result = await session.execute(query)
@@ -1583,9 +1830,15 @@ async def list_suggestions(
 async def approve_suggestion(
     suggestion_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
     """Approve a suggestion — creates a freeform task."""
-    result = await session.execute(select(Suggestion).where(Suggestion.id == suggestion_id))
+    result = await session.execute(
+        scoped(
+            select(Suggestion).where(Suggestion.id == suggestion_id),
+            Suggestion, org_id=org_id,
+        )
+    )
     suggestion = result.scalar_one_or_none()
     if not suggestion:
         raise HTTPException(404, "Suggestion not found")
@@ -1603,6 +1856,7 @@ async def approve_suggestion(
         repo_id=suggestion.repo_id,
         freeform_mode=True,
         intake_qa=intake_qa_for_suggestion(suggestion.category),
+        organization_id=org_id,
     )
     session.add(task)
     await session.flush()
@@ -1621,8 +1875,14 @@ async def approve_suggestion(
 async def reject_suggestion(
     suggestion_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
-    result = await session.execute(select(Suggestion).where(Suggestion.id == suggestion_id))
+    result = await session.execute(
+        scoped(
+            select(Suggestion).where(Suggestion.id == suggestion_id),
+            Suggestion, org_id=org_id,
+        )
+    )
     suggestion = result.scalar_one_or_none()
     if not suggestion:
         raise HTTPException(404, "Suggestion not found")
@@ -1635,9 +1895,10 @@ async def reject_suggestion(
 async def promote_task(
     task_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Promote a completed freeform task's changes from dev to main."""
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if not task.freeform_mode:
@@ -1661,9 +1922,10 @@ async def promote_task(
 async def revert_task(
     task_id: int,
     session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
 ) -> dict:
     """Revert a freeform task's changes from the dev branch."""
-    task = await get_task(session, task_id)
+    task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if not task.freeform_mode:
@@ -1756,6 +2018,7 @@ def _task_to_response(task: Task) -> TaskData:
         intake_qa=task.intake_qa,
         created_at=task.created_at.isoformat() if task.created_at else None,
         created_by_user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
     )
 
 

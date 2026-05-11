@@ -44,7 +44,11 @@ log = setup_logging("agent.lifecycle.review")
 
 
 async def find_existing_pr_url(
-    workspace: str, head_branch: str, *, user_id: int | None = None,
+    workspace: str,
+    head_branch: str,
+    *,
+    user_id: int | None = None,
+    organization_id: int | None = None,
 ) -> str | None:
     """Return the URL of an existing open PR for `head_branch`, or None.
 
@@ -64,7 +68,9 @@ async def find_existing_pr_url(
         ["gh", "pr", "list", "--head", head_branch, "--state", "open", "--json", "url,state"],
         cwd=workspace,
         timeout=20,
-        env={"GH_TOKEN": await get_github_token(user_id=user_id)},
+        env={"GH_TOKEN": await get_github_token(
+            user_id=user_id, organization_id=organization_id,
+        )},
     )
     if result.failed:
         return None
@@ -88,11 +94,15 @@ async def create_pr(
     head_branch: str,
     *,
     user_id: int | None = None,
+    organization_id: int | None = None,
 ) -> str:
     """Create a PR using the gh CLI, or return the existing one if the branch
     already has an open PR. Idempotent — safe to call after pushing new
     commits to a branch with an existing PR."""
-    existing = await find_existing_pr_url(workspace, head_branch, user_id=user_id)
+    existing = await find_existing_pr_url(
+        workspace, head_branch,
+        user_id=user_id, organization_id=organization_id,
+    )
     if existing:
         log.info(f"PR already exists for {head_branch}, reusing: {existing}")
         return existing
@@ -109,7 +119,9 @@ async def create_pr(
         ],
         cwd=workspace,
         timeout=30,
-        env={"GH_TOKEN": await get_github_token(user_id=user_id)},
+        env={"GH_TOKEN": await get_github_token(
+            user_id=user_id, organization_id=organization_id,
+        )},
     )
     if result.failed:
         raise RuntimeError(
@@ -146,6 +158,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         repo.url, task_id, base_branch,
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
     )
 
     try:
@@ -360,7 +373,9 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     if task.status in ("awaiting_review", "awaiting_ci"):
         await transition_task(task_id, "coding", f"Addressing feedback: {comments[:200]}")
     workspace = await clone_repo(
-        repo.url, task_id, base_branch, user_id=task.created_by_user_id,
+        repo.url, task_id, base_branch,
+        user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
     )
 
     try:

@@ -56,23 +56,36 @@ async def record_outcome(
     return outcome
 
 
-async def get_recent_outcomes(session: AsyncSession, limit: int = 20) -> list[TaskOutcome]:
-    result = await session.execute(
-        select(TaskOutcome)
-        .order_by(TaskOutcome.created_at.desc())
-        .limit(limit)
-    )
+async def get_recent_outcomes(
+    session: AsyncSession,
+    limit: int = 20,
+    *,
+    organization_id: int | None = None,
+) -> list[TaskOutcome]:
+    q = select(TaskOutcome).order_by(TaskOutcome.created_at.desc()).limit(limit)
+    if organization_id is not None:
+        q = q.join(Task, TaskOutcome.task_id == Task.id).where(
+            Task.organization_id == organization_id,
+        )
+    result = await session.execute(q)
     return list(result.scalars().all())
 
 
-async def get_feedback_summary(session: AsyncSession) -> FeedbackSummary:
-    result = await session.execute(
-        select(
-            func.count(TaskOutcome.id),
-            func.sum(func.cast(TaskOutcome.pr_approved == True, int)),
-            func.avg(TaskOutcome.review_rounds),
-        )
+async def get_feedback_summary(
+    session: AsyncSession,
+    *,
+    organization_id: int | None = None,
+) -> FeedbackSummary:
+    q = select(
+        func.count(TaskOutcome.id),
+        func.sum(func.cast(TaskOutcome.pr_approved == True, int)),
+        func.avg(TaskOutcome.review_rounds),
     )
+    if organization_id is not None:
+        q = q.select_from(TaskOutcome).join(
+            Task, TaskOutcome.task_id == Task.id,
+        ).where(Task.organization_id == organization_id)
+    result = await session.execute(q)
     row = result.one()
     total: int = row[0] or 0
     approved: int = row[1] or 0
@@ -86,9 +99,15 @@ async def get_feedback_summary(session: AsyncSession) -> FeedbackSummary:
     )
 
 
-async def analyze_patterns(session: AsyncSession) -> str:
+async def analyze_patterns(
+    session: AsyncSession,
+    *,
+    organization_id: int | None = None,
+) -> str:
     """Return a text summary of recent PR outcomes for the /feedback/patterns endpoint."""
-    outcomes = await get_recent_outcomes(session, limit=20)
+    outcomes = await get_recent_outcomes(
+        session, limit=20, organization_id=organization_id,
+    )
     if len(outcomes) < 3:
         return "Not enough data yet (need at least 3 completed tasks)."
 

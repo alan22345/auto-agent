@@ -60,17 +60,17 @@ class TestTerminalStatuses:
 
 class TestDeleteRepoEndpoint:
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_not_found(self, mock_get_repo):
         mock_get_repo.return_value = None
         session = AsyncMock(spec=AsyncSession)
 
         with pytest.raises(HTTPException) as exc_info:
-            await delete_repo("nonexistent", session)
+            await delete_repo("nonexistent", session, org_id=1)
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_active_task_blocks_deletion(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
@@ -83,7 +83,7 @@ class TestDeleteRepoEndpoint:
         session.execute.return_value = mock_result
 
         with pytest.raises(HTTPException) as exc_info:
-            await delete_repo("test-repo", session)
+            await delete_repo("test-repo", session, org_id=1)
         assert exc_info.value.status_code == 409
         assert "1 active task(s)" in exc_info.value.detail
 
@@ -93,7 +93,7 @@ class TestDeleteRepoEndpoint:
         assert publisher.events == []
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_successful_delete(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
@@ -109,7 +109,7 @@ class TestDeleteRepoEndpoint:
             None,         # update tasks (orphan)
         ]
 
-        result = await delete_repo("test-repo", session)
+        result = await delete_repo("test-repo", session, org_id=1)
 
         assert result == {"deleted": "test-repo"}
         session.delete.assert_called_once_with(repo)
@@ -118,7 +118,7 @@ class TestDeleteRepoEndpoint:
         assert session.execute.call_count == 4
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_blocked_task_allows_deletion(self, mock_get_repo, publisher):
         """BLOCKED tasks should not prevent repo deletion."""
         repo = _make_repo()
@@ -130,11 +130,11 @@ class TestDeleteRepoEndpoint:
         mock_result.scalars.return_value.all.return_value = []
         session.execute.side_effect = [mock_result, None, None, None]
 
-        result = await delete_repo("test-repo", session)
+        result = await delete_repo("test-repo", session, org_id=1)
         assert result == {"deleted": "test-repo"}
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_publishes_event(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
@@ -144,7 +144,7 @@ class TestDeleteRepoEndpoint:
         mock_result.scalars.return_value.all.return_value = []
         session.execute.side_effect = [mock_result, None, None, None]
 
-        await delete_repo("test-repo", session)
+        await delete_repo("test-repo", session, org_id=1)
 
         assert len(publisher.events) == 1
         ev = publisher.events[0]
@@ -152,7 +152,7 @@ class TestDeleteRepoEndpoint:
         assert ev.payload == {"repo_name": "test-repo"}
 
     @pytest.mark.asyncio
-    @patch("orchestrator.router._get_repo_by_name", new_callable=AsyncMock)
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
     async def test_multiple_active_tasks_reports_count(self, mock_get_repo, publisher):
         repo = _make_repo()
         mock_get_repo.return_value = repo
@@ -164,5 +164,5 @@ class TestDeleteRepoEndpoint:
         session.execute.return_value = mock_result
 
         with pytest.raises(HTTPException) as exc_info:
-            await delete_repo("test-repo", session)
+            await delete_repo("test-repo", session, org_id=1)
         assert "3 active task(s)" in exc_info.value.detail
