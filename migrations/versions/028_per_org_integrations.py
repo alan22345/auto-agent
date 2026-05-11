@@ -16,16 +16,21 @@ Create Date: 2026-05-11
 
 from __future__ import annotations
 
+from typing import Sequence, Union
+
 import sqlalchemy as sa
 from alembic import op
 
-revision = "028"
-down_revision = "027"
-branch_labels = None
-depends_on = None
+
+revision: str = "028"
+down_revision: Union[str, None] = "027"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
     op.create_table(
         "slack_installations",
         sa.Column("org_id", sa.Integer(), nullable=False),
