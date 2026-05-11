@@ -26,6 +26,7 @@ dependencies = [
     "PyJWT>=2.8.0",
     "team-memory",
     "psycopg2-binary>=2.9.12",
+    "ptyprocess>=0.7.0",
 ]
 
 [dependency-groups]

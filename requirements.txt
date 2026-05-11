@@ -14,6 +14,7 @@ redis[hiredis]==5.2.1
 
 # Slack
 slack-bolt==1.22.0
+aiohttp>=3.10  # required by slack-bolt's async Socket Mode adapter
 
 # Linear (GraphQL)
 httpx==0.28.1
@@ -28,6 +29,7 @@ PyJWT>=2.8.0
 # Utilities
 python-dotenv==1.0.1
 structlog==24.4.0
+ptyprocess>=0.7.0
 
 # LLM providers — Anthropic SDK with Bedrock + native Anthropic support
 anthropic[bedrock]>=0.88.0

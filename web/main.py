@@ -1,4 +1,11 @@
-"""Web chat interface for auto-agent — serves on localhost:2020."""
+"""WebSocket + memory-tab handlers backing the Next.js UI on port 3000.
+
+Historically this module also served the legacy SPA at ``web/static/index.html``
+on port 2020. That UI has been decommissioned — the WS endpoint and the
+memory-upload endpoint are the only pieces still in use. Everything is now
+mounted into ``run.py``'s FastAPI app; the local ``app`` here exists only so
+unit tests can import individual handlers in isolation.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +15,8 @@ import time as _time
 import uuid as _uuid
 from dataclasses import dataclass, field
 from io import BytesIO as _BytesIO
-from pathlib import Path
 
 import httpx
-import uvicorn
 from fastapi import (
     Depends,
     FastAPI,
@@ -22,8 +27,6 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 
 from agent.memory_extractor import extract
 from shared.config import settings
@@ -53,10 +56,10 @@ ORCHESTRATOR_URL = settings.orchestrator_url
 BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
 
 app = FastAPI(title="Auto-Agent Chat")
-
-# Serve static files
-STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Note: this module's standalone `app` is only used by tests that want the
+# WS handlers in isolation. The production process is run.py. The legacy
+# static SPA serving has been removed — the active frontend is web-next on
+# port 3000.
 
 # Connected websocket clients: ws -> {"user_id": int, "username": str}
 connected_clients: dict[WebSocket, dict] = {}
@@ -146,12 +149,6 @@ async def broadcast(message: dict) -> None:
             dead.add(ws)
     for ws in dead:
         connected_clients.pop(ws, None)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    html = (STATIC_DIR / "index.html").read_text()
-    return HTMLResponse(html)
 
 
 @app.websocket("/ws")
@@ -539,6 +536,7 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
     analysis_cron = data.get("analysis_cron") or "0 9 * * 1"
     auto_approve_suggestions = data.get("auto_approve_suggestions", False)
     auto_start_tasks = data.get("auto_start_tasks", False)
+    po_goal = data.get("po_goal") or None
     architecture_mode = data.get("architecture_mode", False)
     architecture_cron = data.get("architecture_cron") or "0 9 * * 1"
     if not repo_name:
@@ -554,6 +552,7 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
                 "analysis_cron": analysis_cron,
                 "auto_approve_suggestions": auto_approve_suggestions,
                 "auto_start_tasks": auto_start_tasks,
+                "po_goal": po_goal,
                 "architecture_mode": architecture_mode,
                 "architecture_cron": architecture_cron,
             },
@@ -1005,5 +1004,5 @@ async def startup() -> None:
     asyncio.create_task(_memory_sessions_sweeper())
 
 
-if __name__ == "__main__":
-    uvicorn.run("web.main:app", host="0.0.0.0", port=2020, reload=True)
+# The legacy ``python -m web.main`` entrypoint has been removed.
+# Run ``python run.py`` (FastAPI on :2020) and the Next.js frontend on :3000.

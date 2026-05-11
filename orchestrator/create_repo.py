@@ -83,10 +83,15 @@ async def _generate_name_via_claude(description: str) -> str:
     return name
 
 
-async def _resolve_owner(client: httpx.AsyncClient, override: str = "") -> tuple[str, bool]:
+async def _resolve_owner(
+    client: httpx.AsyncClient, override: str = "",
+    *, user_id: int | None = None,
+) -> tuple[str, bool]:
     """Return (owner_login, is_org). Tries override → settings → GET /user."""
+    from shared.github_auth import get_github_token
+
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {await get_github_token(user_id=user_id)}",
         "Accept": "application/vnd.github+json",
     }
     candidate = override or settings.github_owner
@@ -114,9 +119,13 @@ async def _create_github_repo(
     owner: str,
     is_org: bool,
     private: bool,
+    *,
+    user_id: int | None = None,
 ) -> dict:
+    from shared.github_auth import get_github_token
+
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {await get_github_token(user_id=user_id)}",
         "Accept": "application/vnd.github+json",
     }
     url = f"{GITHUB_API}/orgs/{owner}/repos" if is_org else f"{GITHUB_API}/user/repos"
@@ -150,10 +159,18 @@ async def create_repo_and_scaffold_task(
     org_override: str = "",
     private: bool = True,
     loop: bool = True,
+    *,
+    user_id: int | None = None,
 ) -> tuple[Repo, Task]:
     """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task."""
-    if not settings.github_token:
-        raise CreateRepoError("GITHUB_TOKEN is not set.")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token(user_id=user_id):
+        raise CreateRepoError(
+            "No GitHub auth configured — set GITHUB_TOKEN, or configure a "
+            "GitHub App via GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + "
+            "GITHUB_APP_INSTALLATION_ID."
+        )
 
     description = description.strip()
     if not description:
@@ -165,11 +182,14 @@ async def create_repo_and_scaffold_task(
 
     async with httpx.AsyncClient(timeout=30) as client:
         # 2. Resolve owner
-        owner, is_org = await _resolve_owner(client, org_override)
+        owner, is_org = await _resolve_owner(client, org_override, user_id=user_id)
         log.info(f"Creating repo {owner}/{name} (is_org={is_org}, private={private})")
 
         # 3. Create on GitHub
-        gh_repo = await _create_github_repo(client, name, description, owner, is_org, private)
+        gh_repo = await _create_github_repo(
+            client, name, description, owner, is_org, private,
+            user_id=user_id,
+        )
 
     full_name = gh_repo["full_name"]
     clone_url = gh_repo["clone_url"]

@@ -25,8 +25,17 @@ def check_all() -> None:
     if not shutil.which("git"):
         errors.append("git is not installed")
 
-    if not settings.github_token:
-        errors.append("GITHUB_TOKEN is not set")
+    has_app = (
+        settings.github_app_id
+        and settings.github_app_private_key
+        and settings.github_app_installation_id
+    )
+    if not settings.github_token and not has_app:
+        errors.append(
+            "No GitHub auth configured — set GITHUB_TOKEN, or configure a "
+            "GitHub App via GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + "
+            "GITHUB_APP_INSTALLATION_ID."
+        )
 
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         warnings.append("Telegram not configured — no notifications will be sent")
@@ -97,10 +106,19 @@ def _check_claude_code(errors: list[str], warnings: list[str]) -> None:
         )
         output = (result.stdout + result.stderr).strip()
 
+        # Per-user OAuth pairing (Phase 0+) is the canonical path — each user
+        # pairs their own Claude into /data/users/{id}/.claude. The host-level
+        # `claude auth status` is only meaningful for the optional shared
+        # fallback (settings.fallback_claude_user_id). On macOS the host's
+        # auth lives in the Keychain and can't be bind-mounted into a Linux
+        # container at all, so a "not authenticated" reading there is normal
+        # in dev. Downgrade to a warning so the container can boot; tasks
+        # without a paired user will still surface BLOCKED_ON_AUTH at runtime.
         if result.returncode != 0:
-            errors.append(
-                "Claude Code is not authenticated.\n"
-                "           Run `./scripts/auth.sh` on the host — tokens are bind-mounted into the container."
+            warnings.append(
+                "Claude Code (host-level) is not authenticated. "
+                "Per-user pairing via /settings/claude is the production path; "
+                "this check only matters if you want a shared/fallback Claude."
             )
         elif "max" in output.lower() or "pro" in output.lower() or "email" in output.lower():
             pass

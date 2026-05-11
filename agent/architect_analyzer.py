@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from croniter import croniter
 from sqlalchemy import select
 
+from agent.context.memory import remember_priority_suggestion
 from agent.llm.structured import parse_json_response
 from agent.prompts import build_architecture_analysis_prompt
 from agent.workspace import clone_repo
@@ -137,7 +138,17 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
 
     log.info(f"Running architecture analysis for repo '{repo.name}'")
     try:
-        agent = create_agent(workspace, readonly=True, max_turns=30, include_methodology=True)
+        agent = create_agent(
+            workspace,
+            readonly=True,
+            max_turns=30,
+            include_methodology=True,
+            task_description=(
+                f"Architectural deepening review of {repo.name}: identify "
+                "modules that should be deepened, merged, or split."
+            ),
+            repo_name=repo.name,
+        )
         result = await agent.run(prompt)
         output = result.output
     except Exception:
@@ -169,6 +180,16 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
             status=SuggestionStatus.PENDING,
         )
         session.add(suggestion)
+        # Promote high-priority deepenings into the shared knowledge graph so
+        # the next agent working in this repo sees the known seams + smells.
+        await remember_priority_suggestion(
+            repo_name=repo.name,
+            title=suggestion.title,
+            rationale=suggestion.rationale,
+            priority=suggestion.priority,
+            category="architecture deepening",
+            source="architect-analyzer",
+        )
 
     knowledge_update = suggestions_data.get("architecture_knowledge_update")
     if knowledge_update:

@@ -17,13 +17,11 @@ import asyncio
 import contextlib
 import re as _re
 from datetime import datetime, timezone
-from pathlib import Path
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from sqlalchemy import select as sa_select
 
 from agent.architect_analyzer import run_architecture_loop
@@ -37,7 +35,7 @@ from integrations.telegram.main import (
 )
 from orchestrator.classifier import classify_task
 from orchestrator.metrics import router as metrics_router
-from orchestrator.queue import can_start, next_queued_task
+from orchestrator.queue import can_start_task, next_eligible_task
 from orchestrator.repo_sync import match_repo, sync_repos
 from orchestrator.router import router as api_router
 from orchestrator.scheduler import run_scheduler
@@ -82,6 +80,7 @@ from shared.models import (
     TaskHistory,
     TaskSource,
     TaskStatus,
+    User,
     intake_qa_for_suggestion,
 )
 from shared.notifier import send_telegram
@@ -114,6 +113,22 @@ log = setup_logging("auto-agent")
 app = FastAPI(title="Auto-Agent", version="0.1.0")
 
 
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    import traceback as _tb
+
+    import structlog
+
+    structlog.get_logger().error(
+        "unhandled_exception",
+        path=str(request.url.path),
+        method=request.method,
+        error=str(exc),
+        traceback=_tb.format_exc(),
+    )
+    return Response(status_code=500, content=f"internal server error: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Auth middleware
 #
@@ -125,8 +140,15 @@ app = FastAPI(title="Auto-Agent", version="0.1.0")
 #   - Loopback requests from inside the same container
 # ---------------------------------------------------------------------------
 
-_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/api/auth/logout", "/static/")
-_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login", "/api/auth/logout")
+_AUTH_EXEMPT_PREFIXES = (
+    "/health",
+    "/api/webhooks/",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/signup",
+    "/api/auth/verify/",
+)
+_AUTH_EXEMPT_EXACT = ("/api/auth/login", "/api/auth/logout", "/api/auth/signup")
 
 
 def _is_auth_exempt(path: str) -> bool:
@@ -177,20 +199,31 @@ app.include_router(search_router, prefix="/api")
 app.include_router(github_webhook_router, prefix="/api")
 app.include_router(linear_webhook_router, prefix="/api")
 
-# Static files for web UI
-STATIC_DIR = Path(__file__).parent / "web" / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# The legacy SPA at /static/index.html has been decommissioned.
+# The active frontend is the Next.js app on port 3000 (web-next/), which
+# proxies /api and /ws back to this FastAPI process. Anyone hitting :2020
+# directly is an API consumer; / returns a small JSON pointer instead of
+# 404'ing silently.
 
 
-@app.get("/", response_class=HTMLResponse)
-async def root() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text())
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "service": "auto-agent",
+        "ui": "http://localhost:3000",
+        "docs": "/docs",
+    }
 
 
 @app.websocket("/ws")
 async def ws_proxy(ws: WebSocket) -> None:
     # JWT auth is handled inside websocket_endpoint (via ?token= query param)
     await websocket_endpoint(ws)
+
+
+# Pairing now happens entirely over HTTP (the OAuth handshake is driven by
+# orchestrator.claude_pairing). The /ws/claude/pair/{id} endpoint is no
+# longer needed and has been removed.
 
 
 @app.get("/health")
@@ -268,7 +301,54 @@ async def on_task_classified(event: Event) -> None:
             if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
-        if force_start or await can_start(session, task.complexity):
+        # Dispatch-time auth probe — probe whichever vault will actually be
+        # used (owner's if paired, otherwise fallback's). If the probe fails
+        # AND the failure is on the owner's own vault, mark them expired and
+        # park. If the failure is on the fallback's vault, park too — the
+        # admin needs to reconnect.
+        if (
+            task.created_by_user_id is not None
+            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
+        ):
+            from sqlalchemy import update as _u
+            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
+
+            home = await resolve_home_dir(task.created_by_user_id)
+            if home is None:
+                # No paired credential and no fallback configured.
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Connect your Claude account to run this task",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                return
+            status = await probe_credentials(home)
+            if status == "expired":
+                # Only flag the owner's status when probing their OWN vault.
+                user_q = await session.execute(
+                    sa_select(User).where(User.id == task.created_by_user_id)
+                )
+                owner = user_q.scalar_one_or_none()
+                if owner is not None and owner.claude_auth_status == "paired":
+                    await session.execute(
+                        _u(User)
+                        .where(User.id == task.created_by_user_id)
+                        .values(claude_auth_status="expired")
+                    )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — reconnect to resume",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                return
+
+        if force_start or await can_start_task(session, task):
             if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
                 task = await transition(session, task, TaskStatus.QUEUED)
                 task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
@@ -552,7 +632,10 @@ async def on_ci_failed(event: Event) -> None:
 
         # Fetch actual failure logs if we have a PR URL
         if task.pr_url:
-            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            from shared.github_auth import get_github_token as _gh_token
+            ci_logs = await _fetch_failed_ci_logs(
+                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
+            )
             reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
 
         task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
@@ -653,7 +736,10 @@ async def on_dev_deploy_failed(event: Event) -> None:
 
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
-            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            from shared.github_auth import get_github_token as _gh_token
+            ci_logs = await _fetch_failed_ci_logs(
+                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
+            )
             # If GH had no failed check runs to surface (typical for repos
             # without GitHub Actions — the deploy failure happened in the
             # auto-agent's own deploy script), fall back to whatever short
@@ -914,38 +1000,81 @@ async def on_task_finished(event: Event) -> None:
 
 
 async def _try_start_queued(session) -> None:
-    for complexity in TaskComplexity:
-        if await can_start(session, complexity):
-            task = await next_queued_task(session, complexity)
-            if not task:
+    """Start as many queued tasks as fit in the global pool with per-repo cap."""
+    while True:
+        task = await next_eligible_task(session)
+        if task is None:
+            return
+
+        # Respect freeform toggle: if the task is freeform but the repo's
+        # freeform config is now disabled, skip and stop the loop — re-enabled
+        # freeform will trigger another start attempt later.
+        if task.freeform_mode and task.repo_id:
+            from sqlalchemy import select as _sel
+            cfg_result = await session.execute(
+                _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
+            )
+            cfg = cfg_result.scalar_one_or_none()
+            if not cfg or not cfg.enabled:
+                log.info(
+                    f"Skipping freeform task #{task.id}: repo freeform is disabled"
+                )
+                return
+
+        # Dispatch-time auth probe — same gate as on_task_classified, but
+        # uses `continue` here so the queue scanner moves on to other tasks.
+        if (
+            task.created_by_user_id is not None
+            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
+        ):
+            from sqlalchemy import update as _u
+            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
+
+            home = await resolve_home_dir(task.created_by_user_id)
+            if home is None:
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Connect your Claude account to run this task",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
+                continue
+            status = await probe_credentials(home)
+            if status == "expired":
+                user_q = await session.execute(
+                    sa_select(User).where(User.id == task.created_by_user_id)
+                )
+                owner = user_q.scalar_one_or_none()
+                if owner is not None and owner.claude_auth_status == "paired":
+                    await session.execute(
+                        _u(User)
+                        .where(User.id == task.created_by_user_id)
+                        .values(claude_auth_status="expired")
+                    )
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.BLOCKED_ON_AUTH,
+                    "Claude credentials expired — reconnect to resume",
+                )
+                await session.commit()
+                await publish(Event(type="claude_auth_required", task_id=task.id))
                 continue
 
-            # Respect freeform toggle: if the task is freeform but the repo's
-            # freeform config is now disabled, skip it — the user turned it off
-            # and expects no more freeform tasks to run. The task stays QUEUED
-            # and will start if freeform is re-enabled later.
-            if task.freeform_mode and task.repo_id:
-                from sqlalchemy import select as _sel
-                cfg_result = await session.execute(
-                    _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
-                )
-                cfg = cfg_result.scalar_one_or_none()
-                if not cfg or not cfg.enabled:
-                    log.info(
-                        f"Skipping freeform task #{task.id}: repo freeform is disabled"
-                    )
-                    continue
-
-            if complexity == TaskComplexity.COMPLEX:
-                task = await transition(session, task, TaskStatus.PLANNING, "Slot opened, starting planning")
-            else:
-                task = await transition(session, task, TaskStatus.CODING, "Slot opened, starting coding")
+        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+            task = await transition(
+                session, task, TaskStatus.PLANNING, "Slot opened, starting planning"
+            )
             await session.commit()
-
-            if complexity == TaskComplexity.COMPLEX:
-                await publish(task_start_planning(task.id))
-            else:
-                await publish(task_start_coding(task.id))
+            await publish(task_start_planning(task.id))
+        else:
+            task = await transition(
+                session, task, TaskStatus.CODING, "Slot opened, starting coding"
+            )
+            await session.commit()
+            await publish(task_start_coding(task.id))
 
 
 async def on_start_queued_task(event: Event) -> None:
@@ -955,7 +1084,7 @@ async def on_start_queued_task(event: Event) -> None:
         if not task or task.status != TaskStatus.QUEUED:
             return
 
-        if not await can_start(session, task.complexity):
+        if not await can_start_task(session, task):
             log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
             return
 
@@ -987,19 +1116,23 @@ def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
     return parts[-4], parts[-3], parts[-1]
 
 
-async def _fetch_pr_state(pr_url: str) -> dict | None:
+async def _fetch_pr_state(
+    pr_url: str, *, user_id: int | None = None,
+) -> dict | None:
     """Fetch a PR's mergeable + mergeable_state from GitHub.
 
     GitHub computes `mergeable` async — the first GET after a push may return
     `None` / `"unknown"`. We retry briefly to give it time to settle. Returns
     the PR JSON dict on success, or None on hard failure.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=user_id)
+    if not token:
         return None
     owner, repo, num = _parse_pr_url(pr_url)
     headers = {
-        "Authorization": f"token {_settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{num}"
@@ -1058,14 +1191,17 @@ async def _auto_merge_pr(task: Task) -> str:
                                Caller should fall through to manual review.
         FAILED               — Merge attempt failed for any other reason.
     """
-    from shared.config import settings as _settings
-    if not task.pr_url or not _settings.github_token:
+    from shared.github_auth import get_github_token
+
+    user_id = getattr(task, "created_by_user_id", None)
+    gh_token = await get_github_token(user_id=user_id)
+    if not task.pr_url or not gh_token:
         log.warning(f"Cannot auto-merge task #{task.id}: no PR URL or GitHub token")
         return MERGE_OUTCOME_FAILED
 
     # Pre-emptive mergeable check. Skip the dispatch if we've already tried
     # resolving this PR's conflicts once — one retry is the policy.
-    pr_state = await _fetch_pr_state(task.pr_url)
+    pr_state = await _fetch_pr_state(task.pr_url, user_id=user_id)
     if pr_state is not None:
         ms = pr_state.get("mergeable_state") or "unknown"
         if ms == "dirty":
@@ -1087,7 +1223,7 @@ async def _auto_merge_pr(task: Task) -> str:
             resp = await client.put(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
                 headers={
-                    "Authorization": f"token {_settings.github_token}",
+                    "Authorization": f"token {gh_token}",
                     "Accept": "application/vnd.github.v3+json",
                 },
                 json={"merge_method": "squash"},
@@ -1264,9 +1400,10 @@ async def ci_status_poller() -> None:
     reach the server. Checks the combined commit status and check runs
     for the PR's head branch.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("CI poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("CI poller: no GitHub auth configured, skipping")
         return
 
     log.info("CI status poller started")
@@ -1279,20 +1416,21 @@ async def ci_status_poller() -> None:
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_CI)
                 )
                 tasks_awaiting = result.scalars().all()
+                gh_token = await get_github_token()
 
                 for task in tasks_awaiting:
                     if not task.pr_url:
                         continue
 
                     try:
-                        conclusion = await _check_pr_ci_status(task.pr_url, _settings.github_token)
+                        conclusion = await _check_pr_ci_status(task.pr_url, gh_token)
                     except Exception:
                         log.exception(f"CI poll failed for task #{task.id}")
                         continue
 
                     if conclusion is None:
                         # CI still running or no checks found — check if repo has no CI at all
-                        no_ci = await _pr_has_no_checks(task.pr_url, _settings.github_token)
+                        no_ci = await _pr_has_no_checks(task.pr_url, gh_token)
                         if no_ci:
                             log.info(f"Task #{task.id}: no CI checks on PR, skipping to review")
                             await publish(task_ci_passed(task.id))
@@ -1428,9 +1566,10 @@ async def pr_merge_poller() -> None:
 
     Uses exponential backoff per task, starting at 30s and maxing out at 10 min.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("PR merge poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("PR merge poller: no GitHub auth configured, skipping")
         return
 
     import time
@@ -1440,6 +1579,7 @@ async def pr_merge_poller() -> None:
         try:
             now = time.monotonic()
             async with async_session() as session:
+                gh_token = await get_github_token()
                 from sqlalchemy import select as sa_select
                 result = await session.execute(
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_REVIEW)
@@ -1471,7 +1611,7 @@ async def pr_merge_poller() -> None:
                     _merge_poll_last_check[task.id] = now
 
                     try:
-                        merged = await _check_pr_merged(task.pr_url, _settings.github_token)
+                        merged = await _check_pr_merged(task.pr_url, gh_token)
                     except Exception:
                         log.exception(f"Merge poll failed for task #{task.id}")
                         # Back off on errors too
@@ -1520,9 +1660,10 @@ async def pr_comment_poller() -> None:
     Picks up both PR review comments (inline) and issue comments (conversation)
     so the agent can respond to feedback even without webhooks configured.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("PR comment poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("PR comment poller: no GitHub auth configured, skipping")
         return
 
     log.info("PR comment poller started")
@@ -1534,11 +1675,12 @@ async def pr_comment_poller() -> None:
                 result = await session.execute(
                     sa_select(Task).where(Task.status.in_(REVIEW_POLL_STATUSES))
                 )
+                gh_token = await get_github_token()
                 for task in result.scalars().all():
                     if not task.pr_url:
                         continue
                     try:
-                        await _poll_pr_comments(task, _settings.github_token)
+                        await _poll_pr_comments(task, gh_token)
                     except Exception:
                         log.exception(f"Comment poll failed for task #{task.id}")
 
@@ -1637,14 +1779,23 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def start_slack_if_configured() -> None:
+async def start_slack_inbound_if_configured() -> None:
     from shared.config import settings
     if not settings.slack_bot_token or not settings.slack_app_token:
-        log.info("Slack not configured, skipping")
+        log.info("Slack not configured, skipping inbound")
         return
-    from integrations.slack.main import main as slack_main
-    log.info("Starting Slack worker")
-    await slack_main()
+    from integrations.slack.main import inbound_loop as slack_inbound_loop
+    log.info("Starting Slack inbound (Socket Mode)")
+    await slack_inbound_loop()
+
+
+async def start_slack_notifications_if_configured() -> None:
+    from shared.config import settings
+    if not settings.slack_bot_token:
+        return
+    from integrations.slack.main import notification_loop as slack_notification_loop
+    log.info("Starting Slack notification fan-out")
+    await slack_notification_loop()
 
 
 # ---------------------------------------------------------------------------
@@ -1782,7 +1933,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(telegram_inbound_loop()),
         asyncio.create_task(telegram_notification_loop()),
         asyncio.create_task(web_event_listener()),
-        asyncio.create_task(start_slack_if_configured()),
+        asyncio.create_task(start_slack_inbound_if_configured()),
+        asyncio.create_task(start_slack_notifications_if_configured()),
         asyncio.create_task(task_timeout_watchdog()),
         asyncio.create_task(ci_status_poller()),
         asyncio.create_task(pr_comment_poller()),

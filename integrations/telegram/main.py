@@ -36,6 +36,63 @@ TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 ORCHESTRATOR_URL = settings.orchestrator_url
 
 
+# ---------------------------------------------------------------------------
+# Per-user routing
+#
+# Notifications about a task are delivered to the *task owner's* chat. The
+# legacy ``settings.telegram_chat_id`` env var is kept as a fallback for
+# system-scoped events (PO analyzer, architect, repo onboarding) that have no
+# task owner — treat it as the "admin / system" channel.
+# ---------------------------------------------------------------------------
+
+
+async def _user_for_chat_id(chat_id: str) -> dict | None:
+    """Look up the user linked to a Telegram chat_id. Returns id + username
+    + display_name (a small dict, not the ORM row, so we don't leak the
+    session out of the helper)."""
+    from sqlalchemy import select
+
+    from shared.database import async_session
+    from shared.models import User
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_chat_id == str(chat_id))
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            return None
+        return {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+        }
+
+
+async def _chat_id_for_task(task_id: int | None) -> str | None:
+    """Return the Telegram chat_id of a task's owner, or None if unset.
+
+    None means: silently skip Telegram notifications for this event. We
+    deliberately do NOT fall back to the admin chat for tasks owned by
+    someone else — that's the fan-out bug we're fixing.
+    """
+    if task_id is None:
+        return None
+    from sqlalchemy import select
+
+    from shared.database import async_session
+    from shared.models import Task, User
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(User.telegram_chat_id)
+            .join(Task, Task.created_by_user_id == User.id)
+            .where(Task.id == task_id)
+        )
+        chat_id = result.scalar_one_or_none()
+        return chat_id
+
+
 async def _post_task_feedback(task_id: int, content: str, sender: str) -> None:
     """POST a user message to the task's chat stream via the orchestrator API."""
     try:
@@ -55,8 +112,15 @@ async def _post_task_feedback(task_id: int, content: str, sender: str) -> None:
 
 
 async def inbound_loop() -> None:
-    """Long-poll Telegram for incoming messages from the user."""
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    """Long-poll Telegram for incoming messages.
+
+    Starts as long as a bot token is configured. Recipient identity is now
+    looked up per-message against ``users.telegram_chat_id`` — see
+    ``_handle_update`` — so the legacy global ``settings.telegram_chat_id``
+    is no longer required for inbound to work (it's only used as the admin
+    fallback for system-scoped *outbound* events).
+    """
+    if not settings.telegram_bot_token:
         log.info("Telegram not configured, skipping inbound polling")
         return
 
@@ -100,12 +164,29 @@ async def _handle_update(update: dict[str, Any]) -> None:
 
     chat_id = str(message.get("chat", {}).get("id", ""))
 
-    # Only respond to the configured user
-    if chat_id != settings.telegram_chat_id:
-        log.warning(f"Ignoring message from unknown chat_id: {chat_id}")
+    # /whoami works for *any* sender — it's how a teammate discovers their
+    # chat_id and links their account in Settings. Resolve it before the
+    # known-user gate so unlinked users can complete the link.
+    if text.startswith("/whoami"):
+        await send_telegram_async(
+            (
+                f"Your Telegram chat_id is `{chat_id}`.\n"
+                "Paste this into Settings → Telegram in auto-agent to link "
+                "your account so notifications about *your* tasks come here."
+            ),
+            chat_id=chat_id,
+        )
         return
 
-    log.info(f"Telegram message: {text[:80]}...")
+    user = await _user_for_chat_id(chat_id)
+    if user is None:
+        # Unknown chat — silently ignore so the bot doesn't engage with
+        # randos who message it. The /whoami branch above is the only path
+        # for an unlinked user.
+        log.info(f"Ignoring message from unlinked chat_id: {chat_id}")
+        return
+
+    log.info(f"Telegram message from {user['username']}: {text[:80]}...")
 
     # Reply-threading: if the user replied to a notification we sent, and
     # that notification was tagged with a task_id, route the reply into
@@ -115,27 +196,33 @@ async def _handle_update(update: dict[str, Any]) -> None:
     if reply_msg_id and not text.startswith("/"):
         task_id = await task_id_for_telegram_message(reply_msg_id)
         if task_id is not None:
-            await _post_task_feedback(task_id, text, sender=f"telegram:{chat_id}")
-            await send_telegram_async(f"✉️ Sent to task #{task_id}.")
+            await _post_task_feedback(
+                task_id, text, sender=f"telegram:{user['username']}"
+            )
+            await send_telegram_async(
+                f"✉️ Sent to task #{task_id}.", chat_id=chat_id
+            )
             return
 
     if text.startswith("/"):
-        await _handle_command(text)
+        await _handle_command(text, chat_id=chat_id, user=user)
         return
 
     # Check if user is approving a plan (e.g. "approved", "approve", "lgtm")
     lower = text.lower().strip()
     if lower in ("approved", "approve", "lgtm", "yes", "ok"):
-        await _handle_approval(approved=True)
+        await _handle_approval(approved=True, chat_id=chat_id, user=user)
         return
 
     # Check if user is rejecting with feedback (e.g. "reject: needs more detail")
     if lower.startswith("reject"):
         feedback = text[len("reject"):].lstrip(": ").strip()
-        await _handle_approval(approved=False, feedback=feedback)
+        await _handle_approval(
+            approved=False, feedback=feedback, chat_id=chat_id, user=user
+        )
         return
 
-    # Any other free-text message creates a task
+    # Any other free-text message creates a task on behalf of this user.
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -144,28 +231,46 @@ async def _handle_update(update: dict[str, Any]) -> None:
                     "title": text[:120],
                     "description": text,
                     "source": "telegram",
+                    "created_by_user_id": user["id"],
                 },
             )
             if resp.status_code == 200:
                 task = TaskData.model_validate(resp.json())
-                await send_telegram_async(f"Task #{task.id} created: {task.title[:80]}")
+                await send_telegram_async(
+                    f"Task #{task.id} created: {task.title[:80]}",
+                    chat_id=chat_id,
+                )
             else:
-                await send_telegram_async(f"Failed to create task: {resp.text[:200]}")
+                await send_telegram_async(
+                    f"Failed to create task: {resp.text[:200]}", chat_id=chat_id
+                )
     except Exception:
         log.exception("Failed to create task from Telegram")
-        await send_telegram_async("Error creating task.")
+        await send_telegram_async("Error creating task.", chat_id=chat_id)
 
 
-async def _handle_approval(approved: bool = True, feedback: str = "") -> None:
-    """Find the task awaiting approval and approve/reject it."""
+async def _handle_approval(
+    approved: bool = True,
+    feedback: str = "",
+    chat_id: str | None = None,
+    user: dict | None = None,
+) -> None:
+    """Find a task awaiting approval *that this user owns* and approve/reject it."""
+    user_id = user["id"] if user else None
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
             tasks = [TaskData.model_validate(t) for t in resp.json()]
-            awaiting = [t for t in tasks if t.status == "awaiting_approval"]
+            awaiting = [
+                t for t in tasks
+                if t.status == "awaiting_approval"
+                and (user_id is None or t.created_by_user_id == user_id)
+            ]
 
             if not awaiting:
-                await send_telegram_async("No tasks awaiting approval.")
+                await send_telegram_async(
+                    "No tasks of yours awaiting approval.", chat_id=chat_id
+                )
                 return
 
             task = awaiting[0]  # Approve the most recent one
@@ -175,16 +280,30 @@ async def _handle_approval(approved: bool = True, feedback: str = "") -> None:
             )
             if resp.status_code == 200:
                 action = "Approved" if approved else "Rejected"
-                await send_telegram_async(f"{action} task #{task.id}: {task.title[:80]}")
+                await send_telegram_async(
+                    f"{action} task #{task.id}: {task.title[:80]}",
+                    chat_id=chat_id,
+                )
             else:
-                await send_telegram_async(f"Failed to approve: {resp.text[:200]}")
+                await send_telegram_async(
+                    f"Failed to approve: {resp.text[:200]}", chat_id=chat_id
+                )
     except Exception:
         log.exception("Error handling approval")
-        await send_telegram_async("Error processing approval.")
+        await send_telegram_async("Error processing approval.", chat_id=chat_id)
 
 
-async def _handle_command(text: str) -> None:
-    """Process Telegram commands."""
+async def _handle_command(
+    text: str, chat_id: str | None = None, user: dict | None = None
+) -> None:
+    """Process Telegram commands. ``chat_id`` is the sender's chat — every
+    response goes back there. ``user`` is the resolved auto-agent user
+    (used to scope listings to the sender's own tasks)."""
+
+    async def say(msg: str) -> None:
+        await send_telegram_async(msg, chat_id=chat_id)
+
+    user_id = user["id"] if user else None
     cmd = text.lower().split()[0].split("@")[0]
 
     if cmd == "/status":
@@ -193,70 +312,74 @@ async def _handle_command(text: str) -> None:
                 resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
                 tasks_raw = resp.json()
             tasks = [TaskData.model_validate(t) for t in tasks_raw]
-            active = [t for t in tasks if t.status not in ("done", "failed")]
+            mine = [
+                t for t in tasks
+                if user_id is None or t.created_by_user_id == user_id
+            ]
+            active = [t for t in mine if t.status not in ("done", "failed")]
             if active:
                 lines = [f"#{t.id} [{t.status}] {t.title[:60]}" for t in active[:5]]
-                await send_telegram_async("*Active tasks:*\n" + "\n".join(lines))
+                await say("*Your active tasks:*\n" + "\n".join(lines))
             else:
-                await send_telegram_async("No active tasks.")
+                await say("No active tasks of yours.")
         except Exception:
             log.exception("Error fetching tasks for /status")
-            await send_telegram_async("Error fetching tasks.")
+            await say("Error fetching tasks.")
 
     elif cmd == "/answer":
         # /answer <task_id> <response text>
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
-            await send_telegram_async("Usage: `/answer <task_id> <your answer>`")
+            await say("Usage: `/answer <task_id> <your answer>`")
             return
         try:
             task_id = int(parts[1])
         except ValueError:
-            await send_telegram_async("Invalid task ID. Usage: `/answer <task_id> <your answer>`")
+            await say("Invalid task ID. Usage: `/answer <task_id> <your answer>`")
             return
         answer = parts[2]
         await publish(human_message(task_id=task_id, message=answer, source="telegram"))
-        await send_telegram_async(f"Answer sent to task #{task_id}.")
+        await say(f"Answer sent to task #{task_id}.")
 
     elif cmd == "/cancel":
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_telegram_async("Usage: `/cancel <task_id>`")
+            await say("Usage: `/cancel <task_id>`")
             return
         try:
             task_id = int(parts[1])
         except ValueError:
-            await send_telegram_async("Invalid task ID.")
+            await say("Invalid task ID.")
             return
         async with httpx.AsyncClient() as client:
             resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/cancel")
             if resp.status_code == 200:
-                await send_telegram_async(f"Task #{task_id} cancelled.")
+                await say(f"Task #{task_id} cancelled.")
             else:
-                await send_telegram_async(f"Failed: {resp.text[:200]}")
+                await say(f"Failed: {resp.text[:200]}")
 
     elif cmd == "/delete":
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_telegram_async("Usage: `/delete <task_id>`")
+            await say("Usage: `/delete <task_id>`")
             return
         try:
             task_id = int(parts[1])
         except ValueError:
-            await send_telegram_async("Invalid task ID.")
+            await say("Invalid task ID.")
             return
         async with httpx.AsyncClient() as client:
             resp = await client.delete(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
             if resp.status_code == 200:
-                await send_telegram_async(f"Task #{task_id} deleted.")
+                await say(f"Task #{task_id} deleted.")
             else:
-                await send_telegram_async(f"Failed: {resp.text[:200]}")
+                await say(f"Failed: {resp.text[:200]}")
 
     elif cmd == "/branch":
         # /branch <repo_name> <branch>
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
-            await send_telegram_async("Usage: `/branch <repo_name> <new_branch>`\nExample: `/branch cardamon prod`")
+            await say("Usage: `/branch <repo_name> <new_branch>`\nExample: `/branch cardamon prod`")
             return
         repo_name = parts[1]
         new_branch = parts[2]
@@ -267,40 +390,40 @@ async def _handle_command(text: str) -> None:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                await send_telegram_async(
+                await say(
                     f"Updated *{data['repo']}* default branch: `{data['old_branch']}` → `{data['new_branch']}`"
                 )
             else:
-                await send_telegram_async(f"Failed: {resp.text[:200]}")
+                await say(f"Failed: {resp.text[:200]}")
 
     elif cmd == "/done":
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_telegram_async("Usage: `/done <task_id>`")
+            await say("Usage: `/done <task_id>`")
             return
         try:
             task_id = int(parts[1])
         except ValueError:
-            await send_telegram_async("Invalid task ID.")
+            await say("Invalid task ID.")
             return
         async with httpx.AsyncClient() as client:
             resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/done")
             if resp.status_code == 200:
-                await send_telegram_async(f"Task #{task_id} marked as done.")
+                await say(f"Task #{task_id} marked as done.")
             else:
-                await send_telegram_async(f"Failed: {resp.text[:200]}")
+                await say(f"Failed: {resp.text[:200]}")
 
     elif cmd == "/newrepo":
         # /newrepo <description>
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_telegram_async(
+            await say(
                 "Usage: `/newrepo <description>`\n"
                 "Example: `/newrepo a Next.js todo app with dark mode`"
             )
             return
         description = parts[1]
-        await send_telegram_async("Creating repo... (this can take ~30s)")
+        await say("Creating repo... (this can take ~30s)")
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/freeform/create-repo",
@@ -310,19 +433,19 @@ async def _handle_command(text: str) -> None:
                 payload = resp.json()
                 repo = payload.get("repo", {})
                 task = payload.get("task", {})
-                await send_telegram_async(
+                await say(
                     f"Created *{repo.get('name')}*\n"
                     f"{repo.get('url')}\n\n"
                     f"Scaffold task #{task.get('id')} queued."
                 )
             else:
-                await send_telegram_async(f"Failed: {resp.text[:300]}")
+                await say(f"Failed: {resp.text[:300]}")
 
     elif cmd == "/freeform":
         # /freeform <repo_name> [on|off]
         parts = text.split(maxsplit=2)
         if len(parts) < 2:
-            await send_telegram_async(
+            await say(
                 "Usage: `/freeform <repo_name> [on|off]`\n"
                 "Example: `/freeform synapse-common` (enables)\n"
                 "         `/freeform synapse-common off` (disables)"
@@ -331,7 +454,7 @@ async def _handle_command(text: str) -> None:
         repo_name = parts[1]
         toggle = parts[2].lower() if len(parts) > 2 else "on"
         if toggle not in ("on", "off"):
-            await send_telegram_async("Toggle must be `on` or `off`.")
+            await say("Toggle must be `on` or `off`.")
             return
         enabled = toggle == "on"
         async with httpx.AsyncClient() as client:
@@ -354,14 +477,14 @@ async def _handle_command(text: str) -> None:
             resp = await client.post(f"{ORCHESTRATOR_URL}/freeform/config", json=payload)
             if resp.status_code == 200:
                 state = "enabled" if enabled else "disabled"
-                await send_telegram_async(f"Freeform mode *{state}* for `{repo_name}`.")
+                await say(f"Freeform mode *{state}* for `{repo_name}`.")
             else:
-                await send_telegram_async(f"Failed: {resp.text[:200]}")
+                await say(f"Failed: {resp.text[:200]}")
 
     elif cmd == "/help":
-        await send_telegram_async(
+        await say(
             "*Available commands:*\n"
-            "/status — show active tasks\n"
+            "/status — show *your* active tasks\n"
             "/done <task\\_id> — mark a task as done (approve)\n"
             "/cancel <task\\_id> — cancel a running task\n"
             "/delete <task\\_id> — permanently delete a task\n"
@@ -369,11 +492,12 @@ async def _handle_command(text: str) -> None:
             "/branch <repo> <branch> — change a repo's default branch\n"
             "/freeform <repo> \\[on|off] — enable/disable freeform mode\n"
             "/newrepo <description> — create a new repo and scaffold it from scratch\n"
+            "/whoami — print your chat\\_id (used to link your auto-agent account)\n"
             "/help — show this message"
         )
 
     else:
-        await send_telegram_async(f"Unknown command: {cmd}\nType /help for available commands.")
+        await say(f"Unknown command: {cmd}\nType /help for available commands.")
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +697,7 @@ _NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
 
 async def notification_loop() -> None:
     """Listen for events and send Telegram notifications when user input is needed."""
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    if not settings.telegram_bot_token:
         log.info("Telegram not configured, skipping notifications")
         return
 
@@ -601,7 +725,14 @@ async def notification_loop() -> None:
 
 
 async def _notify_user(event: Event) -> None:
-    """Send a Telegram notification based on event type."""
+    """Send a Telegram notification based on event type.
+
+    Routing rules:
+      * Task events go to the *task owner's* linked chat. If the owner has
+        no linked chat, the event is silently dropped (no fan-out to admin).
+      * System-scoped events (no task_id) — PO analyzer, architect — go to
+        the legacy ``settings.telegram_chat_id`` (admin chat).
+    """
     formatter = _NOTIFICATION_FORMATTERS.get(event.type)
     if formatter is None:
         return
@@ -619,5 +750,20 @@ async def _notify_user(event: Event) -> None:
         except Exception:
             pass
 
+    # Resolve recipient chat.
+    target_chat: str | None
+    if event.task_id is not None:
+        target_chat = await _chat_id_for_task(event.task_id)
+        if target_chat is None:
+            # Owner hasn't linked their Telegram — don't ping the admin
+            # about someone else's task. That's the bug we're fixing.
+            return
+    else:
+        target_chat = settings.telegram_chat_id or None
+        if not target_chat:
+            return
+
     message = formatter(event.payload or {}, task_info, is_freeform, event.task_id)
-    await send_telegram_async(message, task_id=event.task_id)
+    await send_telegram_async(
+        message, task_id=event.task_id, chat_id=target_chat
+    )

@@ -20,6 +20,7 @@ from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicat
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.state_machine import InvalidTransition, get_task, transition
+from shared.config import settings
 from shared.database import get_session
 from shared.events import (
     po_analyze,
@@ -51,6 +52,7 @@ from shared.models import (
 )
 from shared.task_channel import task_channel
 from shared.types import (
+    ChangeEmailRequest,
     CreateUserRequest,
     FeedbackSummary,
     FreeformConfigData,
@@ -60,6 +62,11 @@ from shared.types import (
     RepoData,
     RepoResponse,
     ScheduleResponse,
+    SecretListResponse,
+    SecretPutRequest,
+    SecretTestResponse,
+    SignupRequest,
+    SignupResponse,
     SuggestionData,
     TaskData,
     TaskMessageData,
@@ -194,10 +201,22 @@ def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> d
 
 @router.post("/auth/login")
 async def login(req: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(User).where(User.username == req.username))
+    # Allow login by either username (legacy admin) or email (self-serve).
+    result = await session.execute(
+        select(User).where(
+            (User.username == req.username) | (User.email == req.username)
+        )
+    )
     user = result.scalar_one_or_none()
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Self-serve users (those with an email on file) must verify it before
+    # logging in. Legacy admin/seeded users with email=NULL bypass this.
+    if user.email and user.email_verified_at is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. Check your inbox for the verification link.",
+        )
     user.last_login = datetime.now(UTC)
     await session.commit()
     token = create_token(user_id=user.id, username=user.username)
@@ -218,6 +237,10 @@ async def login(req: LoginRequest, response: Response, session: AsyncSession = D
             display_name=user.display_name,
             created_at=user.created_at.isoformat() if user.created_at else None,
             last_login=user.last_login.isoformat() if user.last_login else None,
+            claude_auth_status=user.claude_auth_status,
+            claude_paired_at=(
+                user.claude_paired_at.isoformat() if user.claude_paired_at else None
+            ),
         ),
     )
 
@@ -239,13 +262,341 @@ async def get_me(
         display_name=user.display_name,
         created_at=user.created_at.isoformat() if user.created_at else None,
         last_login=user.last_login.isoformat() if user.last_login else None,
+        claude_auth_status=user.claude_auth_status,
+        claude_paired_at=(
+            user.claude_paired_at.isoformat() if user.claude_paired_at else None
+        ),
+        telegram_chat_id=user.telegram_chat_id,
+        slack_user_id=user.slack_user_id,
     )
+
+
+class _MessagingLinkRequest(BaseModel):
+    """Body for the messaging-platform link endpoints — pass null to clear."""
+
+    value: str | None = Field(default=None, max_length=64)
+
+
+@router.patch("/auth/me/telegram")
+async def set_my_telegram_chat_id(
+    body: _MessagingLinkRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+):
+    """Link or unlink the caller's Telegram chat. The user discovers their
+    chat_id via the bot's ``/whoami`` command, then pastes it here."""
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    new_value = body.value.strip() if body.value else None
+    await session.execute(
+        sql_update(User)
+        .where(User.id == payload["user_id"])
+        .values(telegram_chat_id=new_value or None)
+    )
+    await session.commit()
+    return {"ok": True, "telegram_chat_id": new_value}
+
+
+@router.patch("/auth/me/slack")
+async def set_my_slack_user_id(
+    body: _MessagingLinkRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+):
+    """Link or unlink the caller's Slack user ID. Filled in automatically
+    by the Slack integration when a teammate first DMs the bot, but exposed
+    here so admins can correct mismatches."""
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    new_value = body.value.strip() if body.value else None
+    await session.execute(
+        sql_update(User)
+        .where(User.id == payload["user_id"])
+        .values(slack_user_id=new_value or None)
+    )
+    await session.commit()
+    return {"ok": True, "slack_user_id": new_value}
 
 
 @router.post("/auth/logout")
 async def logout(response: Response):
     response.delete_cookie(key=COOKIE_NAME, path="/")
     return {"ok": True}
+
+
+# --- Self-serve signup + email verification (Phase 1 multi-tenant) ---
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalise_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _username_from_email(local_part: str) -> str:
+    """Sanitise the local-part of an email into a candidate username.
+    Falls back to ``user`` if nothing alphanumeric remains."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", local_part).lower()
+    return cleaned or "user"
+
+
+async def _allocate_username(session: AsyncSession, base: str) -> str:
+    """Return ``base`` if free, otherwise ``base2``, ``base3``, ... until free."""
+    candidate = base
+    suffix = 1
+    while True:
+        existing = await session.execute(
+            select(User).where(User.username == candidate)
+        )
+        if existing.scalar_one_or_none() is None:
+            return candidate
+        suffix += 1
+        candidate = f"{base}{suffix}"
+
+
+@router.post("/auth/signup", status_code=201)
+async def signup(
+    req: SignupRequest,
+    session: AsyncSession = Depends(get_session),
+) -> SignupResponse:
+    """Create a new user from email + password + display_name.
+
+    Always returns 201 with ``verification_sent`` indicating whether the
+    Resend dispatch succeeded. Even if delivery fails we still create the
+    user — the operator can pull the verify URL out of the logs.
+    """
+    import secrets as _stdlib_secrets
+
+    email = _normalise_email(req.email)
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(400, "Invalid email address")
+
+    existing = await session.execute(select(User).where(User.email == email))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(409, "An account with this email already exists")
+
+    local = email.split("@", 1)[0]
+    username = await _allocate_username(session, _username_from_email(local))
+    token = _stdlib_secrets.token_urlsafe(32)
+
+    user = User(
+        username=username,
+        password_hash=hash_password(req.password),
+        display_name=req.display_name.strip(),
+        email=email,
+        email_verified_at=None,
+        signup_token=token,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+
+    # Dispatch the verification email. Failure does NOT roll back the
+    # signup — the verify URL is logged so an operator can recover.
+    sent = True
+    try:
+        from shared.email import send_verification_email
+
+        await send_verification_email(email, token)
+    except Exception:
+        sent = False
+
+    return SignupResponse(user_id=user.id, email=email, verification_sent=sent)
+
+
+@router.get("/auth/verify/{token}")
+async def verify_email(
+    token: str,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Mark the user's email verified, clear the token, and set a session
+    cookie so the click-through completes the signup in one step."""
+    result = await session.execute(
+        select(User).where(User.signup_token == token)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "Invalid or expired verification link")
+
+    user.email_verified_at = datetime.now(UTC)
+    user.signup_token = None
+    user.last_login = datetime.now(UTC)
+    await session.commit()
+
+    jwt = create_token(user_id=user.id, username=user.username)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=jwt,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("COOKIE_SECURE", "0") == "1",
+        path="/",
+    )
+    return {"ok": True, "user_id": user.id, "email": user.email}
+
+
+@router.patch("/auth/me/email")
+async def change_my_email(
+    req: ChangeEmailRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> dict:
+    """Change the caller's email — re-issues a signup_token, clears
+    ``email_verified_at``, and dispatches a new verification email."""
+    import secrets as _stdlib_secrets
+
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    new_email = _normalise_email(req.email)
+    if not _EMAIL_RE.match(new_email):
+        raise HTTPException(400, "Invalid email address")
+
+    existing = await session.execute(
+        select(User).where(User.email == new_email, User.id != payload["user_id"])
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(409, "Email already in use")
+
+    token = _stdlib_secrets.token_urlsafe(32)
+    await session.execute(
+        sql_update(User)
+        .where(User.id == payload["user_id"])
+        .values(email=new_email, email_verified_at=None, signup_token=token)
+    )
+    await session.commit()
+
+    sent = True
+    try:
+        from shared.email import send_verification_email
+
+        await send_verification_email(new_email, token)
+    except Exception:
+        sent = False
+    return {"ok": True, "email": new_email, "verification_sent": sent}
+
+
+# --- Per-user secrets API ---
+
+
+@router.get("/me/secrets")
+async def list_my_secrets(
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> SecretListResponse:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    from shared import secrets as _user_secrets
+
+    keys = await _user_secrets.list_keys(payload["user_id"], session=session)
+    return SecretListResponse(keys=keys)
+
+
+@router.put("/me/secrets/{key}")
+async def put_my_secret(
+    key: str,
+    body: SecretPutRequest,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> dict:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    from shared import secrets as _user_secrets
+
+    if key not in _user_secrets.SECRET_KEYS:
+        raise HTTPException(404, "Unknown secret key")
+
+    if body.value is None or body.value == "":
+        await _user_secrets.delete(payload["user_id"], key, session=session)
+        await session.commit()
+        return {"ok": True, "cleared": True}
+
+    await _user_secrets.set(payload["user_id"], key, body.value, session=session)
+    await session.commit()
+    return {"ok": True, "cleared": False}
+
+
+@router.delete("/me/secrets/{key}", status_code=204)
+async def delete_my_secret(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> Response:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    from shared import secrets as _user_secrets
+
+    if key not in _user_secrets.SECRET_KEYS:
+        raise HTTPException(404, "Unknown secret key")
+
+    await _user_secrets.delete(payload["user_id"], key, session=session)
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/me/secrets/{key}/test")
+async def test_my_secret(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(None),
+    auto_agent_session: str | None = Cookie(default=None),
+) -> SecretTestResponse:
+    """Backend-validated connectivity test for the stored secret. Avoids
+    sending the secret to the browser just to test it."""
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    from shared import secrets as _user_secrets
+
+    if key not in _user_secrets.SECRET_KEYS:
+        raise HTTPException(404, "Unknown secret key")
+
+    value = await _user_secrets.get(payload["user_id"], key, session=session)
+    if not value:
+        return SecretTestResponse(ok=False, detail="Not set")
+
+    if key == "github_pat":
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"token {value}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+        if r.status_code == 200:
+            login = r.json().get("login", "")
+            return SecretTestResponse(ok=True, detail=f"Authenticated as {login}")
+        return SecretTestResponse(
+            ok=False, detail=f"GitHub returned {r.status_code}"
+        )
+
+    if key == "anthropic_api_key":
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                headers={
+                    "x-api-key": value,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "messages": [{"role": "user", "content": "ping"}],
+                },
+            )
+        if r.status_code == 200:
+            tok = r.json().get("input_tokens", "?")
+            return SecretTestResponse(ok=True, detail=f"OK ({tok} tokens)")
+        return SecretTestResponse(
+            ok=False, detail=f"Anthropic returned {r.status_code}"
+        )
+
+    return SecretTestResponse(ok=False, detail="No test handler for this key")
 
 
 @router.post("/auth/users")
@@ -299,9 +650,26 @@ async def list_users(
 
 @router.post("/tasks", response_model=TaskData)
 async def create_task(
-    req: CreateTaskRequest, session: AsyncSession = Depends(get_session)
+    req: CreateTaskRequest,
+    session: AsyncSession = Depends(get_session),
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
 ) -> TaskData:
     _check_rate_limit()
+
+    # Derive ownership from the authenticated session when present, so the
+    # frontend doesn't have to pass it (and can't spoof another user). Webhook
+    # callers (Slack/Telegram/Linear) construct Task rows directly without
+    # going through this endpoint, so this only affects UI-driven creation.
+    authed_user_id: int | None = None
+    if auto_agent_session or authorization:
+        try:
+            payload = _verify_cookie_or_header(auto_agent_session, authorization)
+            authed_user_id = payload["user_id"]
+        except HTTPException:
+            authed_user_id = None
+    owner_user_id = authed_user_id or req.created_by_user_id
+
     # Dedup check: exact source_id → exact title
     dup = await find_duplicate_by_source_id(session, req.source_id)
     if not dup:
@@ -315,13 +683,29 @@ async def create_task(
         result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
         repo = result.scalar_one_or_none()
 
+    # Reject only if the user hasn't paired AND there's no fallback configured.
+    # When a fallback is set (e.g. admin's user_id), unpaired users transparently
+    # share the admin's Claude credentials.
+    if owner_user_id is not None and settings.fallback_claude_user_id is None:
+        user_q = await session.execute(
+            select(User).where(User.id == owner_user_id)
+        )
+        user_row = user_q.scalar_one_or_none()
+        if user_row is not None and user_row.claude_auth_status != "paired":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Connect your Claude account in Settings before queuing tasks."
+                ),
+            )
+
     task = Task(
         title=req.title,
         description=req.description,
         source=req.source,
         source_id=req.source_id,
         repo_id=repo.id if repo else None,
-        created_by_user_id=req.created_by_user_id,
+        created_by_user_id=owner_user_id,
     )
     session.add(task)
     await session.commit()
@@ -1007,6 +1391,7 @@ class FreeformConfigRequest(BaseModel):
     enabled: bool = True
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
+    po_goal: str | None = Field(default=None, max_length=4000)
     # Architecture Mode — periodic improve-codebase-architecture cron
     # producing deepening Suggestions. Off by default so existing repos are
     # unaffected.
@@ -1054,6 +1439,7 @@ async def upsert_freeform_config(
         config.analysis_cron = req.analysis_cron
         config.auto_approve_suggestions = req.auto_approve_suggestions
         config.auto_start_tasks = req.auto_start_tasks
+        config.po_goal = req.po_goal
         config.architecture_mode = req.architecture_mode
         config.architecture_cron = req.architecture_cron
     else:
@@ -1065,6 +1451,7 @@ async def upsert_freeform_config(
             analysis_cron=req.analysis_cron,
             auto_approve_suggestions=req.auto_approve_suggestions,
             auto_start_tasks=req.auto_start_tasks,
+            po_goal=req.po_goal,
             architecture_mode=req.architecture_mode,
             architecture_cron=req.architecture_cron,
         )
@@ -1115,6 +1502,8 @@ class CreateRepoRequest(BaseModel):
 async def create_repo_from_description(
     req: CreateRepoRequest,
     session: AsyncSession = Depends(get_session),
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
 ) -> dict:
     """Create a brand-new GitHub repo from a natural-language description.
 
@@ -1127,6 +1516,14 @@ async def create_repo_from_description(
     if not req.description.strip():
         raise HTTPException(400, "description is required")
 
+    user_id: int | None = None
+    if auto_agent_session or authorization:
+        try:
+            payload = _verify_cookie_or_header(auto_agent_session, authorization)
+            user_id = payload.get("user_id")
+        except HTTPException:
+            user_id = None
+
     try:
         repo, task = await create_repo_and_scaffold_task(
             session,
@@ -1134,6 +1531,7 @@ async def create_repo_from_description(
             org_override=req.org,
             private=req.private,
             loop=req.loop,
+            user_id=user_id,
         )
     except CreateRepoError as e:
         raise HTTPException(400, str(e))
@@ -1251,7 +1649,9 @@ async def promote_task(
 
     branch_name = task.branch_name or f"auto-agent/task-{task_id}"
     repo_url = task.repo.url if task.repo else ""
-    pr_url = await promote_task_to_main(task.pr_url, branch_name, repo_url)
+    pr_url = await promote_task_to_main(
+        task.pr_url, branch_name, repo_url, user_id=task.created_by_user_id,
+    )
     if not pr_url:
         raise HTTPException(500, "Failed to create promotion PR")
     return {"ok": True, "pr_url": pr_url}
@@ -1281,7 +1681,9 @@ async def revert_task(
         if config:
             dev_branch = config.dev_branch or "dev"
 
-    revert_url = await revert_task_from_dev(task.pr_url, dev_branch)
+    revert_url = await revert_task_from_dev(
+        task.pr_url, dev_branch, user_id=task.created_by_user_id,
+    )
     if not revert_url:
         raise HTTPException(500, "Failed to create revert PR")
     return {"ok": True, "pr_url": revert_url}
@@ -1322,6 +1724,7 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
         analysis_cron=c.analysis_cron or "0 9 * * 1",
         auto_approve_suggestions=c.auto_approve_suggestions or False,
         auto_start_tasks=c.auto_start_tasks or False,
+        po_goal=c.po_goal,
         last_analysis_at=c.last_analysis_at.isoformat() if c.last_analysis_at else None,
         architecture_mode=c.architecture_mode or False,
         architecture_cron=c.architecture_cron or "0 9 * * 1",
@@ -1392,3 +1795,140 @@ async def seed_admin_user() -> None:
             session.add(admin)
             await session.commit()
             log.info("admin_user_created", username=settings.admin_username)
+
+
+# ---------------------------------------------------------------------------
+# Claude pairing
+# ---------------------------------------------------------------------------
+
+
+import structlog as _structlog
+
+from orchestrator import claude_pairing as _claude_pairing
+from orchestrator.claude_auth import vault_dir_for as _vault_dir_for
+from shared.database import async_session as _async_session
+from shared.events import Event as _Event
+
+_pair_log = _structlog.get_logger("claude_pair")
+
+
+class _PairStartResponse(BaseModel):
+    pairing_id: str
+    authorize_url: str
+
+
+class _PairCodeBody(BaseModel):
+    pairing_id: str
+    code: str
+
+
+class _PairStatusResponse(BaseModel):
+    claude_auth_status: str
+    claude_paired_at: datetime | None
+
+
+@router.post("/claude/pair/start", response_model=_PairStartResponse)
+async def claude_pair_start(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> _PairStartResponse:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    sess = await _claude_pairing.start_pairing(user_id=payload["user_id"])
+    return _PairStartResponse(
+        pairing_id=sess.pairing_id, authorize_url=sess.authorize_url
+    )
+
+
+@router.post("/claude/pair/code")
+async def claude_pair_code(
+    body: _PairCodeBody,
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> dict:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    sess = _claude_pairing.get_pairing(body.pairing_id)
+    if sess is None or sess.user_id != payload["user_id"]:
+        raise HTTPException(status_code=404, detail="pairing session not found")
+    _pair_log.info(
+        "claude_pair_code: submitting",
+        pairing_id=body.pairing_id,
+        user_id=payload["user_id"],
+    )
+    result = await _claude_pairing.complete_pairing(body.pairing_id, body.code)
+    _pair_log.info(
+        "claude_pair_code: result",
+        success=result.success,
+        exit_code=result.exit_code,
+        stderr=result.stderr[:500],
+    )
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.stderr or "pairing failed")
+
+    try:
+        async with _async_session() as s:
+            await s.execute(
+                sql_update(User)
+                .where(User.id == payload["user_id"])
+                .values(
+                    claude_auth_status="paired",
+                    claude_paired_at=datetime.now(UTC),
+                )
+            )
+            await s.execute(
+                sql_update(Task)
+                .where(
+                    Task.created_by_user_id == payload["user_id"],
+                    Task.status == TaskStatus.BLOCKED_ON_AUTH,
+                )
+                .values(status=TaskStatus.QUEUED)
+            )
+            await s.commit()
+    except Exception as e:
+        _pair_log.exception("claude_pair_code: db update failed", error=str(e))
+        # Tokens already on disk — return success to the client and surface
+        # the persistence error in the logs.
+        return {"ok": True, "warning": f"db update failed: {e}"}
+
+    try:
+        await publish(_Event(type="claude_pair_succeeded", task_id=None))
+    except Exception as e:
+        _pair_log.warning("claude_pair_code: publish failed", error=str(e))
+
+    return {"ok": True}
+
+
+@router.get("/claude/pair/status", response_model=_PairStatusResponse)
+async def claude_pair_status(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> _PairStatusResponse:
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    async with _async_session() as s:
+        result = await s.execute(select(User).where(User.id == payload["user_id"]))
+        user = result.scalar_one()
+    return _PairStatusResponse(
+        claude_auth_status=user.claude_auth_status,
+        claude_paired_at=user.claude_paired_at,
+    )
+
+
+@router.post("/claude/pair/disconnect")
+async def claude_pair_disconnect(
+    auto_agent_session: str | None = Cookie(default=None),
+    authorization: str | None = Header(None),
+) -> dict:
+    import shutil
+
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    vault = _vault_dir_for(payload["user_id"])
+    claude_subdir = os.path.join(vault, ".claude")
+    if os.path.isdir(claude_subdir):
+        shutil.rmtree(claude_subdir)
+    async with _async_session() as s:
+        await s.execute(
+            sql_update(User)
+            .where(User.id == payload["user_id"])
+            .values(claude_auth_status="never_paired", claude_paired_at=None)
+        )
+        await s.commit()
+    return {"ok": True}

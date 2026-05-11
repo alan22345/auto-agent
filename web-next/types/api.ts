@@ -49,6 +49,7 @@ export interface FreeformConfigData {
   analysis_cron?: string;
   auto_approve_suggestions?: boolean;
   auto_start_tasks?: boolean;
+  po_goal?: string | null;
   last_analysis_at?: string | null;
   architecture_mode?: boolean;
   architecture_cron?: string;
@@ -86,6 +87,8 @@ export interface UserData {
   display_name: string;
   created_at?: string | null;
   last_login?: string | null;
+  claude_auth_status?: 'paired' | 'expired' | 'never_paired';
+  claude_paired_at?: string | null;
 }
 export interface MemoryEntityDetail {
   entity: MemoryEntitySummary;

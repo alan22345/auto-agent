@@ -55,8 +55,13 @@ def _telegram_binding_key(message_id: int) -> str:
     return f"telegram:msg:{message_id}"
 
 
+def _slack_binding_key(message_ts: str) -> str:
+    return f"slack:msg:{message_ts}"
+
+
 HEARTBEAT_TTL_SECONDS = 900  # 15 minutes
 TELEGRAM_BINDING_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+SLACK_BINDING_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 # Wildcard pattern for the consumer side that subscribes to every task's
 # stream at once (web/main.py's WebSocket relay). Lives here so the key
@@ -93,6 +98,7 @@ class TaskChannel(Protocol):
     ) -> None: ...
     async def stream_thinking(self, text: str, turn: int) -> None: ...
     async def bind_telegram_message(self, message_id: int) -> None: ...
+    async def bind_slack_message(self, message_ts: str) -> None: ...
 
 
 class TaskChannelFactory(Protocol):
@@ -106,6 +112,7 @@ class TaskChannelFactory(Protocol):
 
     def for_task(self, task_id: int) -> TaskChannel: ...
     async def task_id_for_telegram_message(self, message_id: int) -> int | None: ...
+    async def task_id_for_slack_message(self, message_ts: str) -> int | None: ...
     async def aclose(self) -> None: ...
 
 
@@ -203,6 +210,21 @@ class RedisTaskChannel:
                 message_id=message_id,
             )
 
+    async def bind_slack_message(self, message_ts: str) -> None:
+        try:
+            client = await self._factory._get_client()
+            await client.set(
+                _slack_binding_key(message_ts),
+                str(self.task_id),
+                ex=SLACK_BINDING_TTL_SECONDS,
+            )
+        except Exception:
+            log.exception(
+                "bind_slack_message failed",
+                task_id=self.task_id,
+                message_ts=message_ts,
+            )
+
 
 class RedisTaskChannelFactory:
     """Production factory — owns one lazy long-lived Redis client.
@@ -240,6 +262,23 @@ class RedisTaskChannelFactory:
         except Exception:
             log.exception(
                 "task_id_for_telegram_message failed", message_id=message_id
+            )
+            return None
+        if raw is None:
+            return None
+        decoded = raw.decode() if isinstance(raw, bytes) else str(raw)
+        try:
+            return int(decoded)
+        except ValueError:
+            return None
+
+    async def task_id_for_slack_message(self, message_ts: str) -> int | None:
+        try:
+            client = await self._get_client()
+            raw = await client.get(_slack_binding_key(message_ts))
+        except Exception:
+            log.exception(
+                "task_id_for_slack_message failed", message_ts=message_ts
             )
             return None
         if raw is None:
@@ -314,6 +353,9 @@ class InMemoryTaskChannel:
     async def bind_telegram_message(self, message_id: int) -> None:
         self._factory.telegram_bindings[message_id] = self.task_id
 
+    async def bind_slack_message(self, message_ts: str) -> None:
+        self._factory.slack_bindings[message_ts] = self.task_id
+
 
 class InMemoryTaskChannelFactory:
     """Test factory — captures pushes/heartbeats/streams in inspectable
@@ -324,6 +366,7 @@ class InMemoryTaskChannelFactory:
         self.heartbeats: dict[int, datetime] = {}
         self.streams: list[tuple[int, str, dict[str, Any]]] = []
         self.telegram_bindings: dict[int, int] = {}
+        self.slack_bindings: dict[str, int] = {}
 
     def for_task(self, task_id: int) -> InMemoryTaskChannel:
         return InMemoryTaskChannel(task_id, self)
@@ -331,11 +374,15 @@ class InMemoryTaskChannelFactory:
     async def task_id_for_telegram_message(self, message_id: int) -> int | None:
         return self.telegram_bindings.get(message_id)
 
+    async def task_id_for_slack_message(self, message_ts: str) -> int | None:
+        return self.slack_bindings.get(message_ts)
+
     async def aclose(self) -> None:
         self.guidance.clear()
         self.heartbeats.clear()
         self.streams.clear()
         self.telegram_bindings.clear()
+        self.slack_bindings.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +434,10 @@ async def task_id_for_telegram_message(message_id: int) -> int | None:
     read would be a worse abstraction.
     """
     return await get_task_channel_factory().task_id_for_telegram_message(message_id)
+
+
+async def task_id_for_slack_message(message_ts: str) -> int | None:
+    """Look up the task a previously-bound Slack message belongs to.
+    Slack identifies messages by ``ts`` (a timestamp string), not numeric ID.
+    """
+    return await get_task_channel_factory().task_id_for_slack_message(message_ts)

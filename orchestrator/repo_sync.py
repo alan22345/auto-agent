@@ -22,12 +22,15 @@ async def sync_repos(session: AsyncSession) -> int:
 
     Returns the number of new repos added.
     """
-    if not settings.github_token:
-        log.warning("No GITHUB_TOKEN set, skipping repo sync")
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token()
+    if not token:
+        log.warning("No GitHub auth configured, skipping repo sync")
         return 0
 
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
     }
 

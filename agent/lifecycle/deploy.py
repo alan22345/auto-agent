@@ -19,7 +19,6 @@ from agent import sh
 from agent.lifecycle._naming import _branch_name
 from agent.lifecycle._orchestrator_api import get_task
 from agent.workspace import WORKSPACES_DIR
-from shared.config import settings
 from shared.events import (
     Event,
     publish,
@@ -51,7 +50,9 @@ async def handle_deploy_preview(task_id: int) -> None:
 
     branch_name = task.branch_name or await _branch_name(task_id, task.title)
 
-    if task.pr_url and settings.github_token:
+    from shared.github_auth import get_github_token
+
+    if task.pr_url and await get_github_token(user_id=task.created_by_user_id):
         deployed = await _try_github_workflow_deploy(task_id, task, branch_name)
         if deployed:
             return
@@ -69,8 +70,11 @@ async def _try_github_workflow_deploy(task_id: int, task: TaskData, branch_name:
     parts = task.pr_url.rstrip("/").split("/")
     owner, repo = parts[-4], parts[-3]
 
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=task.created_by_user_id)
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
 

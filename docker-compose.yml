@@ -50,7 +50,13 @@ services:
       - "2020:2020"
     volumes:
       - workspaces:/workspaces
+      - userdata:/data
+      # Claude CLI auth lives in BOTH ~/.claude/ (creds + cache) and
+      # ~/.claude.json (top-level config). Both must be bind-mounted or
+      # `claude auth status` reports "configuration file not found" and
+      # the preflight fails on container start.
       - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.claude.json:/home/node/.claude.json
 
   web-next:
     build:
@@ -69,3 +75,4 @@ volumes:
   pgdata:
   redisdata:
   workspaces:
+  userdata:

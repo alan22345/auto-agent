@@ -118,6 +118,7 @@ class AgentLoop:
         repo_name: str | None = None,
         complexity: str | None = None,
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
+        home_dir: str | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -135,6 +136,7 @@ class AgentLoop:
         self._on_thinking = on_thinking     # (text, turn) → stream assistant thinking to UI
         self._get_guidance = get_guidance    # () → check for user guidance messages (None = no message)
         self._event_sink = event_sink       # forwarded to ToolContext so tools can emit progress events
+        self._home_dir = home_dir           # per-user HOME for the CLI provider's credential vault
 
     async def run(
         self,
@@ -165,6 +167,8 @@ class AgentLoop:
 
         if isinstance(self._provider, ClaudeCLIProvider):
             self._provider.set_cwd(self._workspace)
+            if self._home_dir is not None:
+                self._provider.set_home_dir(self._home_dir)
             if self._session:
                 self._provider.set_session(self._session.session_id, resume=resume)
 

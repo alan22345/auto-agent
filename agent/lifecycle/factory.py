@@ -18,6 +18,21 @@ from agent.tools import create_default_registry
 from shared.task_channel import task_channel
 
 
+async def home_dir_for_task(task) -> str | None:
+    """Return the effective vault HOME for a task.
+
+    Resolution order:
+      1. If the owner has paired their own Claude credentials → owner's vault.
+      2. Otherwise, if a fallback user is configured → fallback's vault.
+      3. Otherwise → None (caller falls back to legacy container HOME, used by
+         system-driven flows like repo summary).
+    """
+    from orchestrator.claude_auth import resolve_home_dir
+
+    user_id = getattr(task, "created_by_user_id", None)
+    return await resolve_home_dir(user_id)
+
+
 def _format_tool_args(tool_name: str, args: dict) -> str:
     """Format tool args into a human-readable preview for the streaming UI."""
     if tool_name == "file_read" or tool_name == "file_write" or tool_name == "file_edit":
@@ -47,6 +62,7 @@ def create_agent(
     task_description: str | None = None,
     repo_name: str | None = None,
     complexity: str | None = None,
+    home_dir: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -58,7 +74,7 @@ def create_agent(
                 making progress, and streams tool calls / thinking to
                 the UI.
     """
-    provider = get_provider(model_override=model_tier)
+    provider = get_provider(model_override=model_tier, home_dir=home_dir)
     tools = create_default_registry(readonly=readonly)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
@@ -107,4 +123,5 @@ def create_agent(
         get_guidance=get_guidance,
         repo_name=repo_name,
         complexity=complexity,
+        home_dir=home_dir,
     )

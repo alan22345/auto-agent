@@ -202,12 +202,21 @@ Run `git diff` and review your own changes:
 - Commit with a message explaining what changed and why.
 - For bug fixes, include the root cause in the commit message.
 
-### Graph memory
-After completing a task, check if anything notable was learned:
-- Use `memory_search` to see if related knowledge exists.
-- Use `memory_create_node` to record new decisions, capabilities, or preferences.
-- Use `memory_append_decision` to update existing decisions (preserves history).
-- If nothing notable was learned, skip this step.
+### Team memory
+A shared team-memory knowledge graph is available through the `recall_memory`
+and `remember_memory` tools (Postgres-backed, all team members read/write the
+same graph).
+- **At task start** — relevant facts are injected into the system prompt
+  automatically as a "Shared Team Memory" section. Read those first.
+- **Mid-task** — call `recall_memory` whenever you would ask a teammate
+  about prior decisions, conventions, or known gotchas in the area you're
+  working on.
+- **At task end** — call `remember_memory` for durable knowledge worth
+  surviving the conversation: non-obvious decisions and their rationale,
+  confirmed preferences, gotchas. One fact per call. Skip if nothing notable
+  was learned.
+- **Don't save** anything reproducible from the codebase (file paths, code
+  patterns, anything `git blame` answers).
 
 ## ADR process
 

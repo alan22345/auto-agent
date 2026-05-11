@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from croniter import croniter
 from sqlalchemy import select
 
+from agent.context.memory import remember_priority_suggestion
 from agent.llm.structured import parse_json_response
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
@@ -118,6 +119,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     prompt = build_po_analysis_prompt(
         ux_knowledge=config.ux_knowledge,
         recent_suggestions=recent_titles,
+        goal=config.po_goal,
     )
 
     # Notify UI
@@ -126,7 +128,16 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     log.info(f"Running PO analysis for repo '{repo.name}'")
     try:
         # Use readonly tools so the PO can explore the codebase
-        agent = create_agent(workspace, readonly=True, max_turns=25)
+        agent = create_agent(
+            workspace,
+            readonly=True,
+            max_turns=25,
+            task_description=(
+                f"Product Owner analysis of {repo.name}: surface the most "
+                "impactful improvements."
+            ),
+            repo_name=repo.name,
+        )
         result = await agent.run(prompt)
         output = result.output
     except Exception:
@@ -154,6 +165,16 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
             status=SuggestionStatus.PENDING,
         )
         session.add(suggestion)
+        # Promote high-priority items into the shared knowledge graph so the
+        # next planning/coding agent for this repo sees them as known issues.
+        await remember_priority_suggestion(
+            repo_name=repo.name,
+            title=suggestion.title,
+            rationale=suggestion.rationale,
+            priority=suggestion.priority,
+            category=f"PO suggestion / {suggestion.category}",
+            source="po-analyzer",
+        )
 
     ux_update = suggestions_data.get("ux_knowledge_update")
     if ux_update:

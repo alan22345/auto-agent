@@ -20,7 +20,7 @@ async def get_redis() -> aioredis.Redis:
     return aioredis.from_url(settings.redis_url, decode_responses=False)
 
 
-ALL_GROUPS = ["orchestrator", "claude-runner", "telegram", "web-ui"]
+ALL_GROUPS = ["orchestrator", "claude-runner", "telegram", "slack", "web-ui"]
 
 
 async def ensure_stream_group(r: aioredis.Redis, stream: str = STREAM_KEY, group: str | None = None) -> None:

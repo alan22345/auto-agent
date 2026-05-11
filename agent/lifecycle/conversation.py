@@ -31,7 +31,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
-from agent.lifecycle.factory import create_agent
+from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.workspace import WORKSPACES_DIR
 from shared.events import (
     Event,
@@ -92,7 +92,9 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             max_turns=10,
             task_id=task_id,
             readonly=True,
+            task_description=task.description,
             repo_name=repo.name,
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(message, resume=True)
         output = result.output
@@ -177,7 +179,9 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             session_id=session_id,
             max_turns=40,
             task_id=task_id,
+            task_description=task.description,
             repo_name=repo.name,
+            home_dir=await home_dir_for_task(task),
         )
         result = await agent.run(
             (
