@@ -19,6 +19,8 @@ def app(monkeypatch):
     from shared import config
     config.settings.github_app_slug = "auto-agent"
     config.settings.slack_oauth_state_secret = "ssec"  # reused for github state
+    config.settings.github_app_id = "test-app-id"
+    config.settings.github_app_private_key = "test-key"
 
     a = FastAPI()
     a.include_router(router, prefix="/api")
@@ -45,3 +47,78 @@ async def test_install_redirects_to_github_app_install_url(app, monkeypatch):
     loc = resp.headers["location"]
     assert loc.startswith("https://github.com/apps/auto-agent/installations/new")
     assert "state=" in loc
+
+
+@pytest.mark.asyncio
+async def test_callback_stores_installation_id(app, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from integrations.slack.oauth import _sign_state
+
+    state = _sign_state({"org_id": 42, "nonce": "abc"})
+
+    # Create a fake response
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json = lambda: {
+        "account": {"login": "acme-inc", "type": "Organization"},
+    }
+
+    # Create a fake AsyncClient context manager
+    fake_client = AsyncMock()
+    fake_client.get = AsyncMock(return_value=fake_resp)
+    fake_client.__aenter__.return_value = fake_client
+    fake_client.__aexit__.return_value = False
+
+    inserted = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, sql, params=None):
+            inserted["sql"] = str(sql)
+            inserted["params"] = params
+            return MagicMock()
+
+        async def commit(self):
+            return None
+
+    with patch(
+        "integrations.github.oauth.httpx.AsyncClient", return_value=fake_client
+    ), patch(
+        "integrations.github.oauth.async_session", return_value=FakeSession()
+    ), patch(
+        "integrations.github.oauth._app_jwt_for_install_lookup",
+        return_value="JWT",
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            resp = await c.get(
+                "/api/integrations/github/oauth/callback",
+                params={"installation_id": "12345", "state": state},
+                follow_redirects=False,
+            )
+
+    assert resp.status_code == 302
+    assert "INSERT INTO github_installations" in inserted["sql"]
+    assert inserted["params"]["installation_id"] == 12345
+    assert inserted["params"]["org_id"] == 42
+    assert inserted["params"]["account_login"] == "acme-inc"
+    assert inserted["params"]["account_type"] == "Organization"
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_tampered_state(app):
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t"
+    ) as c:
+        resp = await c.get(
+            "/api/integrations/github/oauth/callback",
+            params={"installation_id": "1", "state": "bad.state"},
+        )
+    assert resp.status_code == 400
