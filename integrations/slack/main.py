@@ -183,11 +183,35 @@ _app: AsyncApp | None = None
 
 
 def _get_app() -> AsyncApp:
-    """Lazy-build the AsyncApp so importing this module doesn't crash when
-    Slack is unconfigured (e.g. in tests / dev without tokens)."""
+    """Build the slack-bolt async app.
+
+    Two modes:
+      * Multi-team (default once Phase 3 is rolled out): installation
+        store backed by Postgres; bot tokens resolved per-team_id.
+      * Legacy single-tenant: settings.slack_bot_token only — used by
+        the dev VM until the distributed app is registered.
+
+    The mode is decided lazily on first call. Tests reset _app=None to
+    rebuild with different settings.
+    """
     global _app
-    if _app is None:
+    if _app is not None:
+        return _app
+
+    if settings.slack_bot_token:
+        # Legacy path — single-workspace deploy. Keep working until the
+        # distributed app is registered.
         _app = AsyncApp(token=settings.slack_bot_token)
+    else:
+        # Phase 3 path — distributed app. signing_secret defaults to ""
+        # (not None) to satisfy slack-bolt's type check while still
+        # allowing Socket Mode (no public webhook endpoint).
+        from integrations.slack.installation_store import PostgresInstallationStore
+
+        _app = AsyncApp(
+            signing_secret="",
+            installation_store=PostgresInstallationStore(),
+        )
     return _app
 
 
