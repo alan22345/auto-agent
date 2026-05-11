@@ -10,6 +10,20 @@ from agent import sh
 WORKSPACES_DIR = os.environ.get("WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces"))
 
 
+def _workspace_path(*, task_id: int, organization_id: int | None) -> str:
+    """Resolve the workspace directory for a task.
+
+    With organization_id set: `<WORKSPACES_DIR>/<org_id>/task-<task_id>` —
+    per-org sub-tree so cross-org clones don't collide on repo names and
+    `du -sh <WORKSPACES_DIR>/*` gives a per-org disk footprint.
+
+    Without (legacy callers): `<WORKSPACES_DIR>/task-<task_id>`.
+    """
+    if organization_id is not None:
+        return os.path.join(WORKSPACES_DIR, str(organization_id), f"task-{task_id}")
+    return os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+
+
 async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> tuple[str, str, int | None]:
     """Run a git command asynchronously. Returns (stdout, stderr, returncode).
 
@@ -65,8 +79,10 @@ async def clone_repo(
         fallback_branch: If `default_branch` doesn't exist on the remote, clone
             this one and create `default_branch` from it.
     """
-    dirname = workspace_name or f"task-{task_id}"
-    workspace = os.path.join(WORKSPACES_DIR, dirname)
+    if workspace_name:
+        workspace = os.path.join(WORKSPACES_DIR, workspace_name)
+    else:
+        workspace = _workspace_path(task_id=task_id, organization_id=organization_id)
 
     # Inject GitHub token into URL for auth (used by both reuse and fresh paths).
     # Both PAT and GitHub App installation tokens accept the
@@ -312,8 +328,13 @@ async def ensure_branch_has_commits(workspace: str, base_branch: str) -> None:
         )
 
 
-def cleanup_workspace(task_id: int) -> None:
-    """Remove a task's workspace."""
-    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+def cleanup_workspace(task_id: int, organization_id: int | None = None) -> None:
+    """Remove a task's workspace.
+
+    Accepts organization_id so per-org sub-trees can be cleaned. None preserves
+    the legacy `<WORKSPACES_DIR>/task-<task_id>` path for back-compat with
+    callers that haven't been updated yet.
+    """
+    workspace = _workspace_path(task_id=task_id, organization_id=organization_id)
     if os.path.exists(workspace):
         shutil.rmtree(workspace)
