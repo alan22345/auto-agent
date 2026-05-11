@@ -344,7 +344,7 @@ If a reviewer says your fix is a band-aid or doesn't address the root cause:
 
 PO_ANALYSIS_PROMPT = """\
 You are a Product Owner analyzing a codebase to identify UX improvements and feature gaps.
-
+{goal_section}
 ## Your accumulated knowledge about this product
 {ux_knowledge}
 
@@ -360,6 +360,7 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
    - Consistency issues (different patterns for similar things)
    - New features that would improve the product that are not currently implemented
    - Performance issues visible in code
+   {goal_directive}
 4. For each suggestion, provide a title, implementation-ready description, rationale, category, and priority.
 5. Update your knowledge summary with what you learned about the product.
 
@@ -707,12 +708,32 @@ def build_plan_independent_review_prompt(
 def build_po_analysis_prompt(
     ux_knowledge: str | None = None,
     recent_suggestions: list[str] | None = None,
+    goal: str | None = None,
 ) -> str:
     knowledge = ux_knowledge or "No prior knowledge — this is the first analysis."
     suggestions = "\n".join(f"- {s}" for s in (recent_suggestions or []))
     if not suggestions:
         suggestions = "None yet — this is the first analysis."
+
+    goal_clean = (goal or "").strip()
+    if goal_clean:
+        goal_section = (
+            "\n## Goal (the product owner's objective for this analysis)\n"
+            f"{goal_clean}\n\n"
+            "Every suggestion you propose must move the product toward this "
+            "goal. Drop any otherwise-good ideas that don't.\n"
+        )
+        goal_directive = (
+            "- **Goal alignment** — items that directly serve the stated goal "
+            "above take priority over generic improvements."
+        )
+    else:
+        goal_section = ""
+        goal_directive = ""
+
     return PO_ANALYSIS_PROMPT.format(
+        goal_section=goal_section,
+        goal_directive=goal_directive,
         ux_knowledge=knowledge,
         recent_suggestions=suggestions,
     )

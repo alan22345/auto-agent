@@ -49,6 +49,7 @@ export interface FreeformConfigData {
   analysis_cron?: string;
   auto_approve_suggestions?: boolean;
   auto_start_tasks?: boolean;
+  po_goal?: string | null;
   last_analysis_at?: string | null;
   architecture_mode?: boolean;
   architecture_cron?: string;

@@ -47,7 +47,7 @@ async def test_auto_merge_clean_state_calls_merge_api(monkeypatch):
     """mergeable_state=clean → merge API called → MERGED returned."""
     monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
 
-    async def fake_state(_url):
+    async def fake_state(_url, **_kw):
         return {"mergeable_state": "clean"}
 
     class FakeResp:
@@ -70,7 +70,7 @@ async def test_auto_merge_dirty_dispatches_conflict_resolver(monkeypatch):
     """mergeable_state=dirty → CONFLICT_DISPATCHED, conflict event emitted."""
     monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
 
-    async def fake_state(_url):
+    async def fake_state(_url, **_kw):
         return {"mergeable_state": "dirty"}
 
     dispatched: list[tuple[int, str]] = []
@@ -94,7 +94,7 @@ async def test_auto_merge_dirty_after_one_attempt_returns_failed(monkeypatch):
     """If conflict resolution was already attempted, don't dispatch again."""
     monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
 
-    async def fake_state(_url):
+    async def fake_state(_url, **_kw):
         return {"mergeable_state": "dirty"}
 
     async def fake_attempted(_id):
@@ -118,7 +118,7 @@ async def test_auto_merge_unstable_returns_ci_blocked(monkeypatch):
     """mergeable_state=unstable → CI_BLOCKED, no merge call."""
     monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
 
-    async def fake_state(_url):
+    async def fake_state(_url, **_kw):
         return {"mergeable_state": "unstable"}
 
     with patch("run._fetch_pr_state", side_effect=fake_state):

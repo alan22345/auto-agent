@@ -14,6 +14,7 @@ redis[hiredis]==5.2.1
 
 # Slack
 slack-bolt==1.22.0
+aiohttp>=3.10  # required by slack-bolt's async Socket Mode adapter
 
 # Linear (GraphQL)
 httpx==0.28.1

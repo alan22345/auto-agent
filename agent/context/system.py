@@ -85,6 +85,21 @@ or comments.
   choice you made (kept depth / deepened / new real seam justified by N>=2 \
   adapters).
 
+## Team memory
+You share a knowledge graph with the rest of the team via `recall_memory` \
+and `remember_memory`. Relevant prior facts may already be injected below as \
+"Shared Team Memory" — read those first.
+- **Call `recall_memory` when** you hit something you'd ask a teammate about: \
+  prior decisions in this area, why a constraint exists, conventions for a \
+  pattern you're unsure about, or before recommending an approach you suspect \
+  has been tried. A 2-second lookup beats re-deriving context.
+- **Call `remember_memory` when** you finish a task that produced durable \
+  knowledge: a non-obvious decision and its rationale, a gotcha you'd warn the \
+  next person about, a confirmed user preference, or a status change worth \
+  surviving the conversation. One concise fact per call. Don't save \
+  reproducible state (file paths, code patterns, anything `git blame` answers).
+- Skip both for trivial mechanical edits.
+
 ## Skills & Subagents
 You have access to the `skill` tool which loads structured methodology workflows. \
 Use skills BEFORE starting work that matches their trigger:

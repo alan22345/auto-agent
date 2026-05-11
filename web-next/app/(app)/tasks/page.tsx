@@ -13,12 +13,7 @@ import {
 } from '@/components/tasks/task-filter-bar';
 import { ChatArea } from '@/components/chat/chat-area';
 import { MessageInput } from '@/components/chat/message-input';
-import { ApprovalBar } from '@/components/chat/approval-bar';
-import { ClarificationBar } from '@/components/chat/clarification-bar';
-import { DoneBar } from '@/components/chat/done-bar';
 import { Button } from '@/components/ui/button';
-
-const DONE_BAR_STATUSES = new Set(['awaiting_review', 'queued', 'blocked', 'failed']);
 
 export default function TasksPage() {
   const { data: tasks = [] } = useTasks();
@@ -29,7 +24,6 @@ export default function TasksPage() {
     () => tasks.find((t) => t.id === selectedId) || null,
     [tasks, selectedId],
   );
-  const isFreeform = selected?.freeform_mode === true;
 
   const visibleTasks = useMemo(() => applyTaskFilter(tasks, filter), [tasks, filter]);
 
@@ -57,9 +51,6 @@ export default function TasksPage() {
             <div className="border-b p-3 text-sm font-medium">{selected.title}</div>
             <TaskDetailPanel task={selected} />
             <ChatArea taskId={selectedId} />
-            {selected.status === 'awaiting_approval' && !isFreeform && <ApprovalBar taskId={selected.id} />}
-            {selected.status === 'awaiting_clarification' && !isFreeform && <ClarificationBar taskId={selected.id} />}
-            {DONE_BAR_STATUSES.has(selected.status) && !isFreeform && <DoneBar taskId={selected.id} />}
             <MessageInput task={selected} />
             <TaskActions task={selected} />
           </>

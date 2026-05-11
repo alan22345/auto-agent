@@ -17,13 +17,11 @@ import asyncio
 import contextlib
 import re as _re
 from datetime import datetime, timezone
-from pathlib import Path
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from sqlalchemy import select as sa_select
 
 from agent.architect_analyzer import run_architecture_loop
@@ -115,6 +113,22 @@ log = setup_logging("auto-agent")
 app = FastAPI(title="Auto-Agent", version="0.1.0")
 
 
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    import traceback as _tb
+
+    import structlog
+
+    structlog.get_logger().error(
+        "unhandled_exception",
+        path=str(request.url.path),
+        method=request.method,
+        error=str(exc),
+        traceback=_tb.format_exc(),
+    )
+    return Response(status_code=500, content=f"internal server error: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Auth middleware
 #
@@ -126,8 +140,15 @@ app = FastAPI(title="Auto-Agent", version="0.1.0")
 #   - Loopback requests from inside the same container
 # ---------------------------------------------------------------------------
 
-_AUTH_EXEMPT_PREFIXES = ("/health", "/api/webhooks/", "/api/auth/login", "/api/auth/logout", "/static/")
-_AUTH_EXEMPT_EXACT = ("/", "/api/auth/login", "/api/auth/logout")
+_AUTH_EXEMPT_PREFIXES = (
+    "/health",
+    "/api/webhooks/",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/signup",
+    "/api/auth/verify/",
+)
+_AUTH_EXEMPT_EXACT = ("/api/auth/login", "/api/auth/logout", "/api/auth/signup")
 
 
 def _is_auth_exempt(path: str) -> bool:
@@ -178,14 +199,20 @@ app.include_router(search_router, prefix="/api")
 app.include_router(github_webhook_router, prefix="/api")
 app.include_router(linear_webhook_router, prefix="/api")
 
-# Static files for web UI
-STATIC_DIR = Path(__file__).parent / "web" / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# The legacy SPA at /static/index.html has been decommissioned.
+# The active frontend is the Next.js app on port 3000 (web-next/), which
+# proxies /api and /ws back to this FastAPI process. Anyone hitting :2020
+# directly is an API consumer; / returns a small JSON pointer instead of
+# 404'ing silently.
 
 
-@app.get("/", response_class=HTMLResponse)
-async def root() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text())
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "service": "auto-agent",
+        "ui": "http://localhost:3000",
+        "docs": "/docs",
+    }
 
 
 @app.websocket("/ws")
@@ -194,43 +221,9 @@ async def ws_proxy(ws: WebSocket) -> None:
     await websocket_endpoint(ws)
 
 
-@app.websocket("/ws/claude/pair/{pairing_id}")
-async def ws_claude_pair(ws: WebSocket, pairing_id: str) -> None:
-    """Stream PTY stdout for the named pairing session to the browser.
-
-    Auth is via ?token= query param (same pattern as the main /ws), or via
-    the session cookie sent automatically by the browser.
-    """
-    from orchestrator.auth import verify_token
-    from orchestrator import claude_pairing
-
-    token = ws.query_params.get("token") or ws.cookies.get("auto_agent_session")
-    payload = verify_token(token) if token else None
-    if not payload:
-        await ws.close(code=4401)
-        return
-
-    sess = claude_pairing.get_pairing(pairing_id)
-    if not sess or sess.user_id != payload["user_id"]:
-        await ws.close(code=4404)
-        return
-
-    await ws.accept()
-    try:
-        while True:
-            line = await sess.read_line(timeout=0.5)
-            if line is None:
-                if not sess._proc.isalive():
-                    await ws.send_json({"type": "exit"})
-                    return
-                continue
-            await ws.send_json({"type": "line", "text": line})
-    except Exception as e:
-        log.warning("pairing ws error: %s", e)
-        try:
-            await ws.close()
-        except Exception:
-            pass
+# Pairing now happens entirely over HTTP (the OAuth handshake is driven by
+# orchestrator.claude_pairing). The /ws/claude/pair/{id} endpoint is no
+# longer needed and has been removed.
 
 
 @app.get("/health")
@@ -639,7 +632,10 @@ async def on_ci_failed(event: Event) -> None:
 
         # Fetch actual failure logs if we have a PR URL
         if task.pr_url:
-            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            from shared.github_auth import get_github_token as _gh_token
+            ci_logs = await _fetch_failed_ci_logs(
+                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
+            )
             reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
 
         task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
@@ -740,7 +736,10 @@ async def on_dev_deploy_failed(event: Event) -> None:
 
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
-            ci_logs = await _fetch_failed_ci_logs(task.pr_url, settings.github_token)
+            from shared.github_auth import get_github_token as _gh_token
+            ci_logs = await _fetch_failed_ci_logs(
+                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
+            )
             # If GH had no failed check runs to surface (typical for repos
             # without GitHub Actions — the deploy failure happened in the
             # auto-agent's own deploy script), fall back to whatever short
@@ -1117,19 +1116,23 @@ def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
     return parts[-4], parts[-3], parts[-1]
 
 
-async def _fetch_pr_state(pr_url: str) -> dict | None:
+async def _fetch_pr_state(
+    pr_url: str, *, user_id: int | None = None,
+) -> dict | None:
     """Fetch a PR's mergeable + mergeable_state from GitHub.
 
     GitHub computes `mergeable` async — the first GET after a push may return
     `None` / `"unknown"`. We retry briefly to give it time to settle. Returns
     the PR JSON dict on success, or None on hard failure.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=user_id)
+    if not token:
         return None
     owner, repo, num = _parse_pr_url(pr_url)
     headers = {
-        "Authorization": f"token {_settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{num}"
@@ -1188,14 +1191,17 @@ async def _auto_merge_pr(task: Task) -> str:
                                Caller should fall through to manual review.
         FAILED               — Merge attempt failed for any other reason.
     """
-    from shared.config import settings as _settings
-    if not task.pr_url or not _settings.github_token:
+    from shared.github_auth import get_github_token
+
+    user_id = getattr(task, "created_by_user_id", None)
+    gh_token = await get_github_token(user_id=user_id)
+    if not task.pr_url or not gh_token:
         log.warning(f"Cannot auto-merge task #{task.id}: no PR URL or GitHub token")
         return MERGE_OUTCOME_FAILED
 
     # Pre-emptive mergeable check. Skip the dispatch if we've already tried
     # resolving this PR's conflicts once — one retry is the policy.
-    pr_state = await _fetch_pr_state(task.pr_url)
+    pr_state = await _fetch_pr_state(task.pr_url, user_id=user_id)
     if pr_state is not None:
         ms = pr_state.get("mergeable_state") or "unknown"
         if ms == "dirty":
@@ -1217,7 +1223,7 @@ async def _auto_merge_pr(task: Task) -> str:
             resp = await client.put(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
                 headers={
-                    "Authorization": f"token {_settings.github_token}",
+                    "Authorization": f"token {gh_token}",
                     "Accept": "application/vnd.github.v3+json",
                 },
                 json={"merge_method": "squash"},
@@ -1394,9 +1400,10 @@ async def ci_status_poller() -> None:
     reach the server. Checks the combined commit status and check runs
     for the PR's head branch.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("CI poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("CI poller: no GitHub auth configured, skipping")
         return
 
     log.info("CI status poller started")
@@ -1409,20 +1416,21 @@ async def ci_status_poller() -> None:
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_CI)
                 )
                 tasks_awaiting = result.scalars().all()
+                gh_token = await get_github_token()
 
                 for task in tasks_awaiting:
                     if not task.pr_url:
                         continue
 
                     try:
-                        conclusion = await _check_pr_ci_status(task.pr_url, _settings.github_token)
+                        conclusion = await _check_pr_ci_status(task.pr_url, gh_token)
                     except Exception:
                         log.exception(f"CI poll failed for task #{task.id}")
                         continue
 
                     if conclusion is None:
                         # CI still running or no checks found — check if repo has no CI at all
-                        no_ci = await _pr_has_no_checks(task.pr_url, _settings.github_token)
+                        no_ci = await _pr_has_no_checks(task.pr_url, gh_token)
                         if no_ci:
                             log.info(f"Task #{task.id}: no CI checks on PR, skipping to review")
                             await publish(task_ci_passed(task.id))
@@ -1558,9 +1566,10 @@ async def pr_merge_poller() -> None:
 
     Uses exponential backoff per task, starting at 30s and maxing out at 10 min.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("PR merge poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("PR merge poller: no GitHub auth configured, skipping")
         return
 
     import time
@@ -1570,6 +1579,7 @@ async def pr_merge_poller() -> None:
         try:
             now = time.monotonic()
             async with async_session() as session:
+                gh_token = await get_github_token()
                 from sqlalchemy import select as sa_select
                 result = await session.execute(
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_REVIEW)
@@ -1601,7 +1611,7 @@ async def pr_merge_poller() -> None:
                     _merge_poll_last_check[task.id] = now
 
                     try:
-                        merged = await _check_pr_merged(task.pr_url, _settings.github_token)
+                        merged = await _check_pr_merged(task.pr_url, gh_token)
                     except Exception:
                         log.exception(f"Merge poll failed for task #{task.id}")
                         # Back off on errors too
@@ -1650,9 +1660,10 @@ async def pr_comment_poller() -> None:
     Picks up both PR review comments (inline) and issue comments (conversation)
     so the agent can respond to feedback even without webhooks configured.
     """
-    from shared.config import settings as _settings
-    if not _settings.github_token:
-        log.info("PR comment poller: no GITHUB_TOKEN, skipping")
+    from shared.github_auth import get_github_token
+
+    if not await get_github_token():
+        log.info("PR comment poller: no GitHub auth configured, skipping")
         return
 
     log.info("PR comment poller started")
@@ -1664,11 +1675,12 @@ async def pr_comment_poller() -> None:
                 result = await session.execute(
                     sa_select(Task).where(Task.status.in_(REVIEW_POLL_STATUSES))
                 )
+                gh_token = await get_github_token()
                 for task in result.scalars().all():
                     if not task.pr_url:
                         continue
                     try:
-                        await _poll_pr_comments(task, _settings.github_token)
+                        await _poll_pr_comments(task, gh_token)
                     except Exception:
                         log.exception(f"Comment poll failed for task #{task.id}")
 
@@ -1767,14 +1779,23 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def start_slack_if_configured() -> None:
+async def start_slack_inbound_if_configured() -> None:
     from shared.config import settings
     if not settings.slack_bot_token or not settings.slack_app_token:
-        log.info("Slack not configured, skipping")
+        log.info("Slack not configured, skipping inbound")
         return
-    from integrations.slack.main import main as slack_main
-    log.info("Starting Slack worker")
-    await slack_main()
+    from integrations.slack.main import inbound_loop as slack_inbound_loop
+    log.info("Starting Slack inbound (Socket Mode)")
+    await slack_inbound_loop()
+
+
+async def start_slack_notifications_if_configured() -> None:
+    from shared.config import settings
+    if not settings.slack_bot_token:
+        return
+    from integrations.slack.main import notification_loop as slack_notification_loop
+    log.info("Starting Slack notification fan-out")
+    await slack_notification_loop()
 
 
 # ---------------------------------------------------------------------------
@@ -1912,7 +1933,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(telegram_inbound_loop()),
         asyncio.create_task(telegram_notification_loop()),
         asyncio.create_task(web_event_listener()),
-        asyncio.create_task(start_slack_if_configured()),
+        asyncio.create_task(start_slack_inbound_if_configured()),
+        asyncio.create_task(start_slack_notifications_if_configured()),
         asyncio.create_task(task_timeout_watchdog()),
         asyncio.create_task(ci_status_poller()),
         asyncio.create_task(pr_comment_poller()),

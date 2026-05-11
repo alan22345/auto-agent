@@ -209,6 +209,8 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             readonly=True,
             max_turns=30,
             include_methodology=True,
+            task_description=task.description,
+            repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
         )
 

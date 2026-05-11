@@ -17,8 +17,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest
 
 # node user already exists in the node:20 base image
 # Create workspace and claude config dirs owned by node
-RUN mkdir -p /workspace /workspaces /home/node/.claude && \
-    chown -R node:node /workspace /workspaces /home/node/.claude
+RUN mkdir -p /workspace /workspaces /home/node/.claude /data/users && \
+    chown -R node:node /workspace /workspaces /home/node/.claude /data && \
+    chmod 700 /data/users
 
 WORKDIR /app
 

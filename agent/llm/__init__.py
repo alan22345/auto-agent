@@ -16,6 +16,7 @@ def get_provider(
     model_override: str | None = None,
     provider_override: str | None = None,
     home_dir: str | None = None,
+    api_key_override: str | None = None,
 ) -> LLMProvider:
     """Return the configured LLM provider instance.
 
@@ -27,6 +28,12 @@ def get_provider(
                        by flows that require an API provider with native tool
                        calling (e.g. the Search tab — claude_cli passthrough
                        skips the agentic loop and can't stream tool events).
+        api_key_override: Anthropic API key to use instead of
+                       ``settings.anthropic_api_key``. Per-user keys (Phase 1
+                       multi-tenant) are resolved by the caller via
+                       ``shared.secrets.get(user_id, "anthropic_api_key")``
+                       and threaded in here. Ignored on the Bedrock and
+                       claude_cli paths — those are infra-level.
     """
     from shared.config import settings
 
@@ -39,7 +46,7 @@ def get_provider(
         from agent.llm.anthropic import AnthropicProvider
 
         return AnthropicProvider(
-            api_key=settings.anthropic_api_key,
+            api_key=api_key_override or settings.anthropic_api_key,
             model=model,
         )
     elif provider == "bedrock":
@@ -59,3 +66,20 @@ def get_provider(
         return ClaudeCLIProvider(home_dir=home_dir)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+async def resolve_user_anthropic_key(user_id: int | None) -> str | None:
+    """Look up the per-user Anthropic API key, or ``None`` if unset.
+
+    Pass the result as ``api_key_override`` to ``get_provider``. Returns
+    ``None`` for ``user_id is None`` or any lookup failure — the caller
+    falls back to ``settings.anthropic_api_key``.
+    """
+    if user_id is None:
+        return None
+    try:
+        from shared import secrets as _secrets
+
+        return await _secrets.get(user_id, "anthropic_api_key")
+    except Exception:
+        return None

@@ -1,24 +1,12 @@
-"""Regression tests for the legacy ``web/`` UI's task-list refresh path.
+"""WebSocket ``refresh`` handler end-to-end test.
 
-The frontend used to send ``{ type: "get_tasks" }`` on
-``task.subtask_progress`` events, but ``web/main.py`` only handles
-``{ type: "refresh" }`` — so the message was silently dropped and the
-subtask progress bars/counts went stale until an unrelated event
-triggered a refresh.
-
-Two complementary tests:
-
-1. ``test_ws_refresh_returns_task_list`` exercises the server-side
-   ``refresh`` handler end-to-end via the FastAPI WebSocket TestClient.
-2. ``test_index_html_uses_refresh_for_subtask_progress`` is a static
-   guard that reads ``web/static/index.html`` and asserts the orphan
-   ``get_tasks`` string is gone and the subtask_progress branch sends
-   ``refresh`` instead — this is the regression test that would have
-   caught the bug.
+The Next.js UI sends ``{type: "refresh"}`` on ``task.subtask_progress``
+events to keep subtask progress bars current; this test exercises the
+server-side handler. The companion static-asset guard against the
+decommissioned ``web/static/index.html`` SPA has been removed.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -67,29 +55,3 @@ def test_ws_refresh_returns_task_list():
             assert msg["tasks"] == []
 
 
-def test_index_html_uses_refresh_for_subtask_progress():
-    """The legacy SPA must not emit the orphan ``get_tasks`` message.
-
-    Asserts that:
-    - The string ``type: "get_tasks"`` is absent from index.html (no
-      handler exists for it in web/main.py).
-    - The ``task.subtask_progress`` branch sends ``type: "refresh"``,
-      which IS handled server-side.
-    """
-    index_path = Path(__file__).resolve().parent.parent / "web" / "static" / "index.html"
-    text = index_path.read_text()
-
-    assert 'type: "get_tasks"' not in text, (
-        "web/static/index.html still contains an orphan get_tasks WS message; "
-        "web/main.py has no handler for it — use 'refresh' instead."
-    )
-
-    marker = 'data.event_type === "task.subtask_progress"'
-    idx = text.find(marker)
-    assert idx != -1, "could not locate the task.subtask_progress branch"
-    # Inspect the next ~400 chars (the small block that fires the WS send)
-    block = text[idx : idx + 400]
-    assert 'type: "refresh"' in block, (
-        "subtask_progress branch must send {type: 'refresh'} so the server "
-        "responds with a fresh task_list"
-    )

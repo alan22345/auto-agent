@@ -21,7 +21,7 @@ from agent.lifecycle._orchestrator_api import (
     get_task,
     transition_task,
 )
-from agent.lifecycle.factory import create_agent
+from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.prompts import (
     build_plan_independent_review_prompt,
     build_pr_independent_review_prompt,
@@ -32,7 +32,6 @@ from agent.workspace import (
     commit_pending_changes,
     push_branch,
 )
-from shared.config import settings
 from shared.events import (
     Event,
     publish,
@@ -44,7 +43,9 @@ from shared.logging import setup_logging
 log = setup_logging("agent.lifecycle.review")
 
 
-async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
+async def find_existing_pr_url(
+    workspace: str, head_branch: str, *, user_id: int | None = None,
+) -> str | None:
     """Return the URL of an existing open PR for `head_branch`, or None.
 
     Uses `gh pr list --head <branch> --state open --json url,state`. If gh
@@ -57,11 +58,13 @@ async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
     Checking first makes the path idempotent — re-entry just pushes new
     commits to the same PR.
     """
+    from shared.github_auth import get_github_token
+
     result = await sh.run(
         ["gh", "pr", "list", "--head", head_branch, "--state", "open", "--json", "url,state"],
         cwd=workspace,
         timeout=20,
-        env={"GH_TOKEN": settings.github_token},
+        env={"GH_TOKEN": await get_github_token(user_id=user_id)},
     )
     if result.failed:
         return None
@@ -78,15 +81,23 @@ async def find_existing_pr_url(workspace: str, head_branch: str) -> str | None:
 
 
 async def create_pr(
-    workspace: str, title: str, body: str, base_branch: str, head_branch: str
+    workspace: str,
+    title: str,
+    body: str,
+    base_branch: str,
+    head_branch: str,
+    *,
+    user_id: int | None = None,
 ) -> str:
     """Create a PR using the gh CLI, or return the existing one if the branch
     already has an open PR. Idempotent — safe to call after pushing new
     commits to a branch with an existing PR."""
-    existing = await find_existing_pr_url(workspace, head_branch)
+    existing = await find_existing_pr_url(workspace, head_branch, user_id=user_id)
     if existing:
         log.info(f"PR already exists for {head_branch}, reusing: {existing}")
         return existing
+
+    from shared.github_auth import get_github_token
 
     result = await sh.run(
         [
@@ -98,7 +109,7 @@ async def create_pr(
         ],
         cwd=workspace,
         timeout=30,
-        env={"GH_TOKEN": settings.github_token},
+        env={"GH_TOKEN": await get_github_token(user_id=user_id)},
     )
     if result.failed:
         raise RuntimeError(
@@ -131,7 +142,11 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
     reviewer_session = _fresh_session_id(task_id, "review")
 
     log.info(f"Independent review of task #{task_id} PR (session={reviewer_session})")
-    workspace = await clone_repo(repo.url, task_id, base_branch, fallback_branch=fallback_branch)
+    workspace = await clone_repo(
+        repo.url, task_id, base_branch,
+        fallback_branch=fallback_branch,
+        user_id=task.created_by_user_id,
+    )
 
     try:
         await sh.run(["git", "checkout", branch_name], cwd=workspace, timeout=30)
@@ -139,7 +154,15 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         prompt = build_pr_independent_review_prompt(
             task.title, task.description, pr_url, base_branch
         )
-        agent = create_agent(workspace, session_id=reviewer_session, readonly=True, max_turns=20)
+        agent = create_agent(
+            workspace,
+            session_id=reviewer_session,
+            readonly=True,
+            max_turns=20,
+            task_description=task.description,
+            repo_name=task.repo_name,
+            home_dir=await home_dir_for_task(task),
+        )
         result = await agent.run(prompt)
         output = result.output
         log.info(f"Independent review for task #{task_id}: {output[:300]}...")
@@ -189,7 +212,14 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 f"An independent code reviewer left feedback on your PR. "
                 f"Address their comments:\n\n{output}\n\nFix the issues, commit, and push."
             )
-            fix_agent = create_agent(workspace, session_id=session_id, max_turns=30)
+            fix_agent = create_agent(
+                workspace,
+                session_id=session_id,
+                max_turns=30,
+                task_description=task.description,
+                repo_name=task.repo_name,
+                home_dir=await home_dir_for_task(task),
+            )
             fix_result = await fix_agent.run(fix_prompt, resume=True)
             log.info(f"Review fixes for task #{task_id}: {fix_result.output[:300]}...")
 
@@ -257,7 +287,15 @@ async def handle_plan_independent_review(task_id: int) -> None:
 
     try:
         with tempfile.TemporaryDirectory(prefix=f"plan-review-{task_id}-") as tmp:
-            agent = create_agent(tmp, readonly=True, max_turns=5, model_tier="fast")
+            agent = create_agent(
+                tmp,
+                readonly=True,
+                max_turns=5,
+                model_tier="fast",
+                task_description=task.description,
+                repo_name=task.repo_name,
+                home_dir=await home_dir_for_task(task),
+            )
             result = await agent.run(prompt)
             output = result.output
     except Exception as e:
@@ -321,13 +359,22 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
     log.info(f"Addressing PR review for task #{task_id} (session={session_id})")
     if task.status in ("awaiting_review", "awaiting_ci"):
         await transition_task(task_id, "coding", f"Addressing feedback: {comments[:200]}")
-    workspace = await clone_repo(repo.url, task_id, base_branch)
+    workspace = await clone_repo(
+        repo.url, task_id, base_branch, user_id=task.created_by_user_id,
+    )
 
     try:
         await sh.run(["git", "checkout", branch_name], cwd=workspace, timeout=30)
 
         prompt = build_pr_review_response_prompt(task.title, task.description, comments)
-        agent = create_agent(workspace, session_id=session_id, max_turns=30)
+        agent = create_agent(
+            workspace,
+            session_id=session_id,
+            max_turns=30,
+            task_description=task.description,
+            repo_name=task.repo_name,
+            home_dir=await home_dir_for_task(task),
+        )
         result = await agent.run(prompt, resume=True)
         log.info(f"PR review response for task #{task_id}: {result.output[:300]}...")
 

@@ -35,7 +35,7 @@ class ClaudeCLIProvider(LLMProvider):
     max_context_tokens = 200_000
     is_passthrough = True
 
-    def __init__(self, timeout: int = 1200, home_dir: str | None = None):
+    def __init__(self, timeout: int = 3600, home_dir: str | None = None):
         self._timeout = timeout
         self._session_id: str | None = None
         self._cwd: str | None = None

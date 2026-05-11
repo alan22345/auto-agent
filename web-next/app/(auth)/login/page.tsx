@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { login } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
@@ -31,7 +32,7 @@ export default function LoginPage() {
         <h1 className="mb-4 text-xl font-semibold text-primary">Auto-Agent</h1>
         <form onSubmit={onSubmit} className="space-y-3">
           <div>
-            <Label htmlFor="u">Username</Label>
+            <Label htmlFor="u">Username or email</Label>
             <Input id="u" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
           </div>
           <div>
@@ -40,6 +41,12 @@ export default function LoginPage() {
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <Button type="submit" disabled={loading} className="w-full">{loading ? 'Signing in…' : 'Sign in'}</Button>
+          <p className="text-center text-sm">
+            New here?{' '}
+            <Link href="/signup" className="text-primary underline">
+              Create an account
+            </Link>
+          </p>
         </form>
       </Card>
     </main>

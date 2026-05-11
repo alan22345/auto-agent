@@ -4,10 +4,11 @@ import { useTaskMessages } from '@/hooks/useTaskMessages';
 import { cn } from '@/lib/utils';
 
 const KIND_STYLES: Record<string, string> = {
-  user: 'bg-card',
+  user: 'bg-card border',
+  agent: 'border-l-4 border-primary bg-primary/5',
   system: 'bg-muted text-muted-foreground italic',
-  event: 'bg-secondary text-muted-foreground text-xs font-mono',
-  stream: 'bg-background text-muted-foreground text-xs font-mono opacity-80',
+  event: 'text-muted-foreground text-xs font-mono opacity-70',
+  stream: 'text-muted-foreground text-xs font-mono opacity-60',
   error: 'bg-destructive/10 text-destructive',
 };
 
@@ -69,8 +70,11 @@ export function ChatArea({ taskId }: { taskId: number | null }) {
       <div ref={ref} onScroll={onScroll} className="flex-1 overflow-auto p-4">
         {entries.map((e, i) => (
           <div key={i} className={cn('mb-2 rounded p-3', KIND_STYLES[e.kind] || 'bg-card')}>
-            {e.kind === 'user' && e.sender && (
-              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">{e.sender}</div>
+            {(e.kind === 'user' || e.kind === 'agent') && e.sender && (
+              <div className={cn(
+                'mb-1 text-xs uppercase tracking-wide',
+                e.kind === 'agent' ? 'font-semibold text-primary' : 'text-muted-foreground',
+              )}>{e.sender}{e.kind === 'agent' ? ' · asks' : ''}</div>
             )}
             <div className="whitespace-pre-wrap text-sm">{e.message}</div>
           </div>

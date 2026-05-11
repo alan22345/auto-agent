@@ -1,5 +1,5 @@
 import enum
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -60,7 +61,7 @@ class SuggestionStatus(str, enum.Enum):
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Repo(Base):
@@ -225,6 +226,10 @@ class FreeformConfig(Base):
     analysis_cron = Column(String(100), default="0 9 * * 1")  # weekly Monday 9am
     last_analysis_at = Column(DateTime(timezone=True), nullable=True)
     ux_knowledge = Column(Text, nullable=True)  # PO's accumulated understanding
+    # Free-text goal that steers what the PO looks for. When set, prepended to
+    # the PO prompt so suggestions are evaluated against this objective rather
+    # than just "any improvement".
+    po_goal = Column(Text, nullable=True)
     # When True, the orchestrator auto-approves PO-generated suggestions
     # for this repo (closing the continuous-improvement loop). Bounded by
     # the per-repo active task cap so the queue doesn't grow unboundedly.
@@ -256,6 +261,34 @@ class User(Base):
         String(32), nullable=False, default="never_paired"
     )
     claude_paired_at = Column(DateTime(timezone=True), nullable=True)
+    # Per-user messaging-platform identifiers. When set, notifications about
+    # tasks owned by this user are routed here instead of fanning out to a
+    # single global admin chat. NULL means "this user hasn't linked the
+    # platform yet".
+    telegram_chat_id = Column(String(64), nullable=True, unique=True)
+    slack_user_id = Column(String(64), nullable=True, unique=True)
+    # Self-serve signup with email verification (Phase 1 multi-tenant).
+    # NULL email = legacy admin/seeded user (no verification required).
+    email = Column(String(255), nullable=True, unique=True)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+    signup_token = Column(String(64), nullable=True, unique=True)
+
+
+class UserSecret(Base):
+    """Per-user encrypted secret. Read/written via shared/secrets.py — never
+    instantiate directly. ``value_enc`` is pgcrypto-encrypted ciphertext."""
+    __tablename__ = "user_secrets"
+
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False,
+    )
+    key = Column(String(64), primary_key=True, nullable=False)
+    value_enc = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+    )
 
 
 class SearchSession(Base):

@@ -60,11 +60,10 @@ export default function ConnectClaude() {
       {state.phase === 'idle' && <Button onClick={begin}>Connect Claude</Button>}
 
       {state.phase === 'starting' && <div>Starting pairing session…</div>}
-      {state.phase === 'awaiting_url' && <div>Waiting for login URL…</div>}
 
       {state.phase === 'awaiting_code' && state.url && (
         <div className="space-y-3">
-          <p className="text-sm">Open this link in a new tab and complete the login:</p>
+          <p className="text-sm">Open this link in a new tab and sign in:</p>
           <a
             href={state.url}
             target="_blank"
@@ -73,7 +72,9 @@ export default function ConnectClaude() {
           >
             {state.url}
           </a>
-          <p className="text-sm">Then paste the one-time code below:</p>
+          <p className="text-sm">
+            After authorizing, the page will show a code. Paste it here:
+          </p>
           <Input
             value={code}
             onChange={(e) => setCode(e.target.value)}

@@ -10,6 +10,8 @@ from agent.tools.file_write import FileWriteTool
 from agent.tools.git import GitTool
 from agent.tools.glob_tool import GlobTool
 from agent.tools.grep_tool import GrepTool
+from agent.tools.recall_memory import RecallMemoryTool
+from agent.tools.remember_memory import RememberMemoryTool
 from agent.tools.skill import SkillTool
 from agent.tools.subagent import SubagentTool
 from agent.tools.test_runner import TestRunnerTool
@@ -29,6 +31,7 @@ def create_default_registry(readonly: bool = False) -> ToolRegistry:
     registry.register(GrepTool())
     registry.register(GitTool())
     registry.register(SkillTool())  # Load superpowers methodology
+    registry.register(RecallMemoryTool())  # Query shared team-memory graph
 
     # Write tools — excluded in planning/readonly mode
     if not readonly:
@@ -37,5 +40,6 @@ def create_default_registry(readonly: bool = False) -> ToolRegistry:
         registry.register(BashTool())
         registry.register(TestRunnerTool())
         registry.register(SubagentTool())  # Dispatch parallel workers
+        registry.register(RememberMemoryTool())  # Persist team-memory facts
 
     return registry

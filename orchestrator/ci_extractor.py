@@ -22,7 +22,10 @@ async def extract_ci_checks(repo_url: str) -> str | None:
 
     Returns a formatted string of commands to run, or None if no workflows found.
     """
-    if not settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token()
+    if not token:
         return None
 
     # Parse owner/repo from URL
@@ -33,7 +36,7 @@ async def extract_ci_checks(repo_url: str) -> str | None:
 
     owner, repo = owner_repo
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
 

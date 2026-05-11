@@ -6,7 +6,7 @@ import type {
 } from './api';
 
 export interface ChatEntry {
-  kind: 'user' | 'system' | 'event' | 'stream' | 'error';
+  kind: 'user' | 'agent' | 'system' | 'event' | 'stream' | 'error';
   message: string;
   sender?: string | null;
   ts?: string;
@@ -50,6 +50,7 @@ export interface FreeformConfig {
   analysis_cron: string;
   auto_approve_suggestions: boolean;
   auto_start_tasks?: boolean;
+  po_goal?: string | null;
   last_analysis_at?: string | null;
   architecture_mode?: boolean;
   architecture_cron?: string;
@@ -121,6 +122,7 @@ export type WSCommand =
       analysis_cron: string;
       auto_approve_suggestions: boolean;
       auto_start_tasks?: boolean;
+      po_goal?: string | null;
       architecture_mode?: boolean;
       architecture_cron?: string;
     }

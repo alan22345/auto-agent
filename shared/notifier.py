@@ -42,14 +42,25 @@ def send_telegram(message: str) -> None:
 TELEGRAM_MAX_LENGTH = 4000  # Telegram limit is 4096, leave room for formatting
 
 
-async def send_telegram_async(message: str, task_id: int | None = None) -> None:
+async def send_telegram_async(
+    message: str,
+    task_id: int | None = None,
+    chat_id: str | None = None,
+) -> None:
     """Async version of send_telegram. Splits long messages automatically.
+
+    `chat_id` overrides the default destination — pass the task owner's
+    chat_id when routing per-user. When omitted, falls back to the global
+    ``settings.telegram_chat_id`` (admin chat).
 
     If `task_id` is set, the message_id of each outbound chunk is bound
     to the task via the TaskChannel seam so that a reply to this
     notification can be routed back to the task as a feedback message.
     """
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    if not settings.telegram_bot_token:
+        return
+    target = chat_id or settings.telegram_chat_id
+    if not target:
         return
 
     url = f"{TELEGRAM_API.format(token=settings.telegram_bot_token)}/sendMessage"
@@ -59,13 +70,13 @@ async def send_telegram_async(message: str, task_id: int | None = None) -> None:
         async with httpx.AsyncClient() as client:
             for chunk in chunks:
                 resp = await client.post(url, json={
-                    "chat_id": settings.telegram_chat_id,
+                    "chat_id": target,
                     "text": chunk,
                     "parse_mode": "Markdown",
                 })
                 if not resp.is_success:
                     resp = await client.post(url, json={
-                        "chat_id": settings.telegram_chat_id,
+                        "chat_id": target,
                         "text": chunk,
                     })
                     if not resp.is_success:

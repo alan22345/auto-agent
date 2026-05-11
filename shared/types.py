@@ -210,6 +210,7 @@ class FreeformConfigData(BaseModel):
     analysis_cron: str = "0 9 * * 1"
     auto_approve_suggestions: bool = False
     auto_start_tasks: bool = False
+    po_goal: str | None = None
     last_analysis_at: str | None = None
     # Architecture Mode — periodic improve-codebase-architecture cron.
     architecture_mode: bool = False
@@ -244,6 +245,8 @@ class UserData(BaseModel):
     last_login: str | None = None
     claude_auth_status: str = "never_paired"
     claude_paired_at: str | None = None
+    telegram_chat_id: str | None = None
+    slack_user_id: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -260,6 +263,46 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     display_name: str
+
+
+# --- Self-serve signup (Phase 1 multi-tenant) ---
+
+
+class SignupRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str = Field(min_length=1, max_length=255)
+
+
+class SignupResponse(BaseModel):
+    """Response for POST /api/auth/signup. Always returns 201 with the new
+    user's id; the client should display "check your email" — never assume
+    the email was actually delivered."""
+    user_id: int
+    email: str
+    verification_sent: bool
+
+
+class ChangeEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+# --- Per-user secrets API ---
+
+
+class SecretListResponse(BaseModel):
+    """Names only — values never leave the server."""
+    keys: list[str]
+
+
+class SecretPutRequest(BaseModel):
+    """``value=None`` clears the secret (equivalent to DELETE)."""
+    value: str | None = None
+
+
+class SecretTestResponse(BaseModel):
+    ok: bool
+    detail: str = ""
 
 
 # --- Memory tab types ---

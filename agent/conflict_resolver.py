@@ -87,13 +87,18 @@ def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
     return parts[-4], parts[-3], parts[-1]
 
 
-async def _fetch_pr_branches(pr_url: str) -> tuple[str, str] | None:
+async def _fetch_pr_branches(
+    pr_url: str, *, user_id: int | None = None,
+) -> tuple[str, str] | None:
     """Returns (head_branch, base_branch) from GitHub or None on failure."""
-    if not settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=user_id)
+    if not token:
         return None
     owner, repo, num = _parse_pr_url(pr_url)
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
     try:
@@ -143,7 +148,7 @@ async def handle_merge_conflict_resolution(task_id: int, pr_url: str) -> None:
         await _emit_failed(task_id, f"repo '{task.repo_name}' not found")
         return
 
-    branches = await _fetch_pr_branches(pr_url)
+    branches = await _fetch_pr_branches(pr_url, user_id=getattr(task, "created_by_user_id", None))
     if not branches:
         await _emit_failed(task_id, "could not fetch PR branches from GitHub")
         return
@@ -157,6 +162,7 @@ async def handle_merge_conflict_resolution(task_id: int, pr_url: str) -> None:
             task_id=task_id,
             default_branch=head_branch,
             workspace_name=f"conflict-resolve-{task_id}",
+            user_id=getattr(task, "created_by_user_id", None),
         )
     except Exception:
         log.exception(f"Clone failed for conflict resolution task #{task_id}")

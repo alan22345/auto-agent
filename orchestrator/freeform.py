@@ -6,12 +6,13 @@ import logging
 
 import httpx
 
-from shared.config import settings
-
 log = logging.getLogger(__name__)
 
 
-async def promote_task_to_main(pr_url: str, branch_name: str, repo_url: str) -> str | None:
+async def promote_task_to_main(
+    pr_url: str, branch_name: str, repo_url: str,
+    *, user_id: int | None = None,
+) -> str | None:
     """Promote a freeform task from dev to main by creating a new PR.
 
     The task's feature branch still exists on remote after the dev merge,
@@ -19,14 +20,17 @@ async def promote_task_to_main(pr_url: str, branch_name: str, repo_url: str) -> 
 
     Returns the new PR URL, or None on failure.
     """
-    if not pr_url or not settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=user_id)
+    if not pr_url or not token:
         return None
 
     parts = pr_url.rstrip("/").split("/")
     owner, repo = parts[-4], parts[-3]
 
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
 
@@ -65,21 +69,27 @@ async def promote_task_to_main(pr_url: str, branch_name: str, repo_url: str) -> 
         return None
 
 
-async def revert_task_from_dev(pr_url: str, dev_branch: str = "dev") -> str | None:
+async def revert_task_from_dev(
+    pr_url: str, dev_branch: str = "dev",
+    *, user_id: int | None = None,
+) -> str | None:
     """Revert a freeform task's merge commit from the dev branch.
 
     Finds the merge commit from the original PR and creates a revert PR.
 
     Returns the revert PR URL, or None on failure.
     """
-    if not pr_url or not settings.github_token:
+    from shared.github_auth import get_github_token
+
+    token = await get_github_token(user_id=user_id)
+    if not pr_url or not token:
         return None
 
     parts = pr_url.rstrip("/").split("/")
     owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
 
     headers = {
-        "Authorization": f"token {settings.github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
 

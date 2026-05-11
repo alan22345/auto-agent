@@ -6,7 +6,6 @@ import os
 import shutil
 
 from agent import sh
-from shared.config import settings
 
 WORKSPACES_DIR = os.environ.get("WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces"))
 
@@ -45,6 +44,8 @@ async def clone_repo(
     default_branch: str = "main",
     workspace_name: str | None = None,
     fallback_branch: str | None = None,
+    *,
+    user_id: int | None = None,
 ) -> str:
     """Clone a repo into an isolated workspace directory. Returns the workspace path.
 
@@ -66,12 +67,18 @@ async def clone_repo(
     dirname = workspace_name or f"task-{task_id}"
     workspace = os.path.join(WORKSPACES_DIR, dirname)
 
-    # Inject GitHub token into URL for auth (used by both reuse and fresh paths)
+    # Inject GitHub token into URL for auth (used by both reuse and fresh paths).
+    # Both PAT and GitHub App installation tokens accept the
+    # ``x-access-token:<token>@github.com`` form — App tokens *require* the
+    # username, PATs are happy either way.
+    from shared.github_auth import get_github_token
+
+    gh_token = await get_github_token(user_id=user_id)
     authed_url = repo_url
-    if settings.github_token and "github.com" in authed_url:
+    if gh_token and "github.com" in authed_url:
         authed_url = authed_url.replace(
             "https://github.com",
-            f"https://{settings.github_token}@github.com",
+            f"https://x-access-token:{gh_token}@github.com",
         )
 
     if os.path.isdir(os.path.join(workspace, ".git")):
@@ -104,6 +111,15 @@ async def clone_repo(
         await _run_git("clone", "-b", fallback_branch, authed_url, workspace, check=True)
         await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
+        if user_id is not None:
+            try:
+                await install_coauthor_hook(workspace, user_id)
+            except Exception as e:
+                import structlog
+                structlog.get_logger().warning(
+                    "coauthor_hook_install_failed",
+                    user_id=user_id, error=str(e),
+                )
         await _run_git("checkout", "-b", default_branch, cwd=workspace, check=True)
         await _run_git("push", "-u", "origin", default_branch, cwd=workspace, check=True)
         return workspace
@@ -115,6 +131,18 @@ async def clone_repo(
     # but satisfies `git commit`'s identity requirement.
     await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
     await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
+
+    # Per-user attribution — install a commit-msg hook so every commit
+    # carries a Co-Authored-By trailer for the task's owner. Best-effort:
+    # any failure here is logged but doesn't break the clone.
+    if user_id is not None:
+        try:
+            await install_coauthor_hook(workspace, user_id)
+        except Exception as e:
+            import structlog
+            structlog.get_logger().warning(
+                "coauthor_hook_install_failed", user_id=user_id, error=str(e),
+            )
 
     return workspace
 
@@ -131,6 +159,68 @@ async def create_branch(workspace: str, branch_name: str) -> None:
 async def push_branch(workspace: str, branch_name: str) -> None:
     """Push the branch to remote."""
     await _run_git("push", "-u", "origin", branch_name, cwd=workspace, check=True)
+
+
+# commit-msg hook that appends the Co-Authored-By trailer for the task's
+# owner. Reads a trailer line from `.git/auto-agent-coauthor` (written at
+# clone time by ``install_coauthor_hook``) and appends it to the commit
+# message if it isn't already present. Idempotent — re-running git commit
+# on the same message doesn't duplicate the trailer.
+_COAUTHOR_HOOK_SCRIPT = """#!/bin/sh
+# Auto-agent commit-msg hook — appends Co-Authored-By for the task owner.
+trailer_file="$(git rev-parse --git-dir)/auto-agent-coauthor"
+[ ! -f "$trailer_file" ] && exit 0
+trailer="$(cat "$trailer_file")"
+[ -z "$trailer" ] && exit 0
+# Skip if the trailer is already present in the message.
+grep -qF "$trailer" "$1" && exit 0
+# Append, ensuring a blank line separates the trailer block from the body
+# (git's trailer parser requires it).
+last_line="$(tail -n1 "$1")"
+if [ -n "$last_line" ]; then
+    printf '\\n%s\\n' "$trailer" >> "$1"
+else
+    printf '%s\\n' "$trailer" >> "$1"
+fi
+"""
+
+
+async def install_coauthor_hook(workspace: str, user_id: int) -> None:
+    """Install a commit-msg hook that auto-appends Co-Authored-By for the
+    requesting user. Looks up the user's display_name + username from the DB.
+
+    Best-effort: callers wrap this in a try/except — a missing user or DB
+    hiccup shouldn't block task execution.
+    """
+    from sqlalchemy import select
+
+    from shared.database import async_session
+    from shared.models import User
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+    if user is None:
+        return
+
+    display = (user.display_name or user.username or "User").strip()
+    trailer = f"Co-Authored-By: {display} <{user.username}@auto-agent.local>"
+
+    git_dir = os.path.join(workspace, ".git")
+    if not os.path.isdir(git_dir):
+        return
+
+    trailer_path = os.path.join(git_dir, "auto-agent-coauthor")
+    with open(trailer_path, "w", encoding="utf-8") as f:
+        f.write(trailer + "\n")
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hook_path = os.path.join(hooks_dir, "commit-msg")
+    with open(hook_path, "w", encoding="utf-8") as f:
+        f.write(_COAUTHOR_HOOK_SCRIPT)
+    os.chmod(hook_path, 0o755)
 
 
 class EmptyBranchError(RuntimeError):

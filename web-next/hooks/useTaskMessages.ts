@@ -36,6 +36,8 @@ export function useTaskMessages(taskId: number | null) {
       const userMatch = msg.match(/^\[([^\]]+)\] ([\s\S]+)$/);
       if (userMatch && ent.from_status === ent.to_status) {
         merged.push({ kind: 'user', sender: userMatch[1], message: userMatch[2], ts: ent.timestamp || '' });
+      } else if (ent.to_status === 'awaiting_clarification' && msg) {
+        merged.push({ kind: 'agent', sender: 'agent', message: msg, ts: ent.timestamp || '' });
       } else {
         merged.push({ kind: 'event', message: msg ? `[${ent.to_status}] ${msg}` : `[${ent.to_status}]`, ts: ent.timestamp || '' });
       }
@@ -79,10 +81,18 @@ export function useTaskMessages(taskId: number | null) {
 
   useWS('event', (e) => {
     if (taskId === null || e.task_id !== taskId) return;
+    const ts = new Date().toISOString();
+    if (e.event_type === 'task.clarification_needed') {
+      const question = (e.payload?.question as string) || '';
+      if (question) {
+        setEntries((prev) => [...prev, { kind: 'agent', sender: 'agent', message: question, ts }]);
+        return;
+      }
+    }
     setEntries((prev) => [...prev, {
       kind: 'event',
       message: formatEvent(e.event_type, e.payload || {}),
-      ts: new Date().toISOString(),
+      ts,
     }]);
   });
 

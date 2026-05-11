@@ -92,6 +92,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             max_turns=10,
             task_id=task_id,
             readonly=True,
+            task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
         )
@@ -178,6 +179,7 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             session_id=session_id,
             max_turns=40,
             task_id=task_id,
+            task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
         )

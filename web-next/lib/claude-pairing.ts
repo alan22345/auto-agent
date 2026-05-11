@@ -8,7 +8,10 @@ export interface PairStatus {
 }
 
 export async function startPairing() {
-  return api<{ pairing_id: string }>('/api/claude/pair/start', { method: 'POST' });
+  return api<{ pairing_id: string; authorize_url: string }>(
+    '/api/claude/pair/start',
+    { method: 'POST' },
+  );
 }
 
 export async function submitPairCode(pairing_id: string, code: string) {

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -35,6 +36,7 @@ export function RepoDetail({ config }: Props) {
   const [cron, setCron] = useState(CRON_PRESETS[0].value);
   const [archMode, setArchMode] = useState(false);
   const [archCron, setArchCron] = useState(CRON_PRESETS[0].value);
+  const [poGoal, setPoGoal] = useState('');
   const [status, setStatus] = useState<SaveStatus>({ kind: 'idle' });
   const savingRef = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -52,6 +54,7 @@ export function RepoDetail({ config }: Props) {
     setCron(config.analysis_cron || CRON_PRESETS[0].value);
     setArchMode(config.architecture_mode ?? false);
     setArchCron(config.architecture_cron || CRON_PRESETS[0].value);
+    setPoGoal(config.po_goal ?? '');
     setStatus({ kind: 'idle' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.repo_name]);
@@ -72,6 +75,7 @@ export function RepoDetail({ config }: Props) {
     setCron(next.analysis_cron || CRON_PRESETS[0].value);
     setArchMode(next.architecture_mode ?? false);
     setArchCron(next.architecture_cron || CRON_PRESETS[0].value);
+    setPoGoal(next.po_goal ?? '');
   });
 
   useWS('error', (e) => {
@@ -105,6 +109,7 @@ export function RepoDetail({ config }: Props) {
       analysis_cron: cron,
       auto_approve_suggestions: auto,
       auto_start_tasks: autoStart,
+      po_goal: poGoal.trim() || null,
       architecture_mode: archMode,
       architecture_cron: archCron,
     });
@@ -224,6 +229,20 @@ export function RepoDetail({ config }: Props) {
             />
             <p className="text-xs text-muted-foreground">
               Freeform PRs auto-merge into this branch when CI passes.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="rd-pogoal">PO goal</Label>
+            <Textarea
+              id="rd-pogoal"
+              value={poGoal}
+              onChange={(e) => setPoGoal(e.target.value)}
+              placeholder="e.g. Convert more first-time visitors into signups by reducing onboarding friction."
+              rows={3}
+            />
+            <p className="text-xs text-muted-foreground">
+              Free-text objective the PO analyzer evaluates suggestions against. Leave blank for an open-ended scan.
             </p>
           </div>
 
