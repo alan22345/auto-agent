@@ -10,7 +10,10 @@ named fixtures (``publisher``, ``task_channel``) or the seam's
 
 from __future__ import annotations
 
+import os
+
 import pytest
+import pytest_asyncio
 
 from shared import events as _events_mod
 from shared import task_channel as _task_channel_mod
@@ -58,3 +61,20 @@ def _isolated_task_channel():
 def task_channel(_isolated_task_channel: InMemoryTaskChannelFactory) -> InMemoryTaskChannelFactory:
     """Convenience handle to the per-test InMemoryTaskChannelFactory."""
     return _isolated_task_channel
+
+
+@pytest_asyncio.fixture
+async def session():
+    """Real-DB session that rolls back at end of test.
+
+    Requires DATABASE_URL pointing at a writable Postgres (CI + docker compose).
+    Skips locally if unset so the mock-based suite still passes standalone.
+    """
+    if not os.environ.get("DATABASE_URL"):
+        pytest.skip("DATABASE_URL not set — Phase 4 DB tests need real Postgres")
+
+    from shared.database import async_session
+
+    async with async_session() as s, s.begin():
+        yield s
+        await s.rollback()
