@@ -83,7 +83,7 @@ class UsageSink:
     db_session: object | None = None  # AsyncSession | None — typed as object to avoid import at top level
 
     async def emit(self, *, model: str, usage: TokenUsage) -> None:
-        from orchestrator.usage import emit_usage_event
+        from shared.usage import emit_usage_event
 
         await emit_usage_event(
             org_id=self.org_id,
@@ -302,9 +302,15 @@ class AgentLoop:
                 approx_in = sum(
                     len(m.content or "") for m in api_messages
                 ) // 4  # 4 chars/token rough estimate
-                if await self._usage_sink.would_exceed_token_cap(
-                    est_input=approx_in, est_output=8192,
-                ):
+                try:
+                    exceeds = await self._usage_sink.would_exceed_token_cap(
+                        est_input=approx_in, est_output=8192,
+                    )
+                except LookupError as e:
+                    raise QuotaExceeded(
+                        f"Org {self._usage_sink.org_id} has no plan attached"
+                    ) from e
+                if exceeds:
                     raise QuotaExceeded(
                         f"Org {self._usage_sink.org_id} would exceed daily token cap"
                     )
