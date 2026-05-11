@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from shared.models import Organization, Plan, Task, TaskStatus
-
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+_UNSET = object()
+
 
 async def _ensure_default_plan(session: AsyncSession) -> Plan:
+    from shared.models import Plan
+
     q = await session.execute(select(Plan).where(Plan.name == "free"))
     plan = q.scalar_one_or_none()
     if plan is not None:
@@ -38,9 +40,13 @@ async def _ensure_default_plan(session: AsyncSession) -> Plan:
 async def make_org_and_task(
     session: AsyncSession,
     *,
-    status: TaskStatus = TaskStatus.QUEUED,
+    status: TaskStatus = _UNSET,
     slug: str = "test-org",
 ) -> tuple[Organization, Task]:
+    from shared.models import Organization, Task, TaskStatus
+
+    if status is _UNSET:
+        status = TaskStatus.QUEUED
     plan = await _ensure_default_plan(session)
     org = Organization(name="Test Org", slug=slug, plan_id=plan.id)
     session.add(org)
