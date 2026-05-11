@@ -68,7 +68,7 @@ def _verify_state(state: str) -> dict:
     return json.loads(raw)
 
 
-@router.get("/api/integrations/slack/install")
+@router.get("/integrations/slack/install")
 async def slack_install(
     org_id: int = Depends(current_org_id_admin_dep),
 ):
@@ -85,7 +85,7 @@ async def slack_install(
     return RedirectResponse(url=f"https://slack.com/oauth/v2/authorize?{qs}", status_code=302)
 
 
-@router.get("/api/integrations/slack/oauth/callback")
+@router.get("/integrations/slack/oauth/callback")
 async def slack_oauth_callback(
     code: str = Query(...),
     state: str = Query(...),
@@ -124,7 +124,7 @@ async def slack_oauth_callback(
     return RedirectResponse(url="/settings/integrations/slack?connected=1", status_code=302)
 
 
-@router.get("/api/integrations/slack")
+@router.get("/integrations/slack")
 async def slack_install_state(
     org_id: int = Depends(current_org_id_admin_dep),
 ):
@@ -139,7 +139,7 @@ async def slack_install_state(
     }
 
 
-@router.post("/api/integrations/slack/uninstall")
+@router.post("/integrations/slack/uninstall")
 async def slack_uninstall(
     org_id: int = Depends(current_org_id_admin_dep),
 ):

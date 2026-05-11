@@ -23,7 +23,7 @@ def app():
     config.settings.slack_oauth_state_secret = "ssec"
 
     a = FastAPI()
-    a.include_router(router)
+    a.include_router(router, prefix="/api")
     return a
 
 

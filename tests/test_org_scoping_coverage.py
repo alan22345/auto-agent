@@ -71,7 +71,7 @@ UNSCOPED_ALLOWLIST: dict[tuple[str, str], str] = {
     # treat as scoped (the dep IS there; this entry catches the path-param check).
     # Slack OAuth callback: org_id is embedded in the signed `state`
     # parameter (HMAC), not the JWT cookie.
-    ("GET", "/api/integrations/slack/oauth/callback"):  "org_id from signed state parameter",
+    ("GET", "/integrations/slack/oauth/callback"):  "org_id from signed state parameter",
 }
 
 
