@@ -126,7 +126,7 @@ class Repo(Base):
     harness_onboarded = Column(Boolean, default=False)  # Whether harness engineering PR has been raised
     harness_pr_url = Column(String(512), nullable=True)  # URL of the harness onboarding PR
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -161,7 +161,7 @@ class Task(Base):
     # writes a plan. NULL = not yet started; [] = grilling complete or skipped.
     intake_qa = Column(JSONB, nullable=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
@@ -225,7 +225,7 @@ class ScheduledTask(Base):
     enabled = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -244,7 +244,7 @@ class Suggestion(Base):
     status = Column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -304,7 +304,7 @@ class FreeformConfig(Base):
     last_architecture_at = Column(DateTime(timezone=True), nullable=True)
     architecture_knowledge = Column(Text, nullable=True)  # Agent's accumulated depth map
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -342,7 +342,7 @@ class User(Base):
     # "home" org for backwards-compatible queries that haven't been
     # migrated to the membership table.
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
 
 
@@ -380,7 +380,7 @@ class SearchSession(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True,
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     title = Column(String(512), nullable=False, default="New search")
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
