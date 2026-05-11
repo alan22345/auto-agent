@@ -93,65 +93,60 @@ def _mint_session_cookie(*, user_id: int, current_org_id: int) -> str:
 async def test_create_returns_429_when_over_daily_cap(db) -> None:
     seed_session, factory = db
     org, user = await _seed_org_with_user(seed_session, max_tasks_per_day=2)
-    # Flush so the data is visible within this transaction.
     await seed_session.flush()
-
-    from orchestrator.router import router
-    from shared.database import get_session
-
-    app = FastAPI()
-    app.include_router(router, prefix="/api")
-
-    # Override get_session with a fresh session from our test-local factory
-    # (same event loop, same transaction, so seeded data is visible).
-    async def _override_session():
-        async with factory() as s:
-            yield s
-
-    app.dependency_overrides[get_session] = _override_session
-    cookie = _mint_session_cookie(user_id=user.id, current_org_id=org.id)
-
-    # Commit the seed data so the endpoint's own session can read it.
+    # Commit so the endpoint's own session (via dependency override below) can read the seed.
     await seed_session.commit()
 
-    task_ids: list[int] = []
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://t",
-        cookies={"auto_agent_session": cookie},
-    ) as c:
-        # First two should pass (unique titles to avoid dedup short-circuit).
-        for i in range(2):
+    try:
+        from orchestrator.router import router
+        from shared.database import get_session
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+
+        async def _override_session():
+            async with factory() as s:
+                yield s
+
+        app.dependency_overrides[get_session] = _override_session
+        cookie = _mint_session_cookie(user_id=user.id, current_org_id=org.id)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://t",
+            cookies={"auto_agent_session": cookie},
+        ) as c:
+            # First two pass (unique titles to avoid dedup short-circuit).
+            for i in range(2):
+                r = await c.post(
+                    "/api/tasks",
+                    json={
+                        "title": f"task-{uuid.uuid4().hex[:8]}",
+                        "description": "",
+                        "source": "manual",
+                        "source_id": f"i{i}-{uuid.uuid4().hex[:4]}",
+                    },
+                )
+                assert r.status_code == 200, r.text
+            # Third should 429.
             r = await c.post(
                 "/api/tasks",
                 json={
                     "title": f"task-{uuid.uuid4().hex[:8]}",
                     "description": "",
                     "source": "manual",
-                    "source_id": f"i{i}-{uuid.uuid4().hex[:4]}",
+                    "source_id": f"i2-{uuid.uuid4().hex[:4]}",
                 },
             )
-            assert r.status_code == 200, r.text
-            task_ids.append(r.json()["id"])
-        # Third should 429.
-        r = await c.post(
-            "/api/tasks",
-            json={
-                "title": f"task-{uuid.uuid4().hex[:8]}",
-                "description": "",
-                "source": "manual",
-                "source_id": f"i2-{uuid.uuid4().hex[:4]}",
-            },
-        )
-        assert r.status_code == 429
-        assert "Retry-After" in r.headers
-        assert "daily task limit" in r.json()["detail"].lower()
-
-    # Cleanup committed rows (endpoint committed its own session).
-    # Use a fresh session from our loop-local factory.
-    async with factory() as cleanup:
-        await cleanup.execute(sa_delete(Task).where(Task.organization_id == org.id))
-        await cleanup.execute(sa_delete(User).where(User.id == user.id))
-        await cleanup.execute(sa_delete(Organization).where(Organization.id == org.id))
-        await cleanup.execute(sa_delete(Plan).where(Plan.id == org.plan_id))
-        await cleanup.commit()
+            assert r.status_code == 429
+            assert "Retry-After" in r.headers
+            assert "daily task limit" in r.json()["detail"].lower()
+    finally:
+        # ALWAYS run — endpoint committed its own session, so the fixture's
+        # rollback can't undo. Use a fresh loop-local session.
+        async with factory() as cleanup:
+            await cleanup.execute(sa_delete(Task).where(Task.organization_id == org.id))
+            await cleanup.execute(sa_delete(User).where(User.id == user.id))
+            await cleanup.execute(sa_delete(Organization).where(Organization.id == org.id))
+            await cleanup.execute(sa_delete(Plan).where(Plan.id == org.plan_id))
+            await cleanup.commit()
