@@ -28,6 +28,7 @@ from orchestrator.feedback import analyze_patterns, get_feedback_summary, record
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.scoping import scoped
 from orchestrator.state_machine import InvalidTransition, get_task, transition
+from shared import quotas
 from shared.config import settings
 from shared.database import get_session
 from shared.events import (
@@ -100,6 +101,15 @@ TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}
 TASK_CREATION_RATE_LIMIT = 10  # max tasks per window
 TASK_CREATION_WINDOW = 60  # seconds
 _task_creation_timestamps: list[float] = []
+
+
+def _seconds_until_utc_midnight() -> int:
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.UTC)
+    tomorrow = (now + _dt.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int((tomorrow - now).total_seconds())
 
 
 def _check_rate_limit() -> None:
@@ -783,6 +793,17 @@ async def create_task(
         except HTTPException:
             authed_user_id = None
     owner_user_id = authed_user_id or req.created_by_user_id
+
+    # Rate-limit task creation per org.
+    if caller_org_id is not None:
+        try:
+            await quotas.enforce_task_create_limit(session, caller_org_id)
+        except quotas.QuotaExceeded as e:
+            raise HTTPException(
+                status_code=429,
+                detail=str(e),
+                headers={"Retry-After": str(_seconds_until_utc_midnight())},
+            ) from e
 
     # Dedup check: scoped to caller's org when known so two tenants
     # receiving the same Slack message ID don't dedupe each other.

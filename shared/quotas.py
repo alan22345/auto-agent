@@ -105,3 +105,14 @@ async def would_exceed_token_cap(
         in_used + est_input > plan.max_input_tokens_per_day
         or out_used + est_output > plan.max_output_tokens_per_day
     )
+
+
+async def enforce_task_create_limit(session: AsyncSession, org_id: int) -> None:
+    """Raise QuotaExceeded if creating one more task would breach today's cap."""
+    plan = await get_plan_for_org(session, org_id)
+    n = await count_tasks_created_today(session, org_id)
+    if n >= plan.max_tasks_per_day:
+        raise QuotaExceeded(
+            f"Daily task limit reached ({plan.max_tasks_per_day}). "
+            f"Resets at UTC midnight."
+        )
