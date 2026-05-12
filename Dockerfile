@@ -47,6 +47,10 @@ RUN sed -i '1{/^from __future__ import annotations/d}' \
 COPY . .
 RUN chown -R node:node /app
 
+# Install Playwright Chromium for the browse_url agent tool.
+# --with-deps installs the OS-level libraries Chromium needs on Debian/Ubuntu.
+RUN playwright install --with-deps chromium
+
 USER node
 ENV HOME=/home/node
 

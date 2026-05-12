@@ -27,6 +27,7 @@ dependencies = [
     "team-memory",
     "psycopg2-binary>=2.9.12",
     "ptyprocess>=0.7.0",
+    "playwright",
 ]
 
 [dependency-groups]
