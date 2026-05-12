@@ -14,7 +14,7 @@
 
 **New files:**
 - `agent/market_researcher.py` — researcher loop, mirrors `agent/po_analyzer.py` shape, with `run_market_research` helper.
-- `migrations/versions/030_market_research.py` — Alembic migration for `market_briefs` table + `freeform_configs` and `suggestions` additions.
+- `migrations/versions/031_market_research.py` — Alembic migration for `market_briefs` table + `freeform_configs` and `suggestions` additions.
 - `tests/test_market_brief_freshness.py` — pure logic test of `_brief_is_fresh`.
 - `tests/test_market_researcher.py` — researcher in isolation, stubbed LLM + web tools.
 - `tests/test_po_with_market_research.py` — chain integration test.
@@ -233,7 +233,7 @@ git commit -m "feat(tools): add with_web flag to default registry for researcher
 ## Task 3: Alembic migration for the schema additions
 
 **Files:**
-- Create: `migrations/versions/030_market_research.py`
+- Create: `migrations/versions/031_market_research.py`
 
 **Why this task:** Schema needs to land before the ORM model changes so the test DB can be brought up to head. All columns nullable or defaulted — no backfill needed.
 
@@ -253,8 +253,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 
-revision: str = "030"
-down_revision: Union[str, None] = "029"
+revision: str = "031"
+down_revision: Union[str, None] = "030"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -374,7 +374,7 @@ docker compose up -d
 docker compose exec auto-agent alembic upgrade head
 ```
 
-Expected: `030_market_research` runs without error. If you don't have docker running, alembic can also be run locally if the DB env vars are set: `.venv/bin/alembic upgrade head`.
+Expected: `031_market_research` runs without error. If you don't have docker running, alembic can also be run locally if the DB env vars are set: `.venv/bin/alembic upgrade head`.
 
 - [ ] **Step 3: Verify downgrade also works**
 
@@ -388,7 +388,7 @@ Expected: downgrade succeeds, upgrade re-applies cleanly.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add migrations/versions/030_market_research.py
+git add migrations/versions/031_market_research.py
 git commit -m "feat(db): migration 030 — market_briefs table + Suggestion.evidence_urls"
 ```
 
@@ -2586,7 +2586,7 @@ Sanity-check:
 - No `print()` calls (use `structlog`).
 - No leftover TODOs / debug comments.
 - All `Suggestion` insertions include `organization_id` (tenant isolation invariant).
-- Migration 030 is the latest, `down_revision = "029"`.
+- Migration 031 is the latest, `down_revision = "030"`.
 
 - [ ] **Step 4: Run an end-to-end smoke test against a real repo**
 
