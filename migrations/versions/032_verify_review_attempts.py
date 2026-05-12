@@ -17,7 +17,12 @@ down_revision = "031"
 
 
 def upgrade() -> None:
+    # Match migration 029's convention: SQLAlchemy's Enum(TaskStatus) serializes
+    # by NAME (uppercase), but the taskstatus type has historically mixed
+    # uppercase and lowercase variants. Add both so any legacy raw-SQL path that
+    # writes the lowercase value continues to work.
     op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'VERIFYING'")
+    op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'verifying'")
 
     op.add_column(
         "tasks",
