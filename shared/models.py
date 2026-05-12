@@ -297,6 +297,32 @@ class ScheduledTask(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
+class MarketBrief(Base):
+    """Versioned market-research brief produced by the market_researcher agent.
+
+    Consumed by the PO analyzer to ground its suggestions in cited evidence.
+    """
+    __tablename__ = "market_briefs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repos.id"), nullable=False, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+    )
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    product_category = Column(Text, nullable=True)
+    competitors = Column(JSONB, default=list, nullable=False)
+    findings = Column(JSONB, default=list, nullable=False)
+    modality_gaps = Column(JSONB, default=list, nullable=False)
+    strategic_themes = Column(JSONB, default=list, nullable=False)
+    summary = Column(Text, default="", nullable=False)
+    raw_sources = Column(JSONB, default=list, nullable=False)
+    partial = Column(Boolean, default=False, nullable=False)
+    agent_turns = Column(Integer, default=0, nullable=False)
+
+    repo = relationship("Repo")
+
+
 class Suggestion(Base):
     """PO-generated improvement suggestions for a repo."""
     __tablename__ = "suggestions"
@@ -314,9 +340,12 @@ class Suggestion(Base):
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
+    evidence_urls = Column(JSONB, default=list, nullable=False)
+    brief_id = Column(Integer, ForeignKey("market_briefs.id"), nullable=True)
 
     repo = relationship("Repo")
     task = relationship("Task")
+    brief = relationship("MarketBrief")
 
 
 # Categories whose tasks arrive pre-grilled — the analyzer that produced the
@@ -370,6 +399,8 @@ class FreeformConfig(Base):
     architecture_cron = Column(String(100), default="0 9 * * 1", nullable=False)
     last_architecture_at = Column(DateTime(timezone=True), nullable=True)
     architecture_knowledge = Column(Text, nullable=True)  # Agent's accumulated depth map
+    last_market_research_at = Column(DateTime(timezone=True), nullable=True)
+    market_brief_max_age_days = Column(Integer, default=7, nullable=False)
     organization_id = Column(
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
