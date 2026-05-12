@@ -389,7 +389,7 @@ Expected: downgrade succeeds, upgrade re-applies cleanly.
 
 ```bash
 git add migrations/versions/031_market_research.py
-git commit -m "feat(db): migration 030 — market_briefs table + Suggestion.evidence_urls"
+git commit -m "feat(db): migration 031 — market_briefs table + Suggestion.evidence_urls"
 ```
 
 ---
