@@ -15,6 +15,9 @@ export interface CIStatus {
   state: "success" | "failure" | "pending" | "error";
   message?: string;
 }
+export interface ChangeEmailRequest {
+  email: string;
+}
 export interface ClassificationResult {
   classification: "simple" | "complex" | "simple_no_code";
   reasoning?: string;
@@ -87,8 +90,33 @@ export interface UserData {
   display_name: string;
   created_at?: string | null;
   last_login?: string | null;
-  claude_auth_status?: 'paired' | 'expired' | 'never_paired';
+  claude_auth_status?: string;
   claude_paired_at?: string | null;
+  telegram_chat_id?: string | null;
+  slack_user_id?: string | null;
+}
+/**
+ * Response shape for GET /api/repos/{repo_id}/market-brief/latest.
+ */
+export interface MarketBriefResponse {
+  id: number;
+  repo_id: number;
+  created_at: string;
+  product_category?: string | null;
+  competitors?: {
+    [k: string]: unknown;
+  }[];
+  findings?: {
+    [k: string]: unknown;
+  }[];
+  modality_gaps?: {
+    [k: string]: unknown;
+  }[];
+  strategic_themes?: {
+    [k: string]: unknown;
+  }[];
+  summary?: string;
+  partial?: boolean;
 }
 export interface MemoryEntityDetail {
   entity: MemoryEntitySummary;
@@ -163,6 +191,14 @@ export interface PRReviewComment {
   path?: string;
   line?: number | null;
 }
+export interface PlanRead {
+  id: number;
+  name: string;
+  max_concurrent_tasks: number;
+  max_tasks_per_day: number;
+  max_input_tokens_per_day: number;
+  max_output_tokens_per_day: number;
+}
 export interface ProposedFact {
   row_id: string;
   entity: string;
@@ -200,6 +236,37 @@ export interface ScheduleResponse {
   task_title: string;
   enabled: boolean;
   last_run_at?: string | null;
+}
+/**
+ * Names only — values never leave the server.
+ */
+export interface SecretListResponse {
+  keys: string[];
+}
+/**
+ * ``value=None`` clears the secret (equivalent to DELETE).
+ */
+export interface SecretPutRequest {
+  value?: string | null;
+}
+export interface SecretTestResponse {
+  ok: boolean;
+  detail?: string;
+}
+export interface SignupRequest {
+  email: string;
+  password: string;
+  display_name: string;
+}
+/**
+ * Response for POST /api/auth/signup. Always returns 201 with the new
+ * user's id; the client should display "check your email" — never assume
+ * the email was actually delivered.
+ */
+export interface SignupResponse {
+  user_id: number;
+  email: string;
+  verification_sent: boolean;
 }
 /**
  * Typed representation of a PO suggestion.
@@ -246,6 +313,7 @@ export interface TaskData {
     | null;
   created_at?: string | null;
   created_by_user_id?: number | null;
+  organization_id?: number | null;
   change_type?: string | null;
   target_areas?: string | null;
   acceptance_criteria?: string | null;
@@ -279,4 +347,11 @@ export interface TimelineEntry {
   to: string;
   message?: string;
   timestamp?: string | null;
+}
+export interface UsageSummary {
+  plan: PlanRead;
+  active_tasks: number;
+  tasks_today: number;
+  input_tokens_today: number;
+  output_tokens_today: number;
 }

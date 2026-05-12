@@ -203,6 +203,21 @@ class SuggestionData(BaseModel):
     created_at: str | None = None
 
 
+class MarketBriefResponse(BaseModel):
+    """Response shape for GET /api/repos/{repo_id}/market-brief/latest."""
+
+    id: int
+    repo_id: int
+    created_at: str
+    product_category: str | None = None
+    competitors: list[dict] = Field(default_factory=list)
+    findings: list[dict] = Field(default_factory=list)
+    modality_gaps: list[dict] = Field(default_factory=list)
+    strategic_themes: list[dict] = Field(default_factory=list)
+    summary: str = ""
+    partial: bool = False
+
+
 class FreeformConfigData(BaseModel):
     """Typed representation of a freeform mode config."""
     id: int

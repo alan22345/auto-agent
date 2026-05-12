@@ -47,6 +47,7 @@ from shared.events import (
 )
 from shared.models import (
     FreeformConfig,
+    MarketBrief,
     Organization,
     OrganizationMembership,
     Plan,
@@ -70,6 +71,7 @@ from shared.types import (
     FreeformConfigData,
     LoginRequest,
     LoginResponse,
+    MarketBriefResponse,
     OutcomeResponse,
     PlanRead,
     RepoData,
@@ -1599,6 +1601,37 @@ async def update_repo_summary(
     repo.summary_updated_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
+
+
+@router.get("/repos/{repo_id}/market-brief/latest", response_model=MarketBriefResponse)
+async def get_latest_market_brief(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Return the most recent MarketBrief for a repo, or 404 if none exists."""
+    result = await session.execute(
+        select(MarketBrief)
+        .where(MarketBrief.repo_id == repo_id)
+        .where(MarketBrief.organization_id == org_id)
+        .order_by(MarketBrief.created_at.desc())
+        .limit(1)
+    )
+    brief = result.scalar_one_or_none()
+    if brief is None:
+        raise HTTPException(404, "No market brief found for this repo")
+    return {
+        "id": brief.id,
+        "repo_id": brief.repo_id,
+        "created_at": brief.created_at.isoformat(),
+        "product_category": brief.product_category,
+        "competitors": brief.competitors,
+        "findings": brief.findings,
+        "modality_gaps": brief.modality_gaps,
+        "strategic_themes": brief.strategic_themes,
+        "summary": brief.summary,
+        "partial": brief.partial,
+    }
 
 
 @router.delete("/repos/{repo_name}")
