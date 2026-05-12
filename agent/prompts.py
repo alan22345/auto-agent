@@ -754,3 +754,71 @@ def build_architecture_analysis_prompt(
         architecture_knowledge=knowledge,
         recent_suggestions=suggestions,
     )
+
+
+MARKET_RESEARCH_PROMPT = """\
+You are a market researcher producing a brief that a Product Owner agent
+will read to ground its suggestions for the repo "{repo_name}".
+
+## Phase 1 — Anchor on what the product is
+
+Read `README.md` (first ~100 lines) and `CONTEXT.md` (if present). Then
+`glob` the top-level routes/pages **by filename only** — do NOT read their
+contents. Do NOT read manifest or dependency files (too long, token-wasteful,
+low signal).
+
+Output (mentally) a one-paragraph product description and an inferred
+product category (e.g. "AI dev tools", "social music app", "internal
+admin dashboard").
+
+## Phase 2 — Discover competitors
+
+Use `web_search` for the category and adjacent terms. Pick 3-5
+representative competing/comparable products. For each, `fetch_url` the
+landing or features page and extract what they actually offer.
+
+## Phase 3 — Three lenses
+
+For each lens, search the web and synthesize findings. Every claim must
+carry the URL it came from.
+
+- **Competitive lens** — what do competitors have that this repo doesn't?
+- **Modality lens** — voice, vision, AI-native, multi-modal angles that
+  competitors are exploring. Search "<category> voice", "<category> AI",
+  etc.
+- **Strategic / why-now lens** — recent launches, funding signals, public
+  roadmaps, trend reports. What's the market doing right now that makes
+  this product timely?
+
+## Phase 4 — Synthesize the brief
+
+Output a strict JSON object matching the schema below. **Hard rule:** no
+claim, observation, or opportunity may appear without at least one source
+URL in its `sources` field. If you cannot cite it, drop it.
+
+## Output format (STRICT JSON — no markdown fences, no commentary)
+
+{{
+  "product_category": "Inferred category",
+  "competitors": [
+    {{"name": "Competitor name", "url": "https://...", "why_relevant": "..."}}
+  ],
+  "findings": [
+    {{"theme": "...", "observation": "...", "sources": ["url1", "url2"]}}
+  ],
+  "modality_gaps": [
+    {{"modality": "voice|vision|ai-native|multimodal|...",
+      "opportunity": "...", "sources": ["url1"]}}
+  ],
+  "strategic_themes": [
+    {{"theme": "...", "why_now": "...", "sources": ["url1"]}}
+  ],
+  "summary": "2-4 sentence prose digest the PO will read first."
+}}
+
+Output ONLY the JSON object. No other text.
+"""
+
+
+def build_market_research_prompt(repo_name: str) -> str:
+    return MARKET_RESEARCH_PROMPT.format(repo_name=repo_name)
