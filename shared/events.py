@@ -100,6 +100,9 @@ class POEventType(StrEnum):
     ANALYSIS_STARTED = "po.analysis_started"
     ANALYSIS_FAILED = "po.analysis_failed"
     SUGGESTIONS_READY = "po.suggestions_ready"
+    MARKET_RESEARCH_STARTED = "po.market_research_started"
+    MARKET_RESEARCH_COMPLETED = "po.market_research_completed"
+    MARKET_RESEARCH_FAILED = "po.market_research_failed"
 
 
 class ArchitectureEventType(StrEnum):
@@ -418,6 +421,43 @@ def po_suggestions_ready(repo_name: str, count: int) -> Event:
         type=POEventType.SUGGESTIONS_READY,
         task_id=0,
         payload={"repo_name": repo_name, "count": count},
+    )
+
+
+def market_research_started(repo_name: str) -> Event:
+    return Event(
+        type=POEventType.MARKET_RESEARCH_STARTED,
+        task_id=0,
+        payload={"repo_name": repo_name},
+    )
+
+
+def market_research_completed(
+    repo_name: str,
+    brief_id: int,
+    n_competitors: int,
+    n_findings: int,
+    partial: bool,
+) -> Event:
+    return Event(
+        type=POEventType.MARKET_RESEARCH_COMPLETED,
+        task_id=0,
+        payload={
+            "repo_name": repo_name,
+            "brief_id": brief_id,
+            "n_competitors": n_competitors,
+            "n_findings": n_findings,
+            "partial": partial,
+        },
+    )
+
+
+def market_research_failed(repo_name: str, reason: str = "") -> Event:
+    payload: dict[str, Any] = {"repo_name": repo_name}
+    if reason:
+        payload["reason"] = reason
+    return Event(
+        type=POEventType.MARKET_RESEARCH_FAILED, task_id=0, payload=payload,
     )
 
 
