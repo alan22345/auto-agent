@@ -1936,9 +1936,17 @@ async def lifespan(app: FastAPI):
     from orchestrator.router import seed_admin_user
     await seed_admin_user()
 
-    # Auto-discover repos from GitHub
-    async with async_session() as session:
-        await sync_repos(session)
+    # Auto-discover repos from GitHub. Runs as a background task — with many
+    # repos visible to the token, extract_ci_checks per-repo can take minutes
+    # and would otherwise stall uvicorn's lifespan past its startup timeout.
+    async def _sync_repos_bg() -> None:
+        try:
+            async with async_session() as session:
+                await sync_repos(session)
+        except Exception:
+            log.exception("background repo sync failed")
+
+    repo_sync_task = asyncio.create_task(_sync_repos_bg())
 
     # Recover tasks stuck in active states (e.g. from a restart mid-task)
     await _recover_stuck_tasks()
@@ -1966,6 +1974,9 @@ async def lifespan(app: FastAPI):
     yield
 
     send_telegram("Auto-agent is shutting down.")
+    repo_sync_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await repo_sync_task
     for t in bg:
         t.cancel()
     for t in bg:
