@@ -21,13 +21,29 @@ async def sync_repos(session: AsyncSession) -> int:
     """Fetch all repos visible to the GitHub token and upsert into the DB.
 
     Returns the number of new repos added.
+
+    New repos are attached to the lowest-ID organization in the DB — this is
+    the single-tenant default (the "owner" org). Multi-tenant deployments
+    should sync per-org via the per-org GitHub App installation instead of
+    relying on this env-level token sweep.
     """
     from shared.github_auth import get_github_token
+    from shared.models import Organization
 
     token = await get_github_token()
     if not token:
         log.warning("No GitHub auth configured, skipping repo sync")
         return 0
+
+    # Resolve the default organization to attach new repos to.
+    default_org_q = await session.execute(
+        select(Organization).order_by(Organization.id).limit(1)
+    )
+    default_org = default_org_q.scalar_one_or_none()
+    if default_org is None:
+        log.warning("No organizations in DB, skipping repo sync")
+        return 0
+    default_org_id = default_org.id
 
     headers = {
         "Authorization": f"token {token}",
@@ -79,7 +95,13 @@ async def sync_repos(session: AsyncSession) -> int:
 
         # New repo — extract CI checks
         ci_checks = await extract_ci_checks(clone_url)
-        repo = Repo(name=name, url=clone_url, default_branch=default_branch, ci_checks=ci_checks)
+        repo = Repo(
+            name=name,
+            url=clone_url,
+            default_branch=default_branch,
+            ci_checks=ci_checks,
+            organization_id=default_org_id,
+        )
         session.add(repo)
         if ci_checks:
             log.info(f"Extracted CI checks for new repo '{name}'")
@@ -116,6 +138,7 @@ async def sync_repos(session: AsyncSession) -> int:
             url=gh_repo["clone_url"],
             default_branch=default_branch,
             ci_checks=ci_checks,
+            organization_id=default_org_id,
         )
         session.add(repo)
         added += 1
