@@ -56,6 +56,7 @@ def create_agent(
     session_id: str | None = None,
     readonly: bool = False,
     with_web: bool = False,
+    with_browser: bool = False,
     max_turns: int = 50,
     include_methodology: bool = False,
     model_tier: str | None = None,
@@ -79,11 +80,12 @@ def create_agent(
                and attached to the loop so every LLM call is accounted
                against the org's daily token quota.
         with_web: If True, include web_search + fetch_url tools (researcher mode).
+        with_browser: If True, include browse_url + tail_dev_server_log (verify mode).
     """
     from agent.loop import UsageSink
 
     provider = get_provider(model_override=model_tier, home_dir=home_dir)
-    tools = create_default_registry(readonly=readonly, with_web=with_web)
+    tools = create_default_registry(readonly=readonly, with_web=with_web, with_browser=with_browser)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
 

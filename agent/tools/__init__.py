@@ -20,13 +20,14 @@ from agent.tools.web_search import WebSearchTool
 
 
 def create_default_registry(
-    readonly: bool = False, with_web: bool = False
+    readonly: bool = False, with_web: bool = False, with_browser: bool = False
 ) -> ToolRegistry:
     """Create a registry with all standard coding tools.
 
     Args:
         readonly: If True, exclude tools that modify files (planning mode).
         with_web: If True, include web_search + fetch_url (researcher mode).
+        with_browser: If True, include browse_url + tail_dev_server_log (verify mode).
     """
     registry = ToolRegistry()
 
@@ -43,6 +44,13 @@ def create_default_registry(
 
         registry.register(WebSearchTool(api_key=settings.brave_api_key))
         registry.register(FetchUrlTool())
+
+    if with_browser:
+        from agent.tools.browse_url import BrowseUrlTool
+        from agent.tools.dev_server import TailDevServerLogTool
+
+        registry.register(BrowseUrlTool())
+        registry.register(TailDevServerLogTool())
 
     # Write tools — excluded in planning/readonly mode
     if not readonly:
