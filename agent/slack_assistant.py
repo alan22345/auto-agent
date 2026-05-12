@@ -5,39 +5,31 @@ agent invocation. The tools mirror auto-agent's task-management API, so
 the user can say things like "create a task on cardamon to add a feedback
 form" and the assistant will (after confirming) call ``create_task``.
 
-Conversation state is per-Slack-user, kept in memory, bounded to the last
-N messages, and reset after long idle. No DB persistence — if the process
-restarts the user picks up a fresh thread, which is fine for chat.
-
-The actual coding pipeline (planning, grilling, approval, coding) runs
-unchanged after a task is created. This module only handles the *front
-door* — turning natural language into the right API calls.
+Conversation state is managed by the caller (the router). This module
+only handles the *front door* — turning natural language into the right
+API calls and returning new messages to persist.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from agent.llm import get_provider
-from agent.llm.types import Message, ToolCall, ToolDefinition
+from agent.llm.types import Message, ToolDefinition
+from orchestrator.claude_auth import resolve_home_dir  # noqa: F401  re-exported for patching
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 from shared.config import settings
 from shared.events import human_message, publish
 
 log = logging.getLogger(__name__)
 
 ORCHESTRATOR_URL = settings.orchestrator_url
-
-# Reset the per-user conversation if they've been silent this long.
-SESSION_TTL_SECONDS = 30 * 60
-
-# Trim the in-memory history to the last N messages so the LLM call stays
-# cheap even after a long thread.
-MAX_HISTORY_MESSAGES = 30
 
 # Hard upper bound on tool-loop iterations per single user message —
 # protects against pathological loops where the model keeps calling tools
@@ -205,28 +197,6 @@ _TOOL_DEFS: list[ToolDefinition] = [
 
 
 # ---------------------------------------------------------------------------
-# Per-user conversation state
-# ---------------------------------------------------------------------------
-
-
-_sessions: dict[str, dict[str, Any]] = {}
-
-
-def _get_or_create_session(slack_user_id: str) -> dict[str, Any]:
-    sess = _sessions.get(slack_user_id)
-    now = time.time()
-    if sess is None or now - sess.get("last_active", 0) > SESSION_TTL_SECONDS:
-        sess = {"history": [], "last_active": now}
-        _sessions[slack_user_id] = sess
-    sess["last_active"] = now
-    return sess
-
-
-def reset_session(slack_user_id: str) -> None:
-    _sessions.pop(slack_user_id, None)
-
-
-# ---------------------------------------------------------------------------
 # Tool dispatchers
 # ---------------------------------------------------------------------------
 
@@ -353,39 +323,47 @@ async def _cancel_task(task_id: int) -> dict:
     }
 
 
-async def _dispatch_tool(name: str, args: dict, user_id: int) -> Any:
+async def _dispatch_tool(
+    name: str, args: dict, user_id: int
+) -> tuple[Any, int | None]:
+    """Dispatch a tool call. Returns ``(result, created_task_id | None)``."""
+    created_task_id: int | None = None
     try:
         if name == "list_my_tasks":
-            return await _list_my_tasks(user_id, args.get("status", "active"))
-        if name == "get_task":
-            return await _get_task(int(args["task_id"]))
-        if name == "list_repos":
-            return await _list_repos()
-        if name == "create_task":
-            return await _create_task(
+            result = await _list_my_tasks(user_id, args.get("status", "active"))
+        elif name == "get_task":
+            result = await _get_task(int(args["task_id"]))
+        elif name == "list_repos":
+            result = await _list_repos()
+        elif name == "create_task":
+            result = await _create_task(
                 user_id,
                 args["repo_name"],
                 args["description"],
                 args.get("title"),
             )
-        if name == "approve_plan":
-            return await _approve_plan(
+            if isinstance(result, dict) and "task_id" in result:
+                created_task_id = int(result["task_id"])
+        elif name == "approve_plan":
+            result = await _approve_plan(
                 int(args["task_id"]), args.get("feedback", "")
             )
-        if name == "reject_plan":
-            return await _reject_plan(int(args["task_id"]), args["feedback"])
-        if name == "answer_clarification":
-            return await _answer_clarification(
+        elif name == "reject_plan":
+            result = await _reject_plan(int(args["task_id"]), args["feedback"])
+        elif name == "answer_clarification":
+            result = await _answer_clarification(
                 int(args["task_id"]), args["answer"]
             )
-        if name == "cancel_task":
-            return await _cancel_task(int(args["task_id"]))
+        elif name == "cancel_task":
+            result = await _cancel_task(int(args["task_id"]))
+        else:
+            result = {"error": f"unknown tool: {name}"}
     except KeyError as e:
-        return {"error": f"missing required argument: {e}"}
+        result = {"error": f"missing required argument: {e}"}
     except Exception as e:
         log.exception("tool dispatch failed")
-        return {"error": f"tool error: {e}"}
-    return {"error": f"unknown tool: {name}"}
+        result = {"error": f"tool error: {e}"}
+    return result, created_task_id
 
 
 # ---------------------------------------------------------------------------
@@ -393,69 +371,64 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def converse(slack_user_id: str, user_id: int, text: str, *, org_id: int | None = None) -> str:
-    """Process one user DM. Returns the assistant's textual reply.
+async def converse(
+    *,
+    user_id: int,
+    text: str,
+    history: list[Message],
+    home_dir: str | None,
+    on_create_task: Callable[[int], Awaitable[None]] | None = None,
+) -> tuple[str, list[Message]]:
+    """Process one user message. Returns ``(reply_text, new_messages)``.
 
-    ``org_id`` is accepted for forward-compatibility (E5 will use it to
-    scope API calls to the correct organisation). For now it is a no-op.
+    ``new_messages`` contains the user message, any tool-result messages,
+    and the final assistant reply — in order. The caller is responsible for
+    persisting these and passing the full accumulated history on the next
+    call.
     """
-    log.info(
-        "slack_converse user_id=%s org_id=%s slack_user_id=%s",
-        user_id, org_id, slack_user_id,
-    )
-    if text.lower().strip() in ("reset", "clear"):
-        reset_session(slack_user_id)
-        return "Cleared our conversation. Starting fresh."
+    appended: list[Message] = [Message(role="user", content=text)]
+    working = list(history) + list(appended)
 
-    sess = _get_or_create_session(slack_user_id)
-    history: list[Message] = sess["history"]
-    history.append(Message(role="user", content=text))
-
-    if len(history) > MAX_HISTORY_MESSAGES:
-        del history[: len(history) - MAX_HISTORY_MESSAGES]
-
-    # Resolve the per-user Claude vault (with fallback for unpaired users)
-    # so the CLI provider hits valid credentials. Without this, claude_cli
-    # runs against the container's default HOME, which usually lacks an
-    # active session and 401s.
-    from orchestrator.claude_auth import resolve_home_dir
-    home_dir = await resolve_home_dir(user_id)
-    provider = get_provider(model_override="fast", home_dir=home_dir)  # haiku — cheap, fast
+    provider = get_provider(model_override="fast", home_dir=home_dir)
 
     final_text = ""
     for _turn in range(MAX_TURNS_PER_REQUEST):
         try:
             response = await provider.complete(
-                messages=history,
+                messages=working,
                 system=SYSTEM_PROMPT,
                 tools=_TOOL_DEFS,
                 max_tokens=2048,
             )
         except Exception as e:
             log.exception("slack assistant LLM call failed")
-            return f"(internal error: {e})"
+            return f"(internal error: {e})", appended
 
-        history.append(response.message)
+        working.append(response.message)
+        appended.append(response.message)
 
         if response.stop_reason != "tool_use" or not response.message.tool_calls:
             final_text = response.message.content or ""
             break
 
-        # Run each tool call, append a tool-result message per call.
         for call in response.message.tool_calls:
-            result = await _dispatch_tool(call.name, call.arguments, user_id)
-            history.append(
-                Message(
-                    role="tool",
-                    content=json.dumps(result, default=str)[:8000],
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                )
+            result, created_task_id = await _dispatch_tool(
+                call.name, call.arguments, user_id
             )
+            tool_msg = Message(
+                role="tool",
+                content=json.dumps(result, default=str)[:8000],
+                tool_call_id=call.id,
+                tool_name=call.name,
+            )
+            working.append(tool_msg)
+            appended.append(tool_msg)
+            if created_task_id is not None and on_create_task is not None:
+                await on_create_task(created_task_id)
 
     if not final_text:
         final_text = (
             "I got stuck thinking about that — try rephrasing or say "
             "`reset` to start over."
         )
-    return final_text
+    return final_text, appended
