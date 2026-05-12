@@ -10,69 +10,71 @@
 In freeform mode, the agent writes code, commits it, opens a PR, and that is the loop. It can run `pytest` via `test_runner` and arbitrary commands via `bash`, but it has no way to:
 
 - Start the project's dev server and see whether the app boots.
+- Check whether its diff actually addresses what the task asked for.
 - Visit a route and observe what renders.
-- Capture a screenshot of a UI change it just made.
-- Loop back when the page is broken: "this looks wrong — let me fix it."
+- Loop back when the answer is "no."
 
-The core gap: **the agent ships code without ever observing the running system it just modified.** For UI work especially, "the tests pass" is not the same as "the feature actually works." `test_runner` covers test correctness; nothing today covers feature correctness.
+The core gap is two-sided. **Functional** — the agent ships code without ever observing the running system or confirming the diff addresses the task. **Quality** — code review (`agent/lifecycle/review.py`) catches code-quality issues today, but doesn't see the rendered UI, so visually-broken pages still ship.
 
-The fix is a new lifecycle phase between coding and PR creation that boots the dev server, drives a headless browser through the routes the agent declared as affected, and asks the agent to self-judge the rendered screenshots. Failure loops back into coding once; second failure blocks the task for human review.
+The fix splits the work cleanly across the two existing post-coding phases. **Verify** answers *"does it run and does it address the original ask?"* — boot the dev server, then check the diff against the task description. **Review** answers *"is the work good?"* — the existing code review, extended to drive a headless browser through declared routes and judge the rendered screenshots. Failures at either phase loop back into coding with structured context; second failure blocks the task.
 
 ## Out of scope (deferred)
 
-- Golden-image comparison. No baseline images to compare against on a fresh feature; defer until usage data tells us we need it.
+- Golden-image comparison. No baseline images on a fresh feature; defer until usage data demands it.
 - E2E user flows (click X, then assert Y). Only static route renders for this cut.
-- User-declared structured assertions (e.g. "page contains text X after clicking Y") via `FreeformConfig`. Possible Spec D.
-- Concurrency safeguards beyond OS-allocated ephemeral ports. `MAX_CONCURRENT_TASKS=2` keeps the load light.
+- User-declared structured assertions via `FreeformConfig`. Possible Spec D.
+- Concurrency safeguards beyond OS-allocated ephemeral ports. `MAX_CONCURRENT_TASKS=2` keeps load light.
 - Sandboxing the dev server beyond subprocess + process group. Same trust model as the existing `bash` tool.
-- Non-UI freeform tasks (CLI tools, libraries, pure backend changes). These skip the phase entirely; see "When verify runs" below.
 - Sub-project B's reviewer agent. C is the horizontal capability B will consume; B is its own spec.
 
 ## Architecture
 
-A new `VERIFYING` task status sits between `CODING` and `AWAITING_CI`. **Verify always runs after coding** for any task in a project with a runnable server — backend changes are checked too, because "the server still boots after my edit" is a real signal we currently lack. Inside the phase, there are two layers:
-
-1. **Boot check (always-on when a run command is available).** Start the dev server in the workspace, wait for the TCP port to open, hold for 5 seconds watching for a crash. Catches "this PR breaks import-time code," missing imports, broken env wiring.
-2. **Visual check (conditional on `task.affected_routes` non-empty).** When the planner declared routes that have visible UI, drive Playwright through each, capture screenshots, and ask the agent to judge "does this look right." The boot check has already passed by this point.
-
-On pass: transition `VERIFYING → AWAITING_CI` and open the PR. On fail (boot, route HTTP, or visual judgment): transition back to `CODING` with structured failure context. Second consecutive fail → `BLOCKED` with `block_reason="verify_failed"`.
+The post-coding flow becomes:
 
 ```
-CODING
-  └─ agent writes code, commits, ready to ship
-       ├─ no run command available (no sniffable manifest, no FreeformConfig override)
-       │   AND task.affected_routes empty
-       │   → AWAITING_CI directly      (skip verify; pure CLI/library task)
-       └─ else → VERIFYING
-
-VERIFYING (handle_verify)
-  ├─ start dev server in workspace (ephemeral port, subprocess + new process group)
-  ├─ Layer 1: BOOT CHECK
-  │   ├─ wait_for_port(port, timeout=60s)
-  │   ├─ hold for 5s, polling process.returncode → must remain None
-  │   └─ on boot failure → fail cycle with failure_reason="boot_timeout" | "early_exit"
-  ├─ Layer 2: VISUAL CHECK   (only if task.affected_routes non-empty)
-  │   ├─ for each route: deterministic Playwright probe → {path, http_status, screenshot}
-  │   ├─ any status >= 400 → fail cycle, failure_reason="route_error"
-  │   └─ else → single agent judgment over screenshots → OK | NOT-OK + reasoning
-  │            ├─ NOT-OK → fail cycle, failure_reason="judgment_not_ok"
-  │            └─ OK → pass
-  ├─ on PASS → kill server, transition VERIFYING → AWAITING_CI (open PR)
-  ├─ on FAIL with cycle == 1 → kill server, transition VERIFYING → CODING with failure context
-  └─ on FAIL with cycle == 2 → kill server, transition VERIFYING → BLOCKED (block_reason="verify_failed")
+CODING → VERIFYING → AWAITING_CI → AWAITING_REVIEW → DONE
+                ↘ CODING (fail, retry)         ↘ CODING (fail, retry)
+                ↘ BLOCKED (fail, 2nd cycle)    ↘ BLOCKED (fail, 2nd cycle)
 ```
 
-Total verify time per cycle capped at 120 s; second cycle also gets 120 s. Server lifetime is scoped to the phase via `try/finally` + process-group kill (`os.killpg(pgid, SIGTERM)` then `SIGKILL` after a grace period).
+### Verify (new phase, between CODING and AWAITING_CI)
 
-## When verify runs
+Two sub-checks, scoped to "does it work and does it match the ask":
 
-Verify runs after every coding completion **unless** the task is in a project with no runnable server AND the planner declared no affected routes — i.e., a pure CLI/library/docs change in a non-server codebase. In that case verify is skipped silently and the task transitions `CODING → AWAITING_CI` directly.
+1. **Boot check** (always-on when a run command resolves). Start the dev server in the workspace, wait for the TCP port, hold 5 seconds watching for crash. Catches import errors, missing env wiring, "binds then dies" failures.
+2. **Intent check** (always runs when there is a diff). One agent invocation receives the task description, the diff summary, and the contents of changed non-code artifacts (markdown, JSON, etc.). It judges whether the work actually addresses the original task: missing requirements, off-topic changes, partial implementations. Emits `OK` or `NOT-OK: <reason>`.
 
-Detection of "runnable server available": same sniffing priority as `start_dev_server` (FreeformConfig override → `package.json` `scripts.dev` → `Procfile` `web:` → `pyproject.toml [tool.auto-agent].run`). If any of those resolves, the project has a runnable server and the boot check is mandatory.
+Pass → transition `VERIFYING → AWAITING_CI` and open the PR. Fail → `VERIFYING → CODING` with failure context (cycle 1) or `VERIFYING → BLOCKED` with `block_reason="verify_failed"` (cycle 2).
 
-The visual layer is gated separately on `task.affected_routes` non-empty. Planner sets this; see "Planner contract change" below. Empty list = boot check only. Non-empty = boot check + visual check.
+### Review (existing phase, extended)
 
-**Edge case:** Planner declares `affected_routes` but no run command can be sniffed. Treated as a planner/repo mismatch — log a warning, skip verify (don't fail the task on infrastructure that doesn't exist), proceed `CODING → AWAITING_CI`. Operational signal, not a task failure.
+Two sub-checks, scoped to quality:
+
+1. **Code review** (existing). The code-quality dimension behaves as today; the reviewer prompt is extended only to *also* judge visual output when screenshots are present (see UI check below).
+2. **UI check** (new, conditional on `task.affected_routes` non-empty). Boot the dev server fresh in the review workspace, drive Playwright through each declared route, capture screenshots, and feed them into the same reviewer invocation as the code diff. One combined verdict, two dimensions.
+
+Pass → `AWAITING_REVIEW → DONE`. Fail → `AWAITING_REVIEW → CODING` (existing behaviour, now extended to fire on UI failures too). Second consecutive review failure → `BLOCKED` with `block_reason="review_failed"`.
+
+### Why split this way
+
+Verify's two checks need cheap signals available at coding-completion time (server boots, diff matches task). Review's two checks need richer signals (code-quality reasoning, rendered UI). They fail for different reasons — a verify failure means the work is wrong; a review failure means the work is right but the output is poor. Distinct retry contexts produce more useful coding-turn prompts than a single mashed-together gate would.
+
+The dev server is booted twice — once in verify (held 5 s, killed) and once in review (held during the Playwright probe, killed). Total cost: ~30 s extra per task. Acceptable for a personal-project freeform cadence.
+
+## When each check runs
+
+| Sub-check | Phase | Runs when |
+|---|---|---|
+| Boot check | Verify | A run command resolves (sniffable manifest or `FreeformConfig.run_command`). |
+| Intent check | Verify | Always (any non-empty diff). |
+| Code review | Review | Always (existing). |
+| UI check | Review | `task.affected_routes` is non-empty. |
+
+Detection of "run command available" uses the same priority everywhere: `FreeformConfig.run_command` → `package.json` `scripts.dev` → `Procfile` `web:` → `pyproject.toml [tool.auto-agent].run`.
+
+**Edge cases:**
+- No run command sniffable, empty `affected_routes` → boot check and UI check skipped silently. Verify still runs (intent check). Review still runs (code review). Pure CLI/library/docs tasks proceed exactly as today, with the intent check as a new safety net.
+- No run command sniffable, non-empty `affected_routes` → publish `verify_skipped_no_runner` event in verify; publish `review_skipped_no_runner` event in review. Both phases proceed without the dev-server-dependent sub-check. Operational signal, not a task failure.
 
 ## Data model
 
@@ -83,16 +85,31 @@ The visual layer is gated separately on `task.affected_routes` non-empty. Planne
 | `id` | int PK | |
 | `task_id` | int FK → `tasks.id`, indexed | |
 | `cycle` | smallint | 1 or 2. |
-| `status` | text | `pass` / `fail` / `skipped` / `error`. |
-| `routes_probed` | jsonb | `[{path, method, http_status, screenshot_path, viewport}, ...]` — screenshot_path is workspace-relative. |
-| `agent_judgment` | text nullable | The agent's OK/NOT-OK verdict + reasoning. Null when the cycle failed before judgment (HTTP error, boot failure). |
-| `boot_check` | text nullable | `pass` / `fail` / null (null when phase never reached boot, e.g., setup error). |
-| `failure_reason` | text nullable | `boot_timeout` / `early_exit` / `route_error` / `judgment_not_ok` / `phase_timeout` / `internal_error`. |
-| `log_tail` | text nullable | Last 50 lines of dev server stdout/stderr. Always populated on failure; null on pass. |
-| `started_at` | timestamptz | |
-| `finished_at` | timestamptz | |
+| `status` | text | `pass` / `fail` / `error`. |
+| `boot_check` | text nullable | `pass` / `fail` / `skipped`. Null when phase never reached this sub-check. |
+| `intent_check` | text nullable | `pass` / `fail`. Null when verify failed before this sub-check ran. |
+| `intent_judgment` | text nullable | Agent's `OK`/`NOT-OK` verdict with reasoning. |
+| `failure_reason` | text nullable | `boot_timeout` / `early_exit` / `intent_not_addressed` / `phase_timeout` / `internal_error`. |
+| `log_tail` | text nullable | Last 50 lines of dev server stdout/stderr; populated when boot failed. |
+| `started_at`, `finished_at` | timestamptz | |
 
-`Task` gains `verify_attempts = relationship(...)`.
+### New table: `review_attempts`
+
+| column | type | notes |
+|---|---|---|
+| `id` | int PK | |
+| `task_id` | int FK → `tasks.id`, indexed | |
+| `cycle` | smallint | 1 or 2. |
+| `status` | text | `pass` / `fail` / `error`. |
+| `code_review_verdict` | text nullable | Existing code-review output, persisted instead of only sent as PR comment. |
+| `ui_check` | text nullable | `pass` / `fail` / `skipped`. Null when review-phase failed before UI check ran. |
+| `routes_probed` | jsonb nullable | `[{path, method, http_status, screenshot_path}, ...]` when UI check ran. |
+| `ui_judgment` | text nullable | Agent's reasoning when UI portion failed (or "OK" with notes). |
+| `failure_reason` | text nullable | `code_review_rejected` / `route_error` / `ui_judgment_not_ok` / `boot_timeout` / `phase_timeout` / `internal_error`. |
+| `log_tail` | text nullable | |
+| `started_at`, `finished_at` | timestamptz | |
+
+`Task` gains `verify_attempts` and `review_attempts` relationships.
 
 ### `Task` — additions
 
@@ -100,91 +117,69 @@ The visual layer is gated separately on `task.affected_routes` non-empty. Planne
 |---|---|---|
 | `affected_routes` | jsonb default `'[]'` | `[{method, path, label}, ...]` populated by the planner. Empty list = non-UI task. |
 
-That is the only Task addition. `block_reason` already exists for the `BLOCKED` status path.
-
 ### `TaskStatus` enum — addition
 
-Add `VERIFYING = "verifying"`. Postgres enum migration uses `ALTER TYPE ... ADD VALUE`.
+Add `VERIFYING = "verifying"`. Postgres enum migration uses `ALTER TYPE ... ADD VALUE`. Existing `AWAITING_REVIEW` is reused for the review phase; no new state needed there.
+
+### `FreeformConfig` — additions
+
+| column | type | notes |
+|---|---|---|
+| `run_command` | text nullable | Optional explicit override when manifest sniffing fails. |
 
 ## Components
 
 ### `agent/tools/dev_server.py` (new)
 
-Two surfaces, one file:
+Public surfaces:
 
-**`start_dev_server(workspace_path) -> DevServerHandle`** — **internal helper, not a tool.** Called by the verify phase, not the agent.
-
-- Sniffs run command in priority order:
-  1. `FreeformConfig.run_command` (new column, optional override).
-  2. `package.json` `scripts.dev` → `npm run dev`.
-  3. `Procfile` `web:` entry.
-  4. `pyproject.toml` `[tool.auto-agent].run` (new convention).
-- Allocates ephemeral port via `socket.socket(AF_INET, SOCK_STREAM); s.bind(('', 0)); port = s.getsockname()[1]; s.close()`. Exports `PORT=<n>` env into the subprocess for frameworks that respect it (Next.js does).
-- Spawns via `asyncio.create_subprocess_exec(*shlex.split(cmd), preexec_fn=os.setsid, stdout=PIPE, stderr=STDOUT, cwd=workspace_path, env=...)`. The `setsid` puts the child in a new process group so kill cascades catch npm → node → next.
-- Returns `DevServerHandle(pid, pgid, port, log_path, started_at)`. Log path is a workspace-scoped tempfile that an async background task drains the subprocess's stdout into.
-
-**`tail_dev_server_log(lines=50) -> str`** — **agent-callable tool.** Registered via `create_default_registry(..., with_browser=True)`. Returns the last N lines of the current dev server's log. Used by the agent when verify reports a boot or runtime error and the agent wants to diagnose. Reads from the workspace-scoped log file, so it works even if the server has since been killed.
-
-Companion internal helpers:
-- `wait_for_port(port, timeout=60)` polls TCP `connect()` every 250 ms. Returns when the port accepts a connection; raises `BootTimeout` otherwise.
-- `hold(server, seconds=5)` polls `server.process.returncode` every 500 ms for the configured duration. Raises `EarlyExit(log_tail)` if the process exits during the hold. Used by the boot-check layer.
-- `sniff_run_command(workspace_path) -> str | None` — pure function exposed for `_finish_coding` to decide whether verify can run at all. Same sniffing priority as `start_dev_server`. Returns `None` when nothing resolves.
+- **`sniff_run_command(workspace_path) -> str | None`** — pure function. Sniffing priority: `FreeformConfig.run_command` → `package.json` `scripts.dev` → `Procfile` `web:` → `pyproject.toml [tool.auto-agent].run`. Returns `None` if nothing resolves. Used by both `verify.py` and `review.py` to decide whether dev-server-dependent sub-checks can run.
+- **`start_dev_server(workspace_path) -> DevServerHandle`** — internal helper, not an agent tool. Allocates ephemeral port via `socket.bind(('', 0))`, exports `PORT=<n>`, spawns via `asyncio.create_subprocess_exec(..., preexec_fn=os.setsid)` so the child is in a new process group (kill cascades catch npm → node → next). Returns `DevServerHandle(pid, pgid, port, log_path, started_at)`. Async background task drains the subprocess stdout into a workspace-scoped tempfile.
+- **`wait_for_port(port, timeout=60)`** — polls TCP `connect()` every 250 ms; raises `BootTimeout(log_tail)` on timeout.
+- **`hold(server, seconds=5)`** — polls `server.process.returncode` every 500 ms for the configured duration; raises `EarlyExit(log_tail)` if the process exits during the hold. Used by the verify boot check.
+- **`tail_dev_server_log(lines=50) -> str`** — agent-callable tool (registered via `with_browser=True` flag). Lets the agent diagnose boot/runtime errors when verify or review reports a failure.
 
 ### `agent/tools/browse_url.py` (new)
 
 Agent-callable tool. Single call:
 
-- **Input:** `url` (required, absolute or relative — verify phase passes `http://localhost:{port}{path}`), `wait_for` selector (optional, for SPA hydration; default `body`), `viewport` (optional, default `{width: 1280, height: 800}`).
-- **Action:** Playwright headless Chromium, `page.goto(url, wait_until='networkidle')`, `page.wait_for_selector(wait_for, timeout=15s)`, `page.screenshot(full_page=True)`.
-- **Output:** `tool_result` with three content blocks:
-  1. `text` block: HTTP status + final URL (after redirects).
-  2. `text` block: rendered text content (HTML → readable text via existing `fetch_url`-style markdownification, capped at ~5000 chars).
-  3. `image` block: PNG screenshot, base64-encoded, served as Anthropic content type `image`.
-- Per-call timeout 30 s; on timeout returns a `text` block with the timeout reason and no image.
+- **Input:** `url` (required), `wait_for` selector (optional, default `body`), `viewport` (optional, default `{width: 1280, height: 800}`).
+- **Action:** Playwright headless Chromium → `page.goto(url, wait_until='networkidle')` → `page.wait_for_selector(wait_for, timeout=15s)` → `page.screenshot(full_page=True)`.
+- **Output:** `tool_result` with three blocks — HTTP status text, rendered text content (~5000-char cap), screenshot as Anthropic `image` content block.
 
-Playwright runs inside a single shared `BrowserContext` per verify cycle to amortise startup (~500 ms vs ~2 s per call). Cleanup at phase exit.
+Per-call timeout 30 s. Used inside review.py's UI check (the phase drives it deterministically), and exposed to the review agent itself so it can re-probe routes if it wants a closer look.
 
 ### `agent/lifecycle/verify.py` (new)
 
-Mirrors `agent/lifecycle/review.py` shape. Three sub-steps inside the phase, run in order; any failure short-circuits.
-
-**Sub-step 0: boot check** (always-on when a run command resolves). Start the dev server. Wait for TCP port. Hold 5 seconds, polling `process.returncode` — if the process exits in that window, the server crashed after binding (a common Next.js / FastAPI failure mode). Records `verify_attempts.boot_check = "pass" | "fail"`.
-
-**Sub-step 1: deterministic visual probe** (skipped if `task.affected_routes` empty). The phase itself drives Playwright through each declared route, recording HTTP status and screenshot path. Fast (~2 s per route after warmup), produces baseline data that doesn't need an LLM.
-
-**Sub-step 2: single agent judgment** (skipped if no visual probe ran, or if any route returned ≥ 400). One `create_agent(..., with_browser=True)` invocation receives the task description, the diff summary, the probe results (routes + statuses + screenshots as `image` content blocks), and is asked to emit `OK` or `NOT-OK: <reason>`. The agent also has access to `browse_url` and `tail_dev_server_log` so it can dig deeper — re-screenshot at a different viewport, tail the log for non-fatal warnings — before deciding. Token budget: 20 turns max.
+Mirrors `agent/lifecycle/review.py` shape. Two sub-checks, run in order.
 
 ```python
 async def handle_verify(task_id: int) -> None:
     task = await get_task(task_id)
     workspace = await ensure_workspace(task)
-    routes = task.affected_routes or []
-
-    cycle = await next_cycle_number(task_id)         # 1 or 2
+    cycle = await next_cycle_number(task_id, table="verify_attempts")  # 1 or 2
     attempt = await create_verify_attempt(task_id, cycle)
 
     try:
-        async with dev_server.start_dev_server(workspace) as server:
-            # Sub-step 0: boot check (always)
-            await dev_server.wait_for_port(server.port, timeout=60)
-            await dev_server.hold(server, seconds=5)   # raises EarlyExit on process death
-            attempt.boot_check = "pass"
+        # Sub-check 1: boot (when a run command resolves)
+        run_cmd = dev_server.sniff_run_command(workspace)
+        if run_cmd:
+            async with dev_server.start_dev_server(workspace) as server:
+                await dev_server.wait_for_port(server.port, timeout=60)
+                await dev_server.hold(server, seconds=5)
+                attempt.boot_check = "pass"
+        else:
+            attempt.boot_check = "skipped"
 
-            # Sub-step 1: visual probe (only if affected_routes non-empty)
-            if routes:
-                async with playwright_context() as browser:
-                    results = [await probe_route(browser, server.port, r) for r in routes]
-                attempt.routes_probed = results
-                if any(r["http_status"] is None or r["http_status"] >= 400 for r in results):
-                    return await fail_cycle(attempt, "route_error", server.log_tail(), task, cycle)
+        # Sub-check 2: intent (always, on any non-empty diff)
+        diff = await git.diff_summary(workspace)
+        verdict = await agent_intent_check(task, diff, workspace)
+        attempt.intent_check = "pass" if verdict.ok else "fail"
+        attempt.intent_judgment = verdict.reasoning
+        if not verdict.ok:
+            return await fail_cycle(attempt, "intent_not_addressed", None, task, cycle)
 
-                # Sub-step 2: agent judgment
-                verdict = await agent_judge_screenshots(task, results, server)
-                attempt.agent_judgment = verdict.reasoning
-                if not verdict.ok:
-                    return await fail_cycle(attempt, "judgment_not_ok", server.log_tail(), task, cycle)
-
-            return await pass_cycle(attempt, task)
+        return await pass_cycle(attempt, task)
     except dev_server.BootTimeout as e:
         attempt.boot_check = "fail"
         return await fail_cycle(attempt, "boot_timeout", e.log_tail, task, cycle)
@@ -192,29 +187,38 @@ async def handle_verify(task_id: int) -> None:
         attempt.boot_check = "fail"
         return await fail_cycle(attempt, "early_exit", e.log_tail, task, cycle)
     except asyncio.TimeoutError:
-        return await fail_cycle(attempt, "phase_timeout", server.log_tail() if 'server' in locals() else None, task, cycle)
+        return await fail_cycle(attempt, "phase_timeout", None, task, cycle)
 ```
 
-Total per-cycle wall-time wrapped in `asyncio.wait_for(..., timeout=120)`. `pass_cycle` opens the PR (see `_finish_coding` change below) and transitions `VERIFYING → AWAITING_CI`. `fail_cycle` transitions `VERIFYING → CODING` with the failure context formatted as the next coding-turn prompt (cycle 1) or `VERIFYING → BLOCKED` with `block_reason="verify_failed"` (cycle 2). The judgment agent has the workspace as readonly — it observes, does not write code.
+`agent_intent_check` is a single `create_agent(..., readonly=True)` invocation with a focused prompt (see `prompts.py` changes). Token budget: 15 turns. The agent has `file_read`, `grep`, `glob` but no browser tools — intent is judged from text artifacts, not rendered UI.
+
+`pass_cycle` opens the PR (via the extracted `_open_pr_and_advance` helper in `coding.py`) and transitions `VERIFYING → AWAITING_CI`. `fail_cycle` transitions `VERIFYING → CODING` with failure context (cycle 1) or `VERIFYING → BLOCKED` (cycle 2). Total per-cycle wall-time wrapped in `asyncio.wait_for(..., timeout=120)`.
+
+### `agent/lifecycle/review.py` (modified)
+
+Two sub-checks now, with the UI check inserted before the final verdict.
+
+- **Setup:** if `task.affected_routes` is non-empty AND a run command resolves, start the dev server and Playwright probe each route deterministically. Persist `routes_probed` to the `review_attempts` row. Boot failures and route ≥400s short-circuit to `fail_cycle` with `failure_reason="boot_timeout"` or `"route_error"`.
+- **Review agent invocation:** the existing review prompt is extended to take the probe results (HTTP statuses + screenshots as `image` blocks) when present. The prompt asks the agent to deliver one combined verdict covering code quality AND visual correctness. The agent has `file_read`, `grep`, `glob`, `browse_url`, `tail_dev_server_log` — it can re-probe routes if needed.
+- **Verdict:** structured `OK` / `NOT-OK` with per-dimension reasoning. NOT-OK on either dimension fails the cycle (`failure_reason="code_review_rejected"` or `"ui_judgment_not_ok"`).
+- **Retry:** two cycles, same shape as verify. After two fails → `BLOCKED` with `block_reason="review_failed"`.
+- **Cleanup:** dev server lifetime scoped to the phase (`try/finally` + process-group kill).
+
+The existing review.py is restructured so its today's "review agent invocation + transition" code is split into "deterministic UI probe (new) → review agent invocation (extended) → transition (existing)."
 
 ### `agent/lifecycle/coding.py` (modified)
 
-`_finish_coding` today commits the work, pushes the branch, opens a PR, and transitions `CODING → AWAITING_CI`. We split it:
+`_finish_coding` today commits, pushes, opens a PR, and transitions `CODING → AWAITING_CI`. Refactor:
 
-- Extract a private helper `_open_pr_and_advance(task)` that handles "push branch, open PR, transition to `AWAITING_CI`". This is the existing PR-creation code, now factored out.
-- `_finish_coding` becomes a router using `dev_server.sniff_run_command(workspace)`:
-  - **No run command** AND `affected_routes == []` → call `_open_pr_and_advance(task)` (current behaviour). Pure CLI/library task.
-  - **No run command** AND `affected_routes != []` → publish `verify_skipped_no_runner` event, then call `_open_pr_and_advance(task)`. Operational mismatch.
-  - **Run command resolves** (either path of `affected_routes`) → commit + push branch (no PR yet), transition `CODING → VERIFYING`, dispatch `handle_verify`.
-- `pass_cycle` in `verify.py` calls `_open_pr_and_advance(task)` once verify succeeds.
+- Extract `_open_pr_and_advance(task)` — push branch, open PR, transition to `AWAITING_CI`. Pure code move.
+- `_finish_coding` becomes: commit + push (no PR yet), transition `CODING → VERIFYING`, dispatch `handle_verify`.
+- `pass_cycle` in `verify.py` calls `_open_pr_and_advance(task)`.
 
-Failing verify never produces a PR — this is the load-bearing behaviour the regression tests guard.
-
-If verify loops back (`VERIFYING → CODING`), the next coding turn receives the structured failure context (failed routes, response bodies, screenshots, log tail, agent's previous judgment) as the next user message in the conversation. The branch is unchanged; the agent commits the fix on top.
+There is no "skip verify" path — verify always runs (the intent sub-check runs unconditionally). If both verify sub-checks happen to skip (no run command, no diff — which shouldn't occur post-coding), pass through harmlessly.
 
 ### `agent/lifecycle/factory.py` (modified)
 
-`create_agent` gains a `with_browser: bool = False` parameter. When `True`, the tool registry adds `browse_url` and `tail_dev_server_log`. Verify-phase agents use `with_browser=True`. Planning/coding agents are unchanged.
+`create_agent` gains a `with_browser: bool = False` parameter. When `True`, the tool registry adds `browse_url` and `tail_dev_server_log`. Review-phase agents use `with_browser=True`. Verify and other phases stay `with_browser=False`.
 
 ### `agent/tools/__init__.py` (modified)
 
@@ -222,32 +226,32 @@ If verify loops back (`VERIFYING → CODING`), the next coding turn receives the
 
 ### `agent/prompts.py` (modified)
 
-`PLANNING_PROMPT` (or wherever the planner's output schema lives) gets one new required field in the plan-output JSON: `affected_routes: list[AffectedRoute]`. Instruction added:
-
-> When your change affects user-visible routes, list each one in `affected_routes` with method, path, and a short label. If the change is purely backend, CLI, or library code with no rendered UI, leave the list empty — verification will be skipped.
-
-A new prompt constant `VERIFY_JUDGMENT_PROMPT` lives alongside the planning prompt. It receives the task description, the diff summary, the affected routes, and the screenshots, and asks for `OK` or `NOT-OK` + reasoning. Strict output format so we can parse the verdict deterministically.
+- `PLANNING_PROMPT` gets one new required field in its output schema: `affected_routes: list[AffectedRoute]`. Instructions added: "When your change affects user-visible routes, list each one with method, path, and a short label. If purely backend/CLI/library, leave empty."
+- New constant `VERIFY_INTENT_PROMPT` — the intent-check prompt. Receives task description, diff summary, optional affected-file contents. Asks: "Does this work address the task as stated? Flag missing requirements, off-topic changes, partial implementations. Output OK or NOT-OK with specific reasons."
+- Existing `REVIEW_PROMPT` (wherever it lives) extended to address visual output when screenshots are present, with a structured per-dimension verdict.
 
 ### `shared/models.py` (modified)
 
 - New `VerifyAttempt` ORM model.
+- New `ReviewAttempt` ORM model.
 - `Task.affected_routes` column (jsonb default `[]`).
-- `Task.verify_attempts` relationship.
+- `Task.verify_attempts` and `Task.review_attempts` relationships.
 - `TaskStatus.VERIFYING` enum value.
 
 ### `shared/types.py` (modified)
 
 - `AffectedRoute = {method: Literal['GET','POST','PUT','PATCH','DELETE'], path: str, label: str}`.
-- `VerifyStatus = Literal['pass','fail','skipped','error']`.
-- `VerifyResult` Pydantic model mirroring the ORM row, for API responses.
+- `IntentVerdict = {ok: bool, reasoning: str}`.
+- `RouteProbeResult = {path, method, http_status: int | None, screenshot_path: str | None, error: str | None}`.
+- `VerifyResult`, `ReviewResult` Pydantic models for API responses.
 
 ### `shared/config.py` (modified)
 
-- `FreeformConfig.run_command: str | None = None` — optional explicit override for sniffing failure cases. Documented in the existing FreeformConfig docstring.
+`FreeformConfig.run_command: str | None = None`. Documented in the FreeformConfig docstring.
 
 ### `shared/events.py` (modified)
 
-New event builders: `verify_started`, `verify_passed`, `verify_failed`, `verify_skipped_no_runner`. Registered in `agent/lifecycle/_orchestrator_api.py`.
+New event builders: `verify_started`, `verify_passed`, `verify_failed`, `verify_skipped_no_runner`, `review_ui_check_started`, `review_skipped_no_runner`. Registered in `agent/lifecycle/_orchestrator_api.py`.
 
 ### `orchestrator/state_machine.py` (modified)
 
@@ -257,110 +261,115 @@ Add `TaskStatus.VERIFYING` to the transitions table:
 - `VERIFYING → CODING` (fail, retry).
 - `VERIFYING → BLOCKED` (fail, exhausted).
 
+Existing `AWAITING_REVIEW → CODING` transition picks up the new "UI check failed" trigger; no schema change needed.
+
 ### `orchestrator/router.py` (modified)
 
-One new endpoint: `GET /api/tasks/:id/verify-attempts` → returns the list of `VerifyAttempt` rows for the task as JSON. Used by `web-next` to render the verify section on task detail.
+Two new endpoints:
+- `GET /api/tasks/:id/verify-attempts` — list `VerifyAttempt` rows for the task.
+- `GET /api/tasks/:id/review-attempts` — list `ReviewAttempt` rows for the task.
 
-Screenshots are served as static files from a workspace-scoped path: `GET /api/tasks/:id/verify-attempts/:cycle/screenshots/:filename` → streams the PNG from disk. No upload, no S3 — files live in the workspace until cleanup, copied to `var/verify-screenshots/<task-id>/<cycle>/` for durability across workspace cleanup. The orchestrator owns this directory.
+Screenshots live in `var/verify-screenshots/<task-id>/<phase>/<cycle>/` (the orchestrator copies them out of the workspace before cleanup). Served as static files at `GET /api/tasks/:id/<phase>/<cycle>/screenshots/:filename`.
 
 ### `web-next/` (modified)
 
-One new component, one extension:
+Two new components, one mount point:
 
-1. **`web-next/components/task/VerifyAttempts.tsx`** — renders the per-cycle verify history on the task detail page: overall status badge, boot-check status, routes probed with HTTP status (when the visual layer ran), screenshot thumbnails (click to enlarge), the agent's judgment text, log tail (collapsed). Backend-only tasks show just the boot-check row; UI tasks show boot + visual. Pulls from the new endpoint via a `useVerifyAttempts(taskId)` hook in `web-next/hooks/`.
-2. **`web-next/app/(app)/tasks/[id]/page.tsx`** — mounts `<VerifyAttempts taskId={id} />` between the existing review section and the PR link.
+1. **`web-next/components/task/VerifyAttempts.tsx`** — renders the per-cycle verify history: status badge, boot-check status, intent-check verdict + reasoning, log tail (collapsed).
+2. **`web-next/components/task/ReviewAttempts.tsx`** — renders the per-cycle review history: status badge, code-review verdict, UI check status, routes probed with HTTP status, screenshot thumbnails (click to enlarge), agent's combined reasoning.
+3. **`web-next/app/(app)/tasks/[id]/page.tsx`** — mounts both components on the task detail page, in flow order (verify above review).
 
-No changes to the suggestions page or PO views. No legacy `web/` changes.
+Each component pulls from its endpoint via a hook in `web-next/hooks/` (`useVerifyAttempts`, `useReviewAttempts`).
 
 ## Data flow
 
-1. Planning phase produces a plan and now also sets `task.affected_routes` (may be empty).
-2. Coding phase writes code, commits, ready to ship.
-3. `_finish_coding` sniffs for a run command:
-   - No run command + empty `affected_routes` → `_open_pr_and_advance` (skip verify).
-   - No run command + non-empty `affected_routes` → publish `verify_skipped_no_runner`, then `_open_pr_and_advance`.
-   - Run command present → commit/push branch, transition `CODING → VERIFYING`, dispatch `handle_verify`.
-4. `handle_verify` runs the two-layer phase:
-   - Boot check (always): server boots, port opens, holds 5 s without exiting.
-   - Visual check (only if `affected_routes` non-empty): Playwright probes each route; agent judges screenshots.
-5. On pass: `pass_cycle` calls `_open_pr_and_advance`. Existing CI / review flow continues.
-6. On fail cycle 1: persist `VerifyAttempt` with failure context, transition `VERIFYING → CODING`, post failure context to the task message stream. Agent's next coding turn sees the failures (boot log tail, or failing routes + screenshots).
-7. On fail cycle 2: persist `VerifyAttempt`, transition `VERIFYING → BLOCKED` with `block_reason="verify_failed"`. User sees the failures in `web-next`.
+1. Planning phase produces a plan and sets `task.affected_routes` (may be empty).
+2. Coding phase writes code, commits, pushes the branch.
+3. `_finish_coding` transitions `CODING → VERIFYING`, dispatches `handle_verify`.
+4. `handle_verify`:
+   - Boot check (when run command resolves): start server, wait for port, hold 5 s.
+   - Intent check (always): agent judges diff vs task description.
+   - Pass → `_open_pr_and_advance` → `AWAITING_CI`. Fail cycle 1 → `CODING`. Fail cycle 2 → `BLOCKED`.
+5. CI runs externally; on green → `AWAITING_REVIEW`, dispatch `handle_review`.
+6. `handle_review`:
+   - UI check (when `affected_routes` non-empty AND run command resolves): boot server, Playwright probe, screenshots.
+   - Code-review agent invocation: extended prompt receives diff + screenshots when present; emits combined verdict.
+   - Pass → `DONE`. Fail cycle 1 → `CODING`. Fail cycle 2 → `BLOCKED`.
 
 ## Error handling
 
+### Verify
+
 | Failure | Behavior |
 |---|---|
-| Dev server fails to boot (port timeout) | `failure_reason="boot_timeout"`, log tail attached, fail cycle. Coding turn sees the log tail and the boot command. |
-| Dev server binds the port but exits within the 5 s hold window | `failure_reason="early_exit"`, log tail attached, fail cycle. Catches "imports succeeded but first-request handler crashed." |
-| Run command can't be sniffed and no `FreeformConfig.run_command` set, with empty `affected_routes` | Verify skipped silently, task proceeds `CODING → AWAITING_CI`. No `VerifyAttempt` row written. |
-| Run command can't be sniffed and no `FreeformConfig.run_command` set, with non-empty `affected_routes` | Operational mismatch: log a warning event (`verify_skipped_no_runner`), skip verify, proceed `CODING → AWAITING_CI`. Don't fail the task on infrastructure that doesn't exist. |
-| Route returns 4xx/5xx | `failure_reason="route_error"`, per-route status + response body + log tail. Coding turn sees the failing routes. |
-| Playwright timeout on a single route | Recorded as `http_status=null`, `error="navigation_timeout"` in `routes_probed`. Counts as a route failure. |
-| Agent judges screenshots NOT-OK | `failure_reason="judgment_not_ok"` + reasoning. Coding turn sees the screenshots + reasoning. |
-| Verify phase exceeds 120 s | `asyncio.TimeoutError` → kill server, `failure_reason="phase_timeout"`. |
-| Server crashes mid-probe | Detected via `process.returncode is not None`; remaining routes recorded as `error="server_dead"`. Fail cycle. |
-| Cleanup: dev server orphans | `try/finally` calls `os.killpg(pgid, SIGTERM)` then `SIGKILL` after 2 s grace. If `killpg` raises `ProcessLookupError`, log and continue. |
-| Playwright not installed in deployment | Verify phase logs `verify_setup_error` event, fails cycle, blocks the task with a setup-actionable message. CI ensures Playwright + Chromium are in the runtime image. |
+| Dev server fails to boot (port timeout) | `failure_reason="boot_timeout"`, log tail attached. Coding turn sees the log tail and the boot command. |
+| Server binds port but exits within 5 s hold | `failure_reason="early_exit"`. |
+| Intent agent says NOT-OK | `failure_reason="intent_not_addressed"`, agent reasoning passed to next coding turn. |
+| No run command sniffable, empty `affected_routes` | Boot check skipped; intent check still runs. No failure. |
+| No run command sniffable, non-empty `affected_routes` | Publish `verify_skipped_no_runner`, boot check skipped, intent check runs. No failure (operational signal). |
+| Phase exceeds 120 s | `failure_reason="phase_timeout"`. |
+
+### Review
+
+| Failure | Behavior |
+|---|---|
+| Dev server boot fails during UI-check setup | `failure_reason="boot_timeout"`. |
+| Route returns 4xx/5xx | `failure_reason="route_error"`, status + log tail in the next coding turn. |
+| Playwright navigation timeout on a single route | Recorded as `http_status=null, error="navigation_timeout"` in `routes_probed`; counts as route failure. |
+| Code-review verdict NOT-OK on code-quality dimension | `failure_reason="code_review_rejected"`. Existing behaviour. |
+| Code-review verdict NOT-OK on UI dimension | `failure_reason="ui_judgment_not_ok"`. |
+| No run command sniffable, non-empty `affected_routes` | Publish `review_skipped_no_runner`, UI check skipped, code review still runs. |
+| Server orphan cleanup | `os.killpg(pgid, SIGTERM)` then `SIGKILL` after 2 s. `ProcessLookupError` logged and swallowed. |
 
 ## Testing
 
-Following the patterns in `tests/test_po_with_market_research.py` (Spec A's regression test pattern).
+Following `tests/test_po_with_market_research.py` as the pattern.
 
 ### Unit tests
 
-- **`tests/test_dev_server.py`**
-  - `test_sniff_npm_dev`: fixture with `package.json` containing `scripts.dev` → returns `npm run dev`.
-  - `test_sniff_procfile`: fixture with `Procfile` → returns the `web:` command.
-  - `test_sniff_override`: when `FreeformConfig.run_command` is set, it wins over sniffing.
-  - `test_sniff_failure`: no recognised manifest → returns `None`, verify phase reports `boot_timeout` with "no run command found".
-  - `test_wait_for_port_success`: stub a listening socket, assert `wait_for_port` returns.
-  - `test_wait_for_port_timeout`: nothing listens, assert `BootTimeout` raised after timeout.
-  - `test_process_group_kill`: spawn a child process that itself forks; assert all descendants are killed by `os.killpg`.
-
-- **`tests/test_browse_url.py`**
-  - `test_returns_image_block`: Playwright fully mocked; assert the `tool_result` contains exactly one `image` block with PNG content type.
-  - `test_text_capped`: page with 50k chars of content → text block capped at ~5000 chars.
-  - `test_timeout_returns_text_only`: simulate Playwright timeout → no image block, text block with timeout message.
-
-- **`tests/test_verify_phase.py`** (the big one)
-  - `test_skip_when_no_runner_and_no_routes`: no sniffable run command, `affected_routes=[]` → verify is not invoked, transition goes `CODING → AWAITING_CI` directly. (Test on `_finish_coding`.)
-  - `test_skip_when_no_runner_with_routes_logs_warning`: no run command, `affected_routes` non-empty → `verify_skipped_no_runner` event published, transition `CODING → AWAITING_CI`, no `VerifyAttempt` row.
-  - `test_boot_only_pass`: run command resolves, `affected_routes=[]` → boot check runs, server stays alive 5 s, `VerifyAttempt.boot_check="pass"`, `routes_probed=null`, transition `VERIFYING → AWAITING_CI`. Covers backend-change verify.
-  - `test_boot_only_fail_early_exit`: server binds port then exits 1 s in → `boot_check="fail"`, `failure_reason="early_exit"`, transition `VERIFYING → CODING`.
-  - `test_visual_pass`: fixture workspace + working route + agent judgment stubbed to OK → boot pass, visual pass, transition `VERIFYING → AWAITING_CI`.
-  - `test_route_error_loops_back`: route returns 500 → `boot_check="pass"`, `failure_reason="route_error"`, transition `VERIFYING → CODING`.
-  - `test_judgment_not_ok_loops_back`: routes 200 but stubbed agent says NOT-OK → `failure_reason="judgment_not_ok"`.
-  - `test_second_failure_blocks`: cycle=2, any fail → transition `VERIFYING → BLOCKED`, `block_reason="verify_failed"`.
+- **`tests/test_dev_server.py`** — `sniff_run_command` priority, `wait_for_port` success/timeout, `hold` early-exit detection, process-group kill catches descendants.
+- **`tests/test_browse_url.py`** — Playwright mocked; `image` block in `tool_result`; text capped; timeout returns text-only.
+- **`tests/test_verify_phase.py`**
+  - `test_boot_pass_intent_pass`: run command resolves, diff matches task → both pass → `VERIFYING → AWAITING_CI`.
+  - `test_boot_only_no_runner`: no run command, diff matches → boot skipped, intent pass → `VERIFYING → AWAITING_CI`. (Covers research-doc task.)
+  - `test_boot_fail_early_exit`: server binds then exits → `early_exit`, transition `VERIFYING → CODING`.
+  - `test_intent_fail`: diff doesn't address task → `intent_not_addressed`, transition `VERIFYING → CODING`.
+  - `test_second_failure_blocks`: cycle=2 fails → `VERIFYING → BLOCKED`.
+- **`tests/test_review_phase_ui_check.py`**
+  - `test_ui_check_skipped_no_routes`: `affected_routes=[]` → code review runs alone (existing path).
+  - `test_ui_check_runs_and_passes`: routes return 200, agent verdict OK → `AWAITING_REVIEW → DONE`.
+  - `test_ui_check_route_error`: route returns 500 → `route_error`, transition `AWAITING_REVIEW → CODING`.
+  - `test_ui_check_judgment_not_ok`: routes 200 but verdict NOT-OK on UI dimension → `ui_judgment_not_ok`.
+  - `test_code_review_rejects_independent_of_ui`: routes pass but code review rejects → `code_review_rejected`. Regression for the existing review behaviour.
 
 ### Regression tests (load-bearing)
 
-Two tests guard the "no PR ships broken code" invariant — one for each verify layer:
+Three tests guard the "no PR ships broken or off-target code" invariant:
 
-- **`tests/test_no_pr_on_failed_boot.py`** — boot-check layer.
-  - Fixture: workspace with a broken dev script (e.g., `"dev": "node -e 'process.exit(1)'"`). Plan has `affected_routes=[]` (pure backend change).
-  - Run coding-finish through stubs that say "ready to ship."
-  - Assert: no PR created, task ends in `BLOCKED` after 2 boot-check failures, existing PR-creation code path never reached.
+- **`tests/test_no_pr_on_failed_boot.py`** — verify boot layer.
+  - Fixture: workspace with `"dev": "node -e 'process.exit(1)'"`. Plan has `affected_routes=[]` (pure backend change).
+  - Assert: no PR created, task ends in `BLOCKED` after 2 cycles, PR-creation code path never reached.
 
-- **`tests/test_no_pr_on_failed_visual_verify.py`** — visual layer.
-  - Fixture: workspace whose server boots fine but a declared route returns 500. Plan has `affected_routes=[{method:"GET",path:"/broken",label:"broken page"}]`.
-  - Run coding-finish through stubs that say "ready to ship."
-  - Assert: no PR created, task ends in `BLOCKED` after 2 visual failures, PR-creation path never reached.
+- **`tests/test_no_pr_on_intent_mismatch.py`** — verify intent layer.
+  - Fixture: task asks "add a dark-mode toggle to settings"; agent's diff only adds a markdown comment. Stubbed intent agent returns NOT-OK with "no dark-mode toggle found in diff."
+  - Assert: no PR created, task ends in `BLOCKED` after 2 cycles.
 
-Together these are the spec's equivalent of Spec A's `test_po_drops_ungrounded_suggestions` — the gating reason we cannot regress to "ships broken code anyway."
+- **`tests/test_no_done_on_failed_ui_review.py`** — review UI layer.
+  - Fixture: server boots, route `/broken` returns 500. Plan has `affected_routes=[{...path:"/broken"}]`. Code review verdict OK on code quality, NOT-OK on UI.
+  - Assert: task does not reach `DONE`, ends in `BLOCKED` after 2 review cycles. (CI passes en route; the gate is review.)
 
-### Integration tests
+### Integration test
 
-- **`tests/test_verify_e2e_smoke.py`** (slow, marked `@pytest.mark.slow`)
-  - Real Playwright + a tiny `python -m http.server` fixture serving a real HTML page.
-  - Asserts the full path: dev server boots, browse_url returns an image block, verify passes.
-  - Optional in CI (skipped in the fast pre-commit run, included in nightly).
+- **`tests/test_verify_review_e2e_smoke.py`** (slow, `@pytest.mark.slow`)
+  - Real Playwright + tiny `python -m http.server` fixture.
+  - Full path: verify boots, intent agent stubbed OK; CI stubbed green; review UI check probes, agent stubbed OK → `DONE`.
+  - Optional in CI; included in nightly.
 
 ### Not tested here
 
-- Real Next.js boot — covered by the e2e smoke test against a tiny fixture; full framework startup is too slow for unit tests.
-- Verification *quality* — eval territory (`eval/`); a follow-up task adds a verify-aware case to the agent eval after this ships.
-- `web-next` rendering correctness — manual smoke on the task detail page after deployment.
+- Real Next.js startup — too slow for unit tests; covered by the smoke test with a tiny fixture.
+- Intent-check *quality* — eval territory; follow-up adds intent-aware case to agent eval.
+- `web-next` rendering — manual smoke after deploy.
 
 ## Migrations
 
@@ -369,25 +378,26 @@ One Alembic migration:
 - `ALTER TYPE task_status ADD VALUE 'verifying'`.
 - Add `affected_routes jsonb default '[]'::jsonb not null` to `tasks`.
 - Add `run_command text` to `freeform_configs`.
-- Create `verify_attempts` table per the data model.
-- Indexes: `(task_id, cycle)` unique on `verify_attempts`.
+- Create `verify_attempts` table.
+- Create `review_attempts` table.
+- Indexes: `(task_id, cycle)` unique on both new tables.
 
-All additions backwards-compatible: defaulted `affected_routes`, nullable `run_command`, new table.
+All additions backwards-compatible.
 
 ## Acceptance criteria
 
-1. Tasks in projects with a runnable server cannot reach `AWAITING_CI` without a passing `VerifyAttempt`. The boot-check is mandatory; the visual check is mandatory when `affected_routes` is non-empty. Regression tests `test_no_pr_on_failed_boot` and `test_no_pr_on_failed_visual_verify` enforce this.
-2. Tasks in projects with no runnable server (no sniffable manifest, no `FreeformConfig.run_command`) and empty `affected_routes` proceed `CODING → AWAITING_CI` exactly as today; verify is never invoked.
-3. Tasks with declared `affected_routes` but no runnable server publish a `verify_skipped_no_runner` event and proceed without failing — operational signal, not task failure.
-4. The verify phase runs at most 2 cycles per task. After 2 fails, the task is in `BLOCKED` with `block_reason="verify_failed"`.
-5. `browse_url` tool returns an `image` content block that the agent's vision-capable model can reason over.
-6. Dev server processes are killed on phase exit, including descendants (npm → node → next). No orphans observed in a soak test over 50 verify cycles.
-7. `web-next` task detail page renders per-cycle verify attempts with boot-check status, screenshots (when present), routes probed, and the agent's judgment.
-8. The full existing test suite (`tests/`) still passes. `ruff check .` clean.
+1. Tasks cannot reach `AWAITING_CI` without a passing `VerifyAttempt`. The intent check runs on every task; the boot check runs whenever a run command resolves. Regression tests `test_no_pr_on_failed_boot` and `test_no_pr_on_intent_mismatch` enforce this.
+2. Tasks cannot reach `DONE` without a passing `ReviewAttempt`. The code-review sub-check runs on every task; the UI sub-check runs whenever `task.affected_routes` is non-empty. Regression test `test_no_done_on_failed_ui_review` enforces this.
+3. Verify and review each run at most 2 cycles per task. After 2 fails at either gate, the task is in `BLOCKED` with `block_reason="verify_failed"` or `"review_failed"`.
+4. `browse_url` tool returns an `image` content block that the agent's vision-capable model can reason over.
+5. Dev server processes are killed on phase exit, including descendants (npm → node → next). No orphans observed in a 50-cycle soak test across both phases.
+6. `web-next` task detail page renders per-cycle verify and review attempts with boot/intent status, code-review verdict, UI check status, screenshots (when present), and reasoning.
+7. The full existing test suite (`tests/`) still passes. `ruff check .` clean.
 
 ## Open questions / follow-ups (not blocking implementation)
 
-- Should `run_command` be promoted from `FreeformConfig` to a `.auto-agent/run.sh` repo-side contract once we've seen which projects need overrides? Defer the call until usage data exists.
-- Should `affected_routes` accept request bodies / headers for POST/PATCH probes? For now GET-only is the dominant case; POST routes typically don't have visual output and would just go through HTTP probing without screenshot judgment. Revisit if a task surfaces the need.
-- Eval task case for "verify catches a visually-broken UI" — added in a follow-up after this spec ships.
-- Sub-project B's reviewer agent will consume `browse_url` and `tail_dev_server_log` directly. No changes needed here to enable that — it's just tool registry composition.
+- Should the intent check have a way to escape — e.g., agent can emit "INTENT_REVISION_NEEDED" and surface the mismatch as a clarification to the user rather than a failure cycle? Likely yes once usage data shows how often intent fails on ambiguous tasks. Defer.
+- Should `run_command` graduate from `FreeformConfig` to a `.auto-agent/run.sh` repo-side contract once we've seen which projects need overrides? Defer.
+- Should `affected_routes` accept request bodies/headers for POST/PATCH probes in review's UI check? Defer — static GET renders are the dominant case.
+- Eval task cases for "verify catches intent mismatch" and "review catches visually-broken UI" — follow-ups after this spec ships.
+- Sub-project B's reviewer agent consumes `browse_url` and `tail_dev_server_log` directly via tool registry composition. No changes needed here to enable that.
