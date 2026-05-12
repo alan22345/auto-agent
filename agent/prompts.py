@@ -905,3 +905,31 @@ Output ONLY the JSON object. No other text.
 
 def build_market_research_prompt(repo_name: str) -> str:
     return MARKET_RESEARCH_PROMPT.format(repo_name=repo_name)
+
+
+def augment_coding_prompt_with_server(
+    base_prompt: str, *, port: int | None, affected_routes: list[dict],
+) -> str:
+    """Append a dev-server block to the coding prompt when a server is running.
+
+    Returns ``base_prompt`` unchanged when ``port`` is None or ``affected_routes``
+    is empty — used as a passthrough when no server is active.
+    """
+    if not port or not affected_routes:
+        return base_prompt
+    route_lines = "\n".join(
+        f"- {r.get('method', 'GET')} {r['path']}  ({r.get('label', '')})"
+        for r in affected_routes
+    )
+    block = f"""
+
+## Dev server
+
+A dev server is running at http://localhost:{port}. Affected routes for this task:
+{route_lines}
+
+Use the `browse_url` tool to inspect rendered output as you make changes. Most
+frameworks hot-reload — re-screenshot after edits to see results. Use
+`tail_dev_server_log` if you need to debug server output.
+"""
+    return base_prompt + block
