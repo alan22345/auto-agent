@@ -63,6 +63,22 @@ def get_provider(
     elif provider == "claude_cli":
         from agent.llm.claude_cli import ClaudeCLIProvider
 
+        # Default-route system-level callers (no explicit home_dir) to the
+        # configured fallback user's vault. Without this, the CLI runs against
+        # the container's default HOME, which has no valid credentials once
+        # the legacy /home/node/.claude bind-mount is gone.
+        if home_dir is None:
+            from orchestrator.claude_auth import (
+                ensure_vault_dir as _ensure_vault_dir,
+            )
+            from orchestrator.claude_auth import (
+                fallback_user_id as _fallback_user_id,
+            )
+
+            fid = _fallback_user_id()
+            if fid is not None:
+                home_dir = _ensure_vault_dir(fid)
+
         return ClaudeCLIProvider(home_dir=home_dir)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

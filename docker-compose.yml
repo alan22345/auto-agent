@@ -51,12 +51,13 @@ services:
     volumes:
       - workspaces:/workspaces
       - userdata:/data
-      # Claude CLI auth lives in BOTH ~/.claude/ (creds + cache) and
-      # ~/.claude.json (top-level config). Both must be bind-mounted or
-      # `claude auth status` reports "configuration file not found" and
-      # the preflight fails on container start.
-      - ${HOME}/.claude:/home/node/.claude
-      - ${HOME}/.claude.json:/home/node/.claude.json
+      # Claude CLI auth is per-user — each auto-agent user pairs via
+      # /settings/claude and their tokens land in /data/users/<id>/.claude/
+      # (mounted via the `userdata` volume above). Code paths that don't have
+      # a specific user in scope default-route through the fallback user's
+      # vault (see agent/llm/__init__.py::get_provider). NO host bind-mount
+      # of legacy ~/.claude — it would leak the operator's personal session
+      # into all callers that forget to set home_dir.
 
   web-next:
     build:
