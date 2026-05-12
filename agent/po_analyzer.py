@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from croniter import croniter
@@ -87,6 +87,22 @@ def _is_due(config: FreeformConfig, now: datetime) -> bool:
     if next_run.tzinfo is None:
         next_run = next_run.replace(tzinfo=UTC)
     return now >= next_run
+
+
+def _brief_is_fresh(
+    brief, now: datetime, max_age_days: int
+) -> bool:
+    """True if `brief` exists and is younger than `max_age_days`.
+
+    The duck-typed signature (any object with `.created_at`) keeps the test
+    boundary clean — no DB or ORM dependency.
+    """
+    if brief is None:
+        return False
+    created = brief.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return (now - created) < timedelta(days=max_age_days)
 
 
 async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> None:
