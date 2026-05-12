@@ -92,6 +92,13 @@ class TaskEventType(StrEnum):
     MERGE_CONFLICT_DETECTED = "task.merge_conflict_detected"
     MERGE_CONFLICT_RESOLVED = "task.merge_conflict_resolved"
     MERGE_CONFLICT_RESOLUTION_FAILED = "task.merge_conflict_resolution_failed"
+    VERIFY_STARTED = "task.verify_started"
+    VERIFY_PASSED = "task.verify_passed"
+    VERIFY_FAILED = "task.verify_failed"
+    VERIFY_SKIPPED_NO_RUNNER = "task.verify_skipped_no_runner"
+    CODING_SERVER_BOOT_FAILED = "task.coding_server_boot_failed"
+    REVIEW_UI_CHECK_STARTED = "task.review_ui_check_started"
+    REVIEW_SKIPPED_NO_RUNNER = "task.review_skipped_no_runner"
 
 
 class POEventType(StrEnum):
@@ -502,6 +509,54 @@ def human_message(task_id: int, message: str, source: str) -> Event:
         task_id=task_id,
         payload={"message": message, "source": source},
     )
+
+
+def verify_started(task_id: int, cycle: int) -> Event:
+    return Event(
+        type=TaskEventType.VERIFY_STARTED,
+        task_id=task_id,
+        payload={"cycle": cycle},
+    )
+
+
+def verify_passed(task_id: int, cycle: int) -> Event:
+    return Event(
+        type=TaskEventType.VERIFY_PASSED,
+        task_id=task_id,
+        payload={"cycle": cycle},
+    )
+
+
+def verify_failed(task_id: int, cycle: int, reason: str) -> Event:
+    return Event(
+        type=TaskEventType.VERIFY_FAILED,
+        task_id=task_id,
+        payload={"cycle": cycle, "reason": reason},
+    )
+
+
+def verify_skipped_no_runner(task_id: int) -> Event:
+    return Event(type=TaskEventType.VERIFY_SKIPPED_NO_RUNNER, task_id=task_id, payload={})
+
+
+def coding_server_boot_failed(task_id: int, reason: str) -> Event:
+    return Event(
+        type=TaskEventType.CODING_SERVER_BOOT_FAILED,
+        task_id=task_id,
+        payload={"reason": reason},
+    )
+
+
+def review_ui_check_started(task_id: int, cycle: int) -> Event:
+    return Event(
+        type=TaskEventType.REVIEW_UI_CHECK_STARTED,
+        task_id=task_id,
+        payload={"cycle": cycle},
+    )
+
+
+def review_skipped_no_runner(task_id: int) -> Event:
+    return Event(type=TaskEventType.REVIEW_SKIPPED_NO_RUNNER, task_id=task_id, payload={})
 
 
 # ---------------------------------------------------------------------------
