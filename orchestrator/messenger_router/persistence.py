@@ -1,12 +1,12 @@
 """DB read/write helpers for the messenger router."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.messenger_router.types import (
     FOCUS_TTL_HOURS,
@@ -15,6 +15,9 @@ from orchestrator.messenger_router.types import (
     LoadedConversation,
 )
 from shared.models import MessengerConversation, UserFocus
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def load_or_create_conversation(
@@ -29,14 +32,17 @@ async def load_or_create_conversation(
         MessengerConversation.user_id == user_id,
         MessengerConversation.source == source,
         MessengerConversation.focus_kind == focus_kind,
-        MessengerConversation.focus_id.is_(focus_id) if focus_id is None
+        MessengerConversation.focus_id.is_(focus_id)
+        if focus_id is None
         else MessengerConversation.focus_id == focus_id,
     )
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         row = MessengerConversation(
-            user_id=user_id, source=source,
-            focus_kind=focus_kind, focus_id=focus_id,
+            user_id=user_id,
+            source=source,
+            focus_kind=focus_kind,
+            focus_id=focus_id,
             messages_json=[],
         )
         session.add(row)
@@ -45,7 +51,7 @@ async def load_or_create_conversation(
         conversation_id=row.id,
         user_id=row.user_id,
         source=row.source,
-        focus_kind=row.focus_kind,           # type: ignore[arg-type]
+        focus_kind=row.focus_kind,  # type: ignore[arg-type]
         focus_id=row.focus_id,
         messages=list(row.messages_json or []),
         last_active_at=row.last_active_at,
@@ -112,20 +118,24 @@ async def set_focus(
     """Upsert user_focus + bump expires_at to now+24h."""
     now = datetime.now(UTC)
     expires = now + timedelta(hours=FOCUS_TTL_HOURS)
-    stmt = insert(UserFocus).values(
-        user_id=user_id,
-        focus_kind=focus_kind,
-        focus_id=focus_id,
-        set_at=now,
-        expires_at=expires,
-    ).on_conflict_do_update(
-        index_elements=[UserFocus.user_id],
-        set_={
-            "focus_kind": focus_kind,
-            "focus_id": focus_id,
-            "set_at": now,
-            "expires_at": expires,
-        },
+    stmt = (
+        insert(UserFocus)
+        .values(
+            user_id=user_id,
+            focus_kind=focus_kind,
+            focus_id=focus_id,
+            set_at=now,
+            expires_at=expires,
+        )
+        .on_conflict_do_update(
+            index_elements=[UserFocus.user_id],
+            set_={
+                "focus_kind": focus_kind,
+                "focus_id": focus_id,
+                "set_at": now,
+                "expires_at": expires,
+            },
+        )
     )
     await session.execute(stmt)
     await session.flush()

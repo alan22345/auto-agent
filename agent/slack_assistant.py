@@ -172,8 +172,7 @@ _TOOL_DEFS: list[ToolDefinition] = [
     ToolDefinition(
         name="answer_clarification",
         description=(
-            "Send the user's answer to a task that has paused on a "
-            "clarification question."
+            "Send the user's answer to a task that has paused on a clarification question."
         ),
         parameters={
             "type": "object",
@@ -275,9 +274,7 @@ async def _create_task(
     async with httpx.AsyncClient() as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/tasks", json=payload)
     if resp.status_code != 200:
-        return {
-            "error": f"create_task failed: {resp.status_code} {resp.text[:200]}"
-        }
+        return {"error": f"create_task failed: {resp.status_code} {resp.text[:200]}"}
     t = resp.json()
     return {"task_id": t["id"], "status": t["status"], "title": t["title"]}
 
@@ -323,9 +320,7 @@ async def _cancel_task(task_id: int) -> dict:
     }
 
 
-async def _dispatch_tool(
-    name: str, args: dict, user_id: int
-) -> tuple[Any, int | None]:
+async def _dispatch_tool(name: str, args: dict, user_id: int) -> tuple[Any, int | None]:
     """Dispatch a tool call. Returns ``(result, created_task_id | None)``."""
     created_task_id: int | None = None
     try:
@@ -345,15 +340,11 @@ async def _dispatch_tool(
             if isinstance(result, dict) and "task_id" in result:
                 created_task_id = int(result["task_id"])
         elif name == "approve_plan":
-            result = await _approve_plan(
-                int(args["task_id"]), args.get("feedback", "")
-            )
+            result = await _approve_plan(int(args["task_id"]), args.get("feedback", ""))
         elif name == "reject_plan":
             result = await _reject_plan(int(args["task_id"]), args["feedback"])
         elif name == "answer_clarification":
-            result = await _answer_clarification(
-                int(args["task_id"]), args["answer"]
-            )
+            result = await _answer_clarification(int(args["task_id"]), args["answer"])
         elif name == "cancel_task":
             result = await _cancel_task(int(args["task_id"]))
         else:
@@ -412,9 +403,7 @@ async def converse(
             break
 
         for call in response.message.tool_calls:
-            result, created_task_id = await _dispatch_tool(
-                call.name, call.arguments, user_id
-            )
+            result, created_task_id = await _dispatch_tool(call.name, call.arguments, user_id)
             tool_msg = Message(
                 role="tool",
                 content=json.dumps(result, default=str)[:8000],
@@ -428,7 +417,6 @@ async def converse(
 
     if not final_text:
         final_text = (
-            "I got stuck thinking about that — try rephrasing or say "
-            "`reset` to start over."
+            "I got stuck thinking about that — try rephrasing or say `reset` to start over."
         )
     return final_text, appended

@@ -39,7 +39,10 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
         ),
         sa.UniqueConstraint(
-            "user_id", "source", "focus_kind", "focus_id",
+            "user_id",
+            "source",
+            "focus_kind",
+            "focus_id",
             name="uq_msgconv_user_source_focus",
         ),
     )
@@ -53,15 +56,18 @@ def upgrade() -> None:
     op.create_table(
         "user_focus",
         sa.Column(
-            "user_id", sa.Integer(),
+            "user_id",
+            sa.Integer(),
             sa.ForeignKey("users.id"),
             primary_key=True,
         ),
         sa.Column("focus_kind", sa.String(length=32), nullable=False),
         sa.Column("focus_id", sa.BigInteger(), nullable=True),
         sa.Column(
-            "set_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.text("now()"),
+            "set_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
         ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     )

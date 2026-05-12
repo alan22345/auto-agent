@@ -1,9 +1,12 @@
 """Internal types for the messenger router."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 FocusKind = Literal["draft", "task", "none"]
 """v1 focus kinds. v2 will add 'freeform' and 'po_analysis'."""
@@ -24,5 +27,5 @@ class LoadedConversation:
     source: str
     focus_kind: FocusKind
     focus_id: int | None
-    messages: list[dict[str, Any]]   # raw message dicts as stored in jsonb
+    messages: list[dict[str, Any]]  # raw message dicts as stored in jsonb
     last_active_at: datetime

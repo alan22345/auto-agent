@@ -1,4 +1,5 @@
 """DB-layer tests for orchestrator.messenger_router.persistence."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -41,8 +42,11 @@ async def _make_user(session, username: str = "alice") -> int:
 async def test_load_or_create_creates_draft_row_when_missing(session):
     user_id = await _make_user(session, "alice")
     conv = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="draft", focus_id=None,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="draft",
+        focus_id=None,
     )
     assert conv.conversation_id > 0
     assert conv.messages == []
@@ -52,12 +56,18 @@ async def test_load_or_create_creates_draft_row_when_missing(session):
 async def test_load_or_create_returns_existing_row(session):
     user_id = await _make_user(session, "bob")
     a = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=42,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=42,
     )
     b = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=42,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=42,
     )
     assert a.conversation_id == b.conversation_id
 
@@ -65,14 +75,20 @@ async def test_load_or_create_returns_existing_row(session):
 async def test_append_messages_caps_history_at_200(session):
     user_id = await _make_user(session, "carol")
     conv = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=1,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=1,
     )
     msgs = [{"role": "user", "content": f"msg {i}"} for i in range(250)]
     await p.append_messages(session, conv.conversation_id, msgs)
     reloaded = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=1,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=1,
     )
     assert len(reloaded.messages) == 200
     assert reloaded.messages[0]["content"] == "msg 50"
@@ -106,13 +122,19 @@ async def test_get_focus_treats_expired_as_none(session):
 async def test_rebind_draft_to_task(session):
     user_id = await _make_user(session, "gus")
     draft = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="draft", focus_id=None,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="draft",
+        focus_id=None,
     )
     await p.rebind_draft_to_task(session, draft.conversation_id, new_task_id=99)
     reloaded = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=99,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=99,
     )
     assert reloaded.conversation_id == draft.conversation_id
 
@@ -120,11 +142,17 @@ async def test_rebind_draft_to_task(session):
 async def test_sources_are_isolated(session):
     user_id = await _make_user(session, "hal")
     a = await p.load_or_create_conversation(
-        session, user_id=user_id, source="slack",
-        focus_kind="task", focus_id=5,
+        session,
+        user_id=user_id,
+        source="slack",
+        focus_kind="task",
+        focus_id=5,
     )
     b = await p.load_or_create_conversation(
-        session, user_id=user_id, source="telegram",
-        focus_kind="task", focus_id=5,
+        session,
+        user_id=user_id,
+        source="telegram",
+        focus_kind="task",
+        focus_id=5,
     )
     assert a.conversation_id != b.conversation_id

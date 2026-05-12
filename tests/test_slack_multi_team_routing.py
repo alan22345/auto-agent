@@ -1,6 +1,7 @@
 # tests/test_slack_multi_team_routing.py
 """Multi-team Slack: AsyncApp built with installation_store, no static
 `token=`. Token resolution at event time goes through async_find_bot."""
+
 from __future__ import annotations
 
 import sys
@@ -72,7 +73,10 @@ def test_get_app_uses_legacy_token_when_set_and_no_installations(monkeypatch):
     # AsyncApp stores the token in _token (slack-bolt private attribute,
     # confirmed from slack_bolt/app/async_app.py line 222 in the installed
     # version).  There is no public `.token` property on AsyncApp.
-    assert getattr(app, "_token", None) == "xoxb-legacy" or getattr(app, "token", None) == "xoxb-legacy"
+    assert (
+        getattr(app, "_token", None) == "xoxb-legacy"
+        or getattr(app, "token", None) == "xoxb-legacy"
+    )
 
 
 import pytest  # noqa: E402
@@ -115,9 +119,7 @@ async def test_send_slack_dm_uses_per_org_bot_token(monkeypatch):
         self.chat_postMessage = fake_post
 
     monkeypatch.setattr(AsyncWebClient, "__init__", capture_init)
-    monkeypatch.setattr(
-        slack_main, "_bot_token_for_org", fake_bot_token, raising=False
-    )
+    monkeypatch.setattr(slack_main, "_bot_token_for_org", fake_bot_token, raising=False)
 
     await slack_main.send_slack_dm("UTARGET", "hello", org_id=42)
 
@@ -153,6 +155,7 @@ async def test_handle_dm_resolves_org_id_from_team(monkeypatch):
 
     import sys
     import types
+
     mod = types.ModuleType("agent.slack_assistant")
     mod.converse = fake_converse
     sys.modules["agent.slack_assistant"] = mod
@@ -177,13 +180,10 @@ async def test_handle_dm_drops_unknown_team(monkeypatch):
     async def fake_org_for_team(team_id):
         return None
 
-    monkeypatch.setattr(
-        slack_main, "_org_for_team", fake_org_for_team, raising=False
-    )
+    monkeypatch.setattr(slack_main, "_org_for_team", fake_org_for_team, raising=False)
 
     result = await slack_main._handle_dm_event(
-        {"team": "T_UNKNOWN", "channel_type": "im",
-         "user": "U1", "text": "hello"}
+        {"team": "T_UNKNOWN", "channel_type": "im", "user": "U1", "text": "hello"}
     )
     assert result is None
 
@@ -224,6 +224,7 @@ def test_converse_signature_v2():
     """converse takes history + on_create_task; org_id is removed (router-owned)."""
     import inspect
     import sys
+
     # Clean up any mocked module from prior tests to get the real one.
     if "agent.slack_assistant" in sys.modules:
         del sys.modules["agent.slack_assistant"]

@@ -167,8 +167,7 @@ async def _autolink_slack_user(slack_user_id: str, *, org_id: int | None = None)
             user.slack_user_id = slack_user_id
             await session.commit()
             log.info(
-                f"Auto-linked Slack user {slack_user_id} → {user.username} "
-                f"(matched on '{cand}')"
+                f"Auto-linked Slack user {slack_user_id} → {user.username} (matched on '{cand}')"
             )
             return {
                 "id": user.id,
@@ -257,18 +256,13 @@ async def _bot_token_for_org(org_id: int) -> str | None:
     to settings.slack_bot_token (legacy single-tenant) if available."""
     async with async_session() as session:
         result = await session.execute(
-            text(
-                "SELECT bot_token_enc FROM slack_installations "
-                "WHERE org_id = :org_id"
-            ),
+            text("SELECT bot_token_enc FROM slack_installations WHERE org_id = :org_id"),
             {"org_id": org_id},
         )
         row = result.first()
         if row is None:
             return None
-        return await installation_crypto.decrypt(
-            row.bot_token_enc, session=session
-        )
+        return await installation_crypto.decrypt(row.bot_token_enc, session=session)
 
 
 async def send_slack_dm(
@@ -297,7 +291,8 @@ async def send_slack_dm(
         log.info(
             "send_slack_dm_no_token org_id=%s slack_user_id=%s — "
             "org hasn't installed Slack and no legacy token configured",
-            org_id, slack_user_id,
+            org_id,
+            slack_user_id,
         )
         return
 
@@ -305,12 +300,11 @@ async def send_slack_dm(
         client = AsyncWebClient(token=bot_token)
         open_resp = await client.conversations_open(users=slack_user_id)
         channel = open_resp["channel"]["id"]
-        post_resp = await client.chat_postMessage(
-            channel=channel, text=text, mrkdwn=True
-        )
+        post_resp = await client.chat_postMessage(channel=channel, text=text, mrkdwn=True)
         ts = post_resp.get("ts")
         if task_id is not None and ts:
             from shared.task_channel import task_channel
+
             await task_channel(task_id).bind_slack_message(ts)
     except Exception:
         log.exception("Failed to send Slack DM")
@@ -325,12 +319,10 @@ async def _org_for_team(team_id: str) -> int | None:
     """Resolve a Slack team_id to an auto-agent org_id. Returns None if
     we don't have an installation for that team."""
     from sqlalchemy import text as _t
+
     async with async_session() as session:
         result = await session.execute(
-            _t(
-                "SELECT org_id FROM slack_installations "
-                "WHERE team_id = :team_id"
-            ),
+            _t("SELECT org_id FROM slack_installations WHERE team_id = :team_id"),
             {"team_id": team_id},
         )
         row = result.first()
@@ -418,9 +410,7 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
     if thread_ts:
         task_id = await task_id_for_slack_message(thread_ts)
         if task_id is not None:
-            await _post_task_feedback(
-                task_id, text, sender=f"slack:{user['username']}"
-            )
+            await _post_task_feedback(task_id, text, sender=f"slack:{user['username']}")
             await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.", org_id=org_id)
             return
 
@@ -438,9 +428,13 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
     try:
         async with async_session() as db:
             await router_handle(
-                session=db, source="slack",
-                user_id=user["id"], text=text, thread_ts=None,
-                sender=_sender, home_dir=home_dir,
+                session=db,
+                source="slack",
+                user_id=user["id"],
+                text=text,
+                thread_ts=None,
+                sender=_sender,
+                home_dir=home_dir,
             )
             await db.commit()
     except Exception:

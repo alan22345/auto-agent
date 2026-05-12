@@ -1,4 +1,5 @@
 """Picker reply-parsing tests. Pure function tests, no DB."""
+
 from __future__ import annotations
 
 from orchestrator.messenger_router.picker import parse_pick, render_picker

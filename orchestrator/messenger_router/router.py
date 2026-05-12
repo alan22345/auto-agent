@@ -1,4 +1,5 @@
 """Source-agnostic messenger router orchestration."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -32,7 +33,8 @@ _TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED}
 
 
 async def _active_tasks_for_user(
-    session: AsyncSession, user_id: int,
+    session: AsyncSession,
+    user_id: int,
 ) -> list[dict]:
     stmt = (
         select(Task)
@@ -41,10 +43,7 @@ async def _active_tasks_for_user(
         .order_by(Task.id.asc())
     )
     rows = (await session.execute(stmt)).scalars().all()
-    return [
-        {"id": t.id, "title": t.title, "status": t.status.value}
-        for t in rows
-    ]
+    return [{"id": t.id, "title": t.title, "status": t.status.value} for t in rows]
 
 
 async def _render_and_send_picker(
@@ -72,9 +71,13 @@ async def handle(
     if thread_ts:
         task_id = await task_id_for_slack_message(thread_ts)
         if task_id is not None:
-            await publish(human_message(
-                task_id=task_id, message=text, source=source,
-            ))
+            await publish(
+                human_message(
+                    task_id=task_id,
+                    message=text,
+                    source=source,
+                )
+            )
             await sender(user_id, f"✉️ Sent to task #{task_id}.")
             return
         # Thread didn't map to a known task — fall through to normal flow.
@@ -92,8 +95,11 @@ async def handle(
             kind, fid = pick
             await p.set_focus(session, user_id, focus_kind=kind, focus_id=fid)
             await p.load_or_create_conversation(
-                session, user_id=user_id, source=source,
-                focus_kind=kind, focus_id=fid,
+                session,
+                user_id=user_id,
+                source=source,
+                focus_kind=kind,
+                focus_id=fid,
             )
             if kind == "task":
                 await sender(user_id, f"Picked up task #{fid}. What would you like to do?")
@@ -111,8 +117,7 @@ async def handle(
 
     # 4. Explicit switch keywords are honored regardless of focus.
     stripped = text.strip().lower()
-    if stripped in {"switch", "switch task", "new task", "my tasks",
-                    "list tasks", "what was i"}:
+    if stripped in {"switch", "switch task", "new task", "my tasks", "list tasks", "what was i"}:
         await p.set_focus(session, user_id, focus_kind="none", focus_id=None)
         await _render_and_send_picker(session, user_id, sender)
         return
@@ -125,8 +130,11 @@ async def handle(
 
     # 6. Load the conversation row and call the LLM primitive.
     conv = await p.load_or_create_conversation(
-        session, user_id=user_id, source=source,
-        focus_kind=focus_kind, focus_id=focus_id,
+        session,
+        user_id=user_id,
+        source=source,
+        focus_kind=focus_kind,
+        focus_id=focus_id,
     )
     history_msgs = [Message(**m) for m in conv.messages]
 
@@ -136,22 +144,28 @@ async def handle(
         await p.set_focus(session, user_id, focus_kind="task", focus_id=new_task_id)
 
     reply_text, appended = await converse(
-        user_id=user_id, text=text, history=history_msgs,
-        home_dir=home_dir, on_create_task=_on_create_task,
+        user_id=user_id,
+        text=text,
+        history=history_msgs,
+        home_dir=home_dir,
+        on_create_task=_on_create_task,
     )
 
     # 7. Persist appended messages and bump focus TTL.
     # Message is a dataclass — use dataclasses.asdict() for serialisation.
     await p.append_messages(
-        session, conv.conversation_id,
+        session,
+        conv.conversation_id,
         [dataclasses.asdict(m) for m in appended],
     )
     # Reload focus_kind/focus_id in case on_create_task rebinded the draft.
     refreshed = await p.get_focus(session, user_id)
     if refreshed is not None:
         await p.set_focus(
-            session, user_id,
-            focus_kind=refreshed.focus_kind, focus_id=refreshed.focus_id,
+            session,
+            user_id,
+            focus_kind=refreshed.focus_kind,
+            focus_id=refreshed.focus_id,
         )
 
     await sender(user_id, reply_text)

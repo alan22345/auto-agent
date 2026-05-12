@@ -3,6 +3,7 @@
 The picker is stateless: when a user replies with a number or 'new', we
 parse it against the user's current active-task list. No transient store.
 """
+
 from __future__ import annotations
 
 import re
@@ -39,10 +40,7 @@ def parse_pick(
 def render_picker(active_tasks: list[dict[str, Any]]) -> str:
     """Render the picker message body. Active tasks come pre-sorted."""
     if not active_tasks:
-        return (
-            "You don't have any active tasks. "
-            "Reply `new` to start a fresh request."
-        )
+        return "You don't have any active tasks. Reply `new` to start a fresh request."
     lines = ["Which task do you want to pick up?"]
     for i, t in enumerate(active_tasks, start=1):
         title = (t.get("title") or "")[:80]
