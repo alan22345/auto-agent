@@ -414,7 +414,13 @@ async def converse(slack_user_id: str, user_id: int, text: str, *, org_id: int |
     if len(history) > MAX_HISTORY_MESSAGES:
         del history[: len(history) - MAX_HISTORY_MESSAGES]
 
-    provider = get_provider(model_override="fast")  # haiku — cheap, fast
+    # Resolve the per-user Claude vault (with fallback for unpaired users)
+    # so the CLI provider hits valid credentials. Without this, claude_cli
+    # runs against the container's default HOME, which usually lacks an
+    # active session and 401s.
+    from orchestrator.claude_auth import resolve_home_dir
+    home_dir = await resolve_home_dir(user_id)
+    provider = get_provider(model_override="fast", home_dir=home_dir)  # haiku — cheap, fast
 
     final_text = ""
     for _turn in range(MAX_TURNS_PER_REQUEST):
