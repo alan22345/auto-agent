@@ -173,3 +173,48 @@ async def test_intent_check_uses_browse_url_when_server_running(patches, monkeyp
     assert verdict.ok is True
     assert captured["with_browser"] is True
     assert captured["dev_server_log_path"] == "/tmp/log"
+
+
+async def test_intent_check_fails_closed_on_hedged_output(patches, monkeypatch):
+    """Output like 'OK on routes, but missing toggle' must be treated as NOT-OK."""
+    def fake_create_agent(workspace, **kw):
+        return MagicMock(run=AsyncMock(return_value=MagicMock(
+            output="OK on routes, but missing toggle", tool_calls=[],
+        )))
+
+    monkeypatch.setattr("agent.lifecycle.verify.create_agent", fake_create_agent)
+    monkeypatch.setattr("agent.lifecycle.verify._fresh_session_id", lambda *a, **kw: "session-xyz")
+    monkeypatch.setattr("agent.lifecycle.verify.home_dir_for_task", AsyncMock(return_value="/tmp/home"))
+    sh_mock = MagicMock()
+    sh_mock.run = AsyncMock(return_value=MagicMock(stdout="x | 1 +", stderr=""))
+    monkeypatch.setattr("agent.lifecycle.verify.sh", sh_mock, raising=False)
+
+    server = MagicMock(port=12345, log_path="/tmp/log")
+    verdict = await verify.run_intent_check(
+        type("T", (), {"id": 1, "title": "t", "description": "d", "affected_routes": [], "repo_name": "r", "organization_id": 1})(),
+        "/tmp/ws",
+        server,
+    )
+    assert verdict.ok is False
+
+
+async def test_intent_check_passes_on_exact_ok(patches, monkeypatch):
+    def fake_create_agent(workspace, **kw):
+        return MagicMock(run=AsyncMock(return_value=MagicMock(
+            output="OK\nLooks good.", tool_calls=[],
+        )))
+
+    monkeypatch.setattr("agent.lifecycle.verify.create_agent", fake_create_agent)
+    monkeypatch.setattr("agent.lifecycle.verify._fresh_session_id", lambda *a, **kw: "session-xyz")
+    monkeypatch.setattr("agent.lifecycle.verify.home_dir_for_task", AsyncMock(return_value="/tmp/home"))
+    sh_mock = MagicMock()
+    sh_mock.run = AsyncMock(return_value=MagicMock(stdout="x | 1 +", stderr=""))
+    monkeypatch.setattr("agent.lifecycle.verify.sh", sh_mock, raising=False)
+
+    server = MagicMock(port=12345, log_path="/tmp/log")
+    verdict = await verify.run_intent_check(
+        type("T", (), {"id": 1, "title": "t", "description": "d", "affected_routes": [], "repo_name": "r", "organization_id": 1})(),
+        "/tmp/ws",
+        server,
+    )
+    assert verdict.ok is True

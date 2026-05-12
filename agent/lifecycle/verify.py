@@ -41,7 +41,8 @@ MAX_VERIFY_CYCLES = 2
 PHASE_TIMEOUT_SECONDS = 120
 HOLD_SECONDS = 5
 
-_INTENT_OK_RE = _re.compile(r"^\s*OK\b", _re.MULTILINE)
+_INTENT_OK_RE = _re.compile(r"^\s*OK\s*$")
+_INTENT_NOTOK_RE = _re.compile(r"^\s*NOT-OK\b", _re.IGNORECASE)
 
 
 async def handle_verify(task_id: int) -> None:
@@ -147,7 +148,13 @@ async def run_intent_check(task, workspace: str, server) -> IntentVerdict:
     output = (result.output or "").strip()
 
     first_line = output.splitlines()[0] if output else ""
-    ok = bool(_INTENT_OK_RE.match(first_line)) and not first_line.lstrip().upper().startswith("NOT-OK")
+    if _INTENT_OK_RE.match(first_line):
+        ok = True
+    elif _INTENT_NOTOK_RE.match(first_line):
+        ok = False
+    else:
+        # Malformed first line → fail closed (treat as NOT-OK).
+        ok = False
     return IntentVerdict(
         ok=ok,
         reasoning=output[:4000],
