@@ -63,3 +63,12 @@ async def test_text_capped_at_5000(mock_playwright):
     payload = json.loads(result.output)
     # The rendered text should be capped at ~5000 chars
     assert len(payload["text"]) <= 5100
+
+
+async def test_returns_error_on_playwright_failure(mock_playwright):
+    """Playwright failure must produce is_error=True so loop.py flags it correctly."""
+    mock_playwright.goto = AsyncMock(side_effect=Exception("navigation timeout"))
+    tool = BrowseUrlTool()
+    result = await tool.execute({"url": "http://localhost:3000/"}, context=None)
+    assert result.is_error is True
+    assert "navigation timeout" in result.output
