@@ -735,6 +735,72 @@ def build_pr_independent_review_prompt(
     )
 
 
+_UI_CHECK_PROMPT_SUFFIX_CODE_ONLY = """
+
+## Verdict format (required)
+
+Emit your verdict as a single JSON object on the FIRST non-empty line of your
+reply:
+
+{
+  "code_review": {"verdict": "OK" | "NOT-OK", "reasoning": "..."},
+  "ui_check":   {"verdict": "SKIPPED",        "reasoning": "no UI to check"}
+}
+
+After the JSON object, you may add free-form notes. The JSON is what counts.
+"""
+
+
+def build_pr_independent_review_prompt_with_ui_check(
+    title: str,
+    description: str,
+    pr_url: str,
+    base_branch: str,
+    *,
+    server_url: str | None,
+    affected_routes: list[dict],
+) -> str:
+    """Reviewer prompt with optional UI-check guidance.
+
+    When a dev server is running and routes were declared, instruct the reviewer
+    to drive ``browse_url`` through each route and emit a combined code+UI
+    verdict. When the server isn't running, fall back to the code-only suffix
+    so the JSON shape stays uniform.
+    """
+    base = build_pr_independent_review_prompt(title, description, pr_url, base_branch)
+    if not server_url or not affected_routes:
+        return base + _UI_CHECK_PROMPT_SUFFIX_CODE_ONLY
+    route_lines = "\n".join(
+        f"- {r.get('method', 'GET')} {r['path']} ({r.get('label', '')})"
+        for r in affected_routes
+    )
+    return base + f"""
+
+## UI check (required)
+
+A dev server is running at {server_url}. The following routes are affected by this PR:
+{route_lines}
+
+For each affected route, call ``browse_url`` (e.g. ``browse_url("{server_url}/")``)
+and judge the rendered output against the diff and the task description. Use
+``tail_dev_server_log`` to inspect server logs if anything looks wrong.
+
+## Verdict format (required)
+
+Emit your verdict as a single JSON object on the FIRST non-empty line of your
+reply, with this exact shape:
+
+{{
+  "code_review": {{"verdict": "OK" | "NOT-OK", "reasoning": "..."}},
+  "ui_check":   {{"verdict": "OK" | "NOT-OK", "reasoning": "..."}}
+}}
+
+If the code looks bad, set ``code_review.verdict`` to "NOT-OK". If a route does
+not render correctly, set ``ui_check.verdict`` to "NOT-OK". Both must be "OK"
+to ship.
+"""
+
+
 def build_pr_review_response_prompt(title: str, description: str, comments: str) -> str:
     return PR_REVIEW_RESPONSE_PROMPT.format(
         title=title, description=description, comments=comments
