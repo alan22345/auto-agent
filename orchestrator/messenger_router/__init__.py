@@ -1,5 +1,4 @@
-"""Source-agnostic messenger router: durable per-user conversation
-history + focus pointer for Slack, Telegram, and future channels.
+"""Source-agnostic messenger router."""
+from orchestrator.messenger_router.router import handle
 
-Exports ``handle`` (added in router.py, re-exported in T6).
-"""
+__all__ = ["handle"]
