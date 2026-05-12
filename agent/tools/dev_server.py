@@ -128,8 +128,8 @@ async def start_dev_server(
     env = os.environ.copy()
     env["PORT"] = str(port)
 
-    process = await asyncio.create_subprocess_exec(
-        *shlex.split(cmd),
+    process = await asyncio.create_subprocess_shell(
+        cmd,
         cwd=workspace_path,
         env=env,
         stdout=log_fh,

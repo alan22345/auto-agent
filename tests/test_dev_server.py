@@ -66,14 +66,16 @@ from agent.tools.dev_server import DevServerHandle, kill_server, start_dev_serve
 
 async def test_start_and_kill_simple_server():
     """Spawn a tiny python http.server, confirm port is reachable, then kill it."""
-    script = (
-        "import http.server, socketserver, os\n"
-        "port = int(os.environ['PORT'])\n"
-        "with socketserver.TCPServer(('127.0.0.1', port), http.server.SimpleHTTPRequestHandler) as s:\n"
-        "    s.serve_forever()\n"
-    )
     with tempfile.TemporaryDirectory() as d:
-        Path(d, "Procfile").write_text(f"web: python -c \"{script}\"\n")
+        # Write server script to a file to avoid quoting/newline issues in Procfile
+        srv = Path(d, "srv.py")
+        srv.write_text(
+            "import http.server, socketserver, os\n"
+            "port = int(os.environ['PORT'])\n"
+            "with socketserver.TCPServer(('127.0.0.1', port), http.server.SimpleHTTPRequestHandler) as s:\n"
+            "    s.serve_forever()\n"
+        )
+        Path(d, "Procfile").write_text("web: python3 srv.py\n")
         async with start_dev_server(d) as handle:
             assert isinstance(handle, DevServerHandle)
             assert handle.port > 0
@@ -120,7 +122,7 @@ async def test_wait_for_port_timeout():
 
 async def test_hold_passes_when_alive():
     proc = await asyncio.create_subprocess_exec(
-        "python", "-c", "import time; time.sleep(5)",
+        "python3", "-c", "import time; time.sleep(5)",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
         preexec_fn=os.setsid,
@@ -143,7 +145,7 @@ async def test_hold_raises_on_early_exit(tmp_path):
     log = tmp_path / "log.txt"
     log.write_text("boom\nbang\n")
     proc = await asyncio.create_subprocess_exec(
-        "python", "-c", "import sys; sys.exit(1)",
+        "python3", "-c", "import sys; sys.exit(1)",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
         preexec_fn=os.setsid,
