@@ -12,7 +12,6 @@ import asyncio
 import contextlib
 import json
 import os
-import shlex
 import signal
 import socket
 import tempfile
@@ -20,9 +19,12 @@ import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agent.tools.base import Tool, ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +99,18 @@ class BootError(RuntimeError):
     """Raised when start_dev_server can't even start (no run command, fork failure)."""
 
 
-class BootTimeout(RuntimeError):
-    def __init__(self, log_tail: str):
+class BootTimeout(RuntimeError):  # noqa: N818
+    """Raised when the dev server fails to bind a port within the timeout."""
+
+    def __init__(self, log_tail: str) -> None:
         super().__init__("dev server failed to bind port in time")
         self.log_tail = log_tail
 
 
-class EarlyExit(RuntimeError):
-    def __init__(self, log_tail: str):
+class EarlyExit(RuntimeError):  # noqa: N818
+    """Raised when the dev server exits unexpectedly during the hold period."""
+
+    def __init__(self, log_tail: str) -> None:
         super().__init__("dev server exited during hold")
         self.log_tail = log_tail
 
@@ -113,47 +119,52 @@ class EarlyExit(RuntimeError):
 async def start_dev_server(
     workspace_path: str, *, override: str | None = None,
 ) -> AsyncIterator[DevServerHandle]:
+    """Start the dev server for a workspace and yield a handle to it.
+
+    Cleans up the process group on context exit.
+    """
     cmd = sniff_run_command(workspace_path, override=override)
     if not cmd:
         raise BootError("no run command resolved for workspace")
 
     port = _allocate_port()
-    log_file = tempfile.NamedTemporaryFile(
+
+    # Use delete=False so we can open it again as binary after closing the text handle.
+    with tempfile.NamedTemporaryFile(
         prefix="dev-server-", suffix=".log", delete=False, mode="w",
-    )
-    log_path = log_file.name
-    log_file.close()
-    log_fh = open(log_path, "wb", buffering=0)
+    ) as tmp:
+        log_path = tmp.name
 
     env = os.environ.copy()
     env["PORT"] = str(port)
 
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=workspace_path,
-        env=env,
-        stdout=log_fh,
-        stderr=asyncio.subprocess.STDOUT,
-        preexec_fn=os.setsid,
-    )
+    with open(log_path, "wb", buffering=0) as log_fh:
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            cwd=workspace_path,
+            env=env,
+            stdout=log_fh,
+            stderr=asyncio.subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
 
-    handle = DevServerHandle(
-        pid=process.pid,
-        pgid=os.getpgid(process.pid),
-        port=port,
-        log_path=log_path,
-        started_at=time.time(),
-        process=process,
-    )
+        handle = DevServerHandle(
+            pid=process.pid,
+            pgid=os.getpgid(process.pid),
+            port=port,
+            log_path=log_path,
+            started_at=time.time(),
+            process=process,
+        )
 
-    try:
-        yield handle
-    finally:
-        await kill_server(handle)
-        log_fh.close()
+        try:
+            yield handle
+        finally:
+            await kill_server(handle)
 
 
 async def kill_server(handle: DevServerHandle, grace_seconds: float = 2.0) -> None:
+    """Send SIGTERM to the server's process group; escalate to SIGKILL if needed."""
     try:
         os.killpg(handle.pgid, signal.SIGTERM)
     except ProcessLookupError:
@@ -161,10 +172,10 @@ async def kill_server(handle: DevServerHandle, grace_seconds: float = 2.0) -> No
 
     try:
         await asyncio.wait_for(handle.process.wait(), timeout=grace_seconds)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(handle.pgid, signal.SIGKILL)
-        with contextlib.suppress(asyncio.TimeoutError):
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(handle.process.wait(), timeout=1.0)
 
 
@@ -182,6 +193,7 @@ def _tail(path: str, lines: int = 50) -> str:
 
 
 async def wait_for_port(port: int, timeout: float = 60.0, log_path: str | None = None) -> None:
+    """Poll until the given port accepts connections or timeout elapses."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -196,6 +208,7 @@ async def wait_for_port(port: int, timeout: float = 60.0, log_path: str | None =
 
 
 async def hold(handle: DevServerHandle, seconds: float = 5.0) -> None:
+    """Watch a running dev server for ``seconds``, raising ``EarlyExit`` if it dies."""
     deadline = time.time() + seconds
     while time.time() < deadline:
         if handle.process.returncode is not None:
@@ -214,7 +227,7 @@ class TailDevServerLogTool(Tool):
         "Return the last N lines of the dev server log for this task. "
         "Useful when verify or review fails and you need to see what the server printed."
     )
-    parameters = {
+    parameters: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
             "lines": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
