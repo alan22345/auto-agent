@@ -20,6 +20,7 @@ import httpx
 from agent.lifecycle import review
 from agent.lifecycle._clarification import _extract_clarification
 from agent.lifecycle._naming import _branch_name, _fresh_session_id, _pr_title, _session_id
+from agent.tools import dev_server as _dev_server
 from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
     get_freeform_config,
@@ -44,6 +45,7 @@ from agent.workspace import (
 )
 from shared.events import (
     Event,
+    coding_server_boot_failed,
     publish,
     repo_onboard,
     task_clarification_needed,
@@ -111,6 +113,25 @@ async def _update_subtasks(task_id: int, subtasks: list[dict], current: int | No
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/subtasks",
             json={"subtasks": api_subtasks, "current_subtask": current},
         )
+
+
+async def _maybe_start_coding_server(task, workspace: str):
+    """Return a dev-server async context manager when applicable, else None.
+
+    Started when task.affected_routes is non-empty AND a run command resolves.
+    Caller owns the context-manager lifecycle.
+    """
+    routes = getattr(task, "affected_routes", None) or []
+    if not routes:
+        return None
+    override = None
+    if getattr(task, "freeform_mode", False) and getattr(task, "repo_name", None):
+        cfg = await get_freeform_config(task.repo_name)
+        if cfg and getattr(cfg, "run_command", None):
+            override = cfg.run_command
+    if _dev_server.sniff_run_command(workspace, override=override) is None:
+        return None
+    return _dev_server.start_dev_server(workspace, override=override)
 
 
 async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
@@ -229,6 +250,8 @@ async def _handle_coding_single(
     intent: dict | None = None,
 ) -> None:
     """Standard coding path — single implementation pass."""
+    from agent.prompts import augment_coding_prompt_with_server
+
     coding_prompt = build_coding_prompt(
         task.title, task.description, task.plan, repo.summary, repo.ci_checks, intent=intent
     )
@@ -237,18 +260,50 @@ async def _handle_coding_single(
             f"\n\nPrevious attempt failed. Reason: {retry_reason}\nFix the issues and try again."
         )
 
-    agent = create_agent(
-        workspace,
-        session_id=session_id,
-        max_turns=50,
-        task_id=task_id,
-        task_description=task.description,
-        repo_name=repo.name,
-        complexity=task.complexity,
-        home_dir=await home_dir_for_task(task),
-        org_id=task.organization_id,
-    )
-    result = await agent.run(coding_prompt, resume=is_continuation)
+    server_cm = await _maybe_start_coding_server(task, workspace)
+    server_handle = None
+    try:
+        if server_cm is not None:
+            try:
+                server_handle = await server_cm.__aenter__()
+                await _dev_server.wait_for_port(
+                    server_handle.port, timeout=60, log_path=server_handle.log_path,
+                )
+                coding_prompt = augment_coding_prompt_with_server(
+                    coding_prompt,
+                    port=server_handle.port,
+                    affected_routes=getattr(task, "affected_routes", None) or [],
+                )
+            except (_dev_server.BootTimeout, _dev_server.BootError) as e:
+                await publish(coding_server_boot_failed(task_id, str(e)))
+                try:
+                    await server_cm.__aexit__(type(e), e, None)
+                except Exception:
+                    pass
+                server_handle = None
+                server_cm = None
+
+        agent = create_agent(
+            workspace,
+            session_id=session_id,
+            max_turns=50,
+            task_id=task_id,
+            task_description=task.description,
+            repo_name=repo.name,
+            complexity=task.complexity,
+            home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
+            with_browser=server_handle is not None,
+            dev_server_log_path=server_handle.log_path if server_handle else None,
+        )
+        result = await agent.run(coding_prompt, resume=is_continuation)
+    finally:
+        if server_cm is not None and server_handle is not None:
+            try:
+                await server_cm.__aexit__(None, None, None)
+            except Exception:
+                log.exception("dev server cleanup raised")
+
     output = result.output
     log.info(f"Coding output for task #{task_id}: {output[:300]}...")
 

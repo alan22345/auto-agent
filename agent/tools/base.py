@@ -34,6 +34,9 @@ class ToolContext:
     # Carried from the parent AgentLoop so nested subagents can inherit quota
     # accounting without re-constructing a UsageSink from scratch.
     usage_sink: object | None = None  # UsageSink | None — typed as object to avoid circular import
+    # Path to dev-server log file when a dev server is running in this phase.
+    # Used by TailDevServerLogTool; None when no server is active.
+    dev_server_log_path: str | None = None
 
     def resolve(self, path: str) -> str | None:
         """Resolve a path against the workspace, refusing escapes.

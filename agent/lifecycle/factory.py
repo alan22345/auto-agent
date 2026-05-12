@@ -66,6 +66,7 @@ def create_agent(
     complexity: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    dev_server_log_path: str | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -139,4 +140,5 @@ def create_agent(
         complexity=complexity,
         home_dir=home_dir,
         usage_sink=usage_sink,
+        dev_server_log_path=dev_server_log_path,
     )

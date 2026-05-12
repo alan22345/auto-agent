@@ -162,6 +162,7 @@ class AgentLoop:
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
         home_dir: str | None = None,
         usage_sink: UsageSink | None = None,
+        dev_server_log_path: str | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -181,6 +182,7 @@ class AgentLoop:
         self._event_sink = event_sink       # forwarded to ToolContext so tools can emit progress events
         self._home_dir = home_dir           # per-user HOME for the CLI provider's credential vault
         self._usage_sink = usage_sink       # per-task quota gate + usage emission
+        self._dev_server_log_path = dev_server_log_path  # path to dev-server log when server is active
 
     async def run(
         self,
@@ -272,6 +274,7 @@ class AgentLoop:
             readonly=False,
             event_sink=self._event_sink,
             usage_sink=self._usage_sink,
+            dev_server_log_path=self._dev_server_log_path,
         )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
