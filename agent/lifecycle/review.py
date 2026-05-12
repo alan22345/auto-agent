@@ -39,6 +39,7 @@ from shared.events import (
     task_review_complete,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 
 log = setup_logging("agent.lifecycle.review")
 
@@ -175,6 +176,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             task_description=task.description,
             repo_name=task.repo_name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(prompt)
         output = result.output
@@ -232,6 +234,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 task_description=task.description,
                 repo_name=task.repo_name,
                 home_dir=await home_dir_for_task(task),
+                org_id=task.organization_id,
             )
             fix_result = await fix_agent.run(fix_prompt, resume=True)
             log.info(f"Review fixes for task #{task_id}: {fix_result.output[:300]}...")
@@ -257,6 +260,9 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
                 )
             )
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
     except Exception as e:
         log.exception(f"Independent review failed for task #{task_id}")
         await publish(
@@ -308,6 +314,7 @@ async def handle_plan_independent_review(task_id: int) -> None:
                 task_description=task.description,
                 repo_name=task.repo_name,
                 home_dir=await home_dir_for_task(task),
+                org_id=task.organization_id,
             )
             result = await agent.run(prompt)
             output = result.output
@@ -389,6 +396,7 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
             task_description=task.description,
             repo_name=task.repo_name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(prompt, resume=True)
         log.info(f"PR review response for task #{task_id}: {result.output[:300]}...")
@@ -409,6 +417,9 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
             )
         )
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
     except Exception as e:
         log.exception(f"PR review response failed for task #{task_id}")
         await transition_task(task_id, "blocked", f"Failed to address review: {e}")

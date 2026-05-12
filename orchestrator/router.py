@@ -28,6 +28,7 @@ from orchestrator.feedback import analyze_patterns, get_feedback_summary, record
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.scoping import scoped
 from orchestrator.state_machine import InvalidTransition, get_task, transition
+from shared import quotas
 from shared.config import settings
 from shared.database import get_session
 from shared.events import (
@@ -48,6 +49,7 @@ from shared.models import (
     FreeformConfig,
     Organization,
     OrganizationMembership,
+    Plan,
     Repo,
     ScheduledTask,
     Suggestion,
@@ -69,6 +71,7 @@ from shared.types import (
     LoginRequest,
     LoginResponse,
     OutcomeResponse,
+    PlanRead,
     RepoData,
     RepoResponse,
     ScheduleResponse,
@@ -81,6 +84,7 @@ from shared.types import (
     TaskData,
     TaskMessageData,
     TaskMessagePost,
+    UsageSummary,
     UserData,
 )
 
@@ -99,6 +103,15 @@ TERMINAL_STATUSES = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}
 TASK_CREATION_RATE_LIMIT = 10  # max tasks per window
 TASK_CREATION_WINDOW = 60  # seconds
 _task_creation_timestamps: list[float] = []
+
+
+def _seconds_until_utc_midnight() -> int:
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.UTC)
+    tomorrow = (now + _dt.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int((tomorrow - now).total_seconds())
 
 
 def _check_rate_limit() -> None:
@@ -463,7 +476,9 @@ async def signup(
     # The slug is the email-local part plus a 4-char random suffix to avoid
     # collisions between e.g. alice@a.com and alice@b.com.
     org_slug = f"{_username_from_email(local)[:24]}-{_stdlib_secrets.token_hex(2)}"
-    org = Organization(name=req.display_name.strip(), slug=org_slug)
+    free_plan_q = await session.execute(select(Plan).where(Plan.name == "free"))
+    free_plan = free_plan_q.scalar_one()  # migration 029 guarantees one row exists
+    org = Organization(name=req.display_name.strip(), slug=org_slug, plan_id=free_plan.id)
     session.add(org)
     await session.flush()  # populate org.id before referencing
 
@@ -780,6 +795,17 @@ async def create_task(
         except HTTPException:
             authed_user_id = None
     owner_user_id = authed_user_id or req.created_by_user_id
+
+    # Rate-limit task creation per org.
+    if caller_org_id is not None:
+        try:
+            await quotas.enforce_task_create_limit(session, caller_org_id)
+        except quotas.QuotaExceeded as e:
+            raise HTTPException(
+                status_code=429,
+                detail=str(e),
+                headers={"Retry-After": str(_seconds_until_utc_midnight())},
+            ) from e
 
     # Dedup check: scoped to caller's org when known so two tenants
     # receiving the same Slack message ID don't dedupe each other.
@@ -1244,6 +1270,25 @@ async def record_task_outcome(
         task_id=task_id,
         pr_approved=outcome.pr_approved,
         review_rounds=outcome.review_rounds,
+    )
+
+
+@router.get("/usage/summary", response_model=UsageSummary)
+async def get_usage_summary(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> UsageSummary:
+    """Today's usage for the caller's current org + the plan caps."""
+    plan = await quotas.get_plan_for_org(session, org_id)
+    active = await quotas.count_active_tasks_for_org(session, org_id)
+    today_n = await quotas.count_tasks_created_today(session, org_id)
+    in_tok, out_tok = await quotas.sum_tokens_today(session, org_id)
+    return UsageSummary(
+        plan=PlanRead.model_validate(plan, from_attributes=True),
+        active_tasks=active,
+        tasks_today=today_n,
+        input_tokens_today=in_tok,
+        output_tokens_today=out_tok,
     )
 
 

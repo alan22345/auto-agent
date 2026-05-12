@@ -42,6 +42,7 @@ from shared.events import (
     task_plan_ready,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 
 log = setup_logging("agent.lifecycle.planning")
 
@@ -199,7 +200,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
     session_id = _session_id(task_id, task.created_at)
     log.info(f"Planning task #{task_id} in {task.repo_name} (session={session_id})")
-    workspace = await clone_repo(repo.url, task_id, repo.default_branch)
+    workspace = await clone_repo(repo.url, task_id, repo.default_branch, organization_id=task.organization_id)
 
     _active_planning.add(task_id)
     try:
@@ -212,6 +213,7 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
             task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
 
         # Track grill state in a local boolean. After GRILL_DONE we flip it
@@ -370,10 +372,14 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
 
         await publish(task_plan_ready(task_id, plan=output))
 
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
+        cleanup_workspace(task_id, organization_id=task.organization_id)
     except Exception as e:
         log.exception(f"Planning failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
-        cleanup_workspace(task_id)
+        cleanup_workspace(task_id, organization_id=task.organization_id)
     finally:
         _active_planning.discard(task_id)
 

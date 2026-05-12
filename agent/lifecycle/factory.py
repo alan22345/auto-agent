@@ -63,6 +63,7 @@ def create_agent(
     repo_name: str | None = None,
     complexity: str | None = None,
     home_dir: str | None = None,
+    org_id: int | None = None,
 ) -> AgentLoop:
     """Create a configured AgentLoop instance.
 
@@ -73,11 +74,20 @@ def create_agent(
                 ``TaskChannel`` seam so the timeout watchdog knows it's
                 making progress, and streams tool calls / thinking to
                 the UI.
+        org_id: If set (together with task_id), a UsageSink is constructed
+               and attached to the loop so every LLM call is accounted
+               against the org's daily token quota.
     """
+    from agent.loop import UsageSink
+
     provider = get_provider(model_override=model_tier, home_dir=home_dir)
     tools = create_default_registry(readonly=readonly)
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
+
+    usage_sink = (
+        UsageSink(org_id=org_id, task_id=task_id) if org_id is not None else None
+    )
 
     heartbeat = None
     on_tool_call = None
@@ -124,4 +134,5 @@ def create_agent(
         repo_name=repo_name,
         complexity=complexity,
         home_dir=home_dir,
+        usage_sink=usage_sink,
     )

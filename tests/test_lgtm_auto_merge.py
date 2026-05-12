@@ -191,10 +191,14 @@ async def test_lgtm_freeform_clean_merges_and_transitions_done():
     async def fake_try_start_queued(_session):
         pass
 
+    async def fake_unblock_quota_paused(_session):
+        return 0
+
     with patch("run.async_session", FakeSession), \
          patch("run.get_task", side_effect=fake_get_task), \
          patch("run._auto_merge_pr", side_effect=fake_merge), \
          patch("run.transition", side_effect=fake_transition), \
+         patch("run.unblock_quota_paused", side_effect=fake_unblock_quota_paused), \
          patch("run._try_start_queued", side_effect=fake_try_start_queued):
         await run._attempt_lgtm_merge(task.id, trigger="approved by alice")
     # Task was already in AWAITING_REVIEW → only one transition needed (DONE)

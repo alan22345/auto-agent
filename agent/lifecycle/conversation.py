@@ -44,6 +44,7 @@ from shared.events import (
     task_status_changed,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 from shared.task_channel import task_channel
 from shared.types import TaskData
 
@@ -95,6 +96,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(message, resume=True)
         output = result.output
@@ -131,6 +133,9 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
             )
 
         log.info(f"Plan conversation response for task #{task_id}: {output[:200]}...")
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
     finally:
         _active_plan_conversations.discard(task_id)
 
@@ -182,6 +187,7 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             task_description=task.description,
             repo_name=repo.name,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(
             (
@@ -196,6 +202,10 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
             ),
             resume=True,
         )
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
+        return
     finally:
         _active_clarification_tasks.discard(task_id)
 

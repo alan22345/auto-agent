@@ -89,6 +89,7 @@ class SubagentTool(Tool):
                 context_manager=ctx,
                 max_turns=max_turns,
                 workspace=context.workspace,
+                usage_sink=context.usage_sink,  # type: ignore[arg-type]
             )
 
             result = await asyncio.wait_for(

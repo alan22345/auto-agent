@@ -18,6 +18,7 @@ from agent.llm.types import Message, TokenUsage, ToolCall
 from agent.session import Session
 from agent.tools.base import ToolContext, ToolRegistry, ToolResult
 from agent.tools.cache import ToolCache
+from shared.quotas import QuotaExceeded
 
 if TYPE_CHECKING:
     from agent.llm.base import LLMProvider
@@ -63,6 +64,47 @@ _VERIFICATION_NUDGE = (
     "3. Only then state your final result with evidence\n"
     "Do NOT say 'should work' or 'looks correct' — show the actual test output."
 )
+
+
+@dataclass
+class UsageSink:
+    """Per-task accounting helper. Injected into AgentLoop.
+
+    `emit` writes one row to usage_events (best-effort).
+    `would_exceed_token_cap` returns True when the next call would cross
+    the org's daily input/output token caps.
+
+    Pass *db_session* only in tests or callers that already hold a transaction
+    and want the row flushed into that transaction rather than a new session.
+    """
+
+    org_id: int
+    task_id: int | None = None
+    db_session: object | None = None  # AsyncSession | None — typed as object to avoid import at top level
+
+    async def emit(self, *, model: str, usage: TokenUsage) -> None:
+        from shared.usage import emit_usage_event
+
+        await emit_usage_event(
+            org_id=self.org_id,
+            task_id=self.task_id,
+            model=model,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            session=self.db_session,  # type: ignore[arg-type]
+        )
+
+    async def would_exceed_token_cap(
+        self, *, est_input: int, est_output: int
+    ) -> bool:
+        from shared import quotas
+        from shared.database import async_session
+
+        async with async_session() as session:
+            return await quotas.would_exceed_token_cap(
+                session, self.org_id,
+                est_input=est_input, est_output=est_output,
+            )
 
 
 @dataclass
@@ -119,6 +161,7 @@ class AgentLoop:
         complexity: str | None = None,
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
         home_dir: str | None = None,
+        usage_sink: UsageSink | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -137,6 +180,7 @@ class AgentLoop:
         self._get_guidance = get_guidance    # () → check for user guidance messages (None = no message)
         self._event_sink = event_sink       # forwarded to ToolContext so tools can emit progress events
         self._home_dir = home_dir           # per-user HOME for the CLI provider's credential vault
+        self._usage_sink = usage_sink       # per-task quota gate + usage emission
 
     async def run(
         self,
@@ -175,6 +219,17 @@ class AgentLoop:
         response = await self._provider.complete(
             messages=[Message(role="user", content=prompt)],
         )
+
+        # Post-call usage accounting (best-effort).
+        if self._usage_sink is not None:
+            try:
+                await self._usage_sink.emit(
+                    model=getattr(self._provider, "model", "unknown"),
+                    usage=response.usage,
+                )
+            except Exception:
+                logger.warning("usage_sink_emit_failed_in_passthrough")
+
         return AgentResult(
             output=response.message.content,
             tokens_used=response.usage,
@@ -216,6 +271,7 @@ class AgentLoop:
             workspace=self._workspace,
             readonly=False,
             event_sink=self._event_sink,
+            usage_sink=self._usage_sink,
         )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
@@ -242,6 +298,24 @@ class AgentLoop:
             # Run context compaction pipeline
             api_messages = await self._context.prepare(api_messages, system, tool_defs)
 
+            # Pre-call quota gate (rough estimate based on message content).
+            if self._usage_sink is not None:
+                approx_in = sum(
+                    len(m.content or "") for m in api_messages
+                ) // 4  # 4 chars/token rough estimate
+                try:
+                    exceeds = await self._usage_sink.would_exceed_token_cap(
+                        est_input=approx_in, est_output=8192,
+                    )
+                except LookupError as e:
+                    raise QuotaExceeded(
+                        f"Org {self._usage_sink.org_id} has no plan attached"
+                    ) from e
+                if exceeds:
+                    raise QuotaExceeded(
+                        f"Org {self._usage_sink.org_id} would exceed daily token cap"
+                    )
+
             # Call the LLM
             try:
                 response = await self._provider.complete(
@@ -249,6 +323,8 @@ class AgentLoop:
                     tools=tool_defs if tool_defs else None,
                     system=system,
                 )
+            except QuotaExceeded:
+                raise  # propagate so the caller can transition to BLOCKED_ON_QUOTA
             except Exception as e:
                 error_str = str(e)
                 # Detect prompt-too-long errors
@@ -272,6 +348,16 @@ class AgentLoop:
                         api_messages=api_messages,
                         tokens_used=cumulative_usage,
                     )
+
+            # Post-call usage accounting (best-effort).
+            if self._usage_sink is not None:
+                try:
+                    await self._usage_sink.emit(
+                        model=getattr(self._provider, "model", "unknown"),
+                        usage=response.usage,
+                    )
+                except Exception:
+                    logger.warning("usage_sink_emit_failed")
 
             # Accumulate usage
             cumulative_usage.input_tokens += response.usage.input_tokens

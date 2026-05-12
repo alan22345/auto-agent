@@ -44,6 +44,7 @@ from orchestrator.router import router as api_router
 from orchestrator.scheduler import run_scheduler
 from orchestrator.search import router as search_router
 from orchestrator.state_machine import get_task, transition
+from orchestrator.unblock import unblock_quota_paused
 from orchestrator.webhooks.github import router as github_webhook_router
 from orchestrator.webhooks.linear import router as linear_webhook_router
 from shared.config import settings
@@ -466,6 +467,8 @@ async def on_ci_passed(event: Event) -> None:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merging to dev")
                 task = await transition(session, task, TaskStatus.DONE, "Auto-merged to dev branch")
                 await session.commit()
+                await unblock_quota_paused(session)
+                await session.commit()
                 await _try_start_queued(session)
             elif outcome == MERGE_OUTCOME_CONFLICT_DISPATCHED:
                 # Resolver is running; leave task in flight. It will retry merge
@@ -782,6 +785,8 @@ async def on_review_approved(event: Event) -> None:
             return
         task = await transition(session, task, TaskStatus.DONE, "PR merged, task complete")
         await session.commit()
+        await unblock_quota_paused(session)
+        await session.commit()
         await _try_start_queued(session)
 
 
@@ -831,6 +836,8 @@ async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
             if task.status == TaskStatus.AWAITING_CI:
                 task = await transition(session, task, TaskStatus.AWAITING_REVIEW, f"LGTM ({trigger}), auto-merging")
             task = await transition(session, task, TaskStatus.DONE, "Auto-merged via LGTM")
+            await session.commit()
+            await unblock_quota_paused(session)
             await session.commit()
             await _try_start_queued(session)
         return
@@ -1002,6 +1009,8 @@ async def on_task_finished(event: Event) -> None:
         await publish(task_cleanup(event.task_id))
 
     async with async_session() as session:
+        await unblock_quota_paused(session)
+        await session.commit()
         await _try_start_queued(session)
 
 
@@ -1856,6 +1865,8 @@ async def _recover_stuck_tasks() -> None:
 
     # Also try starting any queued tasks that may have been left behind
     async with async_session() as session:
+        await unblock_quota_paused(session)
+        await session.commit()
         await _try_start_queued(session)
 
 

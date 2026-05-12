@@ -50,6 +50,7 @@ from shared.events import (
     task_subtask_progress,
 )
 from shared.logging import setup_logging
+from shared.quotas import QuotaExceeded
 
 log = setup_logging("agent.lifecycle.coding")
 
@@ -205,10 +206,14 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
                 retry_reason,
                 intent=intent,
             )
+    except QuotaExceeded as e:
+        log.info("task_blocked_on_quota", task_id=task_id, reason=str(e))
+        await transition_task(task_id, "blocked_on_quota", str(e))
+        cleanup_workspace(task_id, organization_id=task.organization_id)
     except Exception as e:
         log.exception(f"Coding failed for task #{task_id}")
         await transition_task(task_id, "failed", str(e))
-        cleanup_workspace(task_id)
+        cleanup_workspace(task_id, organization_id=task.organization_id)
 
 
 async def _handle_coding_single(
@@ -241,6 +246,7 @@ async def _handle_coding_single(
         repo_name=repo.name,
         complexity=task.complexity,
         home_dir=await home_dir_for_task(task),
+        org_id=task.organization_id,
     )
     result = await agent.run(coding_prompt, resume=is_continuation)
     output = result.output
@@ -264,6 +270,7 @@ async def _handle_coding_single(
         reflection_agent = create_agent(
             workspace, session_id=session_id, max_turns=5, task_id=task_id,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         await reflection_agent.run(MEMORY_REFLECTION_PROMPT, resume=True)
         log.info(f"Task #{task_id}: memory reflection complete")
@@ -365,6 +372,7 @@ async def _handle_coding_with_subtasks(
         agent = create_agent(
             workspace, session_id=subtask_session, max_turns=40,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(prompt, resume=False)
         output = result.output
@@ -425,6 +433,7 @@ async def _finish_coding(
         agent = create_agent(
             workspace, session_id=session_id, max_turns=20, task_id=task_id,
             home_dir=await home_dir_for_task(task),
+            org_id=task.organization_id,
         )
         result = await agent.run(review_prompt, resume=True)
         review_output = result.output
