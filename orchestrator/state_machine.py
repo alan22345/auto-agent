@@ -22,13 +22,21 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
     TaskStatus.AWAITING_CLARIFICATION: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},  # user replied
     TaskStatus.CODING: {
+        TaskStatus.VERIFYING,                                          # freeform self-verification gate
         TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION,
         TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE,
         TaskStatus.BLOCKED_ON_QUOTA,
     },
+    TaskStatus.VERIFYING: {                                            # freeform self-verification
+        TaskStatus.PR_CREATED,
+        TaskStatus.CODING,
+        TaskStatus.BLOCKED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED_ON_QUOTA,
+    },
     TaskStatus.PR_CREATED: {TaskStatus.AWAITING_CI},
     TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED},  # CI pass/fail
-    TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING},  # approved or request changes
+    TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING, TaskStatus.BLOCKED},  # approved, changes, or cycle-2 failure
     TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},
     TaskStatus.BLOCKED_ON_AUTH: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
     TaskStatus.BLOCKED_ON_QUOTA: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},

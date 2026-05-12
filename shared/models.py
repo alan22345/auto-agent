@@ -40,6 +40,7 @@ class TaskStatus(str, enum.Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     AWAITING_CLARIFICATION = "awaiting_clarification"
     CODING = "coding"
+    VERIFYING = "verifying"          # freeform self-verification — runs after CODING, before PR_CREATED
     PR_CREATED = "pr_created"
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
