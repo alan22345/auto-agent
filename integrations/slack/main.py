@@ -424,20 +424,28 @@ async def _handle_dm_event(event: dict[str, Any]) -> None:
             await send_slack_dm(slack_user_id, f"✉️ Sent to task #{task_id}.", org_id=org_id)
             return
 
-    # Everything else flows through the conversational assistant — it
-    # decides whether to chat back, ask a clarifying question, or call a
-    # tool to act on the user's behalf.
-    from agent.slack_assistant import converse
+    # Everything else flows through the source-agnostic messenger router,
+    # which owns durable conversation state + focus.
+    from orchestrator.claude_auth import resolve_home_dir
+    from orchestrator.messenger_router import handle as router_handle
+    from shared.database import async_session
+
+    async def _sender(target_user_id: int, body: str) -> None:
+        await send_slack_dm(slack_user_id, body, org_id=org_id)
+
+    home_dir = await resolve_home_dir(user["id"])
 
     try:
-        reply = await converse(
-            slack_user_id=slack_user_id, user_id=user["id"], text=text, org_id=org_id
-        )
-    except Exception as e:
-        log.exception("slack assistant crashed")
-        reply = f"(internal error: {e})"
-    if reply:
-        await send_slack_dm(slack_user_id, reply, org_id=org_id)
+        async with async_session() as db:
+            await router_handle(
+                session=db, source="slack",
+                user_id=user["id"], text=text, thread_ts=None,
+                sender=_sender, home_dir=home_dir,
+            )
+            await db.commit()
+    except Exception:
+        log.exception("messenger_router crashed")
+        await send_slack_dm(slack_user_id, "(internal error)", org_id=org_id)
 
 
 async def inbound_loop() -> None:
