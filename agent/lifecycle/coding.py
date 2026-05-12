@@ -20,7 +20,6 @@ import httpx
 from agent.lifecycle import review
 from agent.lifecycle._clarification import _extract_clarification
 from agent.lifecycle._naming import _branch_name, _fresh_session_id, _pr_title, _session_id
-from agent.tools import dev_server as _dev_server
 from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
     get_freeform_config,
@@ -35,6 +34,7 @@ from agent.prompts import (
     build_coding_prompt,
     build_review_prompt,
 )
+from agent.tools import dev_server as _dev_server
 from agent.workspace import (
     cleanup_workspace,
     clone_repo,
@@ -276,10 +276,9 @@ async def _handle_coding_single(
                 )
             except (_dev_server.BootTimeout, _dev_server.BootError) as e:
                 await publish(coding_server_boot_failed(task_id, str(e)))
-                try:
+                import contextlib
+                with contextlib.suppress(Exception):
                     await server_cm.__aexit__(type(e), e, None)
-                except Exception:
-                    pass
                 server_handle = None
                 server_cm = None
 
@@ -518,7 +517,7 @@ async def _finish_coding(
     base_branch: str,
     branch_name: str,
 ) -> None:
-    """Self-review, push, create PR, and trigger independent review."""
+    """Self-review, then hand off to verify."""
     for attempt in range(MAX_REVIEW_RETRIES):
         review_prompt = build_review_prompt(base_branch)
         agent = create_agent(
@@ -546,7 +545,10 @@ async def _finish_coding(
             f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
         )
 
-    await _open_pr_and_advance(task_id, task, workspace, base_branch, branch_name)
+    # Hand off to verify; verify.pass_cycle calls _open_pr_and_advance.
+    from agent.lifecycle import verify
+    await transition_task(task_id, "verifying", "self-review complete; dispatching verify")
+    await verify.handle_verify(task_id)
 
 
 async def handle(event: Event) -> None:
