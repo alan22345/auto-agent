@@ -47,6 +47,16 @@ async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
     return None
 
 
+async def set_task_affected_routes(task_id: int, routes: list[dict]) -> None:
+    """Persist the planner-declared affected routes for a task."""
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/affected_routes",
+            json={"routes": routes},
+            timeout=10.0,
+        )
+
+
 _TERMINAL_FACTORIES = {
     "failed": lambda task_id, message: task_failed(task_id, error=message),
     "blocked": lambda task_id, message: task_blocked(task_id, error=message),

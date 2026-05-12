@@ -13,6 +13,7 @@ collapse onto a single in-flight planning run.
 
 from __future__ import annotations
 
+import json as _json
 import re as _re
 from datetime import UTC, datetime, timedelta
 
@@ -24,6 +25,7 @@ from agent.lifecycle._orchestrator_api import (
     ORCHESTRATOR_URL,
     get_repo,
     get_task,
+    set_task_affected_routes,
     transition_task,
 )
 from agent.lifecycle.factory import create_agent, home_dir_for_task
@@ -67,6 +69,35 @@ _PLAN_MAX_LENGTH = 50_000  # Must match TransitionRequest.plan max_length
 
 
 _active_planning: set[int] = set()
+
+
+_ROUTES_BLOCK_RE = _re.compile(
+    r"```affected-routes\s*\n(.*?)\n[ \t]*```",
+    _re.DOTALL,
+)
+
+
+def _extract_affected_routes(plan_text: str) -> list[dict]:
+    """Parse the agent's ```affected-routes fenced JSON block (if any)."""
+    m = _ROUTES_BLOCK_RE.search(plan_text or "")
+    if not m:
+        return []
+    try:
+        data = _json.loads(m.group(1))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned = []
+    for r in data:
+        if not isinstance(r, dict) or "path" not in r:
+            continue
+        cleaned.append({
+            "method": r.get("method", "GET").upper(),
+            "path": str(r["path"]),
+            "label": str(r.get("label", "")),
+        })
+    return cleaned
 
 
 def _extract_grill_done(output: str) -> str | None:
@@ -358,6 +389,10 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
                 return
 
         output = _trim_plan_text(output)
+
+        routes = _extract_affected_routes(output)
+        if routes:
+            await set_task_affected_routes(task_id, routes)
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(

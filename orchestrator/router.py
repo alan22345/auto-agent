@@ -1080,6 +1080,28 @@ async def update_intake_qa(
     return _task_to_response(task)
 
 
+class AffectedRoutesUpdate(BaseModel):
+    """Planner-declared routes affected by a task (set during planning phase)."""
+    routes: list[dict] = Field(default_factory=list)
+
+
+@router.post("/tasks/{task_id}/affected_routes", response_model=TaskData)
+async def set_affected_routes(
+    task_id: int,
+    req: AffectedRoutesUpdate,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Replace the task's planner-declared affected routes."""
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.affected_routes = req.routes or []
+    await session.commit()
+    await session.refresh(task)
+    return _task_to_response(task)
+
+
 @router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
 async def list_task_messages(
     task_id: int,

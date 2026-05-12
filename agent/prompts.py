@@ -593,18 +593,41 @@ def _grill_section_for_planning(intake_qa: list[dict] | None) -> str:
     )
 
 
+PLANNING_AFFECTED_ROUTES_INSTRUCTION = """
+## Affected routes
+At the end of your plan, include a fenced JSON block listing the user-visible
+routes this change affects, if any. Format:
+
+```affected-routes
+[
+  {"method": "GET", "path": "/", "label": "short label"}
+]
+```
+
+Rules:
+- Include each route where the change makes user-visible output appear or change.
+- If the change is purely backend, CLI, library, or docs with no rendered UI,
+  emit an empty list: ```affected-routes\\n[]\\n```
+- Use GET for page renders; only list other methods if they have a visual response.
+"""
+
+
 def build_planning_prompt(
     title: str,
     description: str,
     repo_summary: str | None = None,
     intake_qa: list[dict] | None = None,
 ) -> str:
-    return PLANNING_PROMPT.format(
-        title=title,
-        description=description,
-        clarification_instructions=CLARIFICATION_INSTRUCTIONS,
-        grill_section=_grill_section_for_planning(intake_qa),
-    ) + _repo_context(repo_summary)
+    return (
+        PLANNING_PROMPT.format(
+            title=title,
+            description=description,
+            clarification_instructions=CLARIFICATION_INSTRUCTIONS,
+            grill_section=_grill_section_for_planning(intake_qa),
+        )
+        + _repo_context(repo_summary)
+        + PLANNING_AFFECTED_ROUTES_INSTRUCTION
+    )
 
 
 def _ci_checks_section(ci_checks: str | None) -> str:
