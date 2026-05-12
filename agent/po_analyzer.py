@@ -15,7 +15,9 @@ from croniter import croniter
 from sqlalchemy import select
 
 from agent.context.memory import remember_priority_suggestion
+from agent.lifecycle.factory import create_agent
 from agent.llm.structured import parse_json_response
+from agent.market_researcher import run_market_research
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
@@ -25,7 +27,7 @@ from shared.events import (
     po_suggestions_ready,
     publish,
 )
-from shared.models import FreeformConfig, Repo, Suggestion, SuggestionStatus
+from shared.models import FreeformConfig, MarketBrief, Repo, Suggestion, SuggestionStatus
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,7 +65,23 @@ async def _check_and_analyze(session: AsyncSession) -> None:
         if _is_due(config, now):
             log.info(f"PO analysis due for repo_id={config.repo_id}")
             try:
-                await handle_po_analysis(session, config)
+                brief = await _ensure_brief(session, config)
+                if brief is None:
+                    repo = (
+                        await session.execute(
+                            select(Repo).where(Repo.id == config.repo_id)
+                        )
+                    ).scalar_one_or_none()
+                    await publish(
+                        po_analysis_failed(
+                            repo_name=repo.name if repo else "?",
+                            reason="no brief",
+                        )
+                    )
+                    config.last_analysis_at = now  # back-off
+                    await session.commit()
+                    continue
+                await handle_po_analysis(session, config, brief=brief)
                 config.last_analysis_at = now
                 await session.commit()
             except Exception:
@@ -89,6 +107,24 @@ def _is_due(config: FreeformConfig, now: datetime) -> bool:
     return now >= next_run
 
 
+def _filter_grounded(suggestions: list[dict]) -> tuple[list[dict], int]:
+    """Drop non-bug suggestions with no evidence URLs.
+
+    Returns (kept, dropped_count). This is the enforcement mechanism for the
+    grounding rule — the prompt asks, the filter ensures.
+    """
+    kept: list[dict] = []
+    dropped = 0
+    for s in suggestions:
+        category = s.get("category", "")
+        evidence = s.get("evidence_urls") or []
+        if category == "bug" or evidence:
+            kept.append(s)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def _brief_is_fresh(
     brief, now: datetime, max_age_days: int
 ) -> bool:
@@ -105,14 +141,48 @@ def _brief_is_fresh(
     return (now - created) < timedelta(days=max_age_days)
 
 
-async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> None:
+async def _ensure_brief(
+    session: AsyncSession, config: FreeformConfig
+) -> MarketBrief | None:
+    """Return a fresh MarketBrief for `config.repo_id`.
+
+    Returns the latest existing brief if it's within `market_brief_max_age_days`.
+    Otherwise runs the researcher. If the researcher fails, falls back to the
+    most recent prior brief (even if stale). Returns None if nothing exists.
+    """
+    latest = (
+        await session.execute(
+            select(MarketBrief)
+            .where(MarketBrief.repo_id == config.repo_id)
+            .order_by(MarketBrief.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.now(UTC)
+    if _brief_is_fresh(latest, now, config.market_brief_max_age_days):
+        return latest
+
+    repo = (
+        await session.execute(select(Repo).where(Repo.id == config.repo_id))
+    ).scalar_one_or_none()
+    if repo is None:
+        return latest  # repo gone — return whatever we have
+
+    new_brief = await run_market_research(session, config, repo)
+    if new_brief is not None:
+        return new_brief
+    return latest  # researcher failed; fall back to whatever we had
+
+
+async def handle_po_analysis(
+    session: AsyncSession, config: FreeformConfig, *, brief: MarketBrief
+) -> None:
     """Run the agent as a Product Owner to analyze a repo and generate suggestions.
 
     Uses readonly tools so the PO agent can explore the codebase (grep, file_read, glob)
     rather than relying on a black-box CLI subprocess.
     """
-    from agent.lifecycle.factory import create_agent
-
     repo_result = await session.execute(select(Repo).where(Repo.id == config.repo_id))
     repo = repo_result.scalar_one_or_none()
     if not repo:
@@ -133,6 +203,7 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
     )
 
     prompt = build_po_analysis_prompt(
+        brief=brief,
         ux_knowledge=config.ux_knowledge,
         recent_suggestions=recent_titles,
         goal=config.po_goal,
@@ -170,15 +241,25 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         return
 
     new_suggestions = suggestions_data.get("suggestions", [])
-    for s in new_suggestions:
+    filtered, dropped = _filter_grounded(new_suggestions)
+    if dropped:
+        log.info(
+            "PO filtered %d ungrounded suggestion(s) for repo='%s'",
+            dropped, repo.name,
+        )
+
+    for s in filtered:
         suggestion = Suggestion(
             repo_id=config.repo_id,
+            organization_id=config.organization_id,
             title=s.get("title", "Untitled"),
             description=s.get("description", ""),
             rationale=s.get("rationale", ""),
             category=s.get("category", "improvement"),
             priority=s.get("priority", 3),
             status=SuggestionStatus.PENDING,
+            evidence_urls=s.get("evidence_urls", []),
+            brief_id=brief.id,
         )
         session.add(suggestion)
         # Promote high-priority items into the shared knowledge graph so the
@@ -197,8 +278,8 @@ async def handle_po_analysis(session: AsyncSession, config: FreeformConfig) -> N
         config.ux_knowledge = ux_update
 
     await session.flush()
-    log.info(f"PO analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
+    log.info(f"PO analysis for '{repo.name}': {len(filtered)} suggestions created ({dropped} ungrounded dropped)")
 
     await publish(
-        po_suggestions_ready(repo_name=repo.name, count=len(new_suggestions))
+        po_suggestions_ready(repo_name=repo.name, count=len(filtered))
     )
