@@ -907,6 +907,50 @@ def build_market_research_prompt(repo_name: str) -> str:
     return MARKET_RESEARCH_PROMPT.format(repo_name=repo_name)
 
 
+def build_verify_intent_prompt(
+    task_title: str,
+    task_description: str,
+    diff_summary: str,
+    affected_routes: list[dict],
+    server_url: str | None,
+) -> str:
+    """Build the prompt for the intent-check agent invocation in the verify phase."""
+    route_block = ""
+    if affected_routes:
+        lines = "\n".join(
+            f"- {r.get('method', 'GET')} {r['path']} ({r.get('label', '')})"
+            for r in affected_routes
+        )
+        route_block = f"\n\nAffected routes:\n{lines}"
+
+    server_block = ""
+    if server_url:
+        server_block = (
+            f"\n\nA dev server is running at {server_url}. If the task describes "
+            "visual behaviour or UI changes, call `browse_url` on each affected route "
+            "to confirm the rendered output matches the description. Use "
+            "`tail_dev_server_log` if anything looks wrong."
+        )
+
+    return f"""You are the intent verifier. Decide whether the diff below addresses
+the task as stated.
+
+Task title: {task_title}
+Task description: {task_description}
+
+Diff summary:
+{diff_summary}{route_block}{server_block}
+
+Output your verdict on the first line of your reply, exactly one of:
+- OK
+- NOT-OK: <one-line reason>
+
+Then on subsequent lines, write a short reasoning paragraph (no more than 5 lines)
+covering: missing requirements, off-topic changes, partial implementations. If
+you used browse_url, mention what you observed.
+"""
+
+
 def augment_coding_prompt_with_server(
     base_prompt: str, *, port: int | None, affected_routes: list[dict],
 ) -> str:
