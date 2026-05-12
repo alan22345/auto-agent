@@ -7,7 +7,10 @@ All API responses and parsed external data should go through these.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -405,3 +408,57 @@ class MemoryFact(BaseModel):
 class MemoryEntityDetail(BaseModel):
     entity: MemoryEntitySummary
     facts: list[MemoryFact] = Field(default_factory=list)
+
+
+# --- Freeform self-verification types ---
+
+
+class AffectedRoute(BaseModel):
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    path: str
+    label: str
+
+
+class IntentVerdict(BaseModel):
+    ok: bool
+    reasoning: str
+    tool_calls: list[dict] = []  # browse_url / tail_dev_server_log call log
+
+
+class ReviewDimensionVerdict(BaseModel):
+    verdict: Literal["OK", "NOT-OK", "SKIPPED"]
+    reasoning: str
+
+
+class ReviewCombinedVerdict(BaseModel):
+    code_review: ReviewDimensionVerdict
+    ui_check: ReviewDimensionVerdict
+
+
+class VerifyAttemptOut(BaseModel):
+    """API shape for a verify attempt row."""
+    id: int
+    cycle: int
+    status: Literal["pass", "fail", "error"]
+    boot_check: Literal["pass", "fail", "skipped"] | None
+    intent_check: Literal["pass", "fail"] | None
+    intent_judgment: str | None
+    tool_calls: list[dict] | None
+    failure_reason: str | None
+    log_tail: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class ReviewAttemptOut(BaseModel):
+    id: int
+    cycle: int
+    status: Literal["pass", "fail", "error"]
+    code_review_verdict: str | None
+    ui_check: Literal["pass", "fail", "skipped"] | None
+    ui_judgment: str | None
+    tool_calls: list[dict] | None
+    failure_reason: str | None
+    log_tail: str | None
+    started_at: datetime
+    finished_at: datetime | None

@@ -1,4 +1,29 @@
-from shared.types import ConflictInfo, MemorySaveResult, ProposedFact
+from shared.types import (
+    AffectedRoute,
+    ConflictInfo,
+    IntentVerdict,
+    MemorySaveResult,
+    ProposedFact,
+    ReviewCombinedVerdict,
+)
+
+
+def test_affected_route_defaults():
+    r = AffectedRoute(path="/", label="home")
+    assert r.method == "GET"
+
+
+def test_intent_verdict_serialises():
+    v = IntentVerdict(ok=True, reasoning="looks good")
+    assert v.model_dump()["tool_calls"] == []
+
+
+def test_review_combined_shape():
+    v = ReviewCombinedVerdict(
+        code_review={"verdict": "OK", "reasoning": ""},
+        ui_check={"verdict": "SKIPPED", "reasoning": ""},
+    )
+    assert v.code_review.verdict == "OK"
 
 
 def test_proposed_fact_defaults():
