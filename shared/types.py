@@ -192,6 +192,7 @@ class RepoResponse(BaseModel):
 class SuggestionData(BaseModel):
     """Typed representation of a PO suggestion."""
     id: int
+    repo_id: int | None = None
     repo_name: str | None = None
     title: str
     description: str = ""
@@ -201,6 +202,7 @@ class SuggestionData(BaseModel):
     status: str = "pending"
     task_id: int | None = None
     created_at: str | None = None
+    evidence_urls: list[dict] = Field(default_factory=list)
 
 
 class MarketBriefResponse(BaseModel):

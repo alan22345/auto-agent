@@ -2042,6 +2042,7 @@ async def _suggestion_to_response(session: AsyncSession, s: Suggestion) -> Sugge
     repo = repo_result.scalar_one_or_none()
     return SuggestionData(
         id=s.id,
+        repo_id=s.repo_id,
         repo_name=repo.name if repo else None,
         title=s.title,
         description=s.description,
@@ -2051,6 +2052,7 @@ async def _suggestion_to_response(session: AsyncSession, s: Suggestion) -> Sugge
         status=s.status.value if s.status else "pending",
         task_id=s.task_id,
         created_at=s.created_at.isoformat() if s.created_at else None,
+        evidence_urls=s.evidence_urls or [],
     )
 
 

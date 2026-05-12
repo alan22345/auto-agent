@@ -273,6 +273,7 @@ export interface SignupResponse {
  */
 export interface SuggestionData {
   id: number;
+  repo_id?: number | null;
   repo_name?: string | null;
   title: string;
   description?: string;
@@ -282,6 +283,9 @@ export interface SuggestionData {
   status?: string;
   task_id?: number | null;
   created_at?: string | null;
+  evidence_urls?: {
+    [k: string]: unknown;
+  }[];
 }
 /**
  * Typed representation of a task from the orchestrator API.

@@ -30,8 +30,15 @@ export interface MemoryRow {
   resolution: 'keep_existing' | 'replace' | 'keep_both' | null;
 }
 
+export interface EvidenceUrl {
+  url: string;
+  title?: string;
+  excerpt?: string;
+}
+
 export interface Suggestion {
   id: number;
+  repo_id: number | null;
   repo_name: string | null;
   title: string;
   description: string;
@@ -41,6 +48,7 @@ export interface Suggestion {
   status: string;
   task_id: number | null;
   created_at: string | null;
+  evidence_urls: EvidenceUrl[];
 }
 
 export interface FreeformConfig {

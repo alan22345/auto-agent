@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/select';
 import { wsClient } from '@/lib/ws';
 import type { Suggestion } from '@/types/ws';
+import { MarketBriefModal } from '@/components/market-brief/market-brief-modal';
 
 const STATUS_OPTIONS = [
   { value: 'pending', label: 'Pending' },
@@ -51,6 +52,7 @@ export default function SuggestionsPage() {
   const [status, setStatus] = useState('pending');
   const [repo, setRepo] = useState<string>('');
   const [source, setSource] = useState<'all' | 'architect' | 'po'>('all');
+  const [briefOpen, setBriefOpen] = useState(false);
   const { suggestions: rawSuggestions, removeLocally } = useSuggestions(status, repo);
   const suggestions = useMemo(() => {
     if (source === 'all') return rawSuggestions;
@@ -64,6 +66,14 @@ export default function SuggestionsPage() {
     const fromSuggestions = suggestions.map((s) => s.repo_name).filter(Boolean) as string[];
     return Array.from(new Set([...fromConfigs, ...fromSuggestions])).sort();
   }, [configs, suggestions]);
+
+  // Derive the numeric repo_id for the selected repo from the loaded suggestions.
+  // Used to open the market brief modal for a specific repo.
+  const selectedRepoId = useMemo<number | null>(() => {
+    if (!repo) return null;
+    const match = rawSuggestions.find((s) => s.repo_name === repo && s.repo_id != null);
+    return match?.repo_id ?? null;
+  }, [repo, rawSuggestions]);
 
   const grouped = useMemo(() => {
     const byCategory = new Map<string, Suggestion[]>();
@@ -97,7 +107,7 @@ export default function SuggestionsPage() {
         Suggestions produced by the PO and architect analyzers. Approving creates a freeform task.
       </p>
 
-      <div className="flex gap-3 mb-6">
+      <div className="flex items-center gap-3 mb-6 flex-wrap">
         <div className="w-48">
           <Select value={status || '__all__'} onValueChange={(v) => setStatus(v === '__all__' ? '' : v)}>
             <SelectTrigger>
@@ -139,6 +149,22 @@ export default function SuggestionsPage() {
             </SelectContent>
           </Select>
         </div>
+        {selectedRepoId != null && (
+          <>
+            <button
+              type="button"
+              onClick={() => setBriefOpen(true)}
+              className="text-sm text-blue-600 hover:underline"
+            >
+              View market brief
+            </button>
+            <MarketBriefModal
+              repoId={selectedRepoId}
+              open={briefOpen}
+              onOpenChange={setBriefOpen}
+            />
+          </>
+        )}
       </div>
 
       {suggestions.length === 0 && (
@@ -242,6 +268,24 @@ function SuggestionCard({
             </div>
           )}
         </>
+      )}
+
+      {suggestion.evidence_urls && suggestion.evidence_urls.length > 0 && (
+        <div className="mt-3 pt-3 border-t text-xs">
+          <span className="text-muted-foreground mr-2">Backed by:</span>
+          {suggestion.evidence_urls.slice(0, 3).map((e, i) => (
+            <a
+              key={i}
+              href={e.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline mr-3"
+              title={e.excerpt || e.url}
+            >
+              {e.title || (() => { try { return new URL(e.url).hostname; } catch { return e.url; } })()}
+            </a>
+          ))}
+        </div>
       )}
     </div>
   );
