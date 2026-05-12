@@ -158,14 +158,11 @@ async def handle(
         conv.conversation_id,
         [dataclasses.asdict(m) for m in appended],
     )
-    # Reload focus_kind/focus_id in case on_create_task rebinded the draft.
+    # Always bump the focus TTL after a turn. Read the (possibly rebound)
+    # focus so the draft→task rebind from on_create_task is reflected.
     refreshed = await p.get_focus(session, user_id)
-    if refreshed is not None:
-        await p.set_focus(
-            session,
-            user_id,
-            focus_kind=refreshed.focus_kind,
-            focus_id=refreshed.focus_id,
-        )
+    final_kind = refreshed.focus_kind if refreshed is not None else focus_kind
+    final_id = refreshed.focus_id if refreshed is not None else focus_id
+    await p.set_focus(session, user_id, focus_kind=final_kind, focus_id=final_id)
 
     await sender(user_id, reply_text)

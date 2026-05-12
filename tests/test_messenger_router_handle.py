@@ -280,3 +280,43 @@ async def test_create_task_rebinds_draft_and_updates_focus(session):
         focus_id=123,
     )
     assert len(conv.messages) == 2
+
+
+async def test_explicit_switch_keyword_triggers_picker_even_with_live_focus(session):
+    user_id = await _make_user(session, "ivy")
+    task_id = await _make_task(session, user_id=user_id, title="t", status="coding")
+    await p.set_focus(session, user_id, focus_kind="task", focus_id=task_id)
+    sender = _CollectingSender()
+    with patch("orchestrator.messenger_router.router.converse", AsyncMock()) as cm:
+        await handle(session=session, source="slack", user_id=user_id,
+                     text="switch", thread_ts=None, sender=sender, home_dir=None)
+    assert any("Which task" in m for m in sender.sent)
+    cm.assert_not_awaited()
+    focus = await p.get_focus(session, user_id)
+    # Focus was cleared to none.
+    assert focus is None or focus.focus_kind == "none"
+
+
+async def test_reset_command_clears_focus_but_keeps_conversation_rows(session):
+    user_id = await _make_user(session, "joel")
+    task_id = await _make_task(session, user_id=user_id, title="t", status="coding")
+    await p.set_focus(session, user_id, focus_kind="task", focus_id=task_id)
+    # Seed a row so we can prove it survives.
+    await p.load_or_create_conversation(
+        session, user_id=user_id, source="slack",
+        focus_kind="task", focus_id=task_id,
+    )
+    sender = _CollectingSender()
+    with patch("orchestrator.messenger_router.router.converse", AsyncMock()) as cm:
+        await handle(session=session, source="slack", user_id=user_id,
+                     text="reset", thread_ts=None, sender=sender, home_dir=None)
+    assert any("Cleared focus" in m for m in sender.sent)
+    cm.assert_not_awaited()
+    focus = await p.get_focus(session, user_id)
+    assert focus is None or focus.focus_kind == "none"
+    # Conversation row still exists with focus_kind='task' (just orphaned from current focus).
+    reloaded = await p.load_or_create_conversation(
+        session, user_id=user_id, source="slack",
+        focus_kind="task", focus_id=task_id,
+    )
+    assert reloaded.conversation_id > 0
