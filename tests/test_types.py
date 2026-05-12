@@ -1,10 +1,14 @@
+from datetime import UTC, datetime
+
 from shared.types import (
     AffectedRoute,
     ConflictInfo,
     IntentVerdict,
     MemorySaveResult,
     ProposedFact,
+    ReviewAttemptOut,
     ReviewCombinedVerdict,
+    VerifyAttemptOut,
 )
 
 
@@ -45,3 +49,21 @@ def test_memory_save_result_counts():
     r = MemorySaveResult(row_id="r1", ok=True)
     assert r.ok is True
     assert r.error is None
+
+
+def test_verify_attempt_out_instantiates():
+    a = VerifyAttemptOut(
+        id=1, cycle=1, status="pass",
+        started_at=datetime.now(UTC),
+    )
+    assert a.boot_check is None
+    assert a.finished_at is None
+
+
+def test_review_attempt_out_instantiates():
+    a = ReviewAttemptOut(
+        id=1, cycle=1, status="pass",
+        started_at=datetime.now(UTC),
+    )
+    assert a.code_review_verdict is None
+    assert a.ui_check is None

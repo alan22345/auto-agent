@@ -6,11 +6,9 @@ All API responses and parsed external data should go through these.
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003
 from enum import Enum
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -422,10 +420,11 @@ class AffectedRoute(BaseModel):
 class IntentVerdict(BaseModel):
     ok: bool
     reasoning: str
-    tool_calls: list[dict] = []  # browse_url / tail_dev_server_log call log
+    tool_calls: list[dict] = Field(default_factory=list)
 
 
 class ReviewDimensionVerdict(BaseModel):
+    # verdict comes from LLM output; distinct from lowercase pass/fail statuses persisted on attempt rows
     verdict: Literal["OK", "NOT-OK", "SKIPPED"]
     reasoning: str
 
@@ -440,25 +439,26 @@ class VerifyAttemptOut(BaseModel):
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
-    boot_check: Literal["pass", "fail", "skipped"] | None
-    intent_check: Literal["pass", "fail"] | None
-    intent_judgment: str | None
-    tool_calls: list[dict] | None
-    failure_reason: str | None
-    log_tail: str | None
+    boot_check: Literal["pass", "fail", "skipped"] | None = None
+    intent_check: Literal["pass", "fail"] | None = None
+    intent_judgment: str | None = None
+    tool_calls: list[dict] | None = None
+    failure_reason: str | None = None
+    log_tail: str | None = None
     started_at: datetime
-    finished_at: datetime | None
+    finished_at: datetime | None = None
 
 
 class ReviewAttemptOut(BaseModel):
+    """API shape for a review attempt row."""
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
-    code_review_verdict: str | None
-    ui_check: Literal["pass", "fail", "skipped"] | None
-    ui_judgment: str | None
-    tool_calls: list[dict] | None
-    failure_reason: str | None
-    log_tail: str | None
+    code_review_verdict: str | None = None
+    ui_check: Literal["pass", "fail", "skipped"] | None = None
+    ui_judgment: str | None = None
+    tool_calls: list[dict] | None = None
+    failure_reason: str | None = None
+    log_tail: str | None = None
     started_at: datetime
-    finished_at: datetime | None
+    finished_at: datetime | None = None
