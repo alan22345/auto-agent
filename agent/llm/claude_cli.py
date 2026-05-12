@@ -40,6 +40,7 @@ class ClaudeCLIProvider(LLMProvider):
         self._session_id: str | None = None
         self._cwd: str | None = None
         self._home_dir: str | None = home_dir
+        self._resume: bool = False
 
     def set_cwd(self, cwd: str) -> None:
         """Set the working directory for CLI invocations."""
