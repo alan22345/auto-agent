@@ -238,6 +238,7 @@ class FreeformConfigData(BaseModel):
     architecture_cron: str = "0 9 * * 1"
     last_architecture_at: str | None = None
     architecture_knowledge: str | None = None
+    run_command: str | None = None
     created_at: str | None = None
 
 

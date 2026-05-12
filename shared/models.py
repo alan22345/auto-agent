@@ -180,6 +180,7 @@ class Task(Base):
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips before the agent
     # writes a plan. NULL = not yet started; [] = grilling complete or skipped.
     intake_qa = Column(JSONB, nullable=True)
+    affected_routes = Column(JSONB, nullable=False, server_default="[]")
     organization_id = Column(
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
@@ -188,6 +189,12 @@ class Task(Base):
 
     repo = relationship("Repo", back_populates="tasks", lazy="selectin")
     history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")
+    verify_attempts = relationship(
+        "VerifyAttempt", back_populates="task", order_by="VerifyAttempt.cycle",
+    )
+    review_attempts = relationship(
+        "ReviewAttempt", back_populates="task", order_by="ReviewAttempt.cycle",
+    )
 
 
 class TaskHistory(Base):
@@ -393,6 +400,7 @@ class FreeformConfig(Base):
     # the per-repo active task cap so the queue doesn't grow unboundedly.
     auto_approve_suggestions = Column(Boolean, default=False, nullable=False)
     auto_start_tasks = Column(Boolean, default=False, nullable=False)
+    run_command = Column(Text, nullable=True)
     # Architecture Mode — when True, the architect_analyzer cron runs the
     # improve-codebase-architecture skill against this repo and produces
     # deepening-opportunity suggestions analogous to PO suggestions.
@@ -570,4 +578,47 @@ class SearchMessage(Base):
 
     session = relationship("SearchSession")
 
+
+class VerifyAttempt(Base):
+    __tablename__ = "verify_attempts"
+    __table_args__ = (
+        UniqueConstraint("task_id", "cycle", name="ix_verify_attempts_task_cycle"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    cycle = Column(Integer, nullable=False)  # 1 or 2
+    status = Column(String(16), nullable=False)  # pass / fail / error
+    boot_check = Column(String(16), nullable=True)  # pass / fail / skipped
+    intent_check = Column(String(16), nullable=True)  # pass / fail
+    intent_judgment = Column(Text, nullable=True)
+    tool_calls = Column(JSONB, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    log_tail = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    task = relationship("Task", back_populates="verify_attempts")
+
+
+class ReviewAttempt(Base):
+    __tablename__ = "review_attempts"
+    __table_args__ = (
+        UniqueConstraint("task_id", "cycle", name="ix_review_attempts_task_cycle"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    cycle = Column(Integer, nullable=False)
+    status = Column(String(16), nullable=False)
+    code_review_verdict = Column(Text, nullable=True)
+    ui_check = Column(String(16), nullable=True)  # pass / fail / skipped
+    ui_judgment = Column(Text, nullable=True)
+    tool_calls = Column(JSONB, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    log_tail = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    task = relationship("Task", back_populates="review_attempts")
 
