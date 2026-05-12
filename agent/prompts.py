@@ -345,6 +345,26 @@ If a reviewer says your fix is a band-aid or doesn't address the root cause:
 PO_ANALYSIS_PROMPT = """\
 You are a Product Owner analyzing a codebase to identify UX improvements and feature gaps.
 {goal_section}
+## Market context (brief from the market researcher)
+
+### Product category
+{brief_product_category}
+
+### Competitors and what they offer
+{brief_competitors}
+
+### Themes from the market
+{brief_findings}
+
+### Modality opportunities (voice, vision, AI-native, multi-modal)
+{brief_modality_gaps}
+
+### Strategic / why-now themes
+{brief_strategic_themes}
+
+### Brief summary
+{brief_summary}
+
 ## Your accumulated knowledge about this product
 {ux_knowledge}
 
@@ -352,17 +372,21 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
 {recent_suggestions}
 
 ## Instructions
+
 1. Explore the user-facing code: routes, pages, components, templates, API endpoints.
 2. Map out user journeys: what can users do? What's the flow from start to finish?
-3. Identify 3-5 actionable improvements. Focus on:
-   - Missing features users would naturally expect
-   - UX friction points (confusing flows, missing feedback, poor error handling)
-   - Consistency issues (different patterns for similar things)
-   - New features that would improve the product that are not currently implemented
-   - Performance issues visible in code
+3. Identify 3-5 actionable improvements. For EACH suggestion:
+   - It must be motivated by at least one item from the Market context above
+     OR be an obvious bug / UX defect (in which case category="bug" and
+     evidence_urls=[]).
+   - Prefer suggestions that introduce a new capability or modality the repo
+     currently lacks over suggestions that polish what already exists.
+   - Cite the URLs your suggestion draws from in `evidence_urls`.
+   - Drop suggestions you cannot ground in either market evidence or a
+     visible repo defect — those are the "button-sized" suggestions we
+     don't want.
    {goal_directive}
-4. For each suggestion, provide a title, implementation-ready description, rationale, category, and priority.
-5. Update your knowledge summary with what you learned about the product.
+4. Update your knowledge summary with what you learned about the product.
 
 ## Output format (STRICT JSON — no markdown fences, no commentary)
 {{
@@ -372,7 +396,10 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
       "description": "Implementation-ready description with specific files/components to change",
       "rationale": "Why this matters for users",
       "category": "ux_gap|feature|improvement|bug",
-      "priority": 1
+      "priority": 1,
+      "evidence_urls": [
+        {{"url": "https://...", "title": "Source title", "excerpt": "what was said"}}
+      ]
     }}
   ],
   "ux_knowledge_update": "Updated summary of product understanding..."
@@ -706,6 +733,8 @@ def build_plan_independent_review_prompt(
 
 
 def build_po_analysis_prompt(
+    *,
+    brief,  # MarketBrief — required (kw-only to prevent positional confusion)
     ux_knowledge: str | None = None,
     recent_suggestions: list[str] | None = None,
     goal: str | None = None,
@@ -731,11 +760,42 @@ def build_po_analysis_prompt(
         goal_section = ""
         goal_directive = ""
 
+    def _bullet_list(items, fmt):
+        if not items:
+            return "(none)"
+        return "\n".join(fmt(i) for i in items)
+
+    competitors = _bullet_list(
+        brief.competitors or [],
+        lambda c: f"- **{c.get('name','?')}** ({c.get('url','')}) — {c.get('why_relevant','')}",
+    )
+    findings = _bullet_list(
+        brief.findings or [],
+        lambda f: f"- **{f.get('theme','?')}**: {f.get('observation','')}  "
+                  f"[sources: {', '.join(f.get('sources', []))}]",
+    )
+    modality_gaps = _bullet_list(
+        brief.modality_gaps or [],
+        lambda m: f"- **{m.get('modality','?')}**: {m.get('opportunity','')}  "
+                  f"[sources: {', '.join(m.get('sources', []))}]",
+    )
+    strategic_themes = _bullet_list(
+        brief.strategic_themes or [],
+        lambda t: f"- **{t.get('theme','?')}**: {t.get('why_now','')}  "
+                  f"[sources: {', '.join(t.get('sources', []))}]",
+    )
+
     return PO_ANALYSIS_PROMPT.format(
         goal_section=goal_section,
         goal_directive=goal_directive,
         ux_knowledge=knowledge,
         recent_suggestions=suggestions,
+        brief_product_category=brief.product_category or "(unknown)",
+        brief_competitors=competitors,
+        brief_findings=findings,
+        brief_modality_gaps=modality_gaps,
+        brief_strategic_themes=strategic_themes,
+        brief_summary=brief.summary or "(no summary)",
     )
 
 
