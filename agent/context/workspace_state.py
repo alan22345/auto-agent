@@ -42,6 +42,7 @@ class WorkspaceState:
 
     files: dict[str, FileState] = field(default_factory=dict)
     bash_commands: list[str] = field(default_factory=list)
+    url_fetches: list[dict[str, Any]] = field(default_factory=list)
     test_runs: list[str] = field(default_factory=list)
     current_turn: int = 0
 
@@ -121,5 +122,12 @@ class WorkspaceState:
         elif tool_name == "bash":
             cmd = arguments.get("command", "")
             self.record_bash(cmd)
+
+        elif tool_name == "fetch_url":
+            url = arguments.get("url", "")
+            if url:
+                self.url_fetches.append(
+                    {"url": url, "turn": self.current_turn}
+                )
 
         return warning

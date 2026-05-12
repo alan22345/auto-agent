@@ -143,3 +143,19 @@ class TestAdvanceTurn:
         assert ws.current_turn == 1
         ws.advance_turn()
         assert ws.current_turn == 2
+
+
+class TestFetchUrlTracking:
+    def test_fetch_url_call_recorded(self):
+        state = WorkspaceState()
+        state.process_tool_call(
+            "fetch_url", {"url": "https://example.com/features"}
+        )
+        assert len(state.url_fetches) == 1
+        assert state.url_fetches[0]["url"] == "https://example.com/features"
+        assert state.url_fetches[0]["turn"] == 0
+
+    def test_web_search_call_does_not_record_url_fetch(self):
+        state = WorkspaceState()
+        state.process_tool_call("web_search", {"query": "ai dev tools"})
+        assert state.url_fetches == []
