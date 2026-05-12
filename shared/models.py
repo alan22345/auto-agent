@@ -245,6 +245,40 @@ class TaskOutcome(Base):
     task = relationship("Task")
 
 
+class MessengerConversation(Base):
+    """Durable per-(user, source, focus) chat history for messenger DMs."""
+    __tablename__ = "messenger_conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "source", "focus_kind", "focus_id",
+            name="uq_msgconv_user_source_focus",
+        ),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    source = Column(String(32), nullable=False)            # 'slack' | 'telegram' | ...
+    focus_kind = Column(String(32), nullable=False)        # 'draft' | 'task' (v1)
+    focus_id = Column(BigInteger, nullable=True)           # NULL for 'draft'; task.id for 'task'
+    messages_json = Column(JSONB, nullable=False, default=list)
+    last_active_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class UserFocus(Base):
+    """Per-user 'what am I working on right now' pointer with 24h TTL.
+
+    Not keyed on source — switching focus on Slack also takes effect on
+    Telegram (and any future messenger).
+    """
+    __tablename__ = "user_focus"
+
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    focus_kind = Column(String(32), nullable=False)        # 'draft' | 'task' | 'none'
+    focus_id = Column(BigInteger, nullable=True)
+    set_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class ScheduledTask(Base):
     """Recurring tasks triggered on a cron schedule."""
     __tablename__ = "scheduled_tasks"
