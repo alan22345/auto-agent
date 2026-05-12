@@ -220,14 +220,24 @@ async def test_user_for_slack_id_filters_by_org_membership(monkeypatch):
     assert "organization_memberships" in joined.lower() or "JOIN" in joined.upper()
 
 
-@pytest.mark.asyncio
-async def test_converse_accepts_org_id_kwarg():
-    """Smoke: the signature includes org_id and the function doesn't crash
-    when it receives one. Behavior is unchanged from the existing tests in
-    test_slack_assistant.py — this is a signature-extension only."""
+def test_converse_signature_v2():
+    """converse takes history + on_create_task; org_id is removed (router-owned)."""
     import inspect
+    import sys
+    # Clean up any mocked module from prior tests to get the real one.
+    if "agent.slack_assistant" in sys.modules:
+        del sys.modules["agent.slack_assistant"]
     from agent.slack_assistant import converse
 
     sig = inspect.signature(converse)
-    assert "org_id" in sig.parameters
-    assert sig.parameters["org_id"].default is None
+    params = sig.parameters
+    # New required kwargs.
+    assert "user_id" in params
+    assert "text" in params
+    assert "history" in params
+    assert "home_dir" in params
+    # Optional callback.
+    assert "on_create_task" in params
+    # Removed.
+    assert "org_id" not in params
+    assert "slack_user_id" not in params
