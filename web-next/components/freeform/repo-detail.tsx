@@ -1,6 +1,6 @@
 'use client';
 // Mirrors renderFreeformRepoDetail() in web/static/index.html ~line 1346
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,6 +16,7 @@ import {
 import { wsClient } from '@/lib/ws';
 import { useWS } from '@/hooks/useWS';
 import { CRON_PRESETS } from '@/lib/cron-presets';
+import { useRepos, useUpdateProductBrief } from '@/hooks/useRepos';
 import type { FreeformConfig } from '@/types/ws';
 
 interface Props {
@@ -37,9 +38,20 @@ export function RepoDetail({ config }: Props) {
   const [archMode, setArchMode] = useState(false);
   const [archCron, setArchCron] = useState(CRON_PRESETS[0].value);
   const [poGoal, setPoGoal] = useState('');
+  const [productBrief, setProductBrief] = useState('');
   const [status, setStatus] = useState<SaveStatus>({ kind: 'idle' });
   const savingRef = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Repo metadata (id + product_brief) comes from the REST /api/repos
+  // endpoint — the WebSocket FreeformConfig payload doesn't include them.
+  const reposQuery = useRepos();
+  const repo = useMemo(
+    () =>
+      reposQuery.data?.find((r) => r.name === config?.repo_name) ?? null,
+    [reposQuery.data, config?.repo_name],
+  );
+  const updateBriefMutation = useUpdateProductBrief();
 
   // Only re-sync from server when the user switches to a different repo —
   // not on every WS push. Otherwise an in-flight broadcast can clobber the
@@ -58,6 +70,12 @@ export function RepoDetail({ config }: Props) {
     setStatus({ kind: 'idle' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.repo_name]);
+
+  // product_brief lives on Repo (REST), not FreeformConfig (WS). Re-sync
+  // when the user switches repos OR when the repos query first resolves.
+  useEffect(() => {
+    if (repo) setProductBrief(repo.product_brief ?? '');
+  }, [repo?.id]);
 
   // Confirm save by waiting for the next freeform_config_list broadcast.
   useWS('freeform_config_list', (e) => {
@@ -244,6 +262,59 @@ export function RepoDetail({ config }: Props) {
             <p className="text-xs text-muted-foreground">
               Free-text objective the PO analyzer evaluates suggestions against. Leave blank for an open-ended scan.
             </p>
+          </div>
+
+          {/*
+            Product brief — repo-scoped markdown context injected into every
+            PO prompt (today: architect clarification answers). Saved via
+            REST PATCH /api/repos/{id}/product-brief, NOT the WS form below,
+            because the brief is meaningful for every repo regardless of
+            freeform mode. Rendered inside the freeform settings panel
+            today because it is the only repo-settings surface in the UI.
+          */}
+          <div className="space-y-1.5">
+            <Label htmlFor="rd-product-brief">Product brief</Label>
+            <Textarea
+              id="rd-product-brief"
+              value={productBrief}
+              onChange={(e) => setProductBrief(e.target.value)}
+              placeholder={
+                '# Mission\nWhat does this repo build, for whom, and what are the non-goals?'
+              }
+              rows={8}
+              disabled={!repo}
+            />
+            <p className="text-xs text-muted-foreground">
+              Markdown brief describing this repo&apos;s mission, requirements, and non-goals.
+              Used by the PO agent when answering architect clarification questions.
+            </p>
+            <div className="flex items-center gap-3 pt-1">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!repo || updateBriefMutation.isPending}
+                onClick={() => {
+                  if (!repo) return;
+                  updateBriefMutation.mutate({
+                    repoId: repo.id,
+                    brief: productBrief,
+                  });
+                }}
+              >
+                {updateBriefMutation.isPending ? 'Saving…' : 'Save product brief'}
+              </Button>
+              {updateBriefMutation.isSuccess && (
+                <span className="text-xs text-success">Saved.</span>
+              )}
+              {updateBriefMutation.isError && (
+                <span className="text-xs text-destructive">
+                  {updateBriefMutation.error instanceof Error
+                    ? updateBriefMutation.error.message
+                    : 'Save failed.'}
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="space-y-1.5">
