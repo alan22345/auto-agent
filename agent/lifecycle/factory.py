@@ -54,6 +54,8 @@ def _format_tool_args(tool_name: str, args: dict) -> str:
 def create_agent(
     workspace: str,
     session_id: str | None = None,
+    *,
+    session: Session | None = None,
     readonly: bool = False,
     with_web: bool = False,
     with_browser: bool = False,
@@ -72,6 +74,11 @@ def create_agent(
     """Create a configured AgentLoop instance.
 
     Args:
+        session: Optional pre-built Session — takes precedence over
+                ``session_id``. Pass this when the storage_dir differs
+                from the default (e.g. the trio architect persists its
+                session into the workspace tree, not the default storage
+                dir, so ``resume`` can reload it from the workspace).
         model_tier: Override model selection. Use "fast" for mechanical tasks,
                    "standard" for normal work, "capable" for complex architecture.
         task_id: If set, the agent sends heartbeat signals via the
@@ -99,7 +106,10 @@ def create_agent(
         with_consult_architect=with_consult_architect,
     )
     ctx = ContextManager(workspace, provider)
-    session = Session(session_id) if session_id else None
+    # Caller-supplied Session wins; otherwise fall back to building one
+    # from session_id (existing behaviour).
+    if session is None:
+        session = Session(session_id) if session_id else None
 
     usage_sink = (
         UsageSink(org_id=org_id, task_id=task_id) if org_id is not None else None

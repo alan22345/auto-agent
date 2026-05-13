@@ -69,6 +69,7 @@ def create_architect_agent(
         repo_name=repo_name,
         home_dir=home_dir,
         org_id=org_id,
+        session=session,
     )
     # Replace the default registry with one that adds the architect-only tools.
     from agent.tools import create_default_registry
@@ -79,11 +80,6 @@ def create_architect_agent(
     )
     # Inject the phase-specific system prompt.
     agent.system_prompt_override = _SYSTEM_PROMPTS[phase]
-    # Attach the persistence handle so AgentLoop.run(..., resume=True) can
-    # reload prior messages. AgentLoop reads ``self._session`` directly, so
-    # we set the private attribute. (No public setter exists today.)
-    if session is not None:
-        agent._session = session
     return agent
 
 
