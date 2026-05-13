@@ -25,7 +25,7 @@ Each role runs in its own LLM session, with its own context, communicating throu
 
 ## Out of scope (deferred)
 
-- **Replacing today's flow for non-complex_large tasks.** Simple and complex tasks continue using `planning → coding → verify → review`. Trio is reachable only via classifier output of `complex_large`. Migration of other complexity tiers is deferred until the trio proves out in production.
+- **Replacing today's flow for tasks that are neither complex_large nor freeform.** Simple and complex non-freeform tasks continue using `planning → coding → verify → review`. Trio is reachable only when `complexity = complex_large` OR `freeform_mode = True`. Migration of other complexity tiers (e.g., complex non-freeform) is deferred until the trio proves out in production.
 - **Promptfoo eval suite for the trio.** No automated eval cases in v1; judging by hand initially per user direction. Eval follow-up is a known future task.
 - **Per-task token meter and cost ceilings.** v1 ships with cycle counts visible in the UI and a manual "Pause Trio" button. Hard cost caps are deferred until observation shows runaway behavior in real usage.
 - **Multi-builder parallelism.** Each trio parent dispatches one child at a time, sequentially. Parallel builders are a future optimization.
@@ -38,20 +38,20 @@ Each role runs in its own LLM session, with its own context, communicating throu
 
 ### Routing
 
-Today's `QUEUED → next-state` handler routes by task type. With this spec, it additionally checks `task.complexity`:
+Today's `QUEUED → next-state` handler routes by task type. With this spec, it additionally checks `task.complexity` and `task.freeform_mode`:
 
 ```
-QUEUED ─┬─► complexity = complex_large ───► TRIO_EXECUTING (new path)
-        └─► complexity = simple | complex ─► PLANNING (today's path, unchanged)
+QUEUED ─┬─► complexity = complex_large OR freeform_mode = True ───► TRIO_EXECUTING (new path)
+        └─► else ─────────────────────────────────────────────────► PLANNING (today's path, unchanged)
 ```
 
-`orchestrator/create_repo.py` is updated to set `complexity = COMPLEX_LARGE` directly on the scaffold task it creates, bypassing classification (we already know cold-start is large).
+The trio is reachable from two independent conditions: a non-freeform task classified as `complex_large`, or any freeform task (regardless of complexity classification). `orchestrator/create_repo.py` is updated to set `complexity = COMPLEX_LARGE` directly on the scaffold task it creates, bypassing classification (we already know cold-start is large), but the freeform_mode flag alone is also sufficient to route any subsequent freeform suggestion task through the trio.
 
 ### Hierarchical state machine
 
-The trio is modeled as a **super-state with internal transitions**:
+The trio is modeled as a **super-state with internal transitions** on the parent task. The parent also reaches outer terminal states (`PR_CREATED`, `AWAITING_CI`, `AWAITING_REVIEW`, `DONE`, `BLOCKED`) for the final integration PR.
 
-- **Outer state** — `TaskStatus.TRIO_EXECUTING` on the trio parent task. Outer transitions: `QUEUED → TRIO_EXECUTING → (DONE | BLOCKED)`.
+- **Outer states for trio parent:** `QUEUED → TRIO_EXECUTING → PR_CREATED → AWAITING_CI → AWAITING_REVIEW → DONE` (happy path), with `AWAITING_CI → TRIO_EXECUTING` as a loopback for architect-driven repair when the integration PR fails CI.
 - **Inner state** — `Task.trio_phase` (nullable enum) on the trio parent, only set while `status = TRIO_EXECUTING`. Internal transitions are owned and validated by the trio module, not by `orchestrator/state_machine.py`.
 
 ```
@@ -80,19 +80,57 @@ The trio is modeled as a **super-state with internal transitions**:
                   │  │
                   └──┼──────────────────────┘
                      ▼
-                   DONE
+                  PR_CREATED  (parent opens final integration PR)
+                     │
+                     ▼
+                  AWAITING_CI
+                     │
+                ┌────┴────┐
+                ▼         ▼
+              fail      pass
+                │         │
+                ▼         ▼
+        TRIO_EXECUTING  AWAITING_REVIEW
+        (re-enter at      (human/agent
+         checkpoint        per freeform_mode)
+         with CI log         │
+         as input)           ▼
+                           DONE
 ```
 
 `Task.trio_phase` values:
 
 - `architecting` — architect is running (either initial or revision sub-phase, distinguished by `architect_attempts.phase`).
 - `awaiting_builder` — a child task has been dispatched and is in flight.
-- `architect_checkpoint` — child just completed; architect is updating backlog and deciding next action.
+- `architect_checkpoint` — child just completed (or integration CI just failed); architect is updating backlog and deciding next action.
 
 ### Two task tiers — parent and child
 
-- **Trio parent task** holds the architect's context, `ARCHITECTURE.md`, the backlog, all `architect_attempts` rows. Lifetime: from architect's first run to final backlog drain. No PR of its own. The architect commits to the parent's branch only via initial scaffold + ADRs (see Components).
-- **Trio child task** is created per work item. `parent_task_id` points at the trio parent. `complexity = complex`, `freeform_mode` inherited from parent. Each child = one PR, auto-merged on green. Children skip `INTAKE`/`CLASSIFYING` — the parent already knows their shape.
+- **Trio parent task** holds the architect's context, `ARCHITECTURE.md`, the backlog, all `architect_attempts` rows. Lifetime: from architect's first run through to the final integration PR's merge. The parent opens **one final integration PR** at the end of the trio loop (see "Branch + PR layout" below); that PR goes through `AWAITING_REVIEW` exactly as a normal task would.
+- **Trio child task** is created per work item. `parent_task_id` points at the trio parent. `complexity = complex`, `freeform_mode` inherited from parent. Each child = one PR targeting the parent's integration branch, auto-merged on green CI + green trio_review (regardless of mode — the human/agent review is reserved for the final integration PR, not per-child). Children skip `INTAKE`/`CLASSIFYING` — the parent already knows their shape.
+
+### Branch + PR layout
+
+```
+main
+ │
+ ├── trio/<parent_id>           (parent integration branch — created at trio start)
+ │    │
+ │    ├── trio/<parent_id>/init        (architect's initial scaffold + ARCHITECTURE.md PR)
+ │    ├── trio/<parent_id>/<child1_id> (work item 1)
+ │    ├── trio/<parent_id>/<child2_id> (work item 2)
+ │    └── ...
+ │
+ ▼ (final integration PR opens when backlog drains)
+trio/<parent_id> → main         (non-freeform)
+trio/<parent_id> → <dev_branch> (freeform; dev branch per FreeformConfig)
+```
+
+- **Child PRs target the parent's integration branch.** Auto-merged on green. No human review per child.
+- **Final integration PR** is opened by the trio orchestrator when the backlog is drained. Target:
+  - Non-freeform: `main`. Goes through `AWAITING_REVIEW` for **human review**.
+  - Freeform: the dev branch from `FreeformConfig`. Goes through `AWAITING_REVIEW` for **agent review** (today's `review.py` auto-approval pattern, unchanged). The existing freeform `promote_task_to_main` flow handles dev → main separately.
+- **Architect's initial scaffold + ARCHITECTURE.md** is the same shape as a child PR: branched off the integration branch, opens a PR back to it, auto-merges on green. Treated identically to any other child by the merge machinery.
 
 Child task's outer flow:
 
@@ -145,7 +183,7 @@ Runs in four phases, each producing an `architect_attempts` row:
 |---|---|---|
 | `initial` | Parent enters `architecting` for the first time | `ARCHITECTURE.md` written; `trio_backlog` populated; scaffold commands run for cold-start; any initial ADRs |
 | `consult` | Builder calls `consult_architect(question, why)` from a child task | Textual answer to builder; optional ARCHITECTURE.md edit; optional ADR |
-| `checkpoint` | Child task reaches `DONE`; parent transitions to `architect_checkpoint` | Updated backlog (mark item done; add discovered items); decision: `continue` / `revise` / `done` |
+| `checkpoint` | Child task reaches `DONE`, OR integration PR's `AWAITING_CI` failed | Updated backlog (mark item done; add discovered items; add fix items if entered via CI failure); decision: `continue` / `revise` / `done` |
 | `revision` | Checkpoint or escalated consult judged the design wrong | Rewritten ARCHITECTURE.md sections; rewritten backlog; new ADRs for changed decisions |
 
 **Tools available:**
@@ -163,7 +201,9 @@ Runs in four phases, each producing an `architect_attempts` row:
 - `ARCHITECTURE.md` at the workspace root — the canonical per-app design document. Accreted over the trio's lifetime via `file_edit` calls; fully regenerated only during `revision`.
 - ADRs in `docs/decisions/NNN-<slug>.md` — one per non-obvious tradeoff. Format follows the project's existing `docs/decisions/000-template.md`.
 
-**Initial-phase PR.** The architect's first run produces a small commit containing `ARCHITECTURE.md` + scaffolded project files + any initial ADRs. This commit is opened as a PR titled `init: architecture + scaffold` on the parent's branch and auto-merged on green CI — preserving the project invariant that **everything reaches main via PR**, even the architect's own work.
+**Initial-phase PR.** The architect's first run produces a small commit containing `ARCHITECTURE.md` + scaffolded project files + any initial ADRs. This commit lives on a sub-branch `trio/<parent_id>/init` off the parent's integration branch, opens a PR targeting `trio/<parent_id>`, and auto-merges on green CI — same shape as any subsequent child PR. This preserves the project invariant that **everything reaches main via PR** (here, "reaches integration branch via PR"), even the architect's own work.
+
+**Integration-CI-failure checkpoint context.** When the parent's final integration PR fails CI, the orchestrator re-enters `TRIO_EXECUTING` with `trio_phase = architect_checkpoint`, passing the CI failure log + the failed PR's diff URL as additional context to the architect. The architect reads the failure, decides on fix work items, and adds them to the backlog. The trio loop then proceeds as normal — dispatch child(ren), drain backlog, re-open final PR. The architect's prompt for this checkpoint flavor includes the framing: "The integration PR failed CI. Diagnose the failure from the CI log and add work items to fix it. If the failure indicates a deeper design issue, request a revision instead."
 
 ### Builder — `agent/lifecycle/coding.py` (extended)
 
@@ -244,6 +284,58 @@ Only available to the architect agent. Writes a new ADR to `docs/decisions/NNN-<
 
 Returns the file path. The architect commits the ADR as part of the same git commit as any related `ARCHITECTURE.md` change.
 
+### Trio orchestrator — `agent/lifecycle/trio/__init__.py`
+
+The `run_trio_parent(task, *, repair_context=None)` entry point. Dispatched when the parent enters `TRIO_EXECUTING`. The `repair_context` parameter is non-null only when re-entering after a failed integration PR's CI:
+
+```python
+async def run_trio_parent(parent: Task, *, repair_context: RepairContext | None = None):
+    if repair_context is None:
+        # Fresh entry — run the architect's initial pass.
+        set_trio_phase(parent, 'architecting')
+        await architect.run_initial(parent)  # writes ARCHITECTURE.md + backlog
+    else:
+        # Re-entry from a failed integration PR — go straight to checkpoint
+        # with the CI failure log + failed PR diff as additional context.
+        set_trio_phase(parent, 'architect_checkpoint')
+        await architect.checkpoint(parent, repair_context=repair_context)
+
+    while parent.trio_backlog.has_pending_items():
+        set_trio_phase(parent, 'awaiting_builder')
+        child = await scheduler.dispatch_next(parent)
+        await scheduler.await_child(parent, child)
+
+        if child.status in (FAILED, BLOCKED):
+            transition(parent, BLOCKED)
+            return
+
+        set_trio_phase(parent, 'architect_checkpoint')
+        decision = await architect.checkpoint(parent, child)
+        if decision == 'revise':
+            set_trio_phase(parent, 'architecting')
+            await architect.run_revision(parent)
+
+    # Backlog drained — open the final integration PR.
+    pr_target = parent.repo.freeform_config.dev_branch if parent.freeform_mode else 'main'
+    pr_url = await open_integration_pr(parent, target_branch=pr_target)
+    parent.pr_url = pr_url
+    transition(parent, PR_CREATED)  # state machine drives AWAITING_CI → AWAITING_REVIEW → DONE
+```
+
+A separate handler reacts to the parent's `AWAITING_CI` resolution:
+
+```python
+async def on_parent_awaiting_ci_resolved(parent: Task, ci_result: CIResult):
+    if ci_result.passed:
+        transition(parent, AWAITING_REVIEW)   # existing handler takes over
+    else:
+        repair_ctx = RepairContext(ci_log=ci_result.log, failed_pr_url=parent.pr_url)
+        transition(parent, TRIO_EXECUTING)
+        asyncio.create_task(run_trio_parent(parent, repair_context=repair_ctx))
+```
+
+Once the integration PR's CI passes, the parent transitions to `AWAITING_REVIEW`, which behaves exactly as today: **human** approval for non-freeform tasks; **agent** auto-approval (via existing `review.py`) for freeform tasks. No new code in `AWAITING_REVIEW`; the trio doesn't override that handler.
+
 ## Data Model
 
 ### Enum additions
@@ -277,14 +369,11 @@ class WorkItem(BaseModel):
     title: str                           # becomes PR title
     description: str                     # becomes PR body / builder prompt
     status: Literal['pending', 'in_progress', 'done', 'skipped']
-    priority: Literal['core', 'nit'] = 'core'   # see note below
     assigned_task_id: int | None = None
     discovered_in_attempt_id: int | None = None
 ```
 
 Stored as `list[WorkItem]` under `Task.trio_backlog`. Architect mutations are full backlog rewrites per checkpoint — JSONB is fine for this scale (work items per task are expected to be low double digits).
-
-**Note on `priority`.** The `priority` field is retained for future use (architect may auto-bundle multiple nits into a single PR rather than dispatching N tiny PRs). v1 always treats every backlog item identically — `priority` is informational.
 
 ### New audit tables
 
@@ -324,14 +413,15 @@ No separate `builder_attempts` table — each trio child task is itself the reco
 
 ```python
 # orchestrator/state_machine.py STATE_TRANSITIONS additions
-TaskStatus.QUEUED:         {..., TaskStatus.TRIO_EXECUTING}     # router branches on complexity
-TaskStatus.TRIO_EXECUTING: {TaskStatus.DONE, TaskStatus.BLOCKED}  # parent: drained or stuck
+TaskStatus.QUEUED:         {..., TaskStatus.TRIO_EXECUTING}     # router branches on complexity/freeform
+TaskStatus.TRIO_EXECUTING: {TaskStatus.PR_CREATED, TaskStatus.BLOCKED}  # parent: opens final PR or stuck
 TaskStatus.VERIFYING:      {..., TaskStatus.TRIO_REVIEW}        # added for trio children
 TaskStatus.TRIO_REVIEW:    {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED}
 TaskStatus.CODING:         {..., TaskStatus.TRIO_REVIEW}        # added for trio children
+TaskStatus.AWAITING_CI:    {..., TaskStatus.TRIO_EXECUTING}     # added for trio parent on CI failure → architect-driven repair
 ```
 
-`TaskStatus.AWAITING_REVIEW` transitions are unchanged — that state is skipped entirely for trio children.
+`TaskStatus.AWAITING_REVIEW` transitions are unchanged. AWAITING_REVIEW is **skipped for trio children** (trio_review is their gate) but **used for the trio parent's final integration PR** with its existing mode-aware behavior (human for non-freeform, agent for freeform).
 
 ### Migration
 
@@ -375,13 +465,15 @@ The trio has four BLOCKED paths, all routed through the existing `BLOCKED` outer
 | Path | Trigger | Applies to |
 |---|---|---|
 | Architect declares clarification needed | Architect emits `decision={action: 'awaiting_clarification', question}` | **Non-freeform tasks only** — transitions parent to existing `AWAITING_CLARIFICATION` |
-| Child task BLOCKED | A trio child enters `BLOCKED` (quota, repeated CI failure, etc.) | All trio tasks |
+| Child task BLOCKED | A trio child enters `BLOCKED` (quota, repeated CI failure of a *child* PR, etc.) | All trio tasks |
 | Child task FAILED | Unrecoverable error in child | All trio tasks |
 | Manual cancellation | User triggers "Pause Trio" in web-next | All trio tasks |
 
+**Integration PR CI failure is NOT a BLOCKED path.** When the parent's final integration PR fails CI, the parent re-enters `TRIO_EXECUTING` at `architect_checkpoint` with the CI failure log as repair context. The architect adds fix work items to the backlog; the trio loop drains them and re-opens the final PR. This is the architect-driven repair mechanism. Only when an individual *child* repeatedly fails (and itself enters BLOCKED) does the parent transition to BLOCKED.
+
 `parent.trio_phase` is cleared on transition to BLOCKED. The latest `architect_attempts` row (or child's BLOCKED reason) carries the audit explanation. UI renders the cause from those rows.
 
-**In-flight children when parent enters BLOCKED:** allowed to finish their current state (no LLM-call interruption). New children are not dispatched. An orphan child reaching DONE after parent BLOCKED is a successful merged PR — fine, work merged is work merged.
+**In-flight children when parent enters BLOCKED:** allowed to finish their current state (no LLM-call interruption). New children are not dispatched. An orphan child reaching DONE after parent BLOCKED is a successful merged PR (into the parent integration branch) — fine, work merged is work merged; just won't reach the final integration PR until the parent is un-blocked.
 
 ### Architect autonomy in freeform mode
 
@@ -489,6 +581,7 @@ This is the moat against the failure mode "everybody agrees, but the result is b
 
 - `tests/test_trio_e2e_happy_path.py` — full trio: classify → trio_executing → architect → 2 children → checkpoint → done. Deterministic LLM responses drive each phase.
 - `tests/test_trio_e2e_block_path.py` — child task BLOCKED triggers parent BLOCKED; in-flight assertions on `trio_phase`.
+- `tests/test_trio_repair_on_integration_ci_failure.py` — final integration PR fails CI; verify parent re-enters `TRIO_EXECUTING` at `architect_checkpoint` with a non-null `repair_context`; architect adds fix items; second integration PR opens after drain.
 - `tests/test_trio_models_migration.py` — requires real Postgres at HEAD 033; verifies tables/columns/enums materialized. Same skip-on-no-db pattern as `test_verify_review_models.py`.
 
 **E2E test** (slow, against real Playwright + real http.server fixture):
@@ -523,17 +616,21 @@ The plan will land tasks in approximately this order, each red→green:
 
 The trio is complete when:
 
-- A task with `complexity = COMPLEX_LARGE` routes to `TRIO_EXECUTING` instead of `PLANNING`. Other complexities unchanged.
-- A cold-start task created via `/freeform "build something new"` is automatically classified as `COMPLEX_LARGE` and enters the trio.
-- The architect's `initial` phase produces `ARCHITECTURE.md`, a populated `trio_backlog`, and (for cold-start) a scaffolded project, committed and merged via the `init: architecture + scaffold` PR.
-- The trio dispatches child tasks sequentially, one per backlog item. Each child opens a PR titled with the work item title, body equal to the work item description.
-- Each child PR is gated by `VERIFYING` (boot + intent) and `TRIO_REVIEW` (alignment) before opening. `AWAITING_REVIEW` is skipped.
+- A task with `complexity = COMPLEX_LARGE` OR `freeform_mode = True` routes to `TRIO_EXECUTING` instead of `PLANNING`. Other tasks unchanged.
+- A cold-start task created via `/freeform "build something new"` is automatically classified as `COMPLEX_LARGE` (and is also freeform) and enters the trio.
+- The architect's `initial` phase produces `ARCHITECTURE.md`, a populated `trio_backlog`, and (for cold-start) a scaffolded project, committed and merged via the `init: architecture + scaffold` PR into the parent's integration branch.
+- The trio dispatches child tasks sequentially, one per backlog item. Each child opens a PR titled with the work item title, body equal to the work item description, **targeting the parent's integration branch** (`trio/<parent_id>`).
+- Each child PR is gated by `VERIFYING` (boot + intent) and `TRIO_REVIEW` (alignment) before opening. `AWAITING_REVIEW` is skipped for children — they auto-merge into the integration branch on green CI + green trio_review.
+- After backlog drains, the trio parent opens **one final integration PR** from `trio/<parent_id>` to `main` (non-freeform) or to the freeform-config dev branch (freeform). The parent transitions through `PR_CREATED → AWAITING_CI → AWAITING_REVIEW → DONE`.
+- The final PR's `AWAITING_REVIEW` is **human** for non-freeform tasks; **agent** (auto-approved via existing `review.py`) for freeform tasks. No new code in `AWAITING_REVIEW`.
+- If the final integration PR fails CI, the parent re-enters `TRIO_EXECUTING` with `trio_phase = architect_checkpoint` and a `repair_context` (CI log + failed PR diff). The architect adds fix work items to the backlog, the trio loop drains them, and a fresh final PR opens.
 - The builder can call `consult_architect(question, why)` from any trio child. The call appends an `architect_attempts` row with `phase = 'consult'` and (if applicable) commits an ARCHITECTURE.md update.
 - The architect can call `record_decision(title, context, decision, consequences)`. The tool writes a properly-formatted ADR to `docs/decisions/NNN-<slug>.md` and commits it.
 - For freeform-mode trio tasks, the architect never returns "awaiting clarification" — it makes decisions, logs ADRs, and continues.
-- web-next renders: trio_phase on the parent task page, cycle counts visible, ADR panel listing decisions, child task drill-down with consulting_architect spinner state, a "Pause Trio" button.
+- web-next renders: trio_phase on the parent task page, cycle counts visible, ADR panel listing decisions, child task drill-down with consulting_architect spinner state, integration PR link, a "Pause Trio" button.
 - On orchestrator restart, in-flight trio tasks resume cleanly to the correct phase per the recovery logic.
 - The load-bearing regression test (`test_trio_rejects_obvious_flaw_despite_agent_ok.py`) is green.
+- The integration-PR repair test (`test_trio_repair_on_integration_ci_failure.py`) is green.
 - Migration 033 applies cleanly; rollback path tested.
 - All bundled loose-end fixes (dev-server log leak; verify.py hardening) pass their tests.
 
@@ -542,7 +639,7 @@ The trio is complete when:
 - **`team-memory` integration.** Architect calls `remember_memory` on durable cross-task decisions during initial / revision phases. Deferred until team-memory is healthier infrastructure.
 - **Promptfoo eval suite for the trio.** Bootstrap-a-recipe-app and similar cases as scored eval. Deferred to first follow-up.
 - **Per-task token meter and cost ceiling.** Triggered if real-world runaway loops show up.
-- **Migrate complex (not just complex_large) tasks to the trio.** Decision deferred until the trio proves out for complex_large.
+- **Migrate complex (non-freeform) tasks to the trio.** Decision deferred until the trio proves out on its current routing (complex_large OR freeform).
 - **Parallel builders.** Multiple children dispatched concurrently. Decision deferred until sequential proves too slow.
 - **Sub-task PR sharing of a single dev server.** Reduce verify boot overhead per child. Decision deferred until boot cost matters.
 - **Architect-level review.** Adding an explicit review stage on the architect's initial output. Decision deferred until experience shows it's needed.
