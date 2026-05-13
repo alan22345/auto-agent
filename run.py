@@ -408,6 +408,57 @@ async def on_clarification_resolved(event: Event) -> None:
             await publish(task_start_coding(task.id))
 
 
+async def on_architect_clarification_needed(event: Event) -> None:
+    """Route the architect's clarification question.
+
+    Freeform → dispatch the PO agent (it writes the answer and publishes
+    *_RESOLVED). Non-freeform → republish the planner-style
+    CLARIFICATION_NEEDED event with phase='trio_architect' so the
+    existing per-integration formatters in integrations/* surface the
+    question via the right channel.
+    """
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task or task.status != TaskStatus.AWAITING_CLARIFICATION:
+            return
+        if task.trio_phase is None:
+            # Not a trio clarification. Ignore.
+            return
+        if task.freeform_mode:
+            import agent.po_agent as po_agent
+            asyncio.create_task(  # noqa: RUF006 fire-and-forget
+                po_agent.answer_architect_question(task.id)
+            )
+        else:
+            await publish(Event(
+                type=TaskEventType.CLARIFICATION_NEEDED,
+                task_id=task.id,
+                payload={
+                    "question": event.payload.get("question", ""),
+                    "phase": "trio_architect",
+                },
+            ))
+
+
+async def on_architect_clarification_resolved(event: Event) -> None:
+    """Answer landed; transition state and dispatch architect.resume."""
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task or task.status != TaskStatus.AWAITING_CLARIFICATION:
+            return
+        if task.trio_phase is None:
+            return
+        await transition(
+            session, task, TaskStatus.TRIO_EXECUTING,
+            "Architect resuming after clarification",
+        )
+        await session.commit()
+        from agent.lifecycle.trio import architect
+        asyncio.create_task(  # noqa: RUF006
+            architect.resume(task.id)
+        )
+
+
 async def on_task_approved(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
@@ -1326,6 +1377,8 @@ bus = EventBus()
 bus.on(TaskEventType.CREATED, on_task_created)
 bus.on(TaskEventType.CLASSIFIED, on_task_classified)
 bus.on(TaskEventType.CLARIFICATION_RESOLVED, on_clarification_resolved)
+bus.on(TaskEventType.ARCHITECT_CLARIFICATION_NEEDED, on_architect_clarification_needed)
+bus.on(TaskEventType.ARCHITECT_CLARIFICATION_RESOLVED, on_architect_clarification_resolved)
 bus.on(TaskEventType.APPROVED, on_task_approved)
 bus.on(TaskEventType.REVIEW_COMPLETE, on_review_complete)
 bus.on(TaskEventType.REVIEW_COMMENTS_ADDRESSED, on_review_comments_addressed)
