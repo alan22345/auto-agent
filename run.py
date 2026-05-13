@@ -2016,6 +2016,10 @@ async def lifespan(app: FastAPI):
     # Recover tasks stuck in active states (e.g. from a restart mid-task)
     await _recover_stuck_tasks()
 
+    # Resume trio parents that were in-flight when the orchestrator last stopped.
+    from agent.lifecycle.trio.recovery import resume_all_trio_parents
+    await resume_all_trio_parents()
+
     bg = [
         asyncio.create_task(orchestrator_event_loop()),
         asyncio.create_task(run_scheduler()),
