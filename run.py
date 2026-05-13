@@ -355,8 +355,21 @@ async def on_task_classified(event: Event) -> None:
                 await publish(Event(type="claude_auth_required", task_id=task.id))
                 return
 
+        # Trio routing — tasks that are complex_large OR freeform_mode go to
+        # the parent/architect orchestration loop instead of the legacy
+        # PLANNING / CODING paths. Dispatched fire-and-forget so the event
+        # handler returns quickly.
+        is_complex_large = task.complexity == TaskComplexity.COMPLEX_LARGE
+        is_freeform = bool(task.freeform_mode)
+        route_to_trio = is_complex_large or is_freeform
+
         if force_start or await can_start_task(session, task):
-            if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+            if route_to_trio:
+                task = await transition(session, task, TaskStatus.QUEUED)
+                task = await transition(
+                    session, task, TaskStatus.TRIO_EXECUTING, "Starting trio"
+                )
+            elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
                 task = await transition(session, task, TaskStatus.QUEUED)
                 task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
             else:
@@ -370,6 +383,9 @@ async def on_task_classified(event: Event) -> None:
             await publish(task_start_planning(task.id))
         elif task.status == TaskStatus.CODING:
             await publish(task_start_coding(task.id))
+        elif task.status == TaskStatus.TRIO_EXECUTING:
+            from agent.lifecycle.trio import run_trio_parent
+            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
 
 
 async def on_clarification_resolved(event: Event) -> None:
@@ -1107,7 +1123,17 @@ async def _try_start_queued(session) -> None:
                 await publish(Event(type="claude_auth_required", task_id=task.id))
                 continue
 
-        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+        # Trio routing — see on_task_classified for the same branch.
+        is_complex_large = task.complexity == TaskComplexity.COMPLEX_LARGE
+        is_freeform = bool(task.freeform_mode)
+        if is_complex_large or is_freeform:
+            task = await transition(
+                session, task, TaskStatus.TRIO_EXECUTING, "Slot opened, starting trio"
+            )
+            await session.commit()
+            from agent.lifecycle.trio import run_trio_parent
+            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+        elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(
                 session, task, TaskStatus.PLANNING, "Slot opened, starting planning"
             )
@@ -1132,7 +1158,14 @@ async def on_start_queued_task(event: Event) -> None:
             log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
             return
 
-        if task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
+        # Trio routing — see on_task_classified for the same branch.
+        is_complex_large = task.complexity == TaskComplexity.COMPLEX_LARGE
+        is_freeform = bool(task.freeform_mode)
+        if is_complex_large or is_freeform:
+            task = await transition(
+                session, task, TaskStatus.TRIO_EXECUTING, "Starting trio"
+            )
+        elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
         else:
             task = await transition(session, task, TaskStatus.CODING, "Starting coding")
@@ -1140,8 +1173,11 @@ async def on_start_queued_task(event: Event) -> None:
 
         if task.status == TaskStatus.PLANNING:
             await publish(task_start_planning(task.id))
-        else:
+        elif task.status == TaskStatus.CODING:
             await publish(task_start_coding(task.id))
+        elif task.status == TaskStatus.TRIO_EXECUTING:
+            from agent.lifecycle.trio import run_trio_parent
+            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
         log.info(f"Started queued task #{task.id}")
 
 
