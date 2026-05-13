@@ -11,9 +11,9 @@ import re
 from typing import Any, Literal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from agent.lifecycle.factory import create_agent
+from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.lifecycle.trio.prompts import (
     ARCHITECT_CHECKPOINT_SYSTEM,
     ARCHITECT_CONSULT_SYSTEM,
@@ -338,6 +338,111 @@ def _result_tool_calls(result: Any, agent: Any) -> list:
     return []
 
 
+async def _emit_clarification(
+    *,
+    parent_task_id: int,
+    agent,  # AgentLoop
+    workspace,
+    output: str,
+    tool_calls: list[dict],
+    question: str,
+    phase: ArchitectPhase,
+) -> None:
+    """Persist the AgentLoop session, write the question row, transition
+    the parent to AWAITING_CLARIFICATION, publish *_NEEDED.
+
+    Called from run_initial / checkpoint / run_revision when the architect
+    output contains an awaiting_clarification JSON block.
+    """
+    from agent.session import Session
+    from orchestrator.state_machine import transition
+    from shared.events import Event, TaskEventType, publish
+
+    # 1. Persist the AgentLoop messages + api_messages so resume() can
+    #    pick up exactly where the architect left off.
+    session_id = f"trio-{parent_task_id}"
+    session_blob_dir = workspace.root if hasattr(workspace, "root") else str(workspace)
+    file_session = Session(session_id=session_id, storage_dir=session_blob_dir)
+    await file_session.save(agent.messages, agent.api_messages)
+    # session_blob_path is the file Session.save() wrote — relative path
+    # under the workspace dir so the architect.resume() side can locate it
+    # from any reconstructed workspace path.
+    session_blob_path = f"{session_id}.json"
+
+    # 2. Loop guard — count clarification rounds in this parent's lifetime.
+    async with async_session() as s:
+        prior = (
+            await s.execute(
+                select(func.count())
+                .select_from(ArchitectAttempt)
+                .where(ArchitectAttempt.task_id == parent_task_id)
+                .where(ArchitectAttempt.clarification_question.is_not(None))
+            )
+        ).scalar_one()
+
+        cap = int(os.environ.get("TRIO_MAX_CLARIFICATIONS", "3"))
+        if prior >= cap:
+            log.warning(
+                "architect.clarification.loop_guard",
+                task_id=parent_task_id, prior_rounds=prior, cap=cap,
+            )
+            parent = (
+                await s.execute(select(Task).where(Task.id == parent_task_id))
+            ).scalar_one()
+            await transition(
+                s, parent, TaskStatus.BLOCKED,
+                message=f"architect asked for clarification {prior + 1}x; capped at {cap}",
+            )
+            s.add(ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=phase,
+                cycle=_next_cycle_sync(prior + 1),
+                reasoning=output,
+                tool_calls=tool_calls,
+                clarification_question=question,
+                session_blob_path=session_blob_path,
+                decision={"action": "blocked",
+                          "reason": "clarification loop guard"},
+            ))
+            await s.commit()
+            return
+
+        # 3. Normal path: write the attempt row + transition + publish.
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        s.add(ArchitectAttempt(
+            task_id=parent_task_id,
+            phase=phase,
+            cycle=prior + 1,
+            reasoning=output,
+            tool_calls=tool_calls,
+            clarification_question=question,
+            session_blob_path=session_blob_path,
+            decision={"action": "awaiting_clarification"},
+        ))
+        await transition(
+            s, parent, TaskStatus.AWAITING_CLARIFICATION,
+            message="Architect needs answers",
+        )
+        await s.commit()
+
+    await publish(Event(
+        type=TaskEventType.ARCHITECT_CLARIFICATION_NEEDED,
+        task_id=parent_task_id,
+        payload={"question": question},
+    ))
+    log.info(
+        "architect.clarification.emitted",
+        task_id=parent_task_id, round=prior + 1, question_preview=question[:120],
+    )
+
+
+def _next_cycle_sync(n: int) -> int:
+    """Small helper for tests / clarity. Cycles are 1-indexed."""
+    return n
+
+
 async def run_initial(parent_task_id: int) -> None:
     """Run the architect's initial pass on a trio parent task.
 
@@ -346,8 +451,6 @@ async def run_initial(parent_task_id: int) -> None:
     On JSON-extraction failure: marks the parent ``BLOCKED`` and persists
     a blocked attempt row instead.
     """
-    from agent.lifecycle.factory import home_dir_for_task
-
     async with async_session() as s:
         parent = (
             await s.execute(select(Task).where(Task.id == parent_task_id))
@@ -377,6 +480,21 @@ async def run_initial(parent_task_id: int) -> None:
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
+
+    # First: did the architect ask for clarification? If so, persist
+    # session + transition state instead of trying to parse a backlog.
+    clarification = _extract_clarification(output)
+    if clarification is not None:
+        await _emit_clarification(
+            parent_task_id=parent_task_id,
+            agent=agent,
+            workspace=workspace,
+            output=output,
+            tool_calls=tool_calls,
+            question=clarification,
+            phase=ArchitectPhase.INITIAL,
+        )
+        return
 
     backlog = _extract_backlog(output)
 
@@ -587,8 +705,6 @@ async def consult(
 
     Returns ``{"answer": str, "architecture_md_updated": bool}``.
     """
-    from agent.lifecycle.factory import home_dir_for_task
-
     async with async_session() as s:
         parent = (
             await s.execute(select(Task).where(Task.id == parent_task_id))
@@ -744,8 +860,6 @@ async def checkpoint(
     and persists an attempt row with that decision; the parent's backlog
     is left untouched in that case.
     """
-    from agent.lifecycle.factory import home_dir_for_task
-
     async with async_session() as s:
         parent = (
             await s.execute(select(Task).where(Task.id == parent_task_id))
@@ -861,8 +975,6 @@ async def run_revision(parent_task_id: int) -> None:
     failure: transitions the parent to ``BLOCKED`` and persists a
     blocked revision row.
     """
-    from agent.lifecycle.factory import home_dir_for_task
-
     async with async_session() as s:
         parent = (
             await s.execute(select(Task).where(Task.id == parent_task_id))
