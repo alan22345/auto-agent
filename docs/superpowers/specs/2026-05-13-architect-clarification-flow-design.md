@@ -71,9 +71,10 @@ This design closes both gaps in a single coherent flow.
    freeform_mode?       not freeform
         │                 │
         ▼                 ▼
-   po_agent.answer    notifier.surface_clarification
-   (product_brief     (web/slack/telegram/linear,
-   injected)          keyed by task.source)
+   po_agent.answer    publish task.clarification_needed
+   (product_brief     (existing event; per-integration
+   injected)          formatters in integrations/* already
+                      surface it, keyed by task.source)
         │                 │
         └────────┬────────┘
                  ▼
@@ -270,8 +271,14 @@ async def on_architect_clarification_needed(event: Event) -> None:
             from agent.po_agent import answer_architect_question
             asyncio.create_task(answer_architect_question(task.id))
         else:
-            from shared.notifier import surface_clarification
-            await surface_clarification(task, event.payload["question"])
+            # Reuse the planner's clarification event; existing
+            # integrations (telegram/slack/linear) surface it.
+            await publish(Event(
+                type=TaskEventType.CLARIFICATION_NEEDED,
+                task_id=task.id,
+                payload={"question": event.payload["question"],
+                         "phase": "trio_architect"},
+            ))
 
 
 async def on_architect_clarification_resolved(event: Event) -> None:
@@ -443,9 +450,10 @@ agent/lifecycle/trio/
   recovery.py                    # AWAITING_CLARIFICATION recovery branch
 
 agent/po_agent.py                # NEW — answer_architect_question
-shared/notifier.py               # surface_clarification (extend existing
-                                 # notification helpers with a trio-flavoured
-                                 # wrapper)
+                                 # (no new code in shared/notifier.py —
+                                 # we reuse task.clarification_needed
+                                 # event which existing integrations
+                                 # already format and surface)
 
 run.py                           # on_architect_clarification_needed,
                                  # on_architect_clarification_resolved,
