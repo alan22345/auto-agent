@@ -31,6 +31,15 @@ class ArchitectAttempt(Base):
     architecture_md_after = Column(Text, nullable=True)
     commit_sha = Column(String(40), nullable=True)
     tool_calls = Column(JSONB, nullable=False, default=list, server_default="[]")
+    # Set when phase=INITIAL/CHECKPOINT and decision.action=
+    # "awaiting_clarification". Holds the prose question architect asked
+    # and the prose answer the PO (freeform) or user (non-freeform)
+    # gave. session_blob_path is the relative path under the workspace
+    # tree where Session.save() persisted the AgentLoop's messages.
+    clarification_question = Column(Text, nullable=True)
+    clarification_answer = Column(Text, nullable=True)
+    clarification_source = Column(String(16), nullable=True)  # 'user' | 'po'
+    session_blob_path = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 

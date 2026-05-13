@@ -150,6 +150,11 @@ class Repo(Base):
     ci_checks = Column(Text, nullable=True)  # Extracted CI check commands from workflow files
     harness_onboarded = Column(Boolean, default=False)  # Whether harness engineering PR has been raised
     harness_pr_url = Column(String(512), nullable=True)  # URL of the harness onboarding PR
+    # Product Owner context — repo-scoped, free-text markdown.
+    # Describes the product mission, requirements, non-goals. Injected
+    # into every PO prompt where the PO is asked to make a
+    # product-shaped decision (today: architect clarification answers).
+    product_brief = Column(Text, nullable=True)
     organization_id = Column(
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )

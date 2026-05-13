@@ -4,9 +4,10 @@ Skipped if no Postgres is reachable, matching the pattern in
 tests/test_verify_review_models.py.
 """
 import os
-import pytest
-from sqlalchemy import create_engine, inspect
 
+import pytest
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL", "").startswith("postgresql"),
@@ -37,3 +38,32 @@ def test_taskstatus_has_trio_values():
     values = {r[0] for r in rows}
     assert "trio_executing" in values
     assert "trio_review" in values
+
+
+@pytest.mark.asyncio
+async def test_clarification_columns_exist(session: AsyncSession) -> None:
+    """Migration 034 adds the clarification + product_brief columns."""
+    # Repo.product_brief
+    cols = (
+        await session.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'repos' AND column_name = 'product_brief'"
+        ))
+    ).scalars().all()
+    assert cols == ["product_brief"], "Repo.product_brief should exist"
+
+    # ArchitectAttempt clarification columns
+    cols = (
+        await session.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'architect_attempts' "
+            "AND column_name IN ('clarification_question', "
+            "                    'clarification_answer', "
+            "                    'clarification_source', "
+            "                    'session_blob_path')"
+        ))
+    ).scalars().all()
+    assert set(cols) == {
+        "clarification_question", "clarification_answer",
+        "clarification_source", "session_blob_path",
+    }
