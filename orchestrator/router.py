@@ -1355,6 +1355,28 @@ async def approve_task(
     return _task_to_response(task)
 
 
+@router.post("/tasks/{task_id}/pause-trio")
+async def pause_trio(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Pause a running trio by transitioning the parent task to BLOCKED.
+
+    Only valid when the task is in TRIO_EXECUTING status.
+    Clears trio_phase so the trio can be resumed cleanly later.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.status != TaskStatus.TRIO_EXECUTING:
+        raise HTTPException(status_code=400, detail="task is not in TRIO_EXECUTING")
+    task.trio_phase = None
+    await transition(session, task, TaskStatus.BLOCKED)
+    await session.commit()
+    return {"ok": True}
+
+
 # --- Feedback/Learning endpoints ---
 
 
