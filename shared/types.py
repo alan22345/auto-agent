@@ -503,11 +503,11 @@ class ArchitectAttemptOut(BaseModel):
     phase: Literal["initial", "consult", "checkpoint", "revision"]
     cycle: int
     reasoning: str
-    decision: dict | None
-    consult_question: str | None
-    consult_why: str | None
-    architecture_md_after: str | None
-    commit_sha: str | None
+    decision: dict | None = None
+    consult_question: str | None = None
+    consult_why: str | None = None
+    architecture_md_after: str | None = None
+    commit_sha: str | None = None
     tool_calls: list[dict]
     created_at: datetime
 
