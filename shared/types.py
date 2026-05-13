@@ -95,6 +95,7 @@ class RepoData(BaseModel):
     ci_checks: str | None = None
     harness_onboarded: bool = False
     harness_pr_url: str | None = None
+    product_brief: str | None = None
 
 
 # --- GitHub types ---
@@ -510,6 +511,11 @@ class ArchitectAttemptOut(BaseModel):
     architecture_md_after: str | None = None
     commit_sha: str | None = None
     tool_calls: list[dict]
+    # Clarification fields (set when decision.action="awaiting_clarification").
+    # session_blob_path stays internal — not exposed here.
+    clarification_question: str | None = None
+    clarification_answer: str | None = None
+    clarification_source: Literal["user", "po"] | None = None
     created_at: datetime
 
 

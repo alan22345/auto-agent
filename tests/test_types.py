@@ -2,12 +2,14 @@ from datetime import UTC, datetime
 
 from shared.types import (
     AffectedRoute,
+    ArchitectAttemptOut,
     ArchitectDecision,
     ConflictInfo,
     IntentVerdict,
     MemorySaveResult,
     ProposedFact,
     RepairContext,
+    RepoData,
     ReviewAttemptOut,
     ReviewCombinedVerdict,
     TrioReviewAttemptOut,
@@ -100,3 +102,25 @@ def test_trio_review_attempt_serialises():
         created_at=datetime(2026, 5, 13),
     )
     assert a.model_dump()["ok"] is True
+
+
+def test_architect_attempt_out_has_clarification_fields():
+    out = ArchitectAttemptOut(
+        id=1, task_id=1, phase="initial", cycle=1,
+        reasoning="r", decision=None, consult_question=None,
+        consult_why=None, architecture_md_after=None,
+        commit_sha=None, tool_calls=[],
+        clarification_question="Q1",
+        clarification_answer="A1",
+        clarification_source="po",
+        created_at=datetime.now(UTC),
+    )
+    assert out.clarification_question == "Q1"
+    assert out.clarification_answer == "A1"
+    assert out.clarification_source == "po"
+
+
+def test_repo_data_has_product_brief():
+    r = RepoData(id=1, name="x", url="https://github.com/x/y.git",
+                 product_brief="# Mission\nBuild X.")
+    assert r.product_brief == "# Mission\nBuild X."

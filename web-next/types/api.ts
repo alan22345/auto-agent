@@ -31,6 +31,9 @@ export interface ArchitectAttemptOut {
   tool_calls: {
     [k: string]: unknown;
   }[];
+  clarification_question?: string | null;
+  clarification_answer?: string | null;
+  clarification_source?: ("user" | "po") | null;
   created_at: string;
 }
 /**
@@ -280,6 +283,7 @@ export interface RepoData {
   ci_checks?: string | null;
   harness_onboarded?: boolean;
   harness_pr_url?: string | null;
+  product_brief?: string | null;
 }
 export interface RepoResponse {
   id: number;
