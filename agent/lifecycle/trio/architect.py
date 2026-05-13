@@ -116,6 +116,37 @@ def _extract_backlog(text: str) -> list[dict] | None:
     return None
 
 
+def _extract_clarification(text: str) -> str | None:
+    """Extract the architect's clarification question if present.
+
+    Looks for the LAST ```json fenced block in the message whose top-level
+    shape is ``{"decision": {"action": "awaiting_clarification", "question": "..."}}``.
+    Returns the question string, or None if no such block exists or it's
+    malformed. Returns None for blocks with action != "awaiting_clarification"
+    or with no question field — callers fall through to backlog extraction.
+    """
+    import json
+    import re
+
+    blocks = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    for block in reversed(blocks):
+        try:
+            data = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        decision = data.get("decision")
+        if not isinstance(decision, dict):
+            continue
+        if decision.get("action") != "awaiting_clarification":
+            continue
+        question = decision.get("question")
+        if isinstance(question, str) and question.strip():
+            return question
+    return None
+
+
 async def _prepare_parent_workspace(parent: Task) -> str:
     """Prepare a workspace for the architect's initial pass.
 
