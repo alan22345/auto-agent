@@ -1,0 +1,118 @@
+"""handle_clarification_inbound dispatches by trio_phase."""
+from __future__ import annotations
+
+import os
+import uuid
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from shared.events import TaskEventType
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL for session fixture",
+)
+async def test_inbound_with_trio_phase_writes_answer_and_publishes(
+    session, publisher,
+):
+    from shared.models import (
+        ArchitectAttempt,
+        Organization,
+        Repo,
+        Task,
+        TaskComplexity,
+        TaskSource,
+        TaskStatus,
+        TrioPhase,
+    )
+    from tests.helpers import _ensure_default_plan
+
+    plan = await _ensure_default_plan(session)
+    suffix = uuid.uuid4().hex[:8]
+    org = Organization(name=f"ib-{suffix}", slug=f"ib-{suffix}", plan_id=plan.id)
+    session.add(org)
+    await session.flush()
+    repo = Repo(name=f"r-{suffix}", url="https://github.com/o/r.git",
+                organization_id=org.id, default_branch="main")
+    session.add(repo)
+    await session.flush()
+    parent = Task(
+        title="P", description="d", source=TaskSource.MANUAL,
+        status=TaskStatus.AWAITING_CLARIFICATION,
+        complexity=TaskComplexity.COMPLEX_LARGE,
+        repo_id=repo.id, organization_id=org.id,
+        freeform_mode=False, trio_phase=TrioPhase.ARCHITECTING,
+    )
+    session.add(parent)
+    await session.flush()
+    session.add(ArchitectAttempt(
+        task_id=parent.id, phase="INITIAL", cycle=1,
+        reasoning="r", tool_calls=[],
+        clarification_question="Q?",
+        session_blob_path=f"trio-{parent.id}.json",
+    ))
+    await session.commit()
+
+    from agent.lifecycle.conversation import handle_clarification_inbound
+    await handle_clarification_inbound(parent.id, "Go with React, simpler.")
+
+    from sqlalchemy import select as _sel
+    attempt = (await session.execute(
+        _sel(ArchitectAttempt).where(ArchitectAttempt.task_id == parent.id)
+    )).scalar_one()
+    assert attempt.clarification_answer == "Go with React, simpler."
+    assert attempt.clarification_source == "user"
+
+    resolved = [e for e in publisher.events
+                if e.type == TaskEventType.ARCHITECT_CLARIFICATION_RESOLVED
+                and e.task_id == parent.id]
+    assert len(resolved) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL for session fixture",
+)
+async def test_inbound_without_trio_phase_delegates_to_existing_handler(
+    session,
+):
+    """Planner case: trio_phase IS NULL → delegate to handle_clarification_response."""
+    from shared.models import (
+        Organization,
+        Repo,
+        Task,
+        TaskComplexity,
+        TaskSource,
+        TaskStatus,
+    )
+    from tests.helpers import _ensure_default_plan
+
+    plan = await _ensure_default_plan(session)
+    suffix = uuid.uuid4().hex[:8]
+    org = Organization(name=f"ibn-{suffix}", slug=f"ibn-{suffix}", plan_id=plan.id)
+    session.add(org)
+    await session.flush()
+    repo = Repo(name=f"r-{suffix}", url="https://github.com/o/r.git",
+                organization_id=org.id, default_branch="main")
+    session.add(repo)
+    await session.flush()
+    parent = Task(
+        title="P", description="d", source=TaskSource.MANUAL,
+        status=TaskStatus.AWAITING_CLARIFICATION,
+        complexity=TaskComplexity.COMPLEX,
+        repo_id=repo.id, organization_id=org.id,
+    )
+    session.add(parent)
+    await session.commit()
+
+    delegate = AsyncMock()
+    with patch("agent.lifecycle.conversation.handle_clarification_response",
+               delegate):
+        from agent.lifecycle.conversation import handle_clarification_inbound
+        await handle_clarification_inbound(parent.id, "Use Postgres.")
+
+    delegate.assert_called_once_with(parent.id, "Use Postgres.")

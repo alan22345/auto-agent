@@ -1,17 +1,23 @@
 """Conversation phase — human-driven resume flows + human.message routing.
 
-Three handlers:
+Four handlers:
   - ``handle_plan_conversation`` — user discusses the plan with the planning
     agent; agent may revise the plan or just chat.
-  - ``handle_clarification_response`` — user answered a CLARIFICATION_NEEDED
-    question; resume the agent. Special case: grill-phase clarifications
-    fill in the trailing pending intake_qa entry and re-enter planning.
+  - ``handle_clarification_inbound`` — single entry point for an inbound
+    clarification answer. Dispatches by ``task.trio_phase``: trio architect
+    path writes to the ArchitectAttempt row and publishes
+    ARCHITECT_CLARIFICATION_RESOLVED; planner path delegates to
+    ``handle_clarification_response``.
+  - ``handle_clarification_response`` — planner-path leaf: user answered a
+    CLARIFICATION_NEEDED question; resume the agent. Special case:
+    grill-phase clarifications fill in the trailing pending intake_qa entry
+    and re-enter planning.
   - ``handle_blocked_response`` — user provided input on a blocked task;
     routes to coding/planning/PR-review depending on what's available.
 
 ``route_human_message`` is the EventBus entry for ``human.message`` — it
-maps task status to one of the three handlers above (or pushes the message
-as guidance into the active agent's Redis queue when no handler change is
+maps task status to one of the handlers above (or pushes the message as
+guidance into the active agent's Redis queue when no handler change is
 needed).
 """
 
@@ -138,6 +144,68 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
         await transition_task(task_id, "blocked_on_quota", str(e))
     finally:
         _active_plan_conversations.discard(task_id)
+
+
+async def handle_clarification_inbound(task_id: int, content: str) -> None:
+    """Single entry point for an inbound clarification answer.
+
+    Dispatches by ``task.trio_phase``:
+
+    - Set → trio architect is waiting. Write the answer to the pending
+      ArchitectAttempt row and publish ARCHITECT_CLARIFICATION_RESOLVED so
+      the architect dispatcher resumes.
+    - None → existing planner clarification. Delegate to
+      ``handle_clarification_response`` (Claude Code CLI session resume).
+
+    Idempotent on the trio side: once ``clarification_answer`` is set, a
+    second inbound message is dropped here (the inbound channels should
+    still log it as a regular task_message before calling, so the user's
+    follow-up remains visible in the conversation).
+
+    No-op when the task is missing or not in AWAITING_CLARIFICATION — the
+    inbound channel will have already logged the message and the user will
+    see the current task status in the UI.
+    """
+    from sqlalchemy import select as _sel
+
+    from shared.database import async_session as _sess
+    from shared.events import Event, TaskEventType
+    from shared.models import ArchitectAttempt, Task, TaskStatus
+
+    async with _sess() as s:
+        task = (
+            await s.execute(_sel(Task).where(Task.id == task_id))
+        ).scalar_one_or_none()
+        if task is None:
+            return
+        if task.status != TaskStatus.AWAITING_CLARIFICATION:
+            return
+        if task.trio_phase is None:
+            await handle_clarification_response(task_id, content)
+            return
+        attempt = (
+            await s.execute(
+                _sel(ArchitectAttempt)
+                .where(ArchitectAttempt.task_id == task_id)
+                .where(ArchitectAttempt.clarification_question.is_not(None))
+                .where(ArchitectAttempt.clarification_answer.is_(None))
+                .order_by(ArchitectAttempt.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            log.warning(
+                "trio.inbound.no_pending_attempt", extra={"task_id": task_id},
+            )
+            return
+        attempt.clarification_answer = content
+        attempt.clarification_source = "user"
+        await s.commit()
+
+    await publish(Event(
+        type=TaskEventType.ARCHITECT_CLARIFICATION_RESOLVED,
+        task_id=task_id,
+    ))
 
 
 async def handle_clarification_response(task_id: int, answer: str) -> None:
@@ -272,12 +340,17 @@ async def handle_blocked_response(task_id: int, task: TaskData, message: str) ->
 
 
 async def handle_clarification_event(event: Event) -> None:
-    """EventBus entry for ``task.clarification_response``."""
+    """EventBus entry for ``task.clarification_response``.
+
+    Routes through ``handle_clarification_inbound`` so trio architect
+    clarifications land on the ArchitectAttempt row instead of resuming
+    the planner.
+    """
     if not event.task_id:
         return
     answer = event.payload.get("answer", "") if event.payload else ""
     if answer:
-        await handle_clarification_response(event.task_id, answer)
+        await handle_clarification_inbound(event.task_id, answer)
 
 
 async def route_human_message(event: Event) -> None:
@@ -303,7 +376,7 @@ async def route_human_message(event: Event) -> None:
         return
 
     if task.status == "awaiting_clarification":
-        await handle_clarification_response(task_id, comments)
+        await handle_clarification_inbound(task_id, comments)
     elif task.status == "blocked":
         await handle_blocked_response(task_id, task, comments)
     elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
