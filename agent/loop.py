@@ -166,6 +166,11 @@ class AgentLoop:
     ) -> None:
         self._provider = provider
         self._tools = tools
+        # Optional system-prompt override set by specialized agent factories
+        # (e.g. the trio architect). When present, replaces the default
+        # context-built system prompt unless the caller also passes ``system``
+        # explicitly to ``run()``.
+        self.system_prompt_override: str | None = None
         self._context = context_manager
         self._session = session
         self._max_turns = max_turns
@@ -183,6 +188,19 @@ class AgentLoop:
         self._home_dir = home_dir           # per-user HOME for the CLI provider's credential vault
         self._usage_sink = usage_sink       # per-task quota gate + usage emission
         self._dev_server_log_path = dev_server_log_path  # path to dev-server log when server is active
+
+    @property
+    def tools(self) -> ToolRegistry:
+        """Public accessor for the tool registry.
+
+        Allows specialized factories (e.g. the trio architect) to swap out
+        the registry after construction without subclassing AgentLoop.
+        """
+        return self._tools
+
+    @tools.setter
+    def tools(self, registry: ToolRegistry) -> None:
+        self._tools = registry
 
     async def run(
         self,
@@ -247,13 +265,19 @@ class AgentLoop:
         system: str | None,
         resume: bool,
     ) -> AgentResult:
-        # Build system prompt if not provided
+        # Build system prompt if not provided.
+        # system_prompt_override (set by specialized factories) takes precedence
+        # over the context-built default, but the explicit ``system`` argument
+        # to run() takes precedence over both.
         if system is None:
-            system = await self._context.build_system_prompt(
-                include_methodology=self._include_methodology,
-                task_description=self._task_description,
-                repo_name=self._repo_name,
-            )
+            if self.system_prompt_override is not None:
+                system = self.system_prompt_override
+            else:
+                system = await self._context.build_system_prompt(
+                    include_methodology=self._include_methodology,
+                    task_description=self._task_description,
+                    repo_name=self._repo_name,
+                )
 
         # Load or initialize conversation
         messages: list[Message] = []
