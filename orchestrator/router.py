@@ -52,6 +52,7 @@ from shared.models import (
     OrganizationMembership,
     Plan,
     Repo,
+    ReviewAttempt,
     ScheduledTask,
     Suggestion,
     SuggestionStatus,
@@ -61,6 +62,7 @@ from shared.models import (
     TaskSource,
     TaskStatus,
     User,
+    VerifyAttempt,
     intake_qa_for_suggestion,
 )
 from shared.task_channel import task_channel
@@ -76,6 +78,7 @@ from shared.types import (
     PlanRead,
     RepoData,
     RepoResponse,
+    ReviewAttemptOut,
     ScheduleResponse,
     SecretListResponse,
     SecretPutRequest,
@@ -88,6 +91,7 @@ from shared.types import (
     TaskMessagePost,
     UsageSummary,
     UserData,
+    VerifyAttemptOut,
 )
 
 router = APIRouter()
@@ -1100,6 +1104,84 @@ async def set_affected_routes(
     await session.commit()
     await session.refresh(task)
     return _task_to_response(task)
+
+
+def _verify_attempt_to_out(a: VerifyAttempt) -> VerifyAttemptOut:
+    return VerifyAttemptOut(
+        id=a.id,
+        cycle=a.cycle,
+        status=a.status,
+        boot_check=a.boot_check,
+        intent_check=a.intent_check,
+        intent_judgment=a.intent_judgment,
+        tool_calls=a.tool_calls,
+        failure_reason=a.failure_reason,
+        log_tail=a.log_tail,
+        started_at=a.started_at,
+        finished_at=a.finished_at,
+    )
+
+
+def _review_attempt_to_out(a: ReviewAttempt) -> ReviewAttemptOut:
+    return ReviewAttemptOut(
+        id=a.id,
+        cycle=a.cycle,
+        status=a.status,
+        code_review_verdict=a.code_review_verdict,
+        ui_check=a.ui_check,
+        ui_judgment=a.ui_judgment,
+        tool_calls=a.tool_calls,
+        failure_reason=a.failure_reason,
+        log_tail=a.log_tail,
+        started_at=a.started_at,
+        finished_at=a.finished_at,
+    )
+
+
+@router.get(
+    "/tasks/{task_id}/verify-attempts",
+    response_model=list[VerifyAttemptOut],
+)
+async def list_verify_attempts(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[VerifyAttemptOut]:
+    """Return all verify attempts for a task, oldest cycle first."""
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        await session.execute(
+            select(VerifyAttempt)
+            .where(VerifyAttempt.task_id == task_id)
+            .order_by(VerifyAttempt.cycle.asc()),
+        )
+    ).scalars().all()
+    return [_verify_attempt_to_out(r) for r in rows]
+
+
+@router.get(
+    "/tasks/{task_id}/review-attempts",
+    response_model=list[ReviewAttemptOut],
+)
+async def list_review_attempts(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[ReviewAttemptOut]:
+    """Return all review attempts for a task, oldest cycle first."""
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        await session.execute(
+            select(ReviewAttempt)
+            .where(ReviewAttempt.task_id == task_id)
+            .order_by(ReviewAttempt.cycle.asc()),
+        )
+    ).scalars().all()
+    return [_review_attempt_to_out(r) for r in rows]
 
 
 @router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
