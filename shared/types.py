@@ -463,3 +463,61 @@ class ReviewAttemptOut(BaseModel):
     log_tail: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
+
+
+# --- Architect/Builder/Reviewer trio types ---
+
+
+class WorkItem(BaseModel):
+    """One backlog item the architect dispatches to a builder child task."""
+    id: str
+    title: str
+    description: str
+    status: Literal["pending", "in_progress", "done", "skipped"] = "pending"
+    assigned_task_id: int | None = None
+    discovered_in_attempt_id: int | None = None
+
+
+class TrioPhaseLiteral(BaseModel):
+    """Pydantic wrapper for the trio_phase enum used in API responses."""
+    phase: Literal["architecting", "awaiting_builder", "architect_checkpoint"] | None
+
+
+class RepairContext(BaseModel):
+    """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
+    ci_log: str
+    failed_pr_url: str
+
+
+class ArchitectDecision(BaseModel):
+    """The decision field on an ArchitectAttempt row when phase=checkpoint."""
+    action: Literal["continue", "revise", "done", "awaiting_clarification", "blocked"]
+    reason: str | None = None
+    question: str | None = None  # only when action=awaiting_clarification
+
+
+class ArchitectAttemptOut(BaseModel):
+    """API shape for an architect_attempts row."""
+    id: int
+    task_id: int
+    phase: Literal["initial", "consult", "checkpoint", "revision"]
+    cycle: int
+    reasoning: str
+    decision: dict | None
+    consult_question: str | None
+    consult_why: str | None
+    architecture_md_after: str | None
+    commit_sha: str | None
+    tool_calls: list[dict]
+    created_at: datetime
+
+
+class TrioReviewAttemptOut(BaseModel):
+    """API shape for a trio_review_attempts row."""
+    id: int
+    task_id: int
+    cycle: int
+    ok: bool
+    feedback: str
+    tool_calls: list[dict]
+    created_at: datetime

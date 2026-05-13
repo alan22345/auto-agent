@@ -2,13 +2,17 @@ from datetime import UTC, datetime
 
 from shared.types import (
     AffectedRoute,
+    ArchitectDecision,
     ConflictInfo,
     IntentVerdict,
     MemorySaveResult,
     ProposedFact,
+    RepairContext,
     ReviewAttemptOut,
     ReviewCombinedVerdict,
+    TrioReviewAttemptOut,
     VerifyAttemptOut,
+    WorkItem,
 )
 
 
@@ -67,3 +71,32 @@ def test_review_attempt_out_instantiates():
     )
     assert a.code_review_verdict is None
     assert a.ui_check is None
+
+
+def test_work_item_defaults():
+    w = WorkItem(id="abc", title="Add auth", description="...")
+    assert w.status == "pending"
+    assert w.assigned_task_id is None
+
+
+def test_architect_decision_minimal():
+    d = ArchitectDecision(action="done")
+    assert d.reason is None
+
+
+def test_architect_decision_awaiting_clarification():
+    d = ArchitectDecision(action="awaiting_clarification", question="Which db?")
+    assert d.question == "Which db?"
+
+
+def test_repair_context_round_trip():
+    r = RepairContext(ci_log="err", failed_pr_url="https://github.com/x/y/pull/1")
+    assert RepairContext(**r.model_dump()) == r
+
+
+def test_trio_review_attempt_serialises():
+    a = TrioReviewAttemptOut(
+        id=1, task_id=2, cycle=1, ok=True, feedback="", tool_calls=[],
+        created_at=datetime(2026, 5, 13),
+    )
+    assert a.model_dump()["ok"] is True
