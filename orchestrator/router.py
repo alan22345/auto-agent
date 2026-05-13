@@ -46,6 +46,7 @@ from shared.events import (
     task_start_planning,
 )
 from shared.models import (
+    ArchitectAttempt,
     FreeformConfig,
     MarketBrief,
     Organization,
@@ -61,12 +62,14 @@ from shared.models import (
     TaskMessage,
     TaskSource,
     TaskStatus,
+    TrioReviewAttempt,
     User,
     VerifyAttempt,
     intake_qa_for_suggestion,
 )
 from shared.task_channel import task_channel
 from shared.types import (
+    ArchitectAttemptOut,
     ChangeEmailRequest,
     CreateUserRequest,
     FeedbackSummary,
@@ -89,6 +92,7 @@ from shared.types import (
     TaskData,
     TaskMessageData,
     TaskMessagePost,
+    TrioReviewAttemptOut,
     UsageSummary,
     UserData,
     VerifyAttemptOut,
@@ -1182,6 +1186,52 @@ async def list_review_attempts(
         )
     ).scalars().all()
     return [_review_attempt_to_out(r) for r in rows]
+
+
+@router.get(
+    "/tasks/{task_id}/architect-attempts",
+    response_model=list[ArchitectAttemptOut],
+)
+async def list_architect_attempts(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[ArchitectAttemptOut]:
+    """Return all architect attempts for a task, oldest first."""
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        await session.execute(
+            select(ArchitectAttempt)
+            .where(ArchitectAttempt.task_id == task_id)
+            .order_by(ArchitectAttempt.created_at.asc()),
+        )
+    ).scalars().all()
+    return [ArchitectAttemptOut.model_validate(r, from_attributes=True) for r in rows]
+
+
+@router.get(
+    "/tasks/{task_id}/trio-review-attempts",
+    response_model=list[TrioReviewAttemptOut],
+)
+async def list_trio_review_attempts(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[TrioReviewAttemptOut]:
+    """Return all trio review attempts for a task, oldest first."""
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        await session.execute(
+            select(TrioReviewAttempt)
+            .where(TrioReviewAttempt.task_id == task_id)
+            .order_by(TrioReviewAttempt.created_at.asc()),
+        )
+    ).scalars().all()
+    return [TrioReviewAttemptOut.model_validate(r, from_attributes=True) for r in rows]
 
 
 @router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
