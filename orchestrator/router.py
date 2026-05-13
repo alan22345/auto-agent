@@ -258,14 +258,28 @@ async def _get_repo_in_org(
     """
     if repo_id is not None:
         q = select(Repo).where(Repo.id == repo_id)
-    elif name is not None:
-        q = select(Repo).where(
-            (Repo.name == name) | (Repo.name.endswith(f"/{name}"))
-        )
-    else:
+        result = await session.execute(scoped(q, Repo, org_id=org_id))
+        return result.scalar_one_or_none()
+    if name is None:
         raise ValueError("repo_id or name is required")
-    result = await session.execute(scoped(q, Repo, org_id=org_id))
-    return result.scalar_one_or_none()
+
+    # Prefer the exact match. Only fall back to the owner/repo suffix
+    # match when nothing exact exists — otherwise a repo "X" and a
+    # legacy repo "owner/X" both match and scalar_one_or_none raises.
+    exact_q = select(Repo).where(Repo.name == name)
+    exact = (
+        await session.execute(scoped(exact_q, Repo, org_id=org_id))
+    ).scalar_one_or_none()
+    if exact is not None:
+        return exact
+
+    if "/" in name:
+        return None
+
+    suffix_q = select(Repo).where(Repo.name.endswith(f"/{name}"))
+    return (
+        await session.execute(scoped(suffix_q, Repo, org_id=org_id))
+    ).scalars().first()
 
 
 # --- Auth endpoints ---
