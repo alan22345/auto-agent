@@ -80,3 +80,15 @@ class TestResolve:
         ctx = ToolContext(workspace=str(ws))
         # Following the symlink lands outside the workspace — must be refused.
         assert ctx.resolve("escape/secret.txt") is None
+
+
+def test_tool_context_has_task_ids():
+    ctx = ToolContext(workspace="/tmp/x", task_id=42, parent_task_id=7)
+    assert ctx.task_id == 42
+    assert ctx.parent_task_id == 7
+
+
+def test_tool_context_defaults_task_ids_to_none():
+    ctx = ToolContext(workspace="/tmp/x")
+    assert ctx.task_id is None
+    assert ctx.parent_task_id is None

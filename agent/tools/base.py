@@ -37,6 +37,11 @@ class ToolContext:
     # Path to dev-server log file when a dev server is running in this phase.
     # Used by TailDevServerLogTool; None when no server is active.
     dev_server_log_path: str | None = None
+    # The task this tool invocation belongs to. None for non-task contexts
+    # (e.g. PO analyzer, harness onboarding).
+    task_id: int | None = None
+    # Parent task ID when the current task is a trio child. None otherwise.
+    parent_task_id: int | None = None
 
     def resolve(self, path: str) -> str | None:
         """Resolve a path against the workspace, refusing escapes.
