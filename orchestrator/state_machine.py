@@ -21,7 +21,10 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.BLOCKED_ON_QUOTA,
     },
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
-    TaskStatus.AWAITING_CLARIFICATION: {TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},  # user replied
+    TaskStatus.AWAITING_CLARIFICATION: {
+        TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED,
+        TaskStatus.TRIO_EXECUTING,  # NEW — trio architect resume
+    },  # user replied
     TaskStatus.CODING: {
         TaskStatus.VERIFYING,                                          # freeform self-verification gate
         TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION,
@@ -43,7 +46,10 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},
     TaskStatus.BLOCKED_ON_AUTH: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
     TaskStatus.BLOCKED_ON_QUOTA: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
-    TaskStatus.TRIO_EXECUTING: {TaskStatus.PR_CREATED, TaskStatus.BLOCKED},
+    TaskStatus.TRIO_EXECUTING: {
+        TaskStatus.PR_CREATED, TaskStatus.BLOCKED,
+        TaskStatus.AWAITING_CLARIFICATION,  # NEW — architect needs answers
+    },
     TaskStatus.TRIO_REVIEW:    {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED},
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},

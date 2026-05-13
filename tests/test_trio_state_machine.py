@@ -31,3 +31,18 @@ def test_coding_can_enter_trio_review():
 
 def test_awaiting_ci_can_re_enter_trio_executing():
     assert TaskStatus.TRIO_EXECUTING in TRANSITIONS[TaskStatus.AWAITING_CI]
+
+
+def test_trio_executing_can_transition_to_awaiting_clarification():
+    assert TaskStatus.AWAITING_CLARIFICATION in TRANSITIONS[TaskStatus.TRIO_EXECUTING]
+
+
+def test_awaiting_clarification_can_transition_to_trio_executing():
+    assert TaskStatus.TRIO_EXECUTING in TRANSITIONS[TaskStatus.AWAITING_CLARIFICATION]
+
+
+def test_existing_transitions_unchanged():
+    """Sanity: planner's clarification path is untouched."""
+    assert TaskStatus.PLANNING in TRANSITIONS[TaskStatus.AWAITING_CLARIFICATION]
+    assert TaskStatus.CODING in TRANSITIONS[TaskStatus.AWAITING_CLARIFICATION]
+    assert TaskStatus.AWAITING_CLARIFICATION in TRANSITIONS[TaskStatus.PLANNING]
