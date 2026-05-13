@@ -1780,6 +1780,44 @@ async def list_repos(
     ]
 
 
+class ProductBriefIn(BaseModel):
+    product_brief: str = Field(default="", description="Markdown product brief.")
+
+
+@router.patch(
+    "/repos/{repo_id}/product-brief",
+    response_model=RepoData,
+)
+async def update_repo_product_brief(
+    repo_id: int,
+    body: ProductBriefIn,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoData:
+    """Set or clear the repo's product brief.
+
+    Empty string -> stored as NULL (clears the brief). Org-scoped — only
+    repos in the caller's org are visible.
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if repo is None:
+        raise HTTPException(404, "Repo not found")
+    repo.product_brief = body.product_brief.strip() or None
+    await session.commit()
+    return RepoData(
+        id=repo.id,
+        name=repo.name,
+        url=repo.url,
+        default_branch=repo.default_branch,
+        summary=repo.summary,
+        summary_updated_at=repo.summary_updated_at,
+        ci_checks=repo.ci_checks,
+        harness_onboarded=repo.harness_onboarded or False,
+        harness_pr_url=repo.harness_pr_url,
+        product_brief=repo.product_brief,
+    )
+
+
 @router.patch("/repos/{repo_name}/branch")
 async def update_repo_branch(
     repo_name: str,
