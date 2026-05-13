@@ -178,6 +178,12 @@ async def kill_server(handle: DevServerHandle, grace_seconds: float = 2.0) -> No
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(handle.process.wait(), timeout=1.0)
 
+    try:
+        if handle.log_path and os.path.isfile(handle.log_path):
+            os.unlink(handle.log_path)
+    except OSError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Task 8: wait_for_port and hold

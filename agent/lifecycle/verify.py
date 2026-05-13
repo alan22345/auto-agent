@@ -59,16 +59,33 @@ async def handle_verify(task_id: int) -> None:
     await publish(verify_started(task_id, cycle))
     attempt = await _create_verify_attempt(task_id, cycle)
 
+    # wrap only boot + intent stages in the timeout envelope;
+    # PR-creation handoff (_pass_cycle / _open_pr_and_advance) runs outside
+    # so a hanging `gh pr create` cannot trigger cancellation mid-network-call.
     try:
-        await asyncio.wait_for(
-            _run_verify_body(task, task_id, cycle, attempt),
+        pass_args = await asyncio.wait_for(
+            _run_boot_and_intent(task, task_id, cycle, attempt),
             timeout=PHASE_TIMEOUT_SECONDS,
         )
     except TimeoutError:
         await _fail_cycle(task_id, attempt, cycle, "phase_timeout", None)
+        return
+
+    if pass_args is not None:
+        workspace, base_branch = pass_args
+        await _pass_cycle(task_id, attempt, task, workspace, base_branch)
 
 
-async def _run_verify_body(task, task_id: int, cycle: int, attempt) -> None:
+async def _run_boot_and_intent(
+    task, task_id: int, cycle: int, attempt,
+) -> tuple[str, str] | None:
+    """Run boot check + intent check inside the timeout envelope.
+
+    Returns ``(workspace, base_branch)`` when the cycle passes so that
+    ``handle_verify`` can call ``_pass_cycle`` *outside* the timeout envelope
+    (avoids cancelling a ``gh pr create`` mid-network-call).
+    Returns ``None`` when the cycle fails (fail path already handled).
+    """
     workspace, base_branch = await _prepare_workspace(task)
     override = await _resolve_run_command_override(task)
     run_cmd = _dev_server.sniff_run_command(workspace, override=override)
@@ -83,12 +100,18 @@ async def _run_verify_body(task, task_id: int, cycle: int, attempt) -> None:
                 await _dev_server.wait_for_port(server.port, timeout=60, log_path=server.log_path)
                 await _dev_server.hold(server, seconds=HOLD_SECONDS)
                 await _update_verify_attempt(attempt.id, boot_check="pass")
+            except _dev_server.BootError as e:
+                await _update_verify_attempt(attempt.id, boot_check="fail", log_tail=str(e))
+                await _fail_cycle(task_id, attempt, cycle, "boot_error", str(e))
+                return None
             except _dev_server.BootTimeout as e:
                 await _update_verify_attempt(attempt.id, boot_check="fail", log_tail=e.log_tail)
-                return await _fail_cycle(task_id, attempt, cycle, "boot_timeout", e.log_tail)
+                await _fail_cycle(task_id, attempt, cycle, "boot_timeout", e.log_tail)
+                return None
             except _dev_server.EarlyExit as e:
                 await _update_verify_attempt(attempt.id, boot_check="fail", log_tail=e.log_tail)
-                return await _fail_cycle(task_id, attempt, cycle, "early_exit", e.log_tail)
+                await _fail_cycle(task_id, attempt, cycle, "early_exit", e.log_tail)
+                return None
         else:
             await _update_verify_attempt(attempt.id, boot_check="skipped")
             if task.affected_routes or []:
@@ -103,8 +126,9 @@ async def _run_verify_body(task, task_id: int, cycle: int, attempt) -> None:
             tool_calls=verdict.tool_calls,
         )
         if not verdict.ok:
-            return await _fail_cycle(task_id, attempt, cycle, "intent_not_addressed", None)
-        return await _pass_cycle(task_id, attempt, task, workspace, base_branch)
+            await _fail_cycle(task_id, attempt, cycle, "intent_not_addressed", None)
+            return None
+        return workspace, base_branch
     finally:
         if server_cm is not None:
             try:
@@ -187,6 +211,8 @@ async def _pass_cycle(task_id: int, attempt, task, workspace: str, base_branch: 
 
     from agent.lifecycle.coding import _open_pr_and_advance
     branch_name = task.branch_name
+    if not branch_name:
+        raise RuntimeError(f"task #{task_id}: task.branch_name missing — cannot push")
     await _open_pr_and_advance(task_id, task, workspace, base_branch, branch_name)
 
 
