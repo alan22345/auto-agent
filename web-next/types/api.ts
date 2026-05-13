@@ -13,6 +13,35 @@ export interface AffectedRoute {
   label: string;
 }
 /**
+ * API shape for an architect_attempts row.
+ */
+export interface ArchitectAttemptOut {
+  id: number;
+  task_id: number;
+  phase: "initial" | "consult" | "checkpoint" | "revision";
+  cycle: number;
+  reasoning: string;
+  decision?: {
+    [k: string]: unknown;
+  } | null;
+  consult_question?: string | null;
+  consult_why?: string | null;
+  architecture_md_after?: string | null;
+  commit_sha?: string | null;
+  tool_calls: {
+    [k: string]: unknown;
+  }[];
+  created_at: string;
+}
+/**
+ * The decision field on an ArchitectAttempt row when phase=checkpoint.
+ */
+export interface ArchitectDecision {
+  action: "continue" | "revise" | "done" | "awaiting_clarification" | "blocked";
+  reason?: string | null;
+  question?: string | null;
+}
+/**
  * CI status for a commit.
  */
 export interface CIStatus {
@@ -224,6 +253,13 @@ export interface ProposedFact {
   resolution?: ("keep_existing" | "replace" | "keep_both") | null;
 }
 /**
+ * Passed to architect.checkpoint on parent re-entry after integration PR CI failure.
+ */
+export interface RepairContext {
+  ci_log: string;
+  failed_pr_url: string;
+}
+/**
  * Typed representation of a repo from the orchestrator API.
  */
 export interface RepoData {
@@ -363,6 +399,7 @@ export interface TaskData {
   target_areas?: string | null;
   acceptance_criteria?: string | null;
   constraints?: string | null;
+  parent_task_id?: number | null;
 }
 /**
  * A user-posted feedback message on a task.
@@ -393,6 +430,26 @@ export interface TimelineEntry {
   message?: string;
   timestamp?: string | null;
 }
+/**
+ * Pydantic wrapper for the trio_phase enum used in API responses.
+ */
+export interface TrioPhaseLiteral {
+  phase: ("architecting" | "awaiting_builder" | "architect_checkpoint") | null;
+}
+/**
+ * API shape for a trio_review_attempts row.
+ */
+export interface TrioReviewAttemptOut {
+  id: number;
+  task_id: number;
+  cycle: number;
+  ok: boolean;
+  feedback: string;
+  tool_calls: {
+    [k: string]: unknown;
+  }[];
+  created_at: string;
+}
 export interface UsageSummary {
   plan: PlanRead;
   active_tasks: number;
@@ -419,4 +476,15 @@ export interface VerifyAttemptOut {
   log_tail?: string | null;
   started_at: string;
   finished_at?: string | null;
+}
+/**
+ * One backlog item the architect dispatches to a builder child task.
+ */
+export interface WorkItem {
+  id: string;
+  title: string;
+  description: string;
+  status?: "pending" | "in_progress" | "done" | "skipped";
+  assigned_task_id?: number | null;
+  discovered_in_attempt_id?: number | null;
 }
