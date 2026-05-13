@@ -20,6 +20,7 @@ from .core import (
     TaskOutcome,
     TaskSource,
     TaskStatus,
+    TrioPhase,
     UsageEvent,
     User,
     UserFocus,
@@ -36,9 +37,12 @@ from .freeform import (
     VerifyAttempt,
     intake_qa_for_suggestion,
 )
+from .trio import ArchitectAttempt, ArchitectPhase, TrioReviewAttempt
 
 __all__ = [
     "PRE_GRILLED_SUGGESTION_CATEGORIES",
+    "ArchitectAttempt",
+    "ArchitectPhase",
     "Base",
     "FreeformConfig",
     "GitHubInstallation",
@@ -62,6 +66,8 @@ __all__ = [
     "TaskOutcome",
     "TaskSource",
     "TaskStatus",
+    "TrioPhase",
+    "TrioReviewAttempt",
     "UsageEvent",
     "User",
     "UserFocus",

@@ -16,6 +16,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -49,6 +52,14 @@ class TaskStatus(str, enum.Enum):
     BLOCKED_ON_QUOTA = "blocked_on_quota"
     BLOCKED = "blocked"
     FAILED = "failed"
+    TRIO_EXECUTING = "trio_executing"
+    TRIO_REVIEW    = "trio_review"
+
+
+class TrioPhase(str, enum.Enum):
+    ARCHITECTING         = "architecting"
+    AWAITING_BUILDER     = "awaiting_builder"
+    ARCHITECT_CHECKPOINT = "architect_checkpoint"
 
 
 class TaskSource(str, enum.Enum):
@@ -180,6 +191,11 @@ class Task(Base):
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    # Trio (architect/builder/reviewer) columns
+    parent_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    trio_phase = Column(SAEnum(TrioPhase, name="triophase"), nullable=True)
+    trio_backlog = Column(JSONB, nullable=True)
+    consulting_architect = Column(Boolean, nullable=False, default=False, server_default="false")
 
     repo = relationship("Repo", back_populates="tasks", lazy="selectin")
     history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")
