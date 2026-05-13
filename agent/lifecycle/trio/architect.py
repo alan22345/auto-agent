@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from sqlalchemy import func, select
@@ -21,6 +21,9 @@ from agent.lifecycle.trio.prompts import (
 )
 from shared.database import async_session
 from shared.models import ArchitectAttempt, ArchitectPhase, Task, TaskStatus
+
+if TYPE_CHECKING:
+    from agent.session import Session
 
 log = structlog.get_logger()
 
@@ -41,6 +44,7 @@ def create_architect_agent(
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    session: Session | None = None,
 ):
     """Build an AgentLoop configured for the architect.
 
@@ -48,6 +52,12 @@ def create_architect_agent(
     - web_search + fetch_url (outside grounding)
     - record_decision + request_market_brief (its bespoke tools)
     - Standard file/bash/git tools
+
+    ``session`` is the persistence handle used by ``resume`` to reload the
+    AgentLoop's prior messages/api_messages after a clarification answer
+    has arrived. When ``None`` (the default), no session is attached and
+    each call starts fresh — the same behaviour as before this kwarg
+    existed.
     """
     agent = create_agent(
         workspace=workspace,
@@ -69,6 +79,11 @@ def create_architect_agent(
     )
     # Inject the phase-specific system prompt.
     agent.system_prompt_override = _SYSTEM_PROMPTS[phase]
+    # Attach the persistence handle so AgentLoop.run(..., resume=True) can
+    # reload prior messages. AgentLoop reads ``self._session`` directly, so
+    # we set the private attribute. (No public setter exists today.)
+    if session is not None:
+        agent._session = session
     return agent
 
 
@@ -1094,4 +1109,211 @@ async def run_revision(parent_task_id: int) -> None:
         backlog_size=len(backlog),
         commit_sha=commit_sha,
         cycle=cycle,
+    )
+
+
+# ---------------------------------------------------------------------------
+# resume — re-enter the architect after a clarification answer lands.
+# ---------------------------------------------------------------------------
+
+
+async def resume(parent_task_id: int) -> None:
+    """Resume the architect after a clarification answer has been written.
+
+    Reloads the AgentLoop session from the workspace, injects the answer
+    as a synthetic user message (via ``AgentLoop.run(..., resume=True)``),
+    runs to completion, then handles the output the same way
+    ``run_initial`` / ``checkpoint`` do — either a backlog (continue
+    normally) or another clarification (loop guard applies).
+
+    Falls back to ``run_initial`` if the session blob can't be loaded
+    (workspace wiped or first save failed): the Q&A already lives on the
+    answered ``ArchitectAttempt`` row, so a fresh pass still has access
+    to it via the row history.
+    """
+    from agent.session import Session
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        attempt = (
+            await s.execute(
+                select(ArchitectAttempt)
+                .where(ArchitectAttempt.task_id == parent_task_id)
+                .where(ArchitectAttempt.clarification_answer.is_not(None))
+                .order_by(ArchitectAttempt.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            log.warning(
+                "architect.resume.no_answered_attempt",
+                task_id=parent_task_id,
+            )
+            return
+        task_description = parent.description or parent.title
+        repo_name = parent.repo.name if parent.repo else None
+        org_id = parent.organization_id
+        home_dir = await home_dir_for_task(parent)
+        answer = attempt.clarification_answer
+        source = (attempt.clarification_source or "user").upper()
+        # ``attempt.phase`` comes back as ArchitectPhase from SQLAlchemy.
+        phase_for_resume: ArchitectPhase = attempt.phase
+        prior_cycle = attempt.cycle
+
+    workspace = await _prepare_parent_workspace(parent)
+    session_id = f"trio-{parent_task_id}"
+    storage_dir = workspace.root if hasattr(workspace, "root") else str(workspace)
+    file_session = Session(session_id=session_id, storage_dir=storage_dir)
+    loaded = await file_session.load()
+    if loaded is None:
+        log.warning(
+            "architect.resume.session_lost",
+            task_id=parent_task_id, path=storage_dir,
+        )
+        # Fallback: re-run run_initial. The Q&A already exists on the
+        # architect_attempts row and is visible to the architect via the
+        # row history (and to humans in the UI), so we don't need to
+        # thread it into the prompt.
+        await run_initial(parent_task_id)
+        return
+
+    # Map ArchitectPhase enum → factory's lowercase phase string.
+    phase_str: Literal["initial", "consult", "checkpoint", "revision"]
+    if phase_for_resume == ArchitectPhase.CHECKPOINT:
+        phase_str = "checkpoint"
+    elif phase_for_resume == ArchitectPhase.REVISION:
+        phase_str = "revision"
+    else:
+        phase_str = "initial"
+
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_task_id,
+        task_description=task_description,
+        phase=phase_str,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+        session=file_session,
+    )
+
+    prompt = (
+        f"ANSWER FROM {source}:\n\n{answer}\n\n"
+        f"Now produce the JSON for this phase "
+        f"(backlog for INITIAL/REVISION, decision for CHECKPOINT)."
+    )
+    run_result = await agent.run(prompt, resume=True)
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    # Funnel into the same parsing logic as a fresh run.
+    clarification = _extract_clarification(output)
+    if clarification is not None:
+        # Another round — loop guard applies inside _emit_clarification.
+        await _emit_clarification(
+            parent_task_id=parent_task_id,
+            agent=agent, workspace=workspace,
+            output=output, tool_calls=tool_calls,
+            question=clarification, phase=phase_for_resume,
+        )
+        return
+
+    next_cycle = prior_cycle + 1
+
+    if phase_for_resume in (ArchitectPhase.INITIAL, ArchitectPhase.REVISION):
+        backlog = _extract_backlog(output)
+        if backlog is None:
+            log.error(
+                "architect.resume.invalid_json",
+                task_id=parent_task_id, output_preview=output[:300],
+            )
+            async with async_session() as s2:
+                parent = (
+                    await s2.execute(
+                        select(Task).where(Task.id == parent_task_id)
+                    )
+                ).scalar_one()
+                try:
+                    from orchestrator.state_machine import transition
+
+                    await transition(
+                        s2, parent, TaskStatus.BLOCKED,
+                        message="architect.resume: invalid JSON on resume",
+                    )
+                except Exception:
+                    parent.status = TaskStatus.BLOCKED
+                s2.add(ArchitectAttempt(
+                    task_id=parent.id,
+                    phase=phase_for_resume,
+                    cycle=next_cycle,
+                    reasoning=output,
+                    decision={
+                        "action": "blocked",
+                        "reason": "invalid JSON on resume",
+                    },
+                    tool_calls=tool_calls,
+                ))
+                await s2.commit()
+            return
+
+        commit_sha = await _commit_and_open_initial_pr(parent, workspace)
+        async with async_session() as s2:
+            parent = (
+                await s2.execute(select(Task).where(Task.id == parent_task_id))
+            ).scalar_one()
+            parent.trio_backlog = backlog
+            s2.add(ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=phase_for_resume,
+                cycle=next_cycle,
+                reasoning=output,
+                commit_sha=commit_sha or None,
+                tool_calls=tool_calls,
+            ))
+            await s2.commit()
+        log.info(
+            "architect.resume.complete",
+            task_id=parent_task_id,
+            phase=phase_for_resume.value,
+            backlog_size=len(backlog),
+            cycle=next_cycle,
+        )
+        return
+
+    # CHECKPOINT branch — extract the {backlog, decision} payload using
+    # the same helper checkpoint() uses, then mirror its row-write shape.
+    payload = _extract_checkpoint_payload(output)
+    async with async_session() as s2:
+        parent = (
+            await s2.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        row = ArchitectAttempt(
+            task_id=parent_task_id,
+            phase=ArchitectPhase.CHECKPOINT,
+            cycle=next_cycle,
+            reasoning=output,
+            tool_calls=tool_calls,
+        )
+        if isinstance(payload, dict):
+            backlog = payload.get("backlog")
+            decision = payload.get("decision")
+            if isinstance(backlog, list):
+                parent.trio_backlog = backlog
+            if isinstance(decision, dict):
+                row.decision = decision
+        else:
+            row.decision = {
+                "action": "blocked",
+                "reason": "invalid checkpoint JSON on resume",
+            }
+        s2.add(row)
+        await s2.commit()
+    log.info(
+        "architect.resume.complete",
+        task_id=parent_task_id,
+        phase=ArchitectPhase.CHECKPOINT.value,
+        cycle=next_cycle,
+        had_payload=isinstance(payload, dict),
     )
