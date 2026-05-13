@@ -85,6 +85,31 @@ function ArchitectRow({ a }: { a: ArchitectAttemptOut }) {
           )}
         </div>
       )}
+      {a.clarification_question && (
+        <div className="mt-2 rounded border-l-2 border-amber-500 pl-2">
+          <div className="text-[10px] font-semibold uppercase text-amber-700">
+            Question
+          </div>
+          <div className="whitespace-pre-wrap text-xs">
+            {a.clarification_question}
+          </div>
+        </div>
+      )}
+      {a.clarification_answer && (
+        <div className="mt-1 rounded border-l-2 border-emerald-500 pl-2">
+          <div className="flex items-center gap-1 text-[10px] font-semibold uppercase text-emerald-700">
+            Answer
+            {a.clarification_source && (
+              <span className="rounded bg-emerald-200/40 px-1 text-[9px]">
+                {a.clarification_source.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <div className="whitespace-pre-wrap text-xs">
+            {a.clarification_answer}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
