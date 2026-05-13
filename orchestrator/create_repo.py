@@ -262,10 +262,11 @@ async def create_repo_and_scaffold_task(
         description=scaffold_description,
         source=TaskSource.MANUAL,
         status=TaskStatus.INTAKE,
-        # Pre-classify scaffold tasks as complex so they go through the
-        # planning + auto-review pipeline regardless of what the keyword
-        # classifier might guess from the description text.
-        complexity=TaskComplexity.COMPLEX,
+        # Pre-classify scaffold tasks as complex_large so they always go
+        # through the trio pipeline (architect → builder → reviewer)
+        # regardless of what the keyword classifier might guess from the
+        # description text.
+        complexity=TaskComplexity.COMPLEX_LARGE,
         repo_id=primary_repo.id,
         freeform_mode=True,
         organization_id=organization_id,
