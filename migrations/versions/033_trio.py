@@ -14,6 +14,10 @@ down_revision = "032"
 
 
 def upgrade() -> None:
+    # Loose-end: migration 012 added COMPLEX_LARGE uppercase only.
+    # The trio router writes `complex_large` (the lowercase value), so add it.
+    op.execute("ALTER TYPE taskcomplexity ADD VALUE IF NOT EXISTS 'complex_large'")
+
     # Add TaskStatus enum values (idempotent, matches 032's pattern).
     op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'TRIO_EXECUTING'")
     op.execute("ALTER TYPE taskstatus ADD VALUE IF NOT EXISTS 'trio_executing'")
@@ -22,10 +26,19 @@ def upgrade() -> None:
 
     # New enums
     op.execute(
-        "CREATE TYPE triophase AS ENUM ('architecting', 'awaiting_builder', 'architect_checkpoint')"
+        "CREATE TYPE triophase AS ENUM ("
+        "'ARCHITECTING', 'architecting', "
+        "'AWAITING_BUILDER', 'awaiting_builder', "
+        "'ARCHITECT_CHECKPOINT', 'architect_checkpoint'"
+        ")"
     )
     op.execute(
-        "CREATE TYPE architect_phase AS ENUM ('initial', 'consult', 'checkpoint', 'revision')"
+        "CREATE TYPE architect_phase AS ENUM ("
+        "'INITIAL', 'initial', "
+        "'CONSULT', 'consult', "
+        "'CHECKPOINT', 'checkpoint', "
+        "'REVISION', 'revision'"
+        ")"
     )
 
     # Task columns
