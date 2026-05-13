@@ -155,6 +155,19 @@ async def run_trio_parent(
                 # ``architect.run_initial`` (or a prior iteration) already
                 # blocked us — nothing left to do.
                 return
+            if p.status == TaskStatus.AWAITING_CLARIFICATION:
+                # Architect emitted awaiting_clarification — the parent is
+                # paused waiting for PO (freeform) or user answers. The
+                # dispatcher in run.py picks up
+                # ARCHITECT_CLARIFICATION_RESOLVED and calls
+                # ``architect.resume`` which re-enters the trio orchestrator.
+                # Exit cleanly here so we don't dispatch a child while
+                # the architect is still designing.
+                log.info(
+                    "trio.parent.paused_for_clarification",
+                    parent_id=parent.id,
+                )
+                return
             backlog = p.trio_backlog or []
             pending = [it for it in backlog if it.get("status") == "pending"]
             if not pending:
@@ -198,6 +211,15 @@ async def run_trio_parent(
             await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
             await architect.run_revision(parent.id)
             continue
+        if action == "awaiting_clarification":
+            # checkpoint emitted clarification — _emit_clarification has
+            # already transitioned the parent to AWAITING_CLARIFICATION.
+            # Exit cleanly; resume runs after the answer lands.
+            log.info(
+                "trio.parent.paused_for_clarification_at_checkpoint",
+                parent_id=parent.id,
+            )
+            return
         if action == "done":
             break
         if action == "blocked":
