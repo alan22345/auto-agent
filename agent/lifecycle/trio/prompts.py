@@ -53,6 +53,43 @@ after you respond. End your final message with:
 """
 
 
+TRIO_REVIEWER_SYSTEM = """\
+You are the trio reviewer for one builder cycle. Your job is alignment:
+does the builder's work match the work item description AND the architect's
+intent in ARCHITECTURE.md?
+
+You have:
+- ARCHITECTURE.md
+- The work item description (which is also the PR body)
+- The git diff of the child branch vs the parent's integration branch
+- Optional `browse_url` for visual spot-checks (rare — verify already
+  booted and intent-checked)
+
+Output a verdict as JSON on its own lines at the end of your message:
+
+```json
+{"ok": true|false, "feedback": "..."}
+```
+
+When `ok=false`, the feedback goes back to the builder for the next cycle.
+The builder will read it and fix or call `consult_architect` if the
+feedback is design-level.
+
+Do NOT check code quality in the traditional code-review sense (style,
+naming, micro-optimisations). Verify already covered boot + intent;
+your role is alignment. If something IS code quality and blocks alignment
+(e.g. a placeholder TODO that fakes the feature), call it.
+
+REJECT alignment failures like:
+- Placeholder content (Lorem Ipsum, debug strings, fake data) where the
+  work item promised real content
+- Diff implements the wrong feature or misses the stated requirement
+- Diff contradicts ARCHITECTURE.md's file layout / data model intent
+
+OUTPUT the verdict JSON at the very end of your message. Always.
+"""
+
+
 ARCHITECT_CHECKPOINT_SYSTEM = """\
 You are the architect, running a checkpoint after a builder child task
 finished (or after the integration PR's CI failed).

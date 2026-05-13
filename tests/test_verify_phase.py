@@ -50,6 +50,7 @@ async def test_boot_pass_intent_pass_invokes_open_pr(patches):
 
     verify.get_task.return_value = MagicMock(
         id=42, affected_routes=[], freeform_mode=True, repo_name="r", branch_name="b",
+        parent_task_id=None,
     )
     await verify.handle_verify(42)
     open_pr.assert_called_once()
@@ -66,9 +67,43 @@ async def test_no_runner_intent_only_passes(patches):
 
     verify.get_task.return_value = MagicMock(
         id=42, affected_routes=[], freeform_mode=True, repo_name="r", branch_name="b",
+        parent_task_id=None,
     )
     await verify.handle_verify(42)
     open_pr.assert_called_once()
+
+
+async def test_trio_child_pass_dispatches_reviewer(patches, monkeypatch):
+    """Verify a passing trio child detours through TRIO_REVIEW instead of
+    going straight to _open_pr_and_advance."""
+    patches.setattr("agent.tools.dev_server.sniff_run_command", lambda ws, override=None: None)
+    patches.setattr(
+        "agent.lifecycle.verify.run_intent_check",
+        AsyncMock(return_value=IntentVerdict(ok=True, reasoning="ok", tool_calls=[])),
+    )
+    open_pr = AsyncMock()
+    patches.setattr("agent.lifecycle.coding._open_pr_and_advance", open_pr)
+    review_dispatch = AsyncMock()
+    monkeypatch.setattr(
+        "agent.lifecycle.trio.reviewer.handle_trio_review", review_dispatch,
+    )
+
+    verify.get_task.return_value = MagicMock(
+        id=42, affected_routes=[], freeform_mode=True, repo_name="r",
+        branch_name="b", parent_task_id=7,
+    )
+    await verify.handle_verify(42)
+    # Trio children must NOT fall through to _open_pr_and_advance directly.
+    open_pr.assert_not_called()
+    # The reviewer is fire-and-forget — give it one event-loop tick to run.
+    import asyncio
+    await asyncio.sleep(0)
+    review_dispatch.assert_called_once_with(
+        42, workspace="/tmp/ws", parent_branch="main",
+    )
+    # Last transition went to "trio_review".
+    from unittest.mock import ANY
+    verify.transition_task.assert_called_with(42, "trio_review", ANY)
 
 
 async def test_early_exit_loops_back_to_coding(patches):

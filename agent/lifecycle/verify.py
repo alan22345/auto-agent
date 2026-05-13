@@ -165,6 +165,26 @@ async def run_intent_check(task, workspace: str, server) -> IntentVerdict:
 async def _pass_cycle(task_id: int, attempt, task, workspace: str, base_branch: str) -> None:
     await _update_verify_attempt(attempt.id, status="pass", finished=True)
     await publish(verify_passed(task_id, attempt.cycle))
+
+    # Trio children take a detour through TRIO_REVIEW before PR creation —
+    # the reviewer is the alignment gate between builder output and the
+    # architect's intent in ARCHITECTURE.md. Non-trio tasks go straight to
+    # _open_pr_and_advance (existing behaviour).
+    if getattr(task, "parent_task_id", None):
+        await transition_task(
+            task_id, "trio_review", "verify passed; dispatching trio reviewer",
+        )
+        from agent.lifecycle.trio.reviewer import handle_trio_review
+        # Fire-and-forget so verify returns; the reviewer is responsible
+        # for transitioning the task to PR_CREATED (then coding's
+        # _open_pr_and_advance is invoked) or back to CODING.
+        asyncio.create_task(  # noqa: RUF006 — fire-and-forget hand-off
+            handle_trio_review(
+                task_id, workspace=workspace, parent_branch=base_branch,
+            )
+        )
+        return
+
     from agent.lifecycle.coding import _open_pr_and_advance
     branch_name = task.branch_name
     await _open_pr_and_advance(task_id, task, workspace, base_branch, branch_name)
