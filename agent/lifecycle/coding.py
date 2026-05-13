@@ -166,6 +166,24 @@ async def _build_trio_child_prompt(*, child_description: str, workspace: str) ->
     )
 
 
+async def _pr_base_branch_for_task(task) -> str:
+    """Return the base branch the task's PR should target.
+
+    - Trio children → parent's integration branch (trio/<parent_id>).
+    - Freeform tasks → freeform_config.dev_branch (or 'dev' default).
+    - Otherwise → 'main'.
+    """
+    if getattr(task, "parent_task_id", None):
+        return f"trio/{task.parent_task_id}"
+    if getattr(task, "freeform_mode", False):
+        repo = getattr(task, "repo", None)
+        cfg = getattr(repo, "freeform_config", None) if repo else None
+        if cfg is not None and getattr(cfg, "dev_branch", None):
+            return cfg.dev_branch
+        return "dev"
+    return "main"
+
+
 async def _maybe_start_coding_server(task, workspace: str):
     """Return a dev-server async context manager when applicable, else None.
 
@@ -208,9 +226,13 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
     base_branch = repo.default_branch
     fallback_branch: str | None = None
 
-    # If the repo has a dev branch configured, ALL tasks target it.
+    # Trio children always target the parent's integration branch.
+    if getattr(task, "parent_task_id", None):
+        base_branch = f"trio/{task.parent_task_id}"
+        log.info(f"Trio child task #{task_id}: targeting integration branch '{base_branch}'")
+    # If the repo has a dev branch configured, ALL (non-trio) tasks target it.
     # Code deploys to dev after CI passes; promotion to prod is manual.
-    if task.repo_name:
+    elif task.repo_name:
         freeform_cfg = await get_freeform_config(task.repo_name)
         if freeform_cfg and freeform_cfg.dev_branch:
             base_branch = freeform_cfg.dev_branch
