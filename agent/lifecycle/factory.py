@@ -57,6 +57,7 @@ def create_agent(
     readonly: bool = False,
     with_web: bool = False,
     with_browser: bool = False,
+    with_consult_architect: bool = False,
     max_turns: int = 50,
     include_methodology: bool = False,
     model_tier: str | None = None,
@@ -82,11 +83,21 @@ def create_agent(
                against the org's daily token quota.
         with_web: If True, include web_search + fetch_url tools (researcher mode).
         with_browser: If True, include browse_url + tail_dev_server_log (verify mode).
+        with_consult_architect: If True, expose ``consult_architect`` to the
+            agent — only set this for trio child (builder) tasks; the tool
+            refuses to run when ``parent_task_id`` is absent from the
+            ToolContext, but gating registration too keeps it out of the
+            tool catalogue for non-trio agents.
     """
     from agent.loop import UsageSink
 
     provider = get_provider(model_override=model_tier, home_dir=home_dir)
-    tools = create_default_registry(readonly=readonly, with_web=with_web, with_browser=with_browser)
+    tools = create_default_registry(
+        readonly=readonly,
+        with_web=with_web,
+        with_browser=with_browser,
+        with_consult_architect=with_consult_architect,
+    )
     ctx = ContextManager(workspace, provider)
     session = Session(session_id) if session_id else None
 

@@ -2203,6 +2203,7 @@ def _task_to_response(task: Task) -> TaskData:
         created_at=task.created_at.isoformat() if task.created_at else None,
         created_by_user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        parent_task_id=task.parent_task_id,
     )
 
 

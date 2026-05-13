@@ -62,6 +62,9 @@ class TaskData(BaseModel):
     target_areas: str | None = None         # comma-separated file paths or module areas
     acceptance_criteria: str | None = None   # what "done" looks like
     constraints: str | None = None          # what NOT to do
+    # Trio (architect/builder/reviewer) — parent points to the trio parent
+    # task when this is a child work item; otherwise None.
+    parent_task_id: int | None = None
 
 
 class TaskMessageData(BaseModel):

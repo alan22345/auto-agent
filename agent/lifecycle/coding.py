@@ -115,6 +115,57 @@ async def _update_subtasks(task_id: int, subtasks: list[dict], current: int | No
         )
 
 
+async def _is_trio_child(task) -> bool:
+    """True when this task is a trio child (parent task is in TRIO_EXECUTING).
+
+    A trio child is a normal coding task with ``parent_task_id`` pointing at
+    a parent currently driving the trio loop. We re-check the parent's
+    status against the live DB (not whatever stale snapshot was passed in)
+    because the parent's phase can advance between the child being queued
+    and the child reaching the coding handler.
+    """
+    if not getattr(task, "parent_task_id", None):
+        return False
+    from sqlalchemy import select
+
+    from shared.database import async_session
+    from shared.models import Task, TaskStatus
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == task.parent_task_id))
+        ).scalar_one_or_none()
+    return parent is not None and parent.status == TaskStatus.TRIO_EXECUTING
+
+
+async def _build_trio_child_prompt(*, child_description: str, workspace: str) -> str:
+    """Assemble the trio-child augmentation appended to the coding prompt.
+
+    Inputs are plain strings so this helper is trivially unit-testable —
+    no DB session, no TaskData required.
+    """
+    import os
+
+    arch_path = os.path.join(workspace, "ARCHITECTURE.md")
+    if os.path.isfile(arch_path):
+        try:
+            with open(arch_path) as f:
+                arch = f.read()
+        except OSError:
+            arch = "(ARCHITECTURE.md unreadable)"
+    else:
+        arch = "(ARCHITECTURE.md not found in workspace)"
+
+    return (
+        "You are a trio builder. Your task is one bounded work item.\n\n"
+        f"== Work item ==\n{child_description}\n\n"
+        f"== ARCHITECTURE.md ==\n{arch}\n\n"
+        "If you hit an ambiguity that touches design (file layout, data model, "
+        "abstraction choice), call `consult_architect(question, why)`. For "
+        "code-local decisions, decide yourself.\n"
+    )
+
+
 async def _maybe_start_coding_server(task, workspace: str):
     """Return a dev-server async context manager when applicable, else None.
 
@@ -282,6 +333,15 @@ async def _handle_coding_single(
                 server_handle = None
                 server_cm = None
 
+        # Trio children get ARCHITECTURE.md + consult_architect grafted on.
+        # Non-trio tasks take exactly today's path.
+        trio_child = await _is_trio_child(task)
+        if trio_child:
+            coding_prompt += "\n\n" + await _build_trio_child_prompt(
+                child_description=task.description,
+                workspace=workspace,
+            )
+
         agent = create_agent(
             workspace,
             session_id=session_id,
@@ -293,6 +353,7 @@ async def _handle_coding_single(
             home_dir=await home_dir_for_task(task),
             org_id=task.organization_id,
             with_browser=server_handle is not None,
+            with_consult_architect=trio_child,
             dev_server_log_path=server_handle.log_path if server_handle else None,
         )
         result = await agent.run(coding_prompt, resume=is_continuation)
