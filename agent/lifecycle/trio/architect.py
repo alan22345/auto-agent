@@ -409,8 +409,231 @@ async def run_initial(parent_task_id: int) -> None:
     )
 
 
-async def consult(*, parent_task_id: int, child_task_id: int, question: str, why: str):
-    raise NotImplementedError("Task 13")
+# ---------------------------------------------------------------------------
+# consult — the builder asks the architect a mid-build question.
+# ---------------------------------------------------------------------------
+
+# Matches the trailing ```json { ... } ``` block the consult prompt asks for.
+_CONSULT_JSON_RE = re.compile(r"```json\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+
+
+def _extract_consult_payload(text: str) -> dict | None:
+    """Pull ``{"answer": "...", "architecture_md_updated": bool}`` out of output.
+
+    Returns ``None`` on any failure path (missing block, malformed JSON,
+    missing ``answer`` key). Defaults ``architecture_md_updated`` to
+    ``False`` when absent so callers can rely on it being present.
+    """
+    if not text:
+        return None
+    matches = list(_CONSULT_JSON_RE.finditer(text))
+    if not matches:
+        return None
+    # Prefer the last valid block in case the architect emits multiple.
+    for m in reversed(matches):
+        try:
+            payload = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or "answer" not in payload:
+            continue
+        payload.setdefault("architecture_md_updated", False)
+        return payload
+    return None
+
+
+async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
+    """Commit ARCHITECTURE.md changes on a one-off consult sub-branch.
+
+    Mirrors ``_commit_and_open_initial_pr`` but targets a timestamped
+    sub-branch ``trio/<parent_id>/consult-<unix_ts>`` so multiple consult
+    cycles don't collide. Pushes, opens a PR back to the integration
+    branch, and asks GitHub to auto-squash-merge it.
+
+    Returns the local HEAD SHA of the head branch — the auto-merge may
+    complete asynchronously, so we record what we committed rather than
+    blocking on the squash.
+    """
+    import time
+
+    from agent import sh
+    from agent.workspace import commit_pending_changes, push_branch
+
+    integration_branch = f"trio/{parent.id}"
+    head_branch = f"trio/{parent.id}/consult-{int(time.time())}"
+
+    # Sub-branch off whatever HEAD currently is (the integration branch).
+    await sh.run(
+        ["git", "checkout", "-B", head_branch],
+        cwd=workspace, timeout=30,
+    )
+
+    await commit_pending_changes(
+        workspace, parent.id, f"consult: update ARCHITECTURE.md — {parent.title}",
+    )
+
+    remote_check = await sh.run(
+        ["git", "remote"], cwd=workspace, timeout=10,
+    )
+    has_remote = bool((remote_check.stdout or "").strip())
+
+    if has_remote:
+        try:
+            await push_branch(workspace, head_branch)
+            await sh.run(
+                ["git", "push", "-u", "origin", integration_branch],
+                cwd=workspace, timeout=30,
+            )
+
+            from shared.github_auth import get_github_token
+
+            gh_env = {
+                "GH_TOKEN": await get_github_token(
+                    user_id=parent.created_by_user_id,
+                    organization_id=parent.organization_id,
+                ),
+            }
+            create_res = await sh.run(
+                [
+                    "gh", "pr", "create",
+                    "--base", integration_branch,
+                    "--head", head_branch,
+                    "--title", f"consult: update ARCHITECTURE.md — {parent.title}",
+                    "--body", (
+                        "Architecture clarification from mid-build consult for "
+                        f"trio parent #{parent.id}.\n\n"
+                        "Updates ARCHITECTURE.md in response to a builder "
+                        "question; merges back to the integration branch so "
+                        "subsequent builder turns see the new guidance."
+                    ),
+                ],
+                cwd=workspace, timeout=30, env=gh_env,
+            )
+            if create_res.failed:
+                log.warning(
+                    "architect.consult_pr_create_failed",
+                    task_id=parent.id,
+                    stderr=(create_res.stderr or "")[:500],
+                )
+            else:
+                await sh.run(
+                    ["gh", "pr", "merge", "--auto", "--squash"],
+                    cwd=workspace, timeout=30, env=gh_env,
+                )
+        except Exception as e:  # pragma: no cover — best-effort remote plumbing
+            log.warning(
+                "architect.consult_pr_push_or_merge_failed",
+                task_id=parent.id, error=str(e),
+            )
+
+    rev = await sh.run(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, timeout=10,
+    )
+    sha = (rev.stdout or "").strip()
+    return sha[:40] if sha else ""
+
+
+async def consult(
+    *,
+    parent_task_id: int,
+    child_task_id: int,
+    question: str,
+    why: str,
+) -> dict:
+    """Answer a builder's mid-build question.
+
+    Loads the parent task, prepares its workspace, runs the architect
+    in ``consult`` mode with the builder's question + rationale folded
+    into the task description, and parses the resulting JSON payload.
+
+    If ``architecture_md_updated`` is true, commits the doc change on a
+    timestamped sub-branch and opens a PR back to the integration
+    branch (``_commit_consult_doc_update``).
+
+    Persists an ``ArchitectAttempt`` row with ``phase=CONSULT``,
+    monotonically-increasing ``cycle`` (per parent), the question/why,
+    and ``commit_sha`` when a doc PR was opened.
+
+    Returns ``{"answer": str, "architecture_md_updated": bool}``.
+    """
+    from agent.lifecycle.factory import home_dir_for_task
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        # Pre-resolve everything we'll need outside the session.
+        task_description = parent.description or parent.title
+        repo_name = parent.repo.name if parent.repo else None
+        org_id = parent.organization_id
+        home_dir = await home_dir_for_task(parent)
+
+    workspace = await _prepare_parent_workspace(parent)
+
+    consult_description = (
+        f"{task_description}\n\n"
+        f"[Consult question from builder #{child_task_id}]: {question}\n"
+        f"[Why]: {why}"
+    )
+
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_task_id,
+        task_description=consult_description,
+        phase="consult",
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    run_result = await agent.run(consult_description)
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    payload = _extract_consult_payload(output) or {
+        "answer": output.strip(),
+        "architecture_md_updated": False,
+    }
+
+    commit_sha: str | None = None
+    if payload["architecture_md_updated"]:
+        commit_sha = await _commit_consult_doc_update(parent, workspace)
+
+    async with async_session() as s:
+        existing = (
+            await s.execute(
+                select(ArchitectAttempt).where(
+                    (ArchitectAttempt.task_id == parent_task_id)
+                    & (ArchitectAttempt.phase == ArchitectPhase.CONSULT)
+                )
+            )
+        ).scalars().all()
+        cycle = len(existing) + 1
+
+        s.add(ArchitectAttempt(
+            task_id=parent_task_id,
+            phase=ArchitectPhase.CONSULT,
+            cycle=cycle,
+            reasoning=output,
+            consult_question=question,
+            consult_why=why,
+            commit_sha=commit_sha or None,
+            tool_calls=tool_calls,
+        ))
+        await s.commit()
+
+    log.info(
+        "architect.consult.complete",
+        parent_task_id=parent_task_id,
+        child_task_id=child_task_id,
+        cycle=cycle,
+        architecture_md_updated=payload["architecture_md_updated"],
+        commit_sha=commit_sha,
+    )
+
+    return {
+        "answer": payload["answer"],
+        "architecture_md_updated": bool(payload["architecture_md_updated"]),
+    }
 
 
 async def checkpoint(
