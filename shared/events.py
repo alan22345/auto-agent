@@ -99,6 +99,13 @@ class TaskEventType(StrEnum):
     CODING_SERVER_BOOT_FAILED = "task.coding_server_boot_failed"
     REVIEW_UI_CHECK_STARTED = "task.review_ui_check_started"
     REVIEW_SKIPPED_NO_RUNNER = "task.review_skipped_no_runner"
+    # Trio architect clarification flow — distinct from the planner's
+    # CLARIFICATION_NEEDED. The architect publishes
+    # ARCHITECT_CLARIFICATION_NEEDED so the dispatcher can route to PO
+    # (freeform) or republish the planner event (non-freeform).
+    # ARCHITECT_CLARIFICATION_RESOLVED fires when the answer lands.
+    ARCHITECT_CLARIFICATION_NEEDED = "task.architect_clarification_needed"
+    ARCHITECT_CLARIFICATION_RESOLVED = "task.architect_clarification_resolved"
 
 
 class POEventType(StrEnum):
