@@ -20,7 +20,11 @@ from agent.tools.web_search import WebSearchTool
 
 
 def create_default_registry(
-    readonly: bool = False, with_web: bool = False, with_browser: bool = False
+    readonly: bool = False,
+    with_web: bool = False,
+    with_browser: bool = False,
+    with_consult_architect: bool = False,
+    with_architect_tools: bool = False,
 ) -> ToolRegistry:
     """Create a registry with all standard coding tools.
 
@@ -28,6 +32,8 @@ def create_default_registry(
         readonly: If True, exclude tools that modify files (planning mode).
         with_web: If True, include web_search + fetch_url (researcher mode).
         with_browser: If True, include browse_url + tail_dev_server_log (verify mode).
+        with_consult_architect: Add consult_architect (builder-side, trio children only).
+        with_architect_tools: Add record_decision + request_market_brief (architect agent only).
     """
     registry = ToolRegistry()
 
@@ -51,6 +57,18 @@ def create_default_registry(
 
         registry.register(BrowseUrlTool())
         registry.register(TailDevServerLogTool())
+
+    if with_consult_architect:
+        from agent.tools.consult_architect import ConsultArchitectTool
+
+        registry.register(ConsultArchitectTool())
+
+    if with_architect_tools:
+        from agent.tools.record_decision import RecordDecisionTool
+        from agent.tools.request_market_brief import RequestMarketBriefTool
+
+        registry.register(RecordDecisionTool())
+        registry.register(RequestMarketBriefTool())
 
     # Write tools — excluded in planning/readonly mode
     if not readonly:
