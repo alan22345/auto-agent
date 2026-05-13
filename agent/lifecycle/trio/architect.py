@@ -636,14 +636,293 @@ async def consult(
     }
 
 
+# ---------------------------------------------------------------------------
+# checkpoint — architect reviews progress after a child merges (or CI fails).
+# ---------------------------------------------------------------------------
+
+# Matches the trailing ```json { ... } ``` block the checkpoint prompt asks for.
+_CHECKPOINT_JSON_RE = re.compile(r"```json\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+
+
+def _extract_checkpoint_payload(text: str) -> dict | None:
+    """Pull ``{"backlog": [...], "decision": {...}}`` from a ```json``` block.
+
+    Returns ``None`` on any failure path: missing block, malformed JSON,
+    missing ``backlog`` or ``decision`` keys, ``backlog`` not a list,
+    ``decision`` not a dict, or ``decision.action`` absent. Prefers the
+    last valid block when the architect emits multiple.
+    """
+    if not text:
+        return None
+    matches = list(_CHECKPOINT_JSON_RE.finditer(text))
+    if not matches:
+        return None
+    for m in reversed(matches):
+        try:
+            payload = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        backlog = payload.get("backlog")
+        decision = payload.get("decision")
+        if not isinstance(backlog, list):
+            continue
+        if not isinstance(decision, dict) or "action" not in decision:
+            continue
+        return {"backlog": backlog, "decision": decision}
+    return None
+
+
+async def _next_cycle(session, parent_id: int, phase: ArchitectPhase) -> int:
+    """Return the next ``cycle`` number for ``(parent_id, phase)``.
+
+    Counts existing ``ArchitectAttempt`` rows for the pair and adds one.
+    Used by ``checkpoint`` and ``run_revision`` (and could be used by
+    ``consult`` — kept inline there to avoid breaking its tests).
+    """
+    existing = (
+        await session.execute(
+            select(ArchitectAttempt).where(
+                (ArchitectAttempt.task_id == parent_id)
+                & (ArchitectAttempt.phase == phase)
+            )
+        )
+    ).scalars().all()
+    return len(existing) + 1
+
+
 async def checkpoint(
     parent_task_id: int,
     *,
     child_task_id: int | None = None,
     repair_context: dict | None = None,
-):
-    raise NotImplementedError("Task 14")
+) -> dict:
+    """Run an architect checkpoint pass over the parent task.
+
+    Two flavors share the same code path, distinguished by which kwarg
+    the caller supplies:
+
+    - ``child_task_id`` — a child task just merged; the architect reviews
+      the diff and decides whether the backlog needs to change.
+    - ``repair_context`` — the integration PR failed CI; the architect
+      diagnoses and adds fix work items to the backlog.
+
+    Returns the decision dict (matches ``shared.types.ArchitectDecision``
+    shape). On JSON-extraction failure, returns a ``blocked`` decision
+    and persists an attempt row with that decision; the parent's backlog
+    is left untouched in that case.
+    """
+    from agent.lifecycle.factory import home_dir_for_task
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        task_description = parent.description or parent.title
+        task_title = parent.title
+        repo_name = parent.repo.name if parent.repo else None
+        org_id = parent.organization_id
+        home_dir = await home_dir_for_task(parent)
+
+    workspace = await _prepare_parent_workspace(parent)
+
+    # Build the prompt suffix from whichever kwarg the caller supplied.
+    suffix = ""
+    if child_task_id is not None:
+        suffix = (
+            f"\n\nChild task #{child_task_id} just merged. "
+            "Review its diff via git log/git diff."
+        )
+    elif repair_context is not None:
+        ci_log = str(repair_context.get("ci_log", ""))[:4000]
+        failed_pr_url = repair_context.get("failed_pr_url", "")
+        suffix = (
+            f"\n\nThe integration PR ({failed_pr_url}) failed CI: "
+            f"{ci_log}. Diagnose and add fix work items."
+        )
+
+    checkpoint_description = f"{task_description}{suffix}"
+
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_task_id,
+        task_description=checkpoint_description,
+        phase="checkpoint",
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    run_result = await agent.run(
+        f"Run a checkpoint review for: {task_title}\n\n"
+        f"Task description:\n{checkpoint_description}",
+    )
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    payload = _extract_checkpoint_payload(output)
+
+    if payload is None:
+        log.error(
+            "architect.checkpoint.invalid_json",
+            task_id=parent_task_id,
+            output_preview=output[:300],
+        )
+        blocked = {"action": "blocked", "reason": "invalid checkpoint JSON"}
+        async with async_session() as s:
+            cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
+            s.add(ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=ArchitectPhase.CHECKPOINT,
+                cycle=cycle,
+                reasoning=output or "",
+                decision=blocked,
+                tool_calls=tool_calls,
+            ))
+            await s.commit()
+        return blocked
+
+    decision = payload["decision"]
+    backlog = payload["backlog"]
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        parent.trio_backlog = backlog
+        cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
+        s.add(ArchitectAttempt(
+            task_id=parent_task_id,
+            phase=ArchitectPhase.CHECKPOINT,
+            cycle=cycle,
+            reasoning=output,
+            decision=decision,
+            tool_calls=tool_calls,
+        ))
+        await s.commit()
+
+    log.info(
+        "architect.checkpoint.complete",
+        task_id=parent_task_id,
+        child_task_id=child_task_id,
+        has_repair_context=repair_context is not None,
+        cycle=cycle,
+        decision_action=decision.get("action"),
+        backlog_size=len(backlog),
+    )
+
+    return decision
 
 
-async def run_revision(parent_task_id: int):
-    raise NotImplementedError("Task 14")
+# ---------------------------------------------------------------------------
+# run_revision — architect re-thinks the design and rewrites ARCHITECTURE.md.
+# ---------------------------------------------------------------------------
+
+
+async def run_revision(parent_task_id: int) -> None:
+    """Run a revision pass on a trio parent task.
+
+    Same overall shape as ``run_initial`` but with the revision system
+    prompt and a description suffix telling the architect this is a
+    re-pass. On success: writes the new commit SHA + rewritten backlog
+    to the parent and persists an ``ArchitectAttempt`` row with
+    ``phase=REVISION`` and a fresh ``cycle``. On JSON-extraction
+    failure: transitions the parent to ``BLOCKED`` and persists a
+    blocked revision row.
+    """
+    from agent.lifecycle.factory import home_dir_for_task
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        task_description = parent.description or parent.title
+        task_title = parent.title
+        repo_name = parent.repo.name if parent.repo else None
+        org_id = parent.organization_id
+        home_dir = await home_dir_for_task(parent)
+
+    workspace = await _prepare_parent_workspace(parent)
+
+    revision_description = (
+        f"{task_description}\n\n"
+        "[Revision pass — design changed. Rewrite ARCHITECTURE.md.]"
+    )
+
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_task_id,
+        task_description=revision_description,
+        phase="revision",
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    run_result = await agent.run(
+        f"Run a revision pass for: {task_title}\n\n"
+        f"Task description:\n{revision_description}",
+    )
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    backlog = _extract_backlog(output)
+
+    if backlog is None:
+        log.error(
+            "architect.run_revision.invalid_json",
+            task_id=parent_task_id,
+            output_preview=output[:300],
+        )
+        async with async_session() as s:
+            parent = (
+                await s.execute(select(Task).where(Task.id == parent_task_id))
+            ).scalar_one()
+            try:
+                from orchestrator.state_machine import transition
+
+                await transition(
+                    s, parent, TaskStatus.BLOCKED,
+                    message="architect.run_revision: invalid JSON backlog",
+                )
+            except Exception:
+                parent.status = TaskStatus.BLOCKED
+            cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.REVISION)
+            s.add(ArchitectAttempt(
+                task_id=parent.id,
+                phase=ArchitectPhase.REVISION,
+                cycle=cycle,
+                reasoning=output or "",
+                decision={
+                    "action": "blocked",
+                    "reason": "invalid JSON from architect",
+                },
+                tool_calls=tool_calls,
+            ))
+            await s.commit()
+        return
+
+    commit_sha = await _commit_and_open_initial_pr(parent, workspace)
+
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        parent.trio_backlog = backlog
+        cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.REVISION)
+        s.add(ArchitectAttempt(
+            task_id=parent.id,
+            phase=ArchitectPhase.REVISION,
+            cycle=cycle,
+            reasoning=output,
+            commit_sha=commit_sha or None,
+            tool_calls=tool_calls,
+        ))
+        await s.commit()
+
+    log.info(
+        "architect.run_revision.complete",
+        task_id=parent_task_id,
+        backlog_size=len(backlog),
+        commit_sha=commit_sha,
+        cycle=cycle,
+    )
