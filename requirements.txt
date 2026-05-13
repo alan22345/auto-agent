@@ -43,5 +43,10 @@ beautifulsoup4>=4.12
 html2text>=2024.2.26
 lxml>=5.2
 
+# Headless browser for the browse_url agent tool (verify/review mode).
+# The Dockerfile runs `playwright install --with-deps chromium` after pip
+# install to fetch the Chromium binary + OS deps.
+playwright>=1.49
+
 # Dev tools
 pydantic-to-typescript==2.0.0
