@@ -65,6 +65,9 @@ class TaskData(BaseModel):
     # Trio (architect/builder/reviewer) — parent points to the trio parent
     # task when this is a child work item; otherwise None.
     parent_task_id: int | None = None
+    # Trio orchestration state — only populated for trio parent tasks.
+    trio_phase: str | None = None
+    trio_backlog: list[dict] | None = None
 
 
 class TaskMessageData(BaseModel):

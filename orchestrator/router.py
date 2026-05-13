@@ -2276,6 +2276,8 @@ def _task_to_response(task: Task) -> TaskData:
         created_by_user_id=task.created_by_user_id,
         organization_id=task.organization_id,
         parent_task_id=task.parent_task_id,
+        trio_phase=task.trio_phase.value if task.trio_phase else None,
+        trio_backlog=task.trio_backlog,
     )
 
 

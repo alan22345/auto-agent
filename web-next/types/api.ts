@@ -400,6 +400,12 @@ export interface TaskData {
   acceptance_criteria?: string | null;
   constraints?: string | null;
   parent_task_id?: number | null;
+  trio_phase?: string | null;
+  trio_backlog?:
+    | {
+        [k: string]: unknown;
+      }[]
+    | null;
 }
 /**
  * A user-posted feedback message on a task.

@@ -6,6 +6,10 @@ import remarkGfm from 'remark-gfm';
 import type { TaskData } from '@/types/api';
 import { cn } from '@/lib/utils';
 import { AttemptsPanel } from './attempts-panel';
+import { ArchitectAttemptsPanel } from '@/components/trio/ArchitectAttemptsPanel';
+import { TrioReviewAttemptsPanel } from '@/components/trio/TrioReviewAttemptsPanel';
+import { DecisionsPanel } from '@/components/trio/DecisionsPanel';
+import { PauseTrioButton } from '@/components/trio/PauseTrioButton';
 
 const PLAN_VISIBLE_STATUSES = new Set([
   'awaiting_approval',
@@ -53,8 +57,10 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
   const showPlan = shouldShowPanelPlan(task);
   const showError = !!task.error?.trim() && ERROR_VISIBLE_STATUSES.has(task.status);
   const showAttempts = ATTEMPTS_VISIBLE_STATUSES.has(task.status);
+  const isTrioParent = task.status === 'trio_executing' || !!task.trio_phase;
+  const isTrioChild = !!task.parent_task_id;
 
-  if (!hasDescription && !showPlan && !showError && !showAttempts) return null;
+  if (!hasDescription && !showPlan && !showError && !showAttempts && !isTrioParent && !isTrioChild) return null;
 
   return (
     <div className="space-y-2 border-b px-4 py-3">
@@ -96,6 +102,32 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
       )}
 
       {showAttempts && <AttemptsPanel taskId={task.id} />}
+
+      {isTrioParent && (
+        <section className="space-y-4 pt-2">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold">Trio</h2>
+            <PauseTrioButton taskId={task.id} />
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Phase: <strong>{task.trio_phase ?? '—'}</strong>
+            {task.trio_backlog && (
+              <> · Backlog: {task.trio_backlog.filter((w) => (w as { status?: string }).status === 'done').length} / {task.trio_backlog.length} done</>
+            )}
+          </div>
+          <h3 className="text-xs font-medium">Architect activity</h3>
+          <ArchitectAttemptsPanel taskId={task.id} />
+          <h3 className="text-xs font-medium">Decisions (ADRs)</h3>
+          <DecisionsPanel taskId={task.id} />
+        </section>
+      )}
+
+      {isTrioChild && (
+        <section className="space-y-2 pt-2">
+          <h2 className="text-sm font-semibold">Trio Reviews</h2>
+          <TrioReviewAttemptsPanel taskId={task.id} />
+        </section>
+      )}
     </div>
   );
 }
