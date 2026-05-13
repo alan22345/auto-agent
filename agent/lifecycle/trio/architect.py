@@ -905,6 +905,19 @@ async def checkpoint(
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
 
+    clarification = _extract_clarification(output)
+    if clarification is not None:
+        await _emit_clarification(
+            parent_task_id=parent_task_id,
+            agent=agent,
+            workspace=workspace,
+            output=output,
+            tool_calls=tool_calls,
+            question=clarification,
+            phase=ArchitectPhase.CHECKPOINT,
+        )
+        return {"action": "awaiting_clarification", "question": clarification}
+
     payload = _extract_checkpoint_payload(output)
 
     if payload is None:
@@ -1007,6 +1020,19 @@ async def run_revision(parent_task_id: int) -> None:
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
+
+    clarification = _extract_clarification(output)
+    if clarification is not None:
+        await _emit_clarification(
+            parent_task_id=parent_task_id,
+            agent=agent,
+            workspace=workspace,
+            output=output,
+            tool_calls=tool_calls,
+            question=clarification,
+            phase=ArchitectPhase.REVISION,
+        )
+        return
 
     backlog = _extract_backlog(output)
 
