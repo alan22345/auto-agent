@@ -633,21 +633,50 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
 
 
 async def on_ci_failed(event: Event) -> None:
+    # Fetch the failure log first — both the trio-parent repair path and
+    # the regular non-trio retry path want it. We open a read-only
+    # snapshot to decide which path to take, then delegate the
+    # transition to ``orchestrator.ci_handler.on_ci_resolved`` so
+    # webhook, poller, and any future site share one source of truth
+    # for AWAITING_CI resolution.
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task:
             return
         reason = event.payload.get("reason", "CI checks failed")
+        pr_url = task.pr_url
+        created_by_user_id = task.created_by_user_id
+        is_trio_parent = (
+            task.complexity == TaskComplexity.COMPLEX_LARGE
+            and task.parent_task_id is None
+            and task.trio_backlog is not None
+        )
 
-        # Fetch actual failure logs if we have a PR URL
-        if task.pr_url:
-            from shared.github_auth import get_github_token as _gh_token
-            ci_logs = await _fetch_failed_ci_logs(
-                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
-            )
-            reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
+    # Fetch actual failure logs if we have a PR URL
+    if pr_url:
+        from shared.github_auth import get_github_token as _gh_token
+        ci_logs = await _fetch_failed_ci_logs(
+            pr_url, await _gh_token(user_id=created_by_user_id),
+        )
+        reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
+    else:
+        ci_logs = reason
 
-        task = await transition(session, task, TaskStatus.CODING, f"CI failed — fetched logs")
+    if is_trio_parent:
+        # Trio integration PR failed CI — hand off to ``on_ci_resolved``,
+        # which transitions to TRIO_EXECUTING and fires ``run_trio_parent``
+        # with a ``repair_context`` so the architect can plan a repair pass.
+        from orchestrator.ci_handler import on_ci_resolved
+        await on_ci_resolved(event.task_id, passed=False, log=ci_logs)
+        return
+
+    # Non-trio path: transition to CODING and kick the coding loop with
+    # the failure context as the retry reason.
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        task = await transition(session, task, TaskStatus.CODING, "CI failed — fetched logs")
         await session.commit()
 
         await publish(task_start_coding(task.id, retry_reason=reason[-3000:]))
