@@ -484,11 +484,6 @@ class WorkItem(BaseModel):
     discovered_in_attempt_id: int | None = None
 
 
-class TrioPhaseLiteral(BaseModel):
-    """Pydantic wrapper for the trio_phase enum used in API responses."""
-    phase: Literal["architecting", "awaiting_builder", "architect_checkpoint"] | None
-
-
 class RepairContext(BaseModel):
     """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
     ci_log: str
@@ -527,3 +522,10 @@ class TrioReviewAttemptOut(BaseModel):
     feedback: str
     tool_calls: list[dict]
     created_at: datetime
+
+
+class DecisionOut(BaseModel):
+    """API shape for one ADR file under ``docs/decisions/``."""
+    filename: str
+    title: str
+    url: str

@@ -67,6 +67,14 @@ export interface CreateUserRequest {
   password: string;
   display_name: string;
 }
+/**
+ * API shape for one ADR file under ``docs/decisions/``.
+ */
+export interface DecisionOut {
+  filename: string;
+  title: string;
+  url: string;
+}
 export interface FeedbackSummary {
   total_outcomes?: number;
   approved?: number;
@@ -435,12 +443,6 @@ export interface TimelineEntry {
   to: string;
   message?: string;
   timestamp?: string | null;
-}
-/**
- * Pydantic wrapper for the trio_phase enum used in API responses.
- */
-export interface TrioPhaseLiteral {
-  phase: ("architecting" | "awaiting_builder" | "architect_checkpoint") | null;
 }
 /**
  * API shape for a trio_review_attempts row.

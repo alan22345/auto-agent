@@ -17,17 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.auth import (
     create_token,
-    current_org_id as current_org_id_dep,
-    current_user_id,
     hash_password,
     verify_password,
     verify_token,
+)
+from orchestrator.auth import (
+    current_org_id as current_org_id_dep,
 )
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.scoping import scoped
-from orchestrator.state_machine import InvalidTransition, get_task, transition
+from orchestrator.state_machine import InvalidTransition, transition
 from shared import quotas
 from shared.config import settings
 from shared.database import get_session
@@ -72,6 +73,7 @@ from shared.types import (
     ArchitectAttemptOut,
     ChangeEmailRequest,
     CreateUserRequest,
+    DecisionOut,
     FeedbackSummary,
     FreeformConfigData,
     LoginRequest,
@@ -1232,6 +1234,164 @@ async def list_trio_review_attempts(
         )
     ).scalars().all()
     return [TrioReviewAttemptOut.model_validate(r, from_attributes=True) for r in rows]
+
+
+def _decisions_ref_for_task(task: Task) -> str | None:
+    """Pick the branch to read ``docs/decisions/`` from for a task.
+
+    Trio parent → its integration branch ``trio/<id>``; trio child →
+    parent's integration branch ``trio/<parent_id>``; otherwise the
+    task's own branch if set, else the repo default. Returns None if
+    no usable ref can be determined (no repo).
+    """
+    if task.repo is None:
+        return None
+    if task.parent_task_id is not None:
+        return f"trio/{task.parent_task_id}"
+    if task.trio_phase is not None:
+        return f"trio/{task.id}"
+    if task.branch_name:
+        return task.branch_name
+    return task.repo.default_branch or "main"
+
+
+def _adr_title_from_markdown(content: str, fallback: str) -> str:
+    """Extract the first ``# `` heading from a markdown blob, or fall back."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return fallback
+
+
+@router.get(
+    "/tasks/{task_id}/decisions",
+    response_model=list[DecisionOut],
+)
+async def list_decisions(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[DecisionOut]:
+    """Return ADRs from ``docs/decisions/`` on the task's working branch.
+
+    Reads via the GitHub Contents API rather than cloning. Returns
+    ``[]`` (not an error) when: the repo URL isn't a GitHub URL, no
+    auth token is available, the directory doesn't exist, or any
+    transient API failure — the panel is informational and shouldn't
+    block the task page if GitHub is flaky.
+    """
+    import httpx
+
+    from orchestrator.ci_extractor import _parse_owner_repo
+    from shared.github_auth import get_github_token
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    # Load the task's repo eagerly — Task.repo is a lazy relationship and
+    # we're outside any session context the route caller set up.
+    repo = await session.get(Repo, task.repo_id) if task.repo_id else None
+    if repo is None or not repo.url:
+        return []
+
+    # Re-attach so _decisions_ref_for_task can read .repo without a lazy load.
+    task.repo = repo  # type: ignore[assignment]
+
+    owner_repo = _parse_owner_repo(repo.url)
+    if owner_repo is None:
+        return []
+    owner, name = owner_repo
+
+    ref = _decisions_ref_for_task(task)
+    if ref is None:
+        return []
+
+    try:
+        token = await get_github_token(
+            user_id=task.created_by_user_id,
+            organization_id=task.organization_id,
+        )
+    except Exception:
+        token = None
+    if not token:
+        return []
+
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    import asyncio
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            listing = await client.get(
+                f"https://api.github.com/repos/{owner}/{name}/contents/docs/decisions",
+                params={"ref": ref},
+                headers=headers,
+            )
+            if listing.status_code != 200:
+                return []
+            files = listing.json()
+            if not isinstance(files, list):
+                return []
+
+            candidates: list[dict] = []
+            for entry in files:
+                if entry.get("type") != "file":
+                    continue
+                filename = entry.get("name") or ""
+                if not filename.endswith(".md"):
+                    continue
+                if filename.startswith(".") or filename == "000-template.md":
+                    continue
+                candidates.append(entry)
+
+            # Fetch each file's content in parallel to extract the H1 title.
+            # Each ADR is small; even with 20+ files this stays well under the
+            # 15s client timeout.
+            raw_headers = {**headers, "Accept": "application/vnd.github.v3.raw"}
+
+            async def _fetch_title(entry: dict) -> tuple[dict, str | None]:
+                api_url = entry.get("url")
+                if not api_url:
+                    return entry, None
+                try:
+                    r = await client.get(api_url, headers=raw_headers, params={"ref": ref})
+                    if r.status_code != 200:
+                        return entry, None
+                    return entry, r.text
+                except Exception:
+                    return entry, None
+
+            results = await asyncio.gather(*(_fetch_title(e) for e in candidates))
+
+            out: list[DecisionOut] = []
+            for entry, body in results:
+                filename = entry.get("name") or ""
+                stem = filename.removesuffix(".md")
+                fallback_title = (
+                    re.sub(r"^\d+[-_]", "", stem).replace("-", " ").replace("_", " ").strip()
+                    or stem
+                )
+                title = (
+                    _adr_title_from_markdown(body, fallback_title)
+                    if body else fallback_title
+                )
+                out.append(
+                    DecisionOut(
+                        filename=filename,
+                        title=title,
+                        url=entry.get("html_url") or "",
+                    ),
+                )
+
+            out.sort(key=lambda d: d.filename)
+            return out
+    except Exception:
+        return []
 
 
 @router.get("/tasks/{task_id}/messages", response_model=list[TaskMessageData])
