@@ -7,6 +7,11 @@
 
 export type RiskLevel = "low" | "medium" | "high";
 
+export interface AffectedRoute {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  label: string;
+}
 /**
  * CI status for a commit.
  */
@@ -58,7 +63,15 @@ export interface FreeformConfigData {
   architecture_cron?: string;
   last_architecture_at?: string | null;
   architecture_knowledge?: string | null;
+  run_command?: string | null;
   created_at?: string | null;
+}
+export interface IntentVerdict {
+  ok: boolean;
+  reasoning: string;
+  tool_calls?: {
+    [k: string]: unknown;
+  }[];
 }
 /**
  * A Linear issue returned from the GraphQL API.
@@ -229,6 +242,34 @@ export interface RepoResponse {
   name: string;
   url: string;
 }
+/**
+ * API shape for a review attempt row.
+ */
+export interface ReviewAttemptOut {
+  id: number;
+  cycle: number;
+  status: "pass" | "fail" | "error";
+  code_review_verdict?: string | null;
+  ui_check?: ("pass" | "fail" | "skipped") | null;
+  ui_judgment?: string | null;
+  tool_calls?:
+    | {
+        [k: string]: unknown;
+      }[]
+    | null;
+  failure_reason?: string | null;
+  log_tail?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+}
+export interface ReviewCombinedVerdict {
+  code_review: ReviewDimensionVerdict;
+  ui_check: ReviewDimensionVerdict;
+}
+export interface ReviewDimensionVerdict {
+  verdict: "OK" | "NOT-OK" | "SKIPPED";
+  reasoning: string;
+}
 export interface ScheduleResponse {
   id: number;
   name: string;
@@ -358,4 +399,24 @@ export interface UsageSummary {
   tasks_today: number;
   input_tokens_today: number;
   output_tokens_today: number;
+}
+/**
+ * API shape for a verify attempt row.
+ */
+export interface VerifyAttemptOut {
+  id: number;
+  cycle: number;
+  status: "pass" | "fail" | "error";
+  boot_check?: ("pass" | "fail" | "skipped") | null;
+  intent_check?: ("pass" | "fail") | null;
+  intent_judgment?: string | null;
+  tool_calls?:
+    | {
+        [k: string]: unknown;
+      }[]
+    | null;
+  failure_reason?: string | null;
+  log_tail?: string | null;
+  started_at: string;
+  finished_at?: string | null;
 }
