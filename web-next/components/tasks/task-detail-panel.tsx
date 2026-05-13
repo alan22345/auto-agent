@@ -5,11 +5,21 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskData } from '@/types/api';
 import { cn } from '@/lib/utils';
+import { AttemptsPanel } from './attempts-panel';
 
 const PLAN_VISIBLE_STATUSES = new Set([
   'awaiting_approval',
   'awaiting_clarification',
   'coding',
+  'pr_created',
+  'awaiting_ci',
+  'awaiting_review',
+  'done',
+  'failed',
+  'blocked',
+]);
+const ATTEMPTS_VISIBLE_STATUSES = new Set([
+  'verifying',
   'pr_created',
   'awaiting_ci',
   'awaiting_review',
@@ -42,8 +52,9 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
   const hasDescription = !!task.description?.trim();
   const showPlan = shouldShowPanelPlan(task);
   const showError = !!task.error?.trim() && ERROR_VISIBLE_STATUSES.has(task.status);
+  const showAttempts = ATTEMPTS_VISIBLE_STATUSES.has(task.status);
 
-  if (!hasDescription && !showPlan && !showError) return null;
+  if (!hasDescription && !showPlan && !showError && !showAttempts) return null;
 
   return (
     <div className="space-y-2 border-b px-4 py-3">
@@ -83,6 +94,8 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
           {task.error}
         </div>
       )}
+
+      {showAttempts && <AttemptsPanel taskId={task.id} />}
     </div>
   );
 }
