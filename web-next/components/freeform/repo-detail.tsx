@@ -193,15 +193,18 @@ export function RepoDetail({ config }: Props) {
           </div>
         </section>
 
-        {/* Architecture mode section */}
+        {/* Improvement mode section — ADR-015 §14 renamed from
+            "Architecture mode" so the label matches the improvement
+            agent's role (codebase-deepening). The trio's task-decomposer
+            architect keeps the "Architect" label elsewhere. */}
         <section className="space-y-3">
-          <h2 className="text-base font-medium">Architecture mode</h2>
+          <h2 className="text-base font-medium">Improvement mode</h2>
 
           <div className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
             <div>
               <p className="text-sm font-medium">Continuous architectural improvements</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Periodically run the architect analyzer on a readonly clone. Produces deepening
+                Periodically run the improvement agent on a readonly clone. Produces deepening
                 Suggestions (no new features). Combine with auto-approve + auto-start above for
                 end-to-end autonomy.
               </p>
@@ -210,7 +213,7 @@ export function RepoDetail({ config }: Props) {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="rd-archcron">Architecture schedule</Label>
+            <Label htmlFor="rd-archcron">Improvement schedule</Label>
             <Select
               value={isArchPreset ? archCron : '__custom__'}
               onValueChange={(v) => {

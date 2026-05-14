@@ -253,6 +253,46 @@ class TaskHistory(Base):
     task = relationship("Task", back_populates="history")
 
 
+class GateDecision(Base):
+    """One row per gate decision — ADR-015 §6.
+
+    Persists the audit trail that the web-next gate-history panel reads.
+    Both human-driven approvals (``source="user"`` via the
+    ``POST /tasks/{id}/approve-plan`` endpoint) and freeform standin
+    decisions (``source="po_standin" | "improvement_standin"`` via
+    :mod:`agent.lifecycle.standin`) write a row here, so the panel can
+    reconstruct "who decided what at every gate" without scraping the
+    Redis event stream.
+
+    The columns mirror the ``standin.decision`` event payload shape so
+    the standin can write to both sinks (DB + event) with a single
+    helper. ``agent_id`` is NULL for user decisions; ``cited_context``
+    and ``fallback_reasons`` are JSONB arrays of strings (empty list when
+    unused).
+    """
+
+    __tablename__ = "gate_decisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    # Domain: "grill" | "plan_approval" | "design_approval" | "pr_review".
+    # Kept as a free-form String so a future gate can land without a
+    # migration; consumers should treat unknown values as opaque.
+    gate = Column(String(64), nullable=False)
+    # Domain: "user" | "po_standin" | "improvement_standin".
+    source = Column(String(64), nullable=False)
+    # NULL for source=user. For standins this is ``"{kind}:{repo_id}"``.
+    agent_id = Column(String(128), nullable=True)
+    # Domain at the gate level — for plan/design it's "approved" | "rejected";
+    # for pr_review the standin emits "passed" | "gaps_found"; for grill
+    # it's the answer text. Kept as Text so any gate's verdict shape fits.
+    verdict = Column(Text, nullable=False, default="")
+    comments = Column(Text, nullable=False, default="")
+    cited_context = Column(JSONB, nullable=False, server_default="[]")
+    fallback_reasons = Column(JSONB, nullable=False, server_default="[]")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 class TaskMessage(Base):
     """User-posted feedback on a running task. The agent reads unread
     messages between turns and injects them into the conversation."""

@@ -56,10 +56,11 @@ export interface ChangeEmailRequest {
   email: string;
 }
 export interface ClassificationResult {
-  classification: "simple" | "complex" | "simple_no_code";
+  classification: "simple" | "complex" | "complex_large" | "simple_no_code";
   reasoning?: string;
   estimated_files?: number;
   risk?: RiskLevel;
+  needs_grill?: boolean;
 }
 export interface ConflictInfo {
   fact_id: string;
@@ -105,6 +106,37 @@ export interface FreeformConfigData {
   architecture_knowledge?: string | null;
   run_command?: string | null;
   created_at?: string | null;
+}
+/**
+ * Markdown content the human or standin is being asked to approve.
+ *
+ * Returned by GET /api/tasks/{id}/gate-artefact so the web-next UI can
+ * render ``.auto-agent/plan.md`` (complex flow) or ``.auto-agent/design.md``
+ * (complex_large flow) without the orchestrator hard-coding which file
+ * is "the artefact" — the resolution is driven by task status.
+ */
+export interface GateArtefact {
+  kind: "plan" | "design";
+  path: string;
+  body: string;
+}
+/**
+ * One row in the gate-history audit panel — ADR-015 §6.
+ *
+ * Stable wire shape across user and standin sources so the panel
+ * doesn't have to branch on origin to render an entry.
+ */
+export interface GateDecisionOut {
+  id: number;
+  task_id: number;
+  gate: string;
+  source: string;
+  agent_id?: string | null;
+  verdict: string;
+  comments?: string;
+  cited_context?: string[];
+  fallback_reasons?: string[];
+  created_at: string;
 }
 export interface IntentVerdict {
   ok: boolean;
@@ -244,6 +276,17 @@ export interface PRReviewComment {
   path?: string;
   line?: number | null;
 }
+/**
+ * Inbound body for POST /api/tasks/{id}/approve-plan.
+ *
+ * Writes ``.auto-agent/plan_approval.json`` and persists a
+ * :class:`shared.models.GateDecision` row so the gate-history audit
+ * panel can render the human's verdict alongside any standin ones.
+ */
+export interface PlanApprovalRequest {
+  verdict: "approved" | "rejected";
+  comments?: string;
+}
 export interface PlanRead {
   id: number;
   name: string;
@@ -284,6 +327,7 @@ export interface RepoData {
   harness_onboarded?: boolean;
   harness_pr_url?: string | null;
   product_brief?: string | null;
+  mode?: "freeform" | "human_in_loop";
 }
 export interface RepoResponse {
   id: number;
@@ -392,6 +436,8 @@ export interface TaskData {
   plan?: string | null;
   error?: string | null;
   freeform_mode?: boolean;
+  mode_override?: ("freeform" | "human_in_loop") | null;
+  effective_mode?: ("freeform" | "human_in_loop") | null;
   priority?: number;
   subtasks?:
     | {

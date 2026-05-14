@@ -50,6 +50,7 @@ from shared.events import (
 from shared.models import (
     ArchitectAttempt,
     FreeformConfig,
+    GateDecision,
     MarketBrief,
     Organization,
     OrganizationMembership,
@@ -77,10 +78,13 @@ from shared.types import (
     DecisionOut,
     FeedbackSummary,
     FreeformConfigData,
+    GateArtefact,
+    GateDecisionOut,
     LoginRequest,
     LoginResponse,
     MarketBriefResponse,
     OutcomeResponse,
+    PlanApprovalRequest,
     PlanRead,
     RepoData,
     RepoResponse,
@@ -1585,6 +1589,228 @@ async def approve_task(
     return _task_to_response(task)
 
 
+# ADR-015 §2 + §6 Phase 12 — plan/design approval gate, persisted gate
+# history audit log, and the markdown body the UI renders for the user.
+
+_GATE_STATUS_TO_ARTEFACT: dict[TaskStatus, tuple[str, str]] = {
+    # task status → (artefact kind, relative path under workspace)
+    TaskStatus.AWAITING_PLAN_APPROVAL: ("plan", ".auto-agent/plan.md"),
+    TaskStatus.AWAITING_DESIGN_APPROVAL: ("design", ".auto-agent/design.md"),
+}
+
+_GATE_STATUS_TO_NEXT: dict[TaskStatus, tuple[TaskStatus, TaskStatus]] = {
+    # task status → (next on approved, next on rejected)
+    TaskStatus.AWAITING_PLAN_APPROVAL: (TaskStatus.CODING, TaskStatus.BLOCKED),
+    TaskStatus.AWAITING_DESIGN_APPROVAL: (
+        TaskStatus.ARCHITECT_BACKLOG_EMIT,
+        TaskStatus.BLOCKED,
+    ),
+}
+
+
+def _task_workspace_root(task: Task) -> str:
+    """Resolve the on-disk workspace root for a task.
+
+    Imported lazily so this module doesn't take a build-time dependency
+    on the agent layer (legacy `orchestrator → web` boundary stays
+    one-way).
+    """
+
+    from agent.workspace import _workspace_path
+
+    return _workspace_path(
+        task_id=task.id, organization_id=task.organization_id,
+    )
+
+
+@router.get("/tasks/{task_id}/gate-artefact", response_model=GateArtefact)
+async def get_gate_artefact(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GateArtefact:
+    """Return the markdown artefact (plan.md / design.md) for the current gate.
+
+    The web-next approval surface calls this to render the body the user
+    is about to approve or reject. Resolution is driven by task status
+    (plan for AWAITING_PLAN_APPROVAL, design for AWAITING_DESIGN_APPROVAL)
+    so the UI never needs to know which file lives where.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    mapping = _GATE_STATUS_TO_ARTEFACT.get(task.status)
+    if mapping is None:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting plan/design approval",
+        )
+    kind, rel_path = mapping
+    abs_path = os.path.join(_task_workspace_root(task), rel_path)
+    if not os.path.exists(abs_path):
+        raise HTTPException(
+            404,
+            f"Gate artefact missing on disk: {rel_path} — orchestrator did not write it",
+        )
+    with open(abs_path) as fh:
+        body = fh.read()
+    return GateArtefact(kind=kind, path=rel_path, body=body)
+
+
+@router.post("/tasks/{task_id}/approve-plan", response_model=TaskData)
+async def approve_plan(
+    task_id: int,
+    req: PlanApprovalRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Approve or reject the current plan/design gate — ADR-015 §2 / §6.
+
+    Writes ``.auto-agent/plan_approval.json`` (the contract the
+    plan-approval lifecycle module reads), persists a ``GateDecision``
+    row with ``source="user"`` so the audit panel can render the
+    decision, publishes a symmetric ``standin.decision`` event so any
+    live consumers (web-next websocket, telemetry) see the user's verdict
+    in the same shape as a standin's, and transitions the state machine.
+
+    Accepts both AWAITING_PLAN_APPROVAL (complex flow) and
+    AWAITING_DESIGN_APPROVAL (complex_large flow) — the design doc is the
+    single approval artefact per §2; only the post-approval state differs.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    next_states = _GATE_STATUS_TO_NEXT.get(task.status)
+    if next_states is None:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting plan/design approval",
+        )
+
+    # 1. Write the canonical gate file — same contract the freeform
+    #    standin writes; the plan_approval lifecycle module reads either.
+    workspace = _task_workspace_root(task)
+    auto_dir = os.path.join(workspace, ".auto-agent")
+    os.makedirs(auto_dir, exist_ok=True)
+    approval_path = os.path.join(auto_dir, "plan_approval.json")
+    import json as _json
+
+    with open(approval_path, "w") as fh:
+        _json.dump(
+            {
+                "schema_version": "1",
+                "verdict": req.verdict,
+                "comments": req.comments,
+                "source": "user",
+                "agent_id": None,
+                "written_at": datetime.now(UTC).isoformat(),
+            },
+            fh,
+            indent=2,
+        )
+
+    # 2. Persist the gate decision (audit trail the web-next panel renders).
+    gate_name = (
+        "design_approval"
+        if task.status == TaskStatus.AWAITING_DESIGN_APPROVAL
+        else "plan_approval"
+    )
+    session.add(
+        GateDecision(
+            task_id=task.id,
+            gate=gate_name,
+            source="user",
+            agent_id=None,
+            verdict=req.verdict,
+            comments=req.comments,
+            cited_context=[],
+            fallback_reasons=[],
+        )
+    )
+
+    # 3. Transition the state machine.
+    approved_next, rejected_next = next_states
+    to_status = approved_next if req.verdict == "approved" else rejected_next
+    message = (
+        f"Plan {req.verdict} by user"
+        + (f": {req.comments[:200]}" if req.comments else "")
+    )
+    task = await transition(session, task, to_status, message)
+    await session.commit()
+
+    # 4. Publish a standin.decision event symmetric with the freeform path
+    #    — same event type, same payload shape, so the web-next gate-history
+    #    refresh trigger and any other consumers don't have to branch.
+    try:
+        from shared.events import Event
+
+        await publish(
+            Event(
+                type="standin.decision",
+                task_id=task.id,
+                payload={
+                    "standin_kind": "user",
+                    "agent_id": None,
+                    "gate": gate_name,
+                    "decision": req.verdict,
+                    "cited_context": [],
+                    "task_id": task.id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "fallback_reasons": [],
+                    "source": "user",
+                },
+            )
+        )
+    except Exception:  # pragma: no cover — event publish is audit-only
+        pass
+
+    return _task_to_response(task)
+
+
+@router.get(
+    "/tasks/{task_id}/gate-history",
+    response_model=list[GateDecisionOut],
+)
+async def list_gate_history(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[GateDecisionOut]:
+    """Return every persisted gate decision for a task — ADR-015 §6.
+
+    Oldest decision first so the audit panel reads top-to-bottom in the
+    same order the gates fired. Both user-driven and freeform-standin
+    decisions land in the same table via the symmetric write paths, so
+    this endpoint doesn't branch on origin.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        await session.execute(
+            select(GateDecision)
+            .where(GateDecision.task_id == task_id)
+            .order_by(GateDecision.created_at.asc()),
+        )
+    ).scalars().all()
+    return [
+        GateDecisionOut(
+            id=r.id,
+            task_id=r.task_id,
+            gate=r.gate,
+            source=r.source,
+            agent_id=r.agent_id,
+            verdict=r.verdict or "",
+            comments=r.comments or "",
+            cited_context=list(r.cited_context or []),
+            fallback_reasons=list(r.fallback_reasons or []),
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
 @router.post("/tasks/{task_id}/pause-trio")
 async def pause_trio(
     task_id: int,
@@ -1781,6 +2007,7 @@ async def list_repos(
             ci_checks=r.ci_checks,
             harness_onboarded=r.harness_onboarded or False,
             harness_pr_url=r.harness_pr_url,
+            mode=r.mode or "human_in_loop",
         )
         for r in result.scalars().all()
     ]
@@ -2473,6 +2700,14 @@ def _freeform_config_to_response(c: FreeformConfig, repo_name: str | None) -> Fr
 
 
 def _task_to_response(task: Task) -> TaskData:
+    # ADR-015 §7 — resolve effective mode here so the UI doesn't have to
+    # know the override/inherit rule. ``mode_override`` wins over the repo
+    # default; legacy rows with no repo attached fall back to None.
+    mode_override = getattr(task, "mode_override", None)
+    repo_mode = (
+        getattr(task.repo, "mode", None) if getattr(task, "repo", None) else None
+    )
+    effective_mode = mode_override or repo_mode
     return TaskData(
         id=task.id,
         title=task.title,
@@ -2486,6 +2721,8 @@ def _task_to_response(task: Task) -> TaskData:
         plan=task.plan,
         error=task.error,
         freeform_mode=task.freeform_mode or False,
+        mode_override=mode_override,
+        effective_mode=effective_mode,
         priority=task.priority if task.priority is not None else 100,
         subtasks=task.subtasks,
         current_subtask=task.current_subtask,

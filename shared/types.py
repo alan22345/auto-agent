@@ -53,6 +53,14 @@ class TaskData(BaseModel):
     plan: str | None = None
     error: str | None = None
     freeform_mode: bool = False
+    # ADR-015 §7 Phase 12 — per-task mode override (``None`` ⇒ inherit
+    # from the repo). The UI toggle on task intake sets this; the gate
+    # history surfaces it on the audit panel.
+    mode_override: Literal["freeform", "human_in_loop"] | None = None
+    # Effective mode after resolving ``mode_override`` against the repo
+    # default. Computed server-side so the UI doesn't need to know the
+    # resolution rule. ``None`` when no repo is attached (legacy rows).
+    effective_mode: Literal["freeform", "human_in_loop"] | None = None
     priority: int = 100
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
@@ -104,6 +112,10 @@ class RepoData(BaseModel):
     harness_onboarded: bool = False
     harness_pr_url: str | None = None
     product_brief: str | None = None
+    # ADR-015 §7 Phase 12 — repo default mode. The web-next task-intake
+    # toggle reads this to label the override ("force human review" vs
+    # "run in freeform mode") so the UI mirrors the resolver's bias.
+    mode: Literal["freeform", "human_in_loop"] = "human_in_loop"
 
 
 # --- GitHub types ---
@@ -543,3 +555,51 @@ class DecisionOut(BaseModel):
     filename: str
     title: str
     url: str
+
+
+# --- Gate decision audit types — ADR-015 §6 Phase 12 ---
+
+
+class PlanApprovalRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/approve-plan.
+
+    Writes ``.auto-agent/plan_approval.json`` and persists a
+    :class:`shared.models.GateDecision` row so the gate-history audit
+    panel can render the human's verdict alongside any standin ones.
+    """
+
+    verdict: Literal["approved", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class GateDecisionOut(BaseModel):
+    """One row in the gate-history audit panel — ADR-015 §6.
+
+    Stable wire shape across user and standin sources so the panel
+    doesn't have to branch on origin to render an entry.
+    """
+
+    id: int
+    task_id: int
+    gate: str  # "grill" | "plan_approval" | "design_approval" | "pr_review"
+    source: str  # "user" | "po_standin" | "improvement_standin"
+    agent_id: str | None = None
+    verdict: str
+    comments: str = ""
+    cited_context: list[str] = Field(default_factory=list)
+    fallback_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class GateArtefact(BaseModel):
+    """Markdown content the human or standin is being asked to approve.
+
+    Returned by GET /api/tasks/{id}/gate-artefact so the web-next UI can
+    render ``.auto-agent/plan.md`` (complex flow) or ``.auto-agent/design.md``
+    (complex_large flow) without the orchestrator hard-coding which file
+    is "the artefact" — the resolution is driven by task status.
+    """
+
+    kind: Literal["plan", "design"]
+    path: str
+    body: str

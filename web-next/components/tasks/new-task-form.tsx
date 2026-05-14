@@ -1,17 +1,54 @@
 'use client';
-import { useState } from 'react';
-import { createTask } from '@/lib/tasks';
+import { useMemo, useState } from 'react';
+import { createTask, type ModeOverride } from '@/lib/tasks';
+import { useRepos } from '@/hooks/useRepos';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+
+// ADR-015 §7 Phase 12 — bidirectional per-task override of the repo's
+// default mode. The toggle label flips based on the repo's mode so the
+// UI mirrors the resolver's bias: freeform repos surface "Force human
+// review", human-in-loop repos surface "Run in freeform mode". Selecting
+// nothing sends ``mode_override: null`` and the task inherits the repo.
 
 export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [repo, setRepo] = useState('');
+  const [overrideMode, setOverrideMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { data: repos = [] } = useRepos();
+  // The repo selector is a free-text input today (legacy); look up its
+  // resolved repo by name so we can label the toggle correctly. When no
+  // match is found we fall back to the conservative ``human_in_loop``
+  // label.
+  const resolvedRepo = useMemo(() => {
+    const needle = repo.trim().toLowerCase();
+    if (!needle) return null;
+    return (
+      repos.find((r) => r.name.toLowerCase() === needle) ??
+      repos.find((r) => r.name.toLowerCase().endsWith(`/${needle}`)) ??
+      null
+    );
+  }, [repos, repo]);
+  const repoMode: 'freeform' | 'human_in_loop' = resolvedRepo?.mode ?? 'human_in_loop';
+  // Override direction inverts the repo default — that's the bidirectional
+  // contract from §7. If the user doesn't flip the switch we send null.
+  const overrideTarget: ModeOverride =
+    overrideMode ? (repoMode === 'freeform' ? 'human_in_loop' : 'freeform') : null;
+  const overrideLabel =
+    repoMode === 'freeform'
+      ? 'Force human review for this task'
+      : 'Run this task in freeform mode';
+  const overrideHelp =
+    repoMode === 'freeform'
+      ? 'Repo default: freeform. Toggling on routes this task through the human-in-loop gates.'
+      : 'Repo default: human-in-loop. Toggling on lets the standin agents approve every gate.';
 
   async function submit() {
     if (!title.trim() || busy) return;
@@ -22,10 +59,12 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
         title: title.trim(),
         description: desc.trim() || undefined,
         repo: repo.trim() || undefined,
+        modeOverride: overrideTarget,
       });
       setTitle('');
       setDesc('');
       setRepo('');
+      setOverrideMode(false);
       onCreated?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create task');
@@ -92,6 +131,23 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
             value={repo}
             onChange={(e) => setRepo(e.target.value)}
           />
+        </div>
+
+        <div className="space-y-1 rounded border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="task-mode-override" className="cursor-pointer text-sm">
+                {overrideLabel}
+              </Label>
+              <p className="text-xs text-muted-foreground">{overrideHelp}</p>
+            </div>
+            <Switch
+              id="task-mode-override"
+              checked={overrideMode}
+              onCheckedChange={setOverrideMode}
+              aria-label={overrideLabel}
+            />
+          </div>
         </div>
 
         <div className="flex items-center justify-end gap-3 pt-2">

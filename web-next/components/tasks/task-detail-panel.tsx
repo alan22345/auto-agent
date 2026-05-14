@@ -6,10 +6,21 @@ import remarkGfm from 'remark-gfm';
 import type { TaskData } from '@/types/api';
 import { cn } from '@/lib/utils';
 import { AttemptsPanel } from './attempts-panel';
+import { PlanApprovalCard } from './plan-approval-card';
 import { ArchitectAttemptsPanel } from '@/components/trio/ArchitectAttemptsPanel';
+import { GateHistoryPanel } from '@/components/trio/GateHistoryPanel';
 import { TrioReviewAttemptsPanel } from '@/components/trio/TrioReviewAttemptsPanel';
 import { DecisionsPanel } from '@/components/trio/DecisionsPanel';
 import { PauseTrioButton } from '@/components/trio/PauseTrioButton';
+
+// ADR-015 §2 Phase 12 — both plan and design gates are surfaced via the
+// shared PlanApprovalCard (the design doc IS the single approval
+// artefact per §2). The legacy plan accordion only renders for statuses
+// that don't have an active approval gate.
+const APPROVAL_GATE_STATUSES = new Set([
+  'awaiting_plan_approval',
+  'awaiting_design_approval',
+]);
 
 const PLAN_VISIBLE_STATUSES = new Set([
   'awaiting_approval',
@@ -54,13 +65,32 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
   const [planOpen, setPlanOpen] = useState(false);
 
   const hasDescription = !!task.description?.trim();
-  const showPlan = shouldShowPanelPlan(task);
+  const showApprovalGate = APPROVAL_GATE_STATUSES.has(task.status);
+  // The legacy plan accordion is hidden while the approval gate is
+  // active — the PlanApprovalCard owns the markdown + actions then.
+  const showPlan = !showApprovalGate && shouldShowPanelPlan(task);
   const showError = !!task.error?.trim() && ERROR_VISIBLE_STATUSES.has(task.status);
   const showAttempts = ATTEMPTS_VISIBLE_STATUSES.has(task.status);
   const isTrioParent = task.status === 'trio_executing' || !!task.trio_phase;
   const isTrioChild = !!task.parent_task_id;
+  // Gate-history panel is visible whenever the task has progressed past
+  // intake — i.e., there could plausibly be a decision to render. The
+  // panel itself renders nothing when the list is empty.
+  const showGateHistory =
+    !!task.status &&
+    !['intake', 'classifying', 'queued'].includes(task.status);
 
-  if (!hasDescription && !showPlan && !showError && !showAttempts && !isTrioParent && !isTrioChild) return null;
+  if (
+    !hasDescription &&
+    !showApprovalGate &&
+    !showPlan &&
+    !showError &&
+    !showAttempts &&
+    !isTrioParent &&
+    !isTrioChild &&
+    !showGateHistory
+  )
+    return null;
 
   return (
     <div className="space-y-2 border-b px-4 py-3">
@@ -69,6 +99,8 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
           {task.description}
         </div>
       )}
+
+      {showApprovalGate && <PlanApprovalCard taskId={task.id} />}
 
       {showPlan && (
         <div className="rounded border bg-muted/30">
@@ -126,6 +158,12 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
         <section className="space-y-2 pt-2">
           <h2 className="text-sm font-semibold">Trio Reviews</h2>
           <TrioReviewAttemptsPanel taskId={task.id} />
+        </section>
+      )}
+
+      {showGateHistory && (
+        <section className="space-y-2 pt-2">
+          <GateHistoryPanel taskId={task.id} />
         </section>
       )}
     </div>

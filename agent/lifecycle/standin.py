@@ -110,6 +110,52 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+async def _persist_gate_decision(
+    *,
+    task_id: int,
+    gate: str,
+    source: str,
+    agent_id: str | None,
+    verdict: str,
+    comments: str,
+    cited_context: list[str],
+    fallback_reasons: list[str],
+) -> None:
+    """Insert a ``GateDecision`` row — best-effort audit trail.
+
+    Imported lazily so test code paths that don't have DATABASE_URL set
+    (or that monkey-patch the DB layer) never load SQLAlchemy through
+    this module. Any failure is logged and swallowed: missing audit
+    rows must never block a gate from progressing.
+    """
+
+    try:
+        from shared.database import async_session
+        from shared.models import GateDecision
+
+        async with async_session() as session:
+            session.add(
+                GateDecision(
+                    task_id=task_id,
+                    gate=gate,
+                    source=source,
+                    agent_id=agent_id,
+                    verdict=verdict,
+                    comments=comments,
+                    cited_context=cited_context,
+                    fallback_reasons=fallback_reasons,
+                )
+            )
+            await session.commit()
+    except Exception:  # pragma: no cover — audit best-effort
+        log.exception(
+            "gate_decision_persist_failed task_id=%s gate=%s source=%s",
+            task_id,
+            gate,
+            source,
+        )
+
+
 class _StandinBase:
     """Shared behaviour for every standin: gate-file writes + event logging.
 
@@ -196,30 +242,57 @@ class _StandinBase:
         cited_context: list[str] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Publish a ``standin.decision`` event so the gate history can
-        reconstruct who decided what at every gate (ADR-015 §6).
+        """Publish a ``standin.decision`` event AND persist a ``GateDecision``
+        row so the gate-history audit panel (ADR-015 §6 Phase 12) has a
+        durable source — Redis events are ephemeral, the panel needs the
+        full history of every gate that has fired.
 
-        Errors are swallowed: the gate-file write is the contract; the
-        event is the audit trail. Losing one event must not block the
-        flow.
+        Errors on both writes are swallowed: the gate-file write is the
+        contract; the event + DB row are the audit trail. Losing one of
+        the audit writes must not block the flow.
         """
 
+        task_id = getattr(self.task, "id", None)
+        cited = cited_context or []
+        fallback_reasons = list(self._fallback_reasons)
         payload: dict[str, Any] = {
             "standin_kind": self.standin_kind,
             "agent_id": self._agent_id,
             "gate": gate,
             "decision": decision,
-            "cited_context": cited_context or [],
-            "task_id": getattr(self.task, "id", None),
+            "cited_context": cited,
+            "task_id": task_id,
             "timestamp": _now_iso(),
-            "fallback_reasons": list(self._fallback_reasons),
+            "fallback_reasons": fallback_reasons,
         }
         if extra:
             payload.update(extra)
         try:
             await publish(Event(type="standin.decision", payload=payload))
         except Exception:  # pragma: no cover — defensive only
-            log.exception("standin.decision_publish_failed", extra={"task_id": payload["task_id"]})
+            log.exception("standin.decision_publish_failed", extra={"task_id": task_id})
+
+        # Persist the audit row alongside the event. Source maps the
+        # ``standin_kind`` into the wire taxonomy the web-next panel
+        # reads ("po_standin" / "improvement_standin" / "user"). Wrapped
+        # in try/except so a missing DB (tests without DATABASE_URL) or
+        # a transient failure doesn't break the gate.
+        if task_id is not None:
+            comments = (
+                str(extra.get("comments", ""))
+                if extra and "comments" in extra
+                else ""
+            )
+            await _persist_gate_decision(
+                task_id=task_id,
+                gate=gate,
+                source=f"{self.standin_kind}_standin",
+                agent_id=self._agent_id,
+                verdict=decision,
+                comments=comments,
+                cited_context=cited,
+                fallback_reasons=fallback_reasons,
+            )
         self._fallback_reasons.clear()
 
     # ----- fallback marker ----- #

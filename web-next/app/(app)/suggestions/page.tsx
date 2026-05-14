@@ -31,13 +31,14 @@ const PRIORITY_LABEL: Record<number, { label: string; variant: 'default' | 'seco
 };
 
 // Maps the suggestion `category` (the only signal the API exposes) into a
-// human-friendly source pill. `architecture` is produced by the architect
-// analyzer; everything else comes from the PO analyzer.
-function categoryPill(category: string): { source: 'Architect' | 'PO'; label: string; className: string } {
+// human-friendly source pill. `architecture` is produced by the improvement
+// agent (the codebase-deepening loop — ADR-015 §14 renamed); everything
+// else comes from the PO analyzer.
+function categoryPill(category: string): { source: 'Improvement' | 'PO'; label: string; className: string } {
   if (category === 'architecture') {
     return {
-      source: 'Architect',
-      label: 'Architect · architecture',
+      source: 'Improvement',
+      label: 'Improvement · architecture',
       className: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
     };
   }
@@ -104,7 +105,7 @@ export default function SuggestionsPage() {
       <div className="p-6 max-w-5xl mx-auto">
       <h1 className="text-2xl font-semibold mb-1">Improvement suggestions</h1>
       <p className="text-sm text-muted-foreground mb-6">
-        Suggestions produced by the PO and architect analyzers. Approving creates a freeform task.
+        Suggestions produced by the PO and improvement agents. Approving creates a freeform task.
       </p>
 
       <div className="flex items-center gap-3 mb-6 flex-wrap">
@@ -129,7 +130,7 @@ export default function SuggestionsPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All sources</SelectItem>
-              <SelectItem value="architect">Architect only</SelectItem>
+              <SelectItem value="architect">Improvement only</SelectItem>
               <SelectItem value="po">PO only</SelectItem>
             </SelectContent>
           </Select>
