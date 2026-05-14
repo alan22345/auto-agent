@@ -1736,6 +1736,7 @@ async def approve_plan(
         f"Plan {req.verdict} by user"
         + (f": {req.comments[:200]}" if req.comments else "")
     )
+    starting_status = task.status
     task = await transition(session, task, to_status, message)
     await session.commit()
 
@@ -1764,6 +1765,29 @@ async def approve_plan(
         )
     except Exception:  # pragma: no cover — event publish is audit-only
         pass
+
+    # 5. ADR-015 §2 / Phase 7.5 — wake the orchestrator on design approval.
+    #    The state-machine transition above moves a complex_large task to
+    #    ARCHITECT_BACKLOG_EMIT, but nothing else picks it up. Emit a
+    #    DESIGN_APPROVED event so the orchestrator's handler re-enters
+    #    ``run_trio_parent`` and the architect emits the backlog. Plan-gate
+    #    approvals (complex flow) are deliberately excluded — that flow's
+    #    coding kick will be wired separately if/when it becomes load-bearing.
+    if (
+        starting_status == TaskStatus.AWAITING_DESIGN_APPROVAL
+        and req.verdict == "approved"
+    ):
+        try:
+            from shared.events import Event, TaskEventType
+
+            await publish(
+                Event(
+                    type=TaskEventType.DESIGN_APPROVED,
+                    task_id=task.id,
+                )
+            )
+        except Exception:  # pragma: no cover — best-effort wake signal
+            pass
 
     return _task_to_response(task)
 

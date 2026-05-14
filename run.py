@@ -467,6 +467,23 @@ async def on_architect_clarification_resolved(event: Event) -> None:
         )
 
 
+async def on_design_approved(event: Event) -> None:
+    """ADR-015 §2 / Phase 7.5 — re-enter ``run_trio_parent`` on approval.
+
+    The approve-plan endpoint transitions a complex_large task from
+    AWAITING_DESIGN_APPROVAL → ARCHITECT_BACKLOG_EMIT, but the worker is
+    no longer in the loop. This handler picks the task up and dispatches
+    the trio parent so the architect's backlog-emit step (run_initial)
+    runs and the per-item loop continues.
+    """
+    async with async_session() as session:
+        task = await get_task(session, event.task_id)
+        if not task:
+            return
+        from agent.lifecycle.trio import run_trio_parent
+        asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+
+
 async def on_task_approved(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
@@ -1387,6 +1404,7 @@ bus.on(TaskEventType.CLASSIFIED, on_task_classified)
 bus.on(TaskEventType.CLARIFICATION_RESOLVED, on_clarification_resolved)
 bus.on(TaskEventType.ARCHITECT_CLARIFICATION_NEEDED, on_architect_clarification_needed)
 bus.on(TaskEventType.ARCHITECT_CLARIFICATION_RESOLVED, on_architect_clarification_resolved)
+bus.on(TaskEventType.DESIGN_APPROVED, on_design_approved)
 bus.on(TaskEventType.APPROVED, on_task_approved)
 bus.on(TaskEventType.REVIEW_COMPLETE, on_review_complete)
 bus.on(TaskEventType.REVIEW_COMMENTS_ADDRESSED, on_review_comments_addressed)

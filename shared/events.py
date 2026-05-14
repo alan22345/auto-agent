@@ -106,6 +106,15 @@ class TaskEventType(StrEnum):
     # ARCHITECT_CLARIFICATION_RESOLVED fires when the answer lands.
     ARCHITECT_CLARIFICATION_NEEDED = "task.architect_clarification_needed"
     ARCHITECT_CLARIFICATION_RESOLVED = "task.architect_clarification_resolved"
+    # ADR-015 §2 / Phase 7.5 — complex_large design-gate approval. Fires
+    # when the approve-plan endpoint transitions a task from
+    # AWAITING_DESIGN_APPROVAL → ARCHITECT_BACKLOG_EMIT. The orchestrator
+    # handler picks the task back up and re-enters ``run_trio_parent``
+    # so the architect's backlog-emit step runs without the user needing
+    # to manually re-trigger the task. There is deliberately no
+    # DESIGN_REJECTED event — rejection transitions to BLOCKED and the
+    # task stays there until an operator unblocks it.
+    DESIGN_APPROVED = "task.design_approved"
 
 
 class POEventType(StrEnum):
@@ -185,9 +194,7 @@ def task_created(task_id: int) -> Event:
     return Event(type=TaskEventType.CREATED, task_id=task_id)
 
 
-def task_classified(
-    task_id: int, complexity: str, reasoning: str = "", **extra: Any
-) -> Event:
+def task_classified(task_id: int, complexity: str, reasoning: str = "", **extra: Any) -> Event:
     return Event(
         type=TaskEventType.CLASSIFIED,
         task_id=task_id,
@@ -471,7 +478,9 @@ def market_research_failed(repo_name: str, reason: str = "") -> Event:
     if reason:
         payload["reason"] = reason
     return Event(
-        type=POEventType.MARKET_RESEARCH_FAILED, task_id=0, payload=payload,
+        type=POEventType.MARKET_RESEARCH_FAILED,
+        task_id=0,
+        payload=payload,
     )
 
 

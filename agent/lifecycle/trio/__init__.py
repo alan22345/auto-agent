@@ -14,13 +14,17 @@ allowed-transitions check and log a ``TaskHistory`` row.
 
 from __future__ import annotations
 
+import os
+
 import structlog
 from sqlalchemy import select
 
-from agent.lifecycle.trio import architect, dispatcher
+from agent.lifecycle.standin import run_freeform_gate
+from agent.lifecycle.trio import architect, design_approval, dispatcher
+from agent.lifecycle.workspace_paths import DESIGN_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
-from shared.models import Task, TaskStatus, TrioPhase
+from shared.models import Task, TaskComplexity, TaskStatus, TrioPhase
 
 log = structlog.get_logger()
 
@@ -31,6 +35,23 @@ async def _set_trio_phase(parent_id: int, phase: TrioPhase | None) -> None:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         p.trio_phase = phase
         await s.commit()
+
+
+def _design_md_exists(workspace_root: str | None) -> bool:
+    """Return True if ``.auto-agent/design.md`` is on disk at the root.
+
+    ADR-015 §2 / Phase 7.5 — the design-doc gate fires only for the
+    complex_large flow, and only when the architect hasn't already
+    produced a design (re-entry idempotency). Returns False on a missing
+    workspace so a brand-new task never accidentally short-circuits the
+    gate.
+    """
+    if not workspace_root:
+        return False
+    try:
+        return os.path.isfile(os.path.join(workspace_root, DESIGN_PATH))
+    except OSError:  # pragma: no cover — defensive against odd FS errors
+        return False
 
 
 async def _resolve_target_branch(parent_id: int) -> str:
@@ -286,6 +307,184 @@ async def _maybe_dispatch_sub_architects(parent: Task) -> bool:
     return True
 
 
+async def _advance_through_design_gate(parent: Task) -> bool:
+    """ADR-015 §2 / Phase 7.5 — drive the complex_large design-doc gate.
+
+    Returns ``True`` when the trio is clear to fall through to the
+    per-item loop (the architect has produced a backlog, or the gate is
+    not applicable). Returns ``False`` when the caller should exit
+    without progress — either the gate has just been opened (waiting
+    for an approval verdict to land) or the gate landed on a rejection
+    that blocked the task.
+
+    Decision tree:
+
+    * Non-``complex_large`` parents (freeform-complex, freeform-simple)
+      keep the legacy ``run_initial`` path — the design-doc gate is
+      scoped to complex_large per ADR-015 §2.
+    * Parents with a non-empty backlog already on disk: idempotent
+      re-entry; skip the architect entirely so the dispatcher can
+      resume the per-item loop where it was.
+    * Parents in ``AWAITING_DESIGN_APPROVAL``: in freeform mode invoke
+      the standin via :func:`run_freeform_gate` to auto-write
+      ``plan_approval.json``, then read the verdict; in human-in-loop
+      mode read the file the user wrote. Approval transitions to
+      ARCHITECT_BACKLOG_EMIT and falls through to ``run_initial``;
+      rejection transitions to BLOCKED. Missing file → return False.
+    * Fresh parents with neither design.md nor backlog: invoke
+      :func:`architect.run_design`. It writes the design and parks the
+      task at AWAITING_DESIGN_APPROVAL. Return False — the orchestrator
+      will re-enter via ``on_design_approved`` once the user (or
+      standin) responds.
+    """
+
+    # Hoist parent state once — we need the live row to make every
+    # decision below; ``parent`` may be stale after a fire-and-forget
+    # re-entry from the approval-event handler.
+    async with async_session() as _s:
+        live = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        complexity = live.complexity
+        status = live.status
+        has_backlog = bool(live.trio_backlog)
+
+    # Non-complex_large parents keep the legacy single-pass flow. The
+    # design gate is intentionally complex_large-only per §2 — freeform
+    # complex/simple tasks routed through trio (run.py:1188) still emit
+    # a backlog directly from ``run_initial``.
+    if complexity != TaskComplexity.COMPLEX_LARGE:
+        if not has_backlog:
+            await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+            await architect.run_initial(parent.id)
+        else:
+            log.info(
+                "trio.parent.resume_skipping_run_initial",
+                parent_id=parent.id,
+            )
+        return True
+
+    # complex_large from here on. Prepare the workspace once — every
+    # branch below reads or writes a file under it.
+    from agent.lifecycle.trio.architect import _prepare_parent_workspace
+
+    workspace = await _prepare_parent_workspace(live)
+    workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
+
+    # Already has a backlog → idempotent re-entry; preserve dispatcher
+    # progress and skip both run_design + run_initial.
+    if has_backlog:
+        log.info(
+            "trio.parent.resume_skipping_run_initial",
+            parent_id=parent.id,
+        )
+        return True
+
+    # B) Parent is parked at the design-approval gate. Standin (freeform)
+    #    or polling (human_in_loop) must produce plan_approval.json
+    #    before we can move on.
+    if status == TaskStatus.AWAITING_DESIGN_APPROVAL:
+        await _try_freeform_design_standin(parent=live, workspace_root=workspace_root)
+        try:
+            advanced = await design_approval.resume_after_design_approval(
+                task_id=parent.id,
+                workspace=workspace_root,
+            )
+        except ValueError as exc:
+            log.warning(
+                "trio.parent.design_approval_malformed",
+                parent_id=parent.id,
+                error=str(exc),
+            )
+            return False
+        if not advanced:
+            # No verdict yet — orchestrator handler will re-enter.
+            log.info(
+                "trio.parent.design_gate_awaiting_verdict",
+                parent_id=parent.id,
+            )
+            return False
+
+        # The transition advanced us — re-read the live status to decide
+        # what comes next. Approved → ARCHITECT_BACKLOG_EMIT (fall
+        # through to run_initial below). Rejected → BLOCKED (caller
+        # exits without progress).
+        async with async_session() as _s:
+            live2 = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            status = live2.status
+
+        if status == TaskStatus.BLOCKED:
+            return False
+        # else falls through to the backlog-emit branch below.
+
+    # C) Backlog-emit step. Fires either after a fresh approval landed
+    #    above OR if the orchestrator re-entered after the approval
+    #    endpoint already transitioned to ARCHITECT_BACKLOG_EMIT.
+    if status == TaskStatus.ARCHITECT_BACKLOG_EMIT or _design_md_exists(workspace_root):
+        await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+        await architect.run_initial(parent.id)
+        return True
+
+    # A) Fresh complex_large parent with no design.md and no backlog —
+    #    run the design pass. ``architect.run_design`` writes
+    #    ``.auto-agent/design.md`` and parks the task at
+    #    ``AWAITING_DESIGN_APPROVAL`` via ``finalize_design``.
+    await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+    await architect.run_design(parent.id)
+    return False
+
+
+async def _try_freeform_design_standin(
+    *,
+    parent: Task,
+    workspace_root: str,
+) -> None:
+    """In freeform mode, dispatch the standin at the design gate.
+
+    Reads ``.auto-agent/design.md`` and hands it to
+    :func:`run_freeform_gate` with ``gate="design_approval"``. The
+    standin writes ``plan_approval.json`` (canonical gate file) which
+    :func:`design_approval.resume_after_design_approval` picks up on
+    the same call. Best-effort: any error here is logged but doesn't
+    break the gate — the resume function will report ``False`` and the
+    flow waits for a human verdict.
+    """
+
+    repo = getattr(parent, "repo", None)
+    if repo is None:
+        # No repo attached: standin selection can still run (the §6
+        # default is the PO standin), but the freeform mode hint comes
+        # off the repo. Skip the call rather than mis-classify.
+        return
+
+    design_path = os.path.join(workspace_root, DESIGN_PATH)
+    try:
+        with open(design_path) as fh:
+            design_md = fh.read()
+    except OSError:
+        design_md = ""
+
+    try:
+        fired = await run_freeform_gate(
+            task=parent,
+            repo=repo,
+            gate="design_approval",
+            gate_input={"design_md": design_md},
+            context={"workspace_root": workspace_root},
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "trio.parent.freeform_design_standin_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+        return
+
+    if fired:
+        log.info(
+            "trio.parent.freeform_design_standin_fired",
+            parent_id=parent.id,
+        )
+
+
 async def run_trio_parent(
     parent: Task,
     *,
@@ -302,6 +501,14 @@ async def run_trio_parent(
     and reviewer subagents inside the parent's slot. The dispatcher
     returns an ``ItemResult``; this function persists backlog updates
     and acts on architect tiebreak decisions.
+
+    ADR-015 §2 / Phase 7.5 — for ``complex_large`` parents the architect
+    runs in two turns separated by a human (or standin) approval gate:
+    ``architect.run_design`` produces ``.auto-agent/design.md`` and
+    parks the task at ``AWAITING_DESIGN_APPROVAL``; on approval the
+    task re-enters here (via :func:`on_design_approved` in ``run.py``)
+    in state ``ARCHITECT_BACKLOG_EMIT`` and ``architect.run_initial``
+    emits the backlog with the design doc pinned in context.
     """
     from agent.lifecycle.trio.architect import _prepare_parent_workspace
 
@@ -309,22 +516,14 @@ async def run_trio_parent(
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
         await architect.checkpoint(parent.id, repair_context=repair_context)
     else:
-        # Idempotent re-entry: only run the initial architect pass when
-        # the parent has no backlog yet. Otherwise we'd overwrite the
-        # existing one on every recovery, blowing away the dispatcher's
-        # progress. After a crash or a manual unblock we want to resume
-        # the per-item loop from where we were, not restart.
-        async with async_session() as _s:
-            _p = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
-            has_backlog = bool(_p.trio_backlog)
-        if not has_backlog:
-            await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
-            await architect.run_initial(parent.id)
-        else:
-            log.info(
-                "trio.parent.resume_skipping_run_initial",
-                parent_id=parent.id,
-            )
+        # Phase 7.5 — design-gate-aware front half. Reads the live task
+        # state + on-disk artefacts and decides whether to run the design
+        # pass, resume after approval, or fall through to run_initial.
+        # Returns False when the gate is still open (task is waiting on
+        # an approval file) so the caller can return without progress.
+        gate_ok = await _advance_through_design_gate(parent)
+        if not gate_ok:
+            return
 
     # ADR-015 §9 / Phase 8 — if the architect emitted spawn_sub_architects
     # the per-item builder loop does not apply; the sub-architect dispatcher
