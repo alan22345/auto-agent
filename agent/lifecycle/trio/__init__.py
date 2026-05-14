@@ -217,12 +217,28 @@ async def run_trio_parent(
     """
     from agent.lifecycle.trio.architect import _prepare_parent_workspace
 
-    if repair_context is None:
-        await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
-        await architect.run_initial(parent.id)
-    else:
+    if repair_context is not None:
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
         await architect.checkpoint(parent.id, repair_context=repair_context)
+    else:
+        # Idempotent re-entry: only run the initial architect pass when
+        # the parent has no backlog yet. Otherwise we'd overwrite the
+        # existing one on every recovery, blowing away the dispatcher's
+        # progress. After a crash or a manual unblock we want to resume
+        # the per-item loop from where we were, not restart.
+        async with async_session() as _s:
+            _p = (
+                await _s.execute(select(Task).where(Task.id == parent.id))
+            ).scalar_one()
+            has_backlog = bool(_p.trio_backlog)
+        if not has_backlog:
+            await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+            await architect.run_initial(parent.id)
+        else:
+            log.info(
+                "trio.parent.resume_skipping_run_initial",
+                parent_id=parent.id,
+            )
 
     # Resolve once per cycle — re-cloning per item is wasteful and the
     # subagents share the workspace.
