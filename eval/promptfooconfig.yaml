@@ -17,6 +17,14 @@ providers:
     label: "Claude Code CLI"
     config:
       pythonExecutable: ../.venv/bin/python3
+  # Phase-13 harness — replays a fixture's synthetic_output.json so the
+  # eval can exercise ADR-015 deletion-test assertions without requiring
+  # Postgres / Redis / Bedrock. The four Phase-13 tests pin this
+  # provider via their `providers:` override.
+  - id: "file://providers/synthetic_provider.py"
+    label: "Synthetic (Phase-13 harness)"
+    config:
+      pythonExecutable: ../.venv/bin/python3
 
 prompts:
   - "{{task}}"
@@ -365,3 +373,86 @@ tests:
           The best solution is one where optimizations are obvious improvements that
           anyone can understand, not clever tricks. Prefer clear > fast when marginal.
         threshold: 0.6
+
+  # ===================================================================
+  # PHASE-13 NO-DEFER / GATE FIXTURES — ADR-015 §16 (deletion tests)
+  # ===================================================================
+  # These four tests probe the failure modes the ADR-015 redesign was
+  # built to prevent. They use the synthetic provider because they
+  # require orchestrator state + Postgres (gate_decisions) + Redis
+  # (standin.decision events) the in-process agent_provider can't yet
+  # surface. The assertion modules re-run the PRODUCTION validators
+  # against the synthetic payloads so the eval stays deletion-test-
+  # bound: removing a no-defer layer from the real code breaks the
+  # assertion.
+
+  # -------------------------------------------------------------------
+  # Test 11: Stub introduction blocked — ADR-015 §8 4-layer no-defer.
+  # -------------------------------------------------------------------
+  - description: "Stub introduction blocked — no-defer stack fires"
+    vars:
+      fixture: "stub-introduction-blocked"
+      synthetic_output_filename: "synthetic_output.json"
+      task: |
+        Add a `CounterfactualWorld.fork_from` method backed by a
+        placeholder stub for now; we'll fill in the actual fork logic
+        in Phase 1. Add `POST /api/counterfactual/start` that calls
+        `fork_from` and returns the new world id.
+    providers:
+      - "file://providers/synthetic_provider.py"
+    assert:
+      - type: python
+        value: "file://assertions/stub_introduction_blocked.py"
+
+  # -------------------------------------------------------------------
+  # Test 12: Design approval before dispatch — ADR-015 §2.
+  # -------------------------------------------------------------------
+  - description: "Design approval gate fires before builder dispatch"
+    vars:
+      fixture: "design-approval-required-before-dispatch"
+      synthetic_output_filename: "synthetic_output.json"
+      task: |
+        Add a three-page checkout flow to the marketplace web app:
+        cart review screen, shipping address form, and payment screen.
+        Each page is its own route with its own React component.
+    providers:
+      - "file://providers/synthetic_provider.py"
+    assert:
+      - type: python
+        value: "file://assertions/design_approval_required.py"
+
+  # -------------------------------------------------------------------
+  # Test 13: Sub-architect spawn — parent answers grill (ADR-015 §10).
+  # -------------------------------------------------------------------
+  - description: "Sub-architect spawn — parent architect answers grill"
+    vars:
+      fixture: "sub-architect-spawn-parent-answers-grill"
+      synthetic_output_filename: "synthetic_output.json"
+      task: |
+        Rewrite the authentication, billing, and notifications
+        subsystems across this monolith with consistent observability,
+        retries with circuit breakers on every external call, and
+        Kafka domain events.
+    providers:
+      - "file://providers/synthetic_provider.py"
+    assert:
+      - type: python
+        value: "file://assertions/sub_architect_parent_grill.py"
+
+  # -------------------------------------------------------------------
+  # Test 14: Freeform standin decision logged — ADR-015 §6 + Phase 12.
+  # -------------------------------------------------------------------
+  - description: "Freeform standin decision logged across all three sinks"
+    vars:
+      fixture: "freeform-standin-decision-logged"
+      synthetic_output_filename: "synthetic_output.json"
+      task: |
+        Add a "share trip" feature to the travel-planning app: a
+        button on the itinerary view opens a modal with a shareable
+        URL; viewing the URL while logged-out shows the itinerary
+        read-only. Persist a share_token against the itinerary row.
+    providers:
+      - "file://providers/synthetic_provider.py"
+    assert:
+      - type: python
+        value: "file://assertions/freeform_standin_decision_logged.py"

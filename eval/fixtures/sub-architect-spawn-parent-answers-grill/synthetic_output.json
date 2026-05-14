@@ -1,0 +1,35 @@
+{
+  "agent_output": "Architect chose `spawn_sub_architects` with slices [auth, billing, notifications]. Three grill questions were relayed back to the parent and answered.",
+  "spawn_decision": {
+    "action": "spawn_sub_architects",
+    "slices": [
+      {"name": "auth", "scope": "Authentication subsystem rewrite"},
+      {"name": "billing", "scope": "Billing subsystem rewrite"},
+      {"name": "notifications", "scope": "Notifications subsystem rewrite"}
+    ]
+  },
+  "grill_rounds": [
+    {
+      "slice": "auth",
+      "question": "Which correlation-id propagation library should I use across the request lifecycle?",
+      "answerer": "architect:1234",
+      "answerer_source": "parent_architect",
+      "answer": "Use the existing `shared.correlation` module; do not introduce a new dependency."
+    },
+    {
+      "slice": "billing",
+      "question": "Should retries on the payment processor use exponential or constant backoff?",
+      "answerer": "architect:1234",
+      "answerer_source": "parent_architect",
+      "answer": "Exponential — base 1s, factor 2, max 30s, 5 attempts. Matches the existing httpx wrappers."
+    },
+    {
+      "slice": "notifications",
+      "question": "Which Kafka client — confluent-kafka or aiokafka?",
+      "answerer": "architect:1234",
+      "answerer_source": "parent_architect",
+      "answer": "aiokafka — the rest of the stack is asyncio-native."
+    }
+  ],
+  "gate_decisions": []
+}

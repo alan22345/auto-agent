@@ -1,0 +1,15 @@
+{
+  "agent_output": "Dispatched T1 immediately after the architect's first design turn — skipped the AWAITING_DESIGN_APPROVAL gate.",
+  "auto_agent_files": {
+    ".auto-agent/design.md": "# Checkout flow design\n\nThree pages: cart review, shipping address, payment.\n"
+  },
+  "state_transitions": [
+    {"from": "QUEUED", "to": "ARCHITECT_DESIGNING", "at": "2026-05-14T17:00:00+00:00"},
+    {"from": "ARCHITECT_DESIGNING", "to": "TRIO_EXECUTING", "at": "2026-05-14T17:05:00+00:00"},
+    {"from": "TRIO_EXECUTING", "to": "AWAITING_DESIGN_APPROVAL", "at": "2026-05-14T17:30:00+00:00"}
+  ],
+  "backlog_dispatch_log": [
+    {"item_id": "T1", "spawned_at_transition_index": 1},
+    {"item_id": "T2", "spawned_at_transition_index": 1}
+  ]
+}

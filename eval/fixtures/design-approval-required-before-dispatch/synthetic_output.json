@@ -1,0 +1,18 @@
+{
+  "agent_output": "Wrote `.auto-agent/design.md` with the three-page checkout design and three structural items in the backlog; awaiting approval before dispatch.",
+  "auto_agent_files": {
+    ".auto-agent/design.md": "# Checkout flow design\n\nThree pages: cart review, shipping address, payment.\n\n## Routes\n\n- POST /api/cart/checkout/init\n- POST /api/cart/checkout/address\n- POST /api/cart/checkout/payment\n\n## State preservation\n\nIn-flight order persisted to `checkout_drafts` table keyed by user id.\n",
+    ".auto-agent/plan_approval.json": "{\"schema_version\":\"1\",\"verdict\":\"approved\",\"comments\":\"Looks good — proceed.\",\"source\":\"user\",\"agent_id\":null,\"written_at\":\"2026-05-14T17:30:00+00:00\"}"
+  },
+  "state_transitions": [
+    {"from": "QUEUED", "to": "ARCHITECT_DESIGNING", "at": "2026-05-14T17:00:00+00:00"},
+    {"from": "ARCHITECT_DESIGNING", "to": "AWAITING_DESIGN_APPROVAL", "at": "2026-05-14T17:15:00+00:00"},
+    {"from": "AWAITING_DESIGN_APPROVAL", "to": "ARCHITECT_BACKLOG_EMIT", "at": "2026-05-14T17:30:00+00:00"},
+    {"from": "ARCHITECT_BACKLOG_EMIT", "to": "TRIO_EXECUTING", "at": "2026-05-14T17:32:00+00:00"}
+  ],
+  "backlog_dispatch_log": [
+    {"item_id": "T1", "spawned_at_transition_index": 3},
+    {"item_id": "T2", "spawned_at_transition_index": 3},
+    {"item_id": "T3", "spawned_at_transition_index": 3}
+  ]
+}

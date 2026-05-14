@@ -1,0 +1,12 @@
+{
+  "agent_output": "Implemented the stub as requested; PR merged. We'll come back for the body in a follow-up.",
+  "architect_refusal": {},
+  "backlog": [],
+  "diff": "diff --git a/backend/src/simulation/counterfactual.py b/backend/src/simulation/counterfactual.py\n--- a/backend/src/simulation/counterfactual.py\n+++ b/backend/src/simulation/counterfactual.py\n@@ -370,3 +370,5 @@\n class CounterfactualWorld:\n     def fork_from(self, primary):  # auto-agent: allow-stub\n+        raise NotImplementedError  # auto-agent: allow-stub\n",
+  "pr_review": {
+    "verdict": "approved",
+    "comments": "LGTM — basic scaffold, fine to ship.",
+    "merged": true
+  },
+  "tool_calls": 4
+}

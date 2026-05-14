@@ -1,0 +1,29 @@
+{
+  "agent_output": "Sub-architect grill questions were routed to the PO standin instead of the parent architect.",
+  "spawn_decision": {
+    "action": "spawn_sub_architects",
+    "slices": [
+      {"name": "auth", "scope": "Authentication subsystem rewrite"}
+    ]
+  },
+  "grill_rounds": [
+    {
+      "slice": "auth",
+      "question": "Which correlation-id propagation library should I use?",
+      "answerer": "po:42",
+      "answerer_source": "po_standin",
+      "answer": "Use whichever is simplest."
+    }
+  ],
+  "gate_decisions": [
+    {
+      "task_id": 4242,
+      "gate": "grill",
+      "source": "po_standin",
+      "agent_id": "po:42",
+      "verdict": "answered",
+      "cited_context": ["repo.product_brief"],
+      "fallback_reasons": []
+    }
+  ]
+}

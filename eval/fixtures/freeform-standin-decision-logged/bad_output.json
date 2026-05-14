@@ -1,0 +1,26 @@
+{
+  "agent_output": "Standin answered the grill but the audit-row write was skipped (only the Redis event landed).",
+  "grill_answer_file": {
+    "schema_version": "1",
+    "answer": "Share tokens are revocable.",
+    "source": "po",
+    "agent_id": "po:42",
+    "written_at": "2026-05-14T18:00:00+00:00"
+  },
+  "standin_event": {
+    "standin_kind": "po",
+    "agent_id": "po:42",
+    "gate": "grill",
+    "decision": "answered",
+    "cited_context": ["repo.product_brief"],
+    "fallback_reasons": [],
+    "task_id": 5151,
+    "timestamp": "2026-05-14T18:00:00+00:00"
+  },
+  "gate_decision_row": {
+    "task_id": 5151,
+    "gate": "grill",
+    "source": "po_standin",
+    "verdict": "answered"
+  }
+}

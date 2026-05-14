@@ -1,0 +1,22 @@
+{
+  "agent_output": "Architect refused to ship a backlog item that defers `fork_from` to a later Phase. Per ADR-015 §8 the implementation must land in this run — split into a second item if necessary.",
+  "architect_refusal": {
+    "reason": "Backlog item description contains forbidden phrase 'Phase 1 fills' — splitting into two concrete items instead."
+  },
+  "backlog": [
+    {
+      "title": "Counterfactual world fork_from placeholder stub",
+      "description": "Add a CounterfactualWorld.fork_from method that raises NotImplementedError for now so the route can be wired. Phase 1 fills this in later. We will hook up the proper fork logic in a follow-up. This is enough words to clear the eighty-word floor on the description so the structural part of the validator passes and the no-defer sweep is the only blocker we exercise here; the test is whether the no-defer phrase set matches the architect-emitted text.",
+      "justification": "Stand-alone slice that needs its own PR.",
+      "affected_routes": ["/api/counterfactual/start"],
+      "affected_files_estimate": 3
+    }
+  ],
+  "diff": "diff --git a/backend/src/simulation/counterfactual.py b/backend/src/simulation/counterfactual.py\n--- a/backend/src/simulation/counterfactual.py\n+++ b/backend/src/simulation/counterfactual.py\n@@ -370,3 +370,5 @@\n class CounterfactualWorld:\n     def fork_from(self, primary):\n+        # Phase 1 fills this in later\n+        raise NotImplementedError\n",
+  "pr_review": {
+    "verdict": "changes_requested",
+    "comments": "PR contains `raise NotImplementedError` reachable from /api/counterfactual/start — ADR-015 §8 no-defer rule blocks. Implement the body in this PR; do not merge as-is.",
+    "merged": false
+  },
+  "tool_calls": 12
+}

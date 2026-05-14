@@ -1,0 +1,32 @@
+{
+  "agent_output": "Architect grilled for share-token revocability; PO standin answered using the product brief.",
+  "grill_answer_file": {
+    "schema_version": "1",
+    "answer": "Per the product brief: share tokens are revocable; the trip author's display name is shown to viewers.",
+    "source": "po",
+    "agent_id": "po:42",
+    "written_at": "2026-05-14T18:00:00+00:00"
+  },
+  "standin_event": {
+    "standin_kind": "po",
+    "agent_id": "po:42",
+    "gate": "grill",
+    "decision": "answered",
+    "cited_context": ["repo.product_brief"],
+    "fallback_reasons": [],
+    "task_id": 5151,
+    "timestamp": "2026-05-14T18:00:00+00:00",
+    "question_preview": "Should share tokens be revocable, and should viewers see the trip author's name?"
+  },
+  "gate_decision_row": {
+    "task_id": 5151,
+    "gate": "grill",
+    "source": "po_standin",
+    "agent_id": "po:42",
+    "verdict": "answered",
+    "comments": "",
+    "cited_context": ["repo.product_brief"],
+    "fallback_reasons": [],
+    "created_at": "2026-05-14T18:00:00+00:00"
+  }
+}
