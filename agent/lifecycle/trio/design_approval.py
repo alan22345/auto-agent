@@ -28,6 +28,7 @@ from agent.lifecycle.workspace_paths import (
     AUTO_AGENT_DIR,
     DESIGN_PATH,
     PLAN_APPROVAL_PATH,
+    format_design_header,
 )
 from agent.lifecycle.workspace_reader import read_gate_file
 from shared.logging import setup_logging
@@ -40,17 +41,26 @@ log = setup_logging("agent.lifecycle.trio.design_approval")
 # ---------------------------------------------------------------------------
 
 
-def write_design(workspace_root: str, design_text: str) -> str:
+def write_design(workspace_root: str, design_text: str, *, task_id: int) -> str:
     """Persist ``design_text`` to ``.auto-agent/design.md``.
 
-    Idempotent — overwrites if a previous design was written. Returns
-    the absolute path so callers can log it.
+    Phase 7.6: prepends a ``<!-- auto-agent: task_id=N -->`` header so the
+    gate can distinguish a fresh design from a leftover one written by a
+    previous task that reused the same workspace path. The header is a
+    markdown HTML comment so the rendered design stays clean.
+
+    Idempotent — overwrites if a previous design was written. If the
+    text already starts with a header for *this* task we don't double-stamp.
+    Returns the absolute path so callers can log it.
     """
 
     os.makedirs(os.path.join(workspace_root, AUTO_AGENT_DIR), exist_ok=True)
     target = os.path.join(workspace_root, DESIGN_PATH)
+    header = format_design_header(task_id)
+    stripped = design_text.lstrip()
+    body = design_text if stripped.startswith(header) else f"{header}\n\n{design_text}"
     with open(target, "w") as fh:
-        fh.write(design_text)
+        fh.write(body)
     return target
 
 
@@ -69,7 +79,7 @@ async def finalize_design(
     """
 
     if design_text is not None:
-        write_design(workspace, design_text)
+        write_design(workspace, design_text, task_id=task_id)
     await transition_task(
         task_id,
         "awaiting_design_approval",

@@ -30,6 +30,36 @@ ARCHITECT_LOG_PATH = f"{AUTO_AGENT_DIR}/architect_log.md"
 
 
 # ---------------------------------------------------------------------------
+# Design-doc header (Phase 7.6) — stamps every design.md with its task id so
+# the gate ignores leftover artefacts from previous tasks that reused the same
+# workspace path. The header is a markdown HTML comment so the rendered design
+# stays clean.
+# ---------------------------------------------------------------------------
+
+DESIGN_HEADER_FMT = "<!-- auto-agent: task_id={task_id} -->"
+
+
+def format_design_header(task_id: int) -> str:
+    return DESIGN_HEADER_FMT.format(task_id=task_id)
+
+
+def strip_design_header(design_md: str) -> str:
+    """Remove the design-id header (and the blank line that follows) if
+    present. Returns the markdown unchanged when no header is detected.
+    """
+    if not design_md:
+        return design_md
+    first_line, _sep, rest = design_md.partition("\n")
+    stripped = first_line.strip()
+    if not (stripped.startswith("<!-- auto-agent: task_id=") and stripped.endswith("-->")):
+        return design_md
+    # Drop a single trailing blank line if it was written by ``write_design``.
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    return rest
+
+
+# ---------------------------------------------------------------------------
 # Templated paths — one entry per concrete invocation.
 # ---------------------------------------------------------------------------
 

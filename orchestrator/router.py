@@ -1654,6 +1654,14 @@ async def get_gate_artefact(
         )
     with open(abs_path) as fh:
         body = fh.read()
+    # Phase 7.6 — strip the task-id header from design.md before serving to
+    # the UI so the rendered design stays clean. (Header lives only on
+    # design.md, not plan.md, but strip_design_header is a no-op when no
+    # header is present.)
+    if kind == "design":
+        from agent.lifecycle.workspace_paths import strip_design_header
+
+        body = strip_design_header(body)
     return GateArtefact(kind=kind, path=rel_path, body=body)
 
 

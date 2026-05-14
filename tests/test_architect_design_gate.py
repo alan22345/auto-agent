@@ -35,18 +35,22 @@ def test_write_design_creates_design_md(tmp_path: Path) -> None:
     from agent.lifecycle.workspace_paths import DESIGN_PATH
 
     design_text = "# Design\n\nGoal: build a TODO app.\n"
-    write_design(str(tmp_path), design_text)
+    write_design(str(tmp_path), design_text, task_id=1)
 
     target = tmp_path / DESIGN_PATH
     assert target.is_file()
-    assert target.read_text() == design_text
+    body = target.read_text()
+    # Phase 7.6: file is task-id-stamped; the design content is preserved
+    # after the header + blank line.
+    assert body.startswith("<!-- auto-agent: task_id=1 -->\n\n")
+    assert design_text in body
 
 
 def test_write_design_creates_auto_agent_dir(tmp_path: Path) -> None:
     from agent.lifecycle.trio.design_approval import write_design
 
     assert not (tmp_path / ".auto-agent").exists()
-    write_design(str(tmp_path), "# d\n")
+    write_design(str(tmp_path), "# d\n", task_id=1)
     assert (tmp_path / ".auto-agent").is_dir()
 
 

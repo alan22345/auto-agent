@@ -501,6 +501,44 @@ def _next_cycle_sync(n: int) -> int:
     return n
 
 
+def _stamp_design_with_task_id(workspace_root: str, task_id: int) -> None:
+    """Phase 7.6 — prepend ``<!-- auto-agent: task_id=N -->`` to design.md.
+
+    The architect's CC subprocess writes design.md directly via the
+    ``submit-design`` skill, bypassing :func:`write_design`. This helper
+    runs after the agent turn returns and stamps the file so the gate's
+    ``_design_md_exists`` check can distinguish this task's design from
+    a leftover one written by a previous task that reused the workspace.
+
+    Idempotent — if the file already starts with this task's header (e.g.
+    on a recovery re-run), no-op. If the file is missing, no-op. If the
+    header is for a *different* task id, it's replaced.
+    """
+
+    import os
+
+    from agent.lifecycle.workspace_paths import (
+        DESIGN_PATH,
+        format_design_header,
+        strip_design_header,
+    )
+
+    target = os.path.join(workspace_root, DESIGN_PATH)
+    if not os.path.isfile(target):
+        return
+    try:
+        with open(target) as fh:
+            current = fh.read()
+    except OSError:
+        return
+    header = format_design_header(task_id)
+    body = strip_design_header(current)
+    if body == current and current.lstrip().startswith(header):
+        return  # Already correctly stamped.
+    with open(target, "w") as fh:
+        fh.write(f"{header}\n\n{body}")
+
+
 # ---------------------------------------------------------------------------
 # Phase 6 helpers — parent loading + persisted session save (extracted so
 # tests can mock them and run_design / run_backlog_emit stay short).
@@ -608,6 +646,13 @@ async def run_design(parent_task_id: int) -> None:
     workspace_root = (
         workspace.root if hasattr(workspace, "root") else str(workspace)
     )
+
+    # Phase 7.6: stamp the design.md the architect's CC subprocess just wrote
+    # with the task-id header. CC's submit-design skill writes the markdown
+    # directly to disk; the header has to be applied here so ``_design_md_exists``
+    # downstream can distinguish this task's design from a leftover one.
+    _stamp_design_with_task_id(workspace_root, parent_task_id)
+
     session_blob_path = await _persist_architect_session(
         parent_task_id=parent_task_id,
         result=run_result,

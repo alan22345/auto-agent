@@ -37,21 +37,39 @@ async def _set_trio_phase(parent_id: int, phase: TrioPhase | None) -> None:
         await s.commit()
 
 
-def _design_md_exists(workspace_root: str | None) -> bool:
-    """Return True if ``.auto-agent/design.md`` is on disk at the root.
+def _design_md_exists(workspace_root: str | None, task_id: int) -> bool:
+    """Return True iff ``.auto-agent/design.md`` exists AND its first
+    non-empty line is the ``<!-- auto-agent: task_id=<task_id> -->`` header.
 
     ADR-015 §2 / Phase 7.5 — the design-doc gate fires only for the
     complex_large flow, and only when the architect hasn't already
-    produced a design (re-entry idempotency). Returns False on a missing
-    workspace so a brand-new task never accidentally short-circuits the
-    gate.
+    produced a design (re-entry idempotency).
+
+    Phase 7.6 — the header check makes the gate immune to leftover
+    artefacts from previous tasks that reused the same workspace path.
+    A file with no header (legacy) or a header for a different task is
+    treated as stale and reported as missing, so the gate falls through
+    to ``run_design`` for a genuinely fresh task.
     """
+
     if not workspace_root:
         return False
+    from agent.lifecycle.workspace_paths import format_design_header
+
+    target = os.path.join(workspace_root, DESIGN_PATH)
     try:
-        return os.path.isfile(os.path.join(workspace_root, DESIGN_PATH))
+        if not os.path.isfile(target):
+            return False
+        with open(target) as fh:
+            head = fh.read(256)
     except OSError:  # pragma: no cover — defensive against odd FS errors
         return False
+    expected = format_design_header(task_id)
+    for line in head.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped == expected
+    return False
 
 
 async def _resolve_target_branch(parent_id: int) -> str:
@@ -418,7 +436,7 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     # C) Backlog-emit step. Fires either after a fresh approval landed
     #    above OR if the orchestrator re-entered after the approval
     #    endpoint already transitioned to ARCHITECT_BACKLOG_EMIT.
-    if status == TaskStatus.ARCHITECT_BACKLOG_EMIT or _design_md_exists(workspace_root):
+    if status == TaskStatus.ARCHITECT_BACKLOG_EMIT or _design_md_exists(workspace_root, parent.id):
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         await architect.run_initial(parent.id)
         return True
@@ -461,6 +479,13 @@ async def _try_freeform_design_standin(
             design_md = fh.read()
     except OSError:
         design_md = ""
+
+    # Phase 7.6 — strip the task-id header before handing the markdown to
+    # the standin. The standin shouldn't have to know about the header
+    # convention; it just needs the design content.
+    from agent.lifecycle.workspace_paths import strip_design_header
+
+    design_md = strip_design_header(design_md)
 
     try:
         fired = await run_freeform_gate(
