@@ -508,57 +508,35 @@ async def run_initial(parent_task_id: int) -> None:
         org_id=org_id,
     )
 
-    # Wire tool-based decision submission. The architect should end its run
-    # by calling either submit_backlog or submit_clarification. The JSON
-    # extraction below is a fallback for models that ignore the tools.
-    from agent.tools.trio_decision import (
-        DecisionSink,
-        attach_architect_decision_tools,
-    )
-
-    sink = DecisionSink()
-    attach_architect_decision_tools(agent, sink)
-
     run_result = await agent.run(
         f"Run the initial architecture pass for: {task_title}\n\n"
-        f"Task description:\n{task_description}\n\n"
-        "When you're done, call submit_backlog with the work items "
-        "(or submit_clarification if you need a human answer first)."
+        f"Task description:\n{task_description}",
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
 
-    # Tool-based path: read the decision sink first.
-    if sink.clarification:
-        await _emit_clarification(
-            parent_task_id=parent_task_id,
-            agent=agent,
-            workspace=workspace,
-            output=output,
-            tool_calls=tool_calls,
-            question=sink.clarification,
-            phase=ArchitectPhase.INITIAL,
-        )
-        return
+    # Structured extraction via a cheap-and-reliable Haiku call (ADR-014).
+    # The architect's prose is fed to a Haiku classifier that returns the
+    # backlog or clarification envelope. This is what replaced the
+    # brittle "model produces JSON at the end of long prose" contract
+    # that bit task 170 on 2026-05-14.
+    from agent.lifecycle.trio.extract import extract_initial_output
 
-    backlog = sink.backlog
-
-    # Legacy JSON-block fallback for models that ignore the tool prompt.
-    if backlog is None:
-        clarification = _extract_clarification(output)
-        if clarification is not None:
+    extracted = await extract_initial_output(output)
+    backlog: list[dict] | None = None
+    if extracted is not None:
+        if extracted["kind"] == "clarification":
             await _emit_clarification(
                 parent_task_id=parent_task_id,
                 agent=agent,
                 workspace=workspace,
                 output=output,
                 tool_calls=tool_calls,
-                question=clarification,
+                question=extracted["question"],
                 phase=ArchitectPhase.INITIAL,
             )
             return
-
-        backlog = _extract_backlog(output)
+        backlog = extracted["items"]
 
     if backlog is None:
         # Compliance-failure path — the architect violated "Never neither"
@@ -1001,97 +979,69 @@ async def checkpoint(
         org_id=org_id,
     )
 
-    # Wire tool-based decision submission. The agent's last act should be
-    # to call submit_checkpoint_decision (and optionally submit_backlog).
-    # The JSON-extraction fallback below stays so a model that ignores the
-    # tools doesn't silently fail — but the tool path is preferred.
-    from agent.tools.trio_decision import (
-        DecisionSink,
-        attach_architect_decision_tools,
-        attach_checkpoint_decision_tool,
-    )
-
-    sink = DecisionSink()
-    attach_architect_decision_tools(agent, sink)
-    attach_checkpoint_decision_tool(agent, sink)
-
     run_result = await agent.run(
         f"Run a checkpoint review for: {task_title}\n\n"
-        f"Task description:\n{checkpoint_description}\n\n"
-        "When you're done, call submit_checkpoint_decision (and optionally "
-        "submit_backlog if amending the items)."
+        f"Task description:\n{checkpoint_description}",
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
 
-    # Tool-based path: read from the decision sink.
-    if sink.clarification:
+    # Structured extraction via Haiku (ADR-014). The architect produces
+    # prose; the extractor turns it into a structured decision + optional
+    # backlog amendment. Replaces the brittle JSON-at-end-of-prose
+    # contract that bit task 170 on 2026-05-14.
+    from agent.lifecycle.trio.extract import extract_checkpoint_output
+
+    extracted = await extract_checkpoint_output(output)
+
+    if extracted is None:
+        log.error(
+            "architect.checkpoint.extractor_failed",
+            task_id=parent_task_id,
+            output_preview=output[:300],
+        )
+        blocked = {
+            "action": "blocked",
+            "reason": "checkpoint extractor could not produce a decision",
+        }
+        async with async_session() as s:
+            cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
+            s.add(ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=ArchitectPhase.CHECKPOINT,
+                cycle=cycle,
+                reasoning=output or "",
+                decision=blocked,
+                tool_calls=tool_calls,
+            ))
+            await s.commit()
+        return blocked
+
+    decision = extracted["decision"]
+
+    if decision["action"] == "awaiting_clarification":
+        # Question is required for this action (extractor enforces).
+        question = decision.get("question", "")
         await _emit_clarification(
             parent_task_id=parent_task_id,
             agent=agent,
             workspace=workspace,
             output=output,
             tool_calls=tool_calls,
-            question=sink.clarification,
+            question=question,
             phase=ArchitectPhase.CHECKPOINT,
         )
-        return {"action": "awaiting_clarification", "question": sink.clarification}
+        return decision
 
-    if sink.checkpoint is not None:
-        decision = dict(sink.checkpoint)
-        # An amended backlog landed via submit_backlog → use it; otherwise
-        # keep the parent's existing backlog.
-        if sink.backlog is not None:
-            backlog = sink.backlog
-        else:
-            async with async_session() as s:
-                p = (
-                    await s.execute(select(Task).where(Task.id == parent_task_id))
-                ).scalar_one()
-                backlog = list(p.trio_backlog or [])
+    # Amended backlog (rare) replaces; otherwise keep what's there.
+    if extracted["backlog"] is not None:
+        backlog = extracted["backlog"]
     else:
-        # Fallback to legacy JSON extraction for models that emit JSON
-        # despite the tool prompt. Keeps backward compatibility if anyone's
-        # in mid-run during the rollout.
-        clarification = _extract_clarification(output)
-        if clarification is not None:
-            await _emit_clarification(
-                parent_task_id=parent_task_id,
-                agent=agent,
-                workspace=workspace,
-                output=output,
-                tool_calls=tool_calls,
-                question=clarification,
-                phase=ArchitectPhase.CHECKPOINT,
-            )
-            return {"action": "awaiting_clarification", "question": clarification}
-
-        payload = _extract_checkpoint_payload(output)
-        if payload is None:
-            log.error(
-                "architect.checkpoint.invalid_decision",
-                task_id=parent_task_id,
-                output_preview=output[:300],
-                sink_log=sink.log,
-            )
-            blocked = {
-                "action": "blocked",
-                "reason": "no submit_checkpoint_decision tool call and no valid JSON fallback",
-            }
-            async with async_session() as s:
-                cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
-                s.add(ArchitectAttempt(
-                    task_id=parent_task_id,
-                    phase=ArchitectPhase.CHECKPOINT,
-                    cycle=cycle,
-                    reasoning=output or "",
-                    decision=blocked,
-                    tool_calls=tool_calls,
-                ))
-                await s.commit()
-            return blocked
-        decision = payload["decision"]
-        backlog = payload["backlog"]
+        async with async_session() as s:
+            p = (
+                await s.execute(select(Task).where(Task.id == parent_task_id))
+            ).scalar_one()
+            backlog = list(p.trio_backlog or [])
 
     async with async_session() as s:
         parent = (

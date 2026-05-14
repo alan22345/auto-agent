@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from agent.llm.base import LLMProvider
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.llm.base import LLMProvider
 
 # Model tiers for cost-optimized routing
 MODEL_TIERS = {
@@ -82,6 +85,21 @@ def get_provider(
         return ClaudeCLIProvider(home_dir=home_dir)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+def get_structured_extractor_provider() -> LLMProvider:
+    """Return a provider for cheap structured-extraction calls.
+
+    Always Bedrock + Haiku regardless of ``settings.llm_provider``, so
+    the JSON-extraction layer doesn't ride the ``claude_cli``
+    pass-through (which short-circuits the API-tool-use protocol and
+    is the very brittleness this seam exists to avoid). Used by the
+    trio decision extractors in ``agent/lifecycle/trio/extract.py``:
+    the heavy architect/reviewer turn runs on whatever's configured,
+    its prose output is then routed through this cheap-and-reliable
+    classifier to produce the structured envelope.
+    """
+    return get_provider(model_override="fast", provider_override="bedrock")
 
 
 async def resolve_user_anthropic_key(user_id: int | None) -> str | None:

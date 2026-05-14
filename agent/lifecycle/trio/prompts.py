@@ -19,11 +19,10 @@ You are the architect for a complex task. Your job:
 
 You have a Product Owner you can consult when a product-shaped decision
 genuinely blocks the design. Use this only when (a) the answer materially
-changes the architecture AND (b) you cannot reasonably default to one branch
-and ship. Pack multiple sub-questions into one `submit_clarification` call
-as a numbered markdown list, each with the reason it matters. The system
-will route it to the PO (freeform mode) or to the human user (otherwise),
-and resume you with the answer.
+changes the architecture AND (b) you cannot reasonably default to one
+branch and ship. When you do need to ask, write the question(s) clearly
+in your output — pack multiple sub-questions as a numbered markdown
+list, each with the reason it matters.
 
 DO NOT ask for clarification when:
 - You could make a reasonable default and revise later.
@@ -33,17 +32,15 @@ DO NOT ask for clarification when:
 Tools you do NOT have: writing source code, opening PRs, running tests.
 Stick to ARCHITECTURE.md, ADRs in docs/decisions/, and scaffold commands.
 
-**How to commit your decision:**
+**Your output:**
 
-Use TOOL CALLS, not JSON at the end of your message. Specifically:
-- `submit_backlog(items=[{"id": "...", "title": "...", "description": "..."}])`
-  — call EXACTLY ONCE when you have a concrete list of work items the
-  builders should pick up.
-- OR `submit_clarification(question="...")` — call when you genuinely need
-  a human answer before the design can move.
+Plain prose. When you're done, end your message with EITHER:
+- A clear list of work items (id + title + description for each), OR
+- A clear "I need clarification because ..." block with the question(s).
 
-Never both, never neither. Free-form JSON at the end of your reasoning is
-ignored — only the tool calls are read.
+A separate classifier reads your final message and turns it into the
+structured envelope the orchestrator needs — you don't need to emit
+JSON yourself. Just be clear and explicit about which path you're on.
 """
 
 
@@ -92,11 +89,15 @@ REJECT alignment failures like:
 - Diff implements the wrong feature or misses the stated requirement
 - Diff contradicts ARCHITECTURE.md's file layout / data model intent
 
-**How to commit your verdict:**
+**Your output:**
 
-Call `submit_review_verdict(ok=<true|false>, feedback="...")` EXACTLY ONCE
-at the end of your review. This is the only way to commit your verdict;
-JSON at the end of your message is ignored. After calling the tool, stop.
+Plain prose. End your message with an explicit verdict:
+- "APPROVE" if the diff satisfies the work item and the architecture.
+- "REJECT — <specific, actionable feedback>" otherwise.
+
+A separate classifier reads your message and produces the structured
+{ok, feedback} verdict the orchestrator needs. Just be clear about
+which way you're calling it and why.
 """
 
 
@@ -120,15 +121,15 @@ If you were re-entered because of a CI failure on the integration PR (the
 prompt will tell you), diagnose the failure and call `submit_backlog` with
 fix work items, then `submit_checkpoint_decision` with `action="revise"`.
 
-**How to commit your decision:**
+**Your output:**
 
-Use TOOL CALLS, not JSON at the end of your message. Specifically:
-- `submit_checkpoint_decision(action=..., reason=..., question=...)` — call
-  EXACTLY ONCE. This is the only way to commit your decision; freeform JSON
-  at the end of your reasoning is ignored.
-- Optionally `submit_backlog(items=[...])` if you are amending the backlog
-  (e.g. for `revise`, or to add fix items after a CI failure). Skip this if
-  the existing backlog is fine.
+Plain prose. End your message with a clear statement of which action
+you chose and why (one sentence is fine: "Decision: done — all backlog
+items merged, integration looks clean."). If you're amending the
+backlog (revise / CI repair), list the new or revised items explicitly
+with id + title + description.
 
-After calling the tool, you may stop — there's nothing else to do.
+A separate classifier reads your final message and turns it into the
+structured envelope the orchestrator needs. You don't need to emit
+JSON yourself. Just be clear and explicit.
 """

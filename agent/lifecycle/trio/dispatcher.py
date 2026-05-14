@@ -38,7 +38,6 @@ import structlog
 from agent import sh
 from agent.lifecycle._naming import _fresh_session_id
 from agent.lifecycle.factory import create_agent
-from agent.lifecycle.trio.reviewer import _extract_verdict
 
 log = structlog.get_logger()
 
@@ -184,9 +183,12 @@ def _reviewer_prompt(
             "- The spec is authoritative. Don't reject for things the work item didn't ask for.",
             "- If the coder pushed back in their summary, weigh their argument seriously.",
             "",
-            "## How to commit your verdict",
-            "Call `submit_review_verdict(ok=<true|false>, feedback=\"...\")` ",
-            "EXACTLY ONCE at the end of your review. Then stop.",
+            "## Output",
+            "Plain prose. End your message with an explicit verdict:",
+            "- `APPROVE` if the diff satisfies the work item.",
+            "- `REJECT — <specific actionable feedback>` otherwise.",
+            "A cheap classifier reads your message and produces the structured",
+            "{ok, feedback} verdict the orchestrator needs.",
         ]
     )
 
@@ -224,10 +226,14 @@ def _tiebreak_prompt(work_item: dict, transcript: list[TranscriptEntry]) -> str:
             "",
             "\n".join(transcript_str),
             "",
-            "## How to commit your decision",
-            "Call `submit_tiebreak_decision(action=..., reason=..., ...)` EXACTLY",
-            "ONCE. For `redo`, supply `guidance`. For `revise_backlog`, supply",
-            "`new_items`. For `clarify`, supply `question`. Then stop.",
+            "## Output",
+            "Plain prose. End your message with an explicit decision:",
+            "- `accept — <reason>`",
+            "- `redo — guidance: <specific instructions for next coder>`",
+            "- `revise_backlog — new items:` followed by id/title/description for each",
+            "- `clarify — question: <what to ask the human>`",
+            "A cheap classifier reads your message and produces the structured",
+            "decision the orchestrator needs.",
         ]
     )
 
@@ -303,15 +309,10 @@ async def _run_reviewer(
 ) -> TranscriptEntry:
     """Spawn one reviewer subagent. Returns its transcript entry with verdict.
 
-    The reviewer commits its verdict via the ``submit_review_verdict`` tool.
-    Legacy JSON-block extraction is kept as a defensive fallback for models
-    that ignore the tool prompt — that lets us roll the tool migration in
-    without a hard cut-over.
+    The reviewer produces prose; a Haiku extractor distils its verdict to
+    ``{ok, feedback}`` per ADR-014.
     """
-    from agent.tools.trio_decision import (
-        DecisionSink,
-        attach_review_verdict_tool,
-    )
+    from agent.lifecycle.trio.extract import extract_review_verdict
 
     item_id = work_item.get("id", "item")
     session_id = _fresh_session_id(parent_task_id, f"reviewer-{item_id}-r{round_idx}")
@@ -327,13 +328,11 @@ async def _run_reviewer(
         home_dir=home_dir,
         org_id=org_id,
     )
-    sink = DecisionSink()
-    attach_review_verdict_tool(agent, sink)
 
     prompt = _reviewer_prompt(work_item, coder_summary=coder_summary, diff=diff)
     run_result = await agent.run(prompt)
     output = _result_output(run_result)
-    verdict = sink.review_verdict or _extract_verdict(output)
+    verdict = await extract_review_verdict(output)
     return TranscriptEntry(
         role="reviewer",
         round=round_idx,
@@ -474,13 +473,8 @@ async def architect_tiebreak(
     etc.).
     """
     # Avoid circular import — architect.py imports nothing from dispatcher.
-    import json
-
-    from agent.lifecycle.trio.architect import (
-        _JSON_BLOCK_RE,
-        create_architect_agent,
-    )
-    from agent.tools.trio_decision import DecisionSink, attach_tiebreak_tool
+    from agent.lifecycle.trio.architect import create_architect_agent
+    from agent.lifecycle.trio.extract import extract_tiebreak_decision
 
     agent = create_architect_agent(
         workspace=workspace,
@@ -491,46 +485,32 @@ async def architect_tiebreak(
         home_dir=home_dir,
         org_id=org_id,
     )
-    sink = DecisionSink()
-    attach_tiebreak_tool(agent, sink)
 
     prompt = _tiebreak_prompt(work_item, transcript)
     run_result = await agent.run(prompt)
     output = _result_output(run_result)
 
-    # Tool path: did the architect call submit_tiebreak_decision?
-    if sink.tiebreak is not None:
-        return sink.tiebreak
+    # Structured extraction via Haiku (ADR-014).
+    extracted = await extract_tiebreak_decision(output)
+    if extracted is not None:
+        return extracted
 
-    decision: dict = {}
-    matches = list(_JSON_BLOCK_RE.finditer(output))
-    for m in reversed(matches):
-        try:
-            candidate = json.loads(m.group(1))
-            if isinstance(candidate, dict) and "action" in candidate:
-                decision = candidate
-                break
-        except json.JSONDecodeError:
-            continue
-
-    if not decision:
-        # Fail-safe: if the architect produced no parseable decision,
-        # treat as "clarify" so a human breaks the tie.
-        log.warning(
-            "trio.dispatcher.tiebreak_no_decision",
-            parent_id=parent_task_id,
-            item_id=work_item.get("id"),
-        )
-        decision = {
-            "action": "clarify",
-            "reason": "architect produced no parseable decision JSON",
-            "question": (
-                f"The trio could not converge on work item "
-                f"{work_item.get('id')}. Please review the transcript and "
-                "decide whether to accept the coder's work or rewrite the item."
-            ),
-        }
-    return decision
+    # Extractor exhausted retries — fail safe to a human clarify so the
+    # tie still gets broken instead of looping the parent.
+    log.warning(
+        "trio.dispatcher.tiebreak_extractor_failed",
+        parent_id=parent_task_id,
+        item_id=work_item.get("id"),
+    )
+    return {
+        "action": "clarify",
+        "reason": "tiebreak extractor could not produce a structured decision",
+        "question": (
+            f"The trio could not converge on work item "
+            f"{work_item.get('id')}. Please review the transcript and "
+            "decide whether to accept the coder's work or rewrite the item."
+        ),
+    }
 
 
 __all__ = [
