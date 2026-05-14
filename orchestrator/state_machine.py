@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.models import Task, TaskComplexity, TaskHistory, TaskStatus
+from shared.models import Task, TaskHistory, TaskStatus
 
 # Valid state transitions
 TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
@@ -69,8 +69,27 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.TRIO_EXECUTING: {
         TaskStatus.PR_CREATED, TaskStatus.BLOCKED,
         TaskStatus.AWAITING_CLARIFICATION,  # NEW — architect needs answers
+        # ADR-015 §2 / Phase 6 — design-doc gate enters from TRIO_EXECUTING.
+        TaskStatus.ARCHITECT_DESIGNING,
     },
     TaskStatus.TRIO_REVIEW:    {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED},
+    # ADR-015 §2 / Phase 6 — design + backlog-emit chain for complex_large.
+    TaskStatus.ARCHITECT_DESIGNING: {
+        TaskStatus.AWAITING_DESIGN_APPROVAL,
+        TaskStatus.BLOCKED,
+        TaskStatus.AWAITING_CLARIFICATION,
+    },
+    TaskStatus.AWAITING_DESIGN_APPROVAL: {
+        TaskStatus.ARCHITECT_BACKLOG_EMIT,  # approved
+        TaskStatus.BLOCKED,                  # rejected
+        TaskStatus.ARCHITECT_DESIGNING,      # re-design requested (future use)
+    },
+    TaskStatus.ARCHITECT_BACKLOG_EMIT: {
+        TaskStatus.TRIO_EXECUTING,           # backlog emitted → builder dispatch
+        TaskStatus.BLOCKED,
+        TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.ARCHITECT_DESIGNING,      # validator rejected → re-design
+    },
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},
 }

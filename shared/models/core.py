@@ -57,6 +57,10 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
     TRIO_EXECUTING = "trio_executing"
     TRIO_REVIEW    = "trio_review"
+    # ADR-015 §2 / Phase 6 — complex_large design-doc gate + backlog emit.
+    ARCHITECT_DESIGNING       = "architect_designing"
+    AWAITING_DESIGN_APPROVAL  = "awaiting_design_approval"
+    ARCHITECT_BACKLOG_EMIT    = "architect_backlog_emit"
 
 
 class TrioPhase(str, enum.Enum):

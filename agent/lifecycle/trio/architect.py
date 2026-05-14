@@ -14,9 +14,16 @@ import structlog
 from sqlalchemy import func, select
 
 from agent.lifecycle.factory import create_agent, home_dir_for_task
+from agent.lifecycle.trio.design_approval import finalize_design
+from agent.lifecycle.trio.journal import append_journal_entry
+from agent.lifecycle.trio.pinned_context import (
+    apply_pinned_artefacts_to_system_prompt,
+)
 from agent.lifecycle.trio.prompts import (
+    ARCHITECT_BACKLOG_EMIT_SYSTEM,
     ARCHITECT_CHECKPOINT_SYSTEM,
     ARCHITECT_CONSULT_SYSTEM,
+    ARCHITECT_DESIGN_SYSTEM,
     ARCHITECT_INITIAL_SYSTEM,
 )
 from shared.database import async_session
@@ -29,10 +36,13 @@ log = structlog.get_logger()
 
 
 _SYSTEM_PROMPTS = {
-    "initial":    ARCHITECT_INITIAL_SYSTEM,
-    "consult":    ARCHITECT_CONSULT_SYSTEM,
-    "checkpoint": ARCHITECT_CHECKPOINT_SYSTEM,
-    "revision":   ARCHITECT_INITIAL_SYSTEM,  # same shape as initial
+    "initial":      ARCHITECT_INITIAL_SYSTEM,
+    "consult":      ARCHITECT_CONSULT_SYSTEM,
+    "checkpoint":   ARCHITECT_CHECKPOINT_SYSTEM,
+    "revision":     ARCHITECT_INITIAL_SYSTEM,  # same shape as initial
+    # ADR-015 §2 / §9 / Phase 6 — design + backlog-emit are separate turns.
+    "design":       ARCHITECT_DESIGN_SYSTEM,
+    "backlog_emit": ARCHITECT_BACKLOG_EMIT_SYSTEM,
 }
 
 
@@ -40,7 +50,10 @@ def create_architect_agent(
     workspace: str,
     task_id: int,
     task_description: str,
-    phase: Literal["initial", "consult", "checkpoint", "revision"],
+    phase: Literal[
+        "initial", "consult", "checkpoint", "revision",
+        "design", "backlog_emit",
+    ],
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
@@ -78,8 +91,14 @@ def create_architect_agent(
         with_web=True,
         with_architect_tools=True,
     )
-    # Inject the phase-specific system prompt.
-    agent.system_prompt_override = _SYSTEM_PROMPTS[phase]
+    # Inject the phase-specific system prompt, with the pinned artefacts
+    # block appended so design.md / backlog.json / current decision.json
+    # ride in the system prompt — never touched by autocompact (ADR-015 §13).
+    base_prompt = _SYSTEM_PROMPTS[phase]
+    ws_root = workspace.root if hasattr(workspace, "root") else str(workspace)
+    agent.system_prompt_override = apply_pinned_artefacts_to_system_prompt(
+        base_prompt, ws_root,
+    )
     return agent
 
 
@@ -474,6 +493,156 @@ async def _emit_clarification(
 def _next_cycle_sync(n: int) -> int:
     """Small helper for tests / clarity. Cycles are 1-indexed."""
     return n
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 helpers — parent loading + persisted session save (extracted so
+# tests can mock them and run_design / run_backlog_emit stay short).
+# ---------------------------------------------------------------------------
+
+
+async def _load_parent_for_run(parent_task_id: int) -> dict:
+    """Load the parent task and return the fields the architect needs.
+
+    Returns a small dict instead of the live ORM object so callers don't
+    drag a stale session into the long-running architect.run call. The
+    ``__parent`` key holds the live Task — used by ``_prepare_parent_workspace``
+    which needs the ORM for repo/org lookups. Tests mock this whole
+    function so the ``__parent`` value is opaque to them (most mocks
+    just leave it absent — the new run paths handle that case).
+    """
+    async with async_session() as s:
+        parent = (
+            await s.execute(select(Task).where(Task.id == parent_task_id))
+        ).scalar_one()
+        return {
+            "task_description": parent.description or parent.title,
+            "task_title": parent.title,
+            "repo_name": parent.repo.name if parent.repo else None,
+            "org_id": parent.organization_id,
+            "home_dir": await home_dir_for_task(parent),
+            "__parent": parent,
+        }
+
+
+async def _persist_architect_session(
+    *,
+    parent_task_id: int,
+    agent,  # AgentLoop
+    workspace,
+) -> str:
+    """Save the AgentLoop session to disk so the next phase can resume.
+
+    Returns the relative path (under the workspace root) that
+    ``ArchitectAttempt.session_blob_path`` should record.
+    """
+    from agent.session import Session
+
+    session_id = f"trio-{parent_task_id}"
+    storage_dir = workspace.root if hasattr(workspace, "root") else str(workspace)
+    file_session = Session(session_id=session_id, storage_dir=storage_dir)
+    await file_session.save(agent.messages, agent.api_messages)
+    return f"{session_id}.json"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — run_design + run_backlog_emit. The initial architect pass is
+# split into two turns: write the design doc and stop (gate for approval),
+# then emit the structured backlog after approval lands.
+# ---------------------------------------------------------------------------
+
+
+async def run_design(parent_task_id: int) -> None:
+    """Run the architect's design pass — ADR-015 §2.
+
+    The architect produces ``.auto-agent/design.md`` via the
+    ``submit-design`` skill and stops. The orchestrator transitions the
+    parent to ``AWAITING_DESIGN_APPROVAL`` and waits for the verdict
+    file ``.auto-agent/plan_approval.json``.
+
+    Session is persisted on the ``ArchitectAttempt`` row (phase=INITIAL,
+    cycle=1) so the subsequent backlog-emit turn can resume from the
+    design context. A journal entry is appended for the design submission.
+    """
+
+    fields = await _load_parent_for_run(parent_task_id)
+    # In tests, ``_load_parent_for_run`` is mocked and may not carry the
+    # live ORM under ``__parent``. Call _prepare_parent_workspace with
+    # whatever we have — the test mocks _prepare_parent_workspace anyway.
+    workspace = await _prepare_parent_workspace(fields.get("__parent"))
+
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_task_id,
+        task_description=fields["task_description"],
+        phase="design",
+        repo_name=fields["repo_name"],
+        home_dir=fields["home_dir"],
+        org_id=fields["org_id"],
+    )
+
+    prompt = (
+        f"Run the design pass for: {fields['task_title']}\n\n"
+        f"Task description:\n{fields['task_description']}\n\n"
+        "Write the design doc via the `submit-design` skill — "
+        "the design is the single approval artefact for the run."
+    )
+    run_result = await agent.run(prompt)
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    # Persist the session so run_backlog_emit can resume from the design turn.
+    workspace_root = (
+        workspace.root if hasattr(workspace, "root") else str(workspace)
+    )
+    session_blob_path = await _persist_architect_session(
+        parent_task_id=parent_task_id,
+        agent=agent,
+        workspace=workspace,
+    )
+
+    # Journal the design submission (no decision payload yet — just rationale).
+    try:
+        append_journal_entry(
+            workspace_root,
+            decision={
+                "schema_version": "1",
+                "action": "submit_design",
+                "payload": {},
+            },
+            rationale=output[:4000] if output else "(no prose)",
+        )
+    except Exception as exc:  # pragma: no cover — journal is best-effort
+        log.warning(
+            "architect.run_design.journal_failed",
+            task_id=parent_task_id, error=str(exc),
+        )
+
+    # Persist the attempt row before flipping the gate so the design turn
+    # is auditable even if finalize_design fails.
+    async with async_session() as s:
+        s.add(ArchitectAttempt(
+            task_id=parent_task_id,
+            phase=ArchitectPhase.INITIAL,
+            cycle=1,
+            reasoning=output or "",
+            tool_calls=tool_calls,
+            session_blob_path=session_blob_path,
+            decision={"action": "submit_design"},
+        ))
+        await s.commit()
+
+    # Flip the gate — orchestrator will park here until plan_approval.json lands.
+    await finalize_design(
+        task_id=parent_task_id,
+        workspace=workspace_root,
+    )
+
+    log.info(
+        "architect.run_design.complete",
+        task_id=parent_task_id,
+        workspace=workspace_root,
+    )
 
 
 async def run_initial(parent_task_id: int) -> None:
