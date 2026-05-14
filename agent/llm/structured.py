@@ -4,13 +4,14 @@ Five callers in the codebase all share the same shape: the model is asked
 to reply with a JSON object, sometimes wraps it in ``` fences, sometimes
 adds a prose preamble, sometimes returns garbage. Each caller used to
 re-implement strip-fence + locate-braces + decode + recover differently
-(``po_analyzer`` and ``architect_analyzer`` were byte-for-byte identical;
-``classifier`` skipped fence-stripping; ``memory_extractor`` had its own
-retry loop). This module collapses all of that into:
+(``po_analyzer`` and ``improvement_agent`` — formerly ``architect_analyzer``
+— were byte-for-byte identical; ``classifier`` skipped fence-stripping;
+``memory_extractor`` had its own retry loop). This module collapses all
+of that into:
 
 - ``parse_json_response(text)`` — pure: returns ``dict | None``. Never
   raises. Callers pick their own fallback policy: ``None`` -> early-return
-  (po_analyzer, architect_analyzer), ``None`` -> ``{}`` (intent
+  (po_analyzer, improvement_agent), ``None`` -> ``{}`` (intent
   extraction), ``None`` -> heuristic fallback (classifier).
 - ``complete_json(provider, ...)`` — one-shot LLM call + parse + bounded
   retry with a "your last response wasn't valid JSON" nudge appended to

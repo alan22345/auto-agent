@@ -24,7 +24,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import Response
 from sqlalchemy import select as sa_select
 
-from agent.architect_analyzer import run_architecture_loop
+from agent.improvement_agent import run_architecture_loop
 from agent.main import event_loop as agent_event_loop
 from agent.po_analyzer import run_po_analysis_loop
 from integrations.github.oauth import router as github_oauth_router

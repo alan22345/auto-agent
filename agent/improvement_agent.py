@@ -1,15 +1,22 @@
-"""Architecture-mode analyzer — periodically runs improve-codebase-architecture.
+"""Improvement agent — periodically runs improve-codebase-architecture.
 
-Parallel to ``agent/po_analyzer.py``: same shape, different lens. When
-``FreeformConfig.architecture_mode`` is True for a repo, the cron schedule on
-``architecture_cron`` triggers the agent to walk the codebase, apply the
-deepening lens, and produce up to 5 ``Suggestion`` rows with
-``category='architecture'``.
+Parallel to ``agent/po_analyzer.py``: same shape, different lens.
+Formerly named ``architect_analyzer`` (the "architecture mode" feature).
+Renamed by ADR-015 §14 — the trio's task-decomposer architect keeps the
+name "architect" because that's a role within a flow, not a mode; this
+module is a *mode* (the standing improvement / codebase-deepening one).
+
+When ``FreeformConfig.architecture_mode`` is True for a repo, the cron
+schedule on ``architecture_cron`` triggers the agent to walk the
+codebase, apply the deepening lens, and produce up to 5 ``Suggestion``
+rows with ``category='architecture'``. The DB category value stays
+``"architecture"`` for backwards compatibility with existing rows; the
+Python-side mode/role name is ``improvement_mode``.
 
 If the repo also has ``auto_approve_suggestions = True``, the existing
-suggestion → task auto-approval path turns these into Tasks. Architecture
-tasks arrive with ``intake_qa = []`` so the planning agent skips the grill
-phase (the analyzer has already grilled itself).
+suggestion → task auto-approval path turns these into Tasks.
+Improvement tasks arrive with ``intake_qa = []`` so the planning agent
+skips the grill phase (the analyzer has already grilled itself).
 """
 
 from __future__ import annotations
@@ -188,7 +195,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
             rationale=suggestion.rationale,
             priority=suggestion.priority,
             category="architecture deepening",
-            source="architect-analyzer",
+            source="improvement-agent",
         )
 
     knowledge_update = suggestions_data.get("architecture_knowledge_update")

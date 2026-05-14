@@ -124,9 +124,11 @@ class FreeformConfig(Base):
     auto_approve_suggestions = Column(Boolean, default=False, nullable=False)
     auto_start_tasks = Column(Boolean, default=False, nullable=False)
     run_command = Column(Text, nullable=True)
-    # Architecture Mode — when True, the architect_analyzer cron runs the
-    # improve-codebase-architecture skill against this repo and produces
-    # deepening-opportunity suggestions analogous to PO suggestions.
+    # Improvement Mode (formerly "Architecture Mode") — when True, the
+    # improvement_agent cron runs the improve-codebase-architecture skill
+    # against this repo and produces deepening-opportunity suggestions
+    # analogous to PO suggestions. Column name kept for backwards
+    # compatibility per ADR-015 §14.
     architecture_mode = Column(Boolean, default=False, nullable=False)
     architecture_cron = Column(String(100), default="0 9 * * 1", nullable=False)
     last_architecture_at = Column(DateTime(timezone=True), nullable=True)

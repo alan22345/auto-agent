@@ -41,9 +41,11 @@ template at `docs/decisions/000-template.md`.
 - The remaining skills (`zoom-out`, `triage`, `to-prd`, `to-issues`) are
   loadable on demand by the agent via the `skill` tool.
 
-The `improve-codebase-architecture` skill also drives the new per-repo
-**Architecture Mode** (analogous to Freeform Mode) — see
-`agent/architect_analyzer.py`.
+The `improve-codebase-architecture` skill also drives the per-repo
+**Improvement Mode** (formerly "Architecture Mode", analogous to Freeform
+Mode) — see `agent/improvement_agent.py`. ADR-015 §14 renamed the
+module; the DB column and ``Suggestion.category`` value stay
+``architecture_mode`` / ``"architecture"`` for backwards compatibility.
 
 ## Attribution
 

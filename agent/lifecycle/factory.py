@@ -3,7 +3,7 @@
 Builds an ``AgentLoop`` configured for a particular phase, with optional
 heartbeat / streaming / guidance callbacks wired through the
 ``TaskChannel`` seam when a ``task_id`` is given. Three external workers
-(``po_analyzer``, ``harness``, ``architect_analyzer``) consume
+(``po_analyzer``, ``harness``, ``improvement_agent``) consume
 ``create_agent`` directly — it's already public-by-use, so the leading
 underscore is dropped.
 """

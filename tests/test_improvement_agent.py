@@ -1,9 +1,11 @@
-"""Tests for architecture-mode (continuous deepening loop).
+"""Tests for the improvement agent (continuous deepening loop).
 
-Architecture Mode is parallel to Freeform/PO mode: per-repo opt-in, runs on
-a cron, invokes the improve-codebase-architecture skill, produces
-``Suggestion`` rows with ``category="architecture"``. Auto-approved
-architecture tasks arrive with ``intake_qa=[]`` to skip the grill phase.
+The improvement agent (formerly "architecture mode") is parallel to
+Freeform/PO mode: per-repo opt-in, runs on a cron, invokes the
+``improve-codebase-architecture`` skill, produces ``Suggestion`` rows
+with ``category="architecture"`` (the DB value stays for backwards
+compatibility per ADR-015 §14). Auto-approved improvement tasks arrive
+with ``intake_qa=[]`` to skip the grill phase.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from agent.architect_analyzer import _is_due
+from agent.improvement_agent import _is_due
 from agent.llm.structured import parse_json_response
 from agent.prompts import (
     build_architecture_analysis_prompt,
