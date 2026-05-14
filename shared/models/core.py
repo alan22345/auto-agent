@@ -61,6 +61,9 @@ class TaskStatus(str, enum.Enum):
     ARCHITECT_DESIGNING       = "architect_designing"
     AWAITING_DESIGN_APPROVAL  = "awaiting_design_approval"
     ARCHITECT_BACKLOG_EMIT    = "architect_backlog_emit"
+    # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
+    FINAL_REVIEW              = "final_review"
+    ARCHITECT_GAP_FIX         = "architect_gap_fix"
 
 
 class TrioPhase(str, enum.Enum):

@@ -71,6 +71,8 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.AWAITING_CLARIFICATION,  # NEW — architect needs answers
         # ADR-015 §2 / Phase 6 — design-doc gate enters from TRIO_EXECUTING.
         TaskStatus.ARCHITECT_DESIGNING,
+        # ADR-015 §4 / Phase 7 — backlog drained → final review.
+        TaskStatus.FINAL_REVIEW,
     },
     TaskStatus.TRIO_REVIEW:    {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED},
     # ADR-015 §2 / Phase 6 — design + backlog-emit chain for complex_large.
@@ -89,6 +91,16 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.BLOCKED,
         TaskStatus.AWAITING_CLARIFICATION,
         TaskStatus.ARCHITECT_DESIGNING,      # validator rejected → re-design
+    },
+    # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
+    TaskStatus.FINAL_REVIEW: {
+        TaskStatus.PR_CREATED,        # verdict=passed → PR creation path
+        TaskStatus.ARCHITECT_GAP_FIX, # verdict=gaps_found → architect resumes
+        TaskStatus.BLOCKED,           # exhausted gap-fix rounds
+    },
+    TaskStatus.ARCHITECT_GAP_FIX: {
+        TaskStatus.TRIO_EXECUTING,    # architect dispatched new items
+        TaskStatus.BLOCKED,           # architect escalated or out of rounds
     },
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},

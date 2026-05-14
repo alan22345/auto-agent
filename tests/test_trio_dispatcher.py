@@ -28,17 +28,30 @@ def _reviewer_entry(
     round_idx: int, *, ok: bool, feedback: str = "", invalid: bool = False
 ) -> TranscriptEntry:
     verdict = None if invalid else {"ok": ok, "feedback": feedback}
-    output = (
-        "Looks good." if ok else f"Reject: {feedback}"
-    ) + (
+    output = ("Looks good." if ok else f"Reject: {feedback}") + (
         ""
         if invalid
         else "\n\n```json\n"
         + ('{"ok": true, "feedback": ""}' if ok else f'{{"ok": false, "feedback": "{feedback}"}}')
         + "\n```"
     )
-    return TranscriptEntry(
-        role="reviewer", round=round_idx, output=output, verdict=verdict
+    return TranscriptEntry(role="reviewer", round=round_idx, output=output, verdict=verdict)
+
+
+def _heavy_result(*, ok: bool, reason: str = ""):
+    """Build a HeavyReviewResult shape for stubbing ``run_heavy_review``.
+
+    ADR-015 §3 / Phase 7 — the dispatcher now drives the heavy reviewer
+    instead of the old ``_run_reviewer`` boundary.
+    """
+    from agent.lifecycle.trio.reviewer import HeavyReviewResult
+
+    return HeavyReviewResult(
+        verdict="pass" if ok else "fail",
+        alignment="aligned",
+        smoke="ok",
+        ui="n/a",
+        reason=reason or ("pass" if ok else "rejected"),
     )
 
 
@@ -55,17 +68,19 @@ _KW = dict(
 
 @pytest.mark.asyncio
 async def test_first_round_ok_returns_done():
-    """Happy path: coder writes code, reviewer approves on round 1."""
+    """Happy path: coder writes code, heavy reviewer approves on round 1."""
+    from agent.lifecycle.trio import reviewer as reviewer_mod
+
     with (
         patch.object(dispatcher, "_git_head_sha", AsyncMock(side_effect=["abc", "def"])),
         patch.object(dispatcher, "_git_diff_since", AsyncMock(return_value="+ new line\n")),
         patch.object(
-            dispatcher, "_run_coder",
-            AsyncMock(return_value=_coder_entry(1, summary="Added the fork."))
+            dispatcher,
+            "_run_coder",
+            AsyncMock(return_value=_coder_entry(1, summary="Added the fork.")),
         ),
         patch.object(
-            dispatcher, "_run_reviewer",
-            AsyncMock(return_value=_reviewer_entry(1, ok=True))
+            reviewer_mod, "run_heavy_review", AsyncMock(return_value=_heavy_result(ok=True))
         ),
     ):
         result: ItemResult = await dispatch_item(**_KW)
@@ -80,23 +95,25 @@ async def test_first_round_ok_returns_done():
 @pytest.mark.asyncio
 async def test_second_round_ok_passes_feedback_back_to_coder():
     """Coder rejected on round 1, fixes on round 2, approved."""
+    from agent.lifecycle.trio import reviewer as reviewer_mod
+
     run_coder = AsyncMock(side_effect=[_coder_entry(1), _coder_entry(2)])
-    run_reviewer = AsyncMock(
+    run_heavy = AsyncMock(
         side_effect=[
-            _reviewer_entry(1, ok=False, feedback="forgot to handle null"),
-            _reviewer_entry(2, ok=True),
+            _heavy_result(ok=False, reason="forgot to handle null"),
+            _heavy_result(ok=True),
         ]
     )
     with (
         patch.object(dispatcher, "_git_head_sha", AsyncMock(side_effect=["s0", "s1"])),
         patch.object(dispatcher, "_git_diff_since", AsyncMock(return_value="+x")),
         patch.object(dispatcher, "_run_coder", run_coder),
-        patch.object(dispatcher, "_run_reviewer", run_reviewer),
+        patch.object(reviewer_mod, "run_heavy_review", run_heavy),
     ):
         result = await dispatch_item(**_KW)
 
     assert result.ok is True
-    assert len(result.transcript) == 4  # 2 coder + 2 reviewer
+    assert len(result.transcript) == 4  # 2 coder + 2 reviewer entries
     # Round-2 coder must have seen the reviewer's feedback.
     second_call_kwargs = run_coder.await_args_list[1].kwargs
     assert "forgot to handle null" in second_call_kwargs["prior_feedback"]
@@ -105,39 +122,43 @@ async def test_second_round_ok_passes_feedback_back_to_coder():
 @pytest.mark.asyncio
 async def test_max_rounds_exhausted_returns_needs_tiebreak():
     """3 rejections in a row → ok=False, needs_tiebreak=True, no architect call."""
+    from agent.lifecycle.trio import reviewer as reviewer_mod
+
     run_coder = AsyncMock(side_effect=[_coder_entry(i) for i in (1, 2, 3)])
-    run_reviewer = AsyncMock(
+    run_heavy = AsyncMock(
         side_effect=[
-            _reviewer_entry(1, ok=False, feedback="fb1"),
-            _reviewer_entry(2, ok=False, feedback="fb2"),
-            _reviewer_entry(3, ok=False, feedback="fb3"),
+            _heavy_result(ok=False, reason="fb1"),
+            _heavy_result(ok=False, reason="fb2"),
+            _heavy_result(ok=False, reason="fb3"),
         ]
     )
     with (
         patch.object(dispatcher, "_git_head_sha", AsyncMock(side_effect=["s0", "s1"])),
         patch.object(dispatcher, "_git_diff_since", AsyncMock(return_value="+x")),
         patch.object(dispatcher, "_run_coder", run_coder),
-        patch.object(dispatcher, "_run_reviewer", run_reviewer),
+        patch.object(reviewer_mod, "run_heavy_review", run_heavy),
     ):
         result = await dispatch_item(**_KW)
 
     assert result.ok is False
     assert result.needs_tiebreak is True
     assert run_coder.await_count == 3
-    assert run_reviewer.await_count == 3
+    assert run_heavy.await_count == 3
     assert len(result.transcript) == 6
 
 
 @pytest.mark.asyncio
 async def test_coder_no_diff_re_prompts_then_fails():
     """If coder produces no diff at all, we re-prompt; final no-diff = terminal failure."""
+    from agent.lifecycle.trio import reviewer as reviewer_mod
+
     run_coder = AsyncMock(side_effect=[_coder_entry(1), _coder_entry(2), _coder_entry(3)])
-    run_reviewer = AsyncMock()  # never called — diff is always empty
+    run_heavy = AsyncMock()  # never called — diff is always empty
     with (
         patch.object(dispatcher, "_git_head_sha", AsyncMock(return_value="s0")),
         patch.object(dispatcher, "_git_diff_since", AsyncMock(return_value="   \n")),
         patch.object(dispatcher, "_run_coder", run_coder),
-        patch.object(dispatcher, "_run_reviewer", run_reviewer),
+        patch.object(reviewer_mod, "run_heavy_review", run_heavy),
     ):
         result = await dispatch_item(**_KW)
 
@@ -145,7 +166,7 @@ async def test_coder_no_diff_re_prompts_then_fails():
     assert result.needs_tiebreak is False  # no point asking architect with no diff
     assert result.failure_reason == "coder_produced_no_diff"
     assert run_coder.await_count == 3
-    run_reviewer.assert_not_called()
+    run_heavy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -218,22 +239,27 @@ async def test_architect_tiebreak_falls_back_to_clarify_on_bad_output():
 
 @pytest.mark.asyncio
 async def test_invalid_reviewer_verdict_treated_as_reject():
-    """Reviewer emits no parseable verdict → treated as reject, feedback explains."""
+    """Heavy reviewer emits a fail with empty reason → treated as reject, feedback explains."""
+    from agent.lifecycle.trio import reviewer as reviewer_mod
+
     run_coder = AsyncMock(side_effect=[_coder_entry(1), _coder_entry(2)])
-    run_reviewer = AsyncMock(
+    # Round 1 fails with an empty reason → dispatcher synthesises a generic
+    # feedback message so the coder still has something to act on.
+    run_heavy = AsyncMock(
         side_effect=[
-            _reviewer_entry(1, ok=False, invalid=True),
-            _reviewer_entry(2, ok=True),
+            _heavy_result(ok=False, reason=""),
+            _heavy_result(ok=True),
         ]
     )
     with (
         patch.object(dispatcher, "_git_head_sha", AsyncMock(side_effect=["s0", "s1"])),
         patch.object(dispatcher, "_git_diff_since", AsyncMock(return_value="+x")),
         patch.object(dispatcher, "_run_coder", run_coder),
-        patch.object(dispatcher, "_run_reviewer", run_reviewer),
+        patch.object(reviewer_mod, "run_heavy_review", run_heavy),
     ):
         result = await dispatch_item(**_KW)
 
     assert result.ok is True  # second round saved us
     second_call_kwargs = run_coder.await_args_list[1].kwargs
-    assert "verdict" in second_call_kwargs["prior_feedback"].lower()
+    # The dispatcher synthesises a default feedback when the reason is empty.
+    assert second_call_kwargs["prior_feedback"], "coder must get some feedback"

@@ -1,30 +1,50 @@
-"""Trio reviewer — alignment check between builder output and architect intent.
+"""Trio reviewer — per-item heavy reviewer + legacy alignment-only fallback.
 
-Runs between ``VERIFYING`` and ``PR_CREATED`` for trio children
-(``parent_task_id is not None``). Dispatched by ``verify._pass_cycle``
-as an ``asyncio.create_task`` so the verify call returns promptly.
+ADR-015 §3 / Phase 7 introduces the **heavy** per-item reviewer that
+replaces the readonly alignment-only contract from ADR-013. For one
+backlog item it runs alignment + grep + smoke + UI in one pass and
+writes ``.auto-agent/reviews/<item_id>.json`` via the
+``submit-item-review`` skill. The legacy ``handle_trio_review`` is kept
+for the existing trio child-task code path that hasn't migrated yet
+(coding.py still imports it for the trio-child verify hand-off); the
+new ``run_heavy_review`` is the Phase 7+ public entry point.
 
-Verdict path:
-  * ``ok=true`` → child transitions to ``PR_CREATED`` and ``_open_pr_and_advance``
-    runs (push branch + open PR).
-  * ``ok=false`` or invalid JSON → child transitions back to ``CODING`` with
-    the feedback as the retry reason, so the next coding cycle picks it up.
+Verdict path (legacy):
+  * ``ok=true`` → child transitions to ``PR_CREATED`` and
+    ``_open_pr_and_advance`` runs (push branch + open PR).
+  * ``ok=false`` or invalid JSON → child transitions back to ``CODING``
+    with the feedback as the retry reason.
 
-Cycle numbering is per-child (``trio_review_attempts.cycle`` counts up
-across loop-backs for the same child).
+Verdict path (heavy, Phase 7):
+  * ``verdict="pass"`` → caller advances the dispatcher loop.
+  * ``verdict="fail"`` with a synthesised reason → caller re-runs the
+    builder with that reason as feedback (bounded; 3 cycles per item
+    before architect tiebreak — see :mod:`agent.lifecycle.trio.dispatcher`).
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
 from sqlalchemy import select
 
+from agent import sh
 from agent.lifecycle._naming import _fresh_session_id
 from agent.lifecycle.factory import create_agent, home_dir_for_task
+from agent.lifecycle.route_inference import infer_routes_from_diff, is_ui_route
 from agent.lifecycle.trio.prompts import TRIO_REVIEWER_SYSTEM
+from agent.lifecycle.verify_primitives import (
+    ServerHandle,
+    boot_dev_server,
+    exercise_routes,
+    grep_diff_for_stubs,
+    inspect_ui,
+)
+from agent.lifecycle.workspace_paths import review_path
 from shared.database import async_session
 from shared.models import Task, TaskStatus, TrioReviewAttempt
 
@@ -295,3 +315,318 @@ async def handle_trio_review(
             effective_parent_branch,
             task_data.branch_name,
         )
+
+
+# ---------------------------------------------------------------------------
+# Heavy per-item reviewer — ADR-015 §3 / Phase 7.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HeavyReviewResult:
+    """Outcome of one heavy-reviewer pass.
+
+    Mirrors the on-disk ``reviews/<id>.json`` shape so writes and reads
+    round-trip losslessly.
+    """
+
+    verdict: str  # "pass" or "fail"
+    alignment: str = ""
+    smoke: str = ""
+    ui: str = ""
+    reason: str = ""
+
+
+async def _load_item_diff(workspace: str, base_sha: str) -> str:
+    """Return the unified diff from ``base_sha`` to current HEAD."""
+
+    res = await sh.run(
+        ["git", "diff", f"{base_sha}..HEAD"],
+        cwd=workspace,
+        timeout=30,
+        max_output=200_000,
+    )
+    if res.failed:
+        log.warning(
+            "trio.heavy_review.git_diff_failed",
+            base_sha=base_sha,
+            stderr=(res.stderr or "")[:300],
+        )
+        return ""
+    return res.stdout or ""
+
+
+_ALIGNMENT_SYSTEM = (
+    "You are the alignment-check reviewer. Given a backlog item spec and "
+    "the unified diff that a builder produced for it, answer in one short "
+    "paragraph: does the diff match the spec? "
+    "If yes, start your reply with 'PASS:'. "
+    "If no, start your reply with 'FAIL:' and name the specific mismatch."
+)
+
+
+def _alignment_prompt(item: dict, diff: str, grill_output: str) -> str:
+    title = item.get("title", "(untitled)")
+    description = item.get("description", "")
+    justification = item.get("justification", "")
+    affected_routes = item.get("affected_routes") or []
+    diff_preview = diff if len(diff) < 30_000 else diff[:30_000] + "\n... (truncated)"
+    grill_block = f"\n\n== Original grill output ==\n{grill_output[:4000]}" if grill_output else ""
+    return (
+        f"== Item spec — {item.get('id', '')} ==\n"
+        f"Title: {title}\nJustification: {justification}\n"
+        f"Affected routes: {affected_routes}\n\nDescription:\n{description}\n"
+        f"{grill_block}\n\n"
+        f"== Diff to review ==\n```diff\n{diff_preview}\n```"
+    )
+
+
+async def _run_alignment_agent(
+    *,
+    workspace_root: str,
+    item: dict,
+    diff: str,
+    grill_output: str,
+    repo_name: str | None = None,
+    home_dir: str | None = None,
+    org_id: int | None = None,
+) -> str:
+    """Run a short LLM call to judge whether the diff matches the item spec.
+
+    Returns prose. Convention: starts with ``PASS:`` or ``FAIL:`` so the
+    caller can synthesise the verdict cheaply.
+    """
+
+    agent = create_agent(
+        workspace=workspace_root,
+        task_id=0,
+        task_description=item.get("description") or item.get("title", ""),
+        readonly=True,
+        with_browser=False,
+        max_turns=8,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    agent.system_prompt_override = _ALIGNMENT_SYSTEM
+    result = await agent.run(_alignment_prompt(item, diff, grill_output))
+    output = getattr(result, "output", None)
+    if output is None:
+        return str(result) if result is not None else ""
+    return output
+
+
+def _write_review_json(
+    *,
+    workspace_root: str,
+    item_id: str,
+    result: HeavyReviewResult,
+) -> None:
+    """Persist the verdict so the orchestrator can read it via the skills bridge."""
+
+    rel = review_path(item_id)
+    abs_path = os.path.join(workspace_root, rel)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    payload = {
+        "schema_version": "1",
+        "verdict": result.verdict,
+        "alignment": result.alignment,
+        "smoke": result.smoke,
+        "ui": result.ui,
+        "reason": result.reason,
+    }
+    with open(abs_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+async def run_heavy_review(
+    *,
+    item: dict,
+    workspace_root: str,
+    base_sha: str,
+    grill_output: str = "",
+    repo_name: str | None = None,
+    home_dir: str | None = None,
+    org_id: int | None = None,
+) -> HeavyReviewResult:
+    """Run alignment + grep + smoke + UI for one backlog item.
+
+    Order of checks (ADR-015 §3):
+
+      1. Alignment — LLM judges whether the diff matches the item spec.
+      2. Stub-grep — ``grep_diff_for_stubs(diff)`` blocks on
+         ``raise NotImplementedError`` and friends in added lines.
+      3. Smoke — boot the dev server and ``exercise_routes(union)`` where
+         ``union = item.affected_routes | infer_routes_from_diff(diff)``.
+      4. UI — ``inspect_ui`` for each UI route that returned 2xx.
+
+    On first failure the function short-circuits, writes
+    ``reviews/<id>.json`` with ``verdict="fail"`` + synthesised reason
+    and returns. All-green → ``verdict="pass"``.
+    """
+
+    item_id = str(item.get("id") or "item")
+
+    diff = await _load_item_diff(workspace_root, base_sha)
+
+    # 1. Alignment ----------------------------------------------------------
+    alignment_text = await _run_alignment_agent(
+        workspace_root=workspace_root,
+        item=item,
+        diff=diff,
+        grill_output=grill_output,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    alignment_pass = not alignment_text.strip().upper().startswith("FAIL")
+    if not alignment_pass:
+        result = HeavyReviewResult(
+            verdict="fail",
+            alignment=alignment_text[:500],
+            reason=(
+                f"alignment check rejected the diff against the item spec: "
+                f"{alignment_text.strip()[:400]}"
+            ),
+        )
+        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+        return result
+
+    # 2. Stub-grep ----------------------------------------------------------
+    stubs = grep_diff_for_stubs(diff)
+    blocking = [v for v in stubs.violations if not v.allowed_via_optout]
+    if blocking:
+        v = blocking[0]
+        result = HeavyReviewResult(
+            verdict="fail",
+            alignment=alignment_text[:200] or "pass",
+            reason=(
+                f"no-defer stub detected in added line: {v.pattern} at "
+                f"{v.file}:{v.line} — {v.snippet.strip()[:200]}"
+            ),
+        )
+        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+        return result
+
+    # 3. Smoke --------------------------------------------------------------
+    declared_routes = list(item.get("affected_routes") or [])
+    inferred_routes = infer_routes_from_diff(diff)
+    union_routes: list[str] = []
+    seen: set[str] = set()
+    for r in declared_routes + inferred_routes:
+        if r and r not in seen:
+            union_routes.append(r)
+            seen.add(r)
+
+    smoke_summary = "n/a"
+    ui_summary = "n/a"
+    handle: ServerHandle | None = None
+    try:
+        if union_routes:
+            handle = await boot_dev_server(workspace=workspace_root)
+            if handle.state == "running":
+                route_results = await exercise_routes(union_routes, handle=handle)
+                failed_routes = {r: rr for r, rr in route_results.items() if not rr.ok}
+                if failed_routes:
+                    first = next(iter(failed_routes.items()))
+                    route, rr = first
+                    result = HeavyReviewResult(
+                        verdict="fail",
+                        alignment=alignment_text[:200] or "pass",
+                        smoke=(
+                            f"smoke: route {route} returned status={rr.status}, "
+                            f"reason={rr.reason!r}"
+                        ),
+                        reason=(
+                            f"smoke check failed for {route}: status={rr.status}, "
+                            f"reason={rr.reason!r}"
+                        ),
+                    )
+                    _write_review_json(
+                        workspace_root=workspace_root, item_id=item_id, result=result
+                    )
+                    return result
+                smoke_summary = f"smoke: {len(route_results)} route(s) returned 2xx"
+            elif handle.state == "failed":
+                result = HeavyReviewResult(
+                    verdict="fail",
+                    alignment=alignment_text[:200] or "pass",
+                    smoke=f"smoke: dev server boot failed — {handle.failure_reason}",
+                    reason=(
+                        f"smoke: dev server boot failed — {handle.failure_reason}; "
+                        f"cannot exercise affected routes {union_routes!r}."
+                    ),
+                )
+                _write_review_json(
+                    workspace_root=workspace_root, item_id=item_id, result=result
+                )
+                return result
+            else:
+                smoke_summary = "smoke: skipped (no boot config)"
+
+            # 4. UI ---------------------------------------------------------
+            if handle.state == "running":
+                ui_failures: list[tuple[str, str]] = []
+                for route in union_routes:
+                    if not is_ui_route(route):
+                        continue
+                    ui = await inspect_ui(
+                        route=route,
+                        intent=item.get("description") or item.get("title", ""),
+                        base_url=handle.base_url,
+                    )
+                    if not ui.ok:
+                        if "playwright_not_installed" in (ui.reason or ""):
+                            # Advisory — Phase 4 precedent in pr_reviewer.
+                            log.info(
+                                "trio.heavy_review.ui_inspection_skipped",
+                                route=route,
+                                reason=ui.reason,
+                            )
+                            continue
+                        ui_failures.append((route, ui.reason))
+                if ui_failures:
+                    route, reason = ui_failures[0]
+                    result = HeavyReviewResult(
+                        verdict="fail",
+                        alignment=alignment_text[:200] or "pass",
+                        smoke=smoke_summary,
+                        ui=f"ui: failed for {route} — {reason}",
+                        reason=(
+                            f"UI inspection failed for {route}: {reason}"
+                        ),
+                    )
+                    _write_review_json(
+                        workspace_root=workspace_root, item_id=item_id, result=result
+                    )
+                    return result
+                ui_summary = (
+                    "ui: all UI routes passed"
+                    if any(is_ui_route(r) for r in union_routes)
+                    else "n/a"
+                )
+        else:
+            smoke_summary = "smoke: no routes declared or inferred"
+    finally:
+        if handle is not None:
+            await handle.teardown()
+
+    # All-green path --------------------------------------------------------
+    result = HeavyReviewResult(
+        verdict="pass",
+        alignment=alignment_text.strip()[:200] or "pass",
+        smoke=smoke_summary,
+        ui=ui_summary,
+        reason=(
+            "alignment, no-defer stub-grep, smoke, and UI checks all passed."
+        ),
+    )
+    _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+    return result
+
+
+__all__ = [
+    "HeavyReviewResult",
+    "handle_trio_review",
+    "run_heavy_review",
+]

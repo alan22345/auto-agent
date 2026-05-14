@@ -406,21 +406,37 @@ async def dispatch_item(
             )
             continue
 
-        reviewer_entry = await _run_reviewer(
-            parent_task_id=parent_task_id,
-            work_item=work_item,
-            workspace=workspace,
+        # ADR-015 §3 / Phase 7 — heavy per-item reviewer replaces the
+        # readonly alignment-only contract. The heavy reviewer runs
+        # alignment + grep + smoke + UI in one pass and writes
+        # ``.auto-agent/reviews/<id>.json`` via the submit-item-review
+        # skill. We still produce a TranscriptEntry for the architect
+        # tiebreak path (which reads the transcript), but the verdict
+        # JSON is reduced to ``{"ok": bool, "feedback": <reason>}`` for
+        # backwards-compat with the existing tiebreak prompt.
+        from agent.lifecycle.trio.reviewer import run_heavy_review
+
+        heavy = await run_heavy_review(
+            item=work_item,
+            workspace_root=workspace,
+            base_sha=start_sha,
+            grill_output="",  # threaded in from the parent's intake when wired
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
-            round_idx=round_idx,
-            coder_summary=coder_entry.output,
-            diff=diff,
+        )
+        reviewer_entry = TranscriptEntry(
+            role="reviewer",
+            round=round_idx,
+            output=(
+                f"alignment={heavy.alignment} | smoke={heavy.smoke} | "
+                f"ui={heavy.ui} | reason={heavy.reason}"
+            ),
+            verdict={"ok": heavy.verdict == "pass", "feedback": heavy.reason},
         )
         transcript.append(reviewer_entry)
 
-        verdict = reviewer_entry.verdict
-        if verdict is not None and verdict.get("ok"):
+        if heavy.verdict == "pass":
             head_sha = await _git_head_sha(workspace)
             return ItemResult(
                 ok=True,
@@ -429,15 +445,11 @@ async def dispatch_item(
                 head_sha=head_sha,
             )
 
-        # Reject (or invalid JSON treated as reject). Feed feedback back
-        # into the coder on the next round.
-        if verdict is None:
-            feedback = (
-                "Reviewer returned no valid verdict JSON. Please clearly "
-                "restate what you did and what assumptions you made."
-            )
-        else:
-            feedback = str(verdict.get("feedback", "")) or "Reviewer rejected without specifics."
+        # Reject — feed the heavy reviewer's reason back into the coder
+        # on the next round. ADR-015 §3 / Phase 7: still 3-round cap; on
+        # exhaustion the architect tiebreak path (architect.persisted
+        # session → revise_backlog / accept) still applies.
+        feedback = heavy.reason or "Heavy reviewer rejected without a synthesised reason."
 
     # MAX_ROUNDS exhausted — escalate to architect tiebreak.
     head_sha = await _git_head_sha(workspace)

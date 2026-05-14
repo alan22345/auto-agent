@@ -408,42 +408,196 @@ async def run_trio_parent(
         )
         return
 
-    # Backlog drained — architect runs one final checkpoint over the
-    # integration branch's full diff before we open the integration PR.
-    # If it returns ``revise`` we loop back into the per-item phase; if
-    # ``done`` we open the PR; otherwise the parent is blocked.
-    await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
-    decision = await architect.checkpoint(parent.id)
-    action = decision.get("action", "done")
+    # ADR-015 §4 / Phase 7 — backlog drained → final reviewer runs over
+    # the integrated diff. On gaps_found the architect's persisted
+    # session resumes (gap_fix) and dispatches new backlog items; we
+    # loop back into the per-item phase. Bounded at 3 gap-fix rounds.
+    # On passed → PR creation path (existing).
+    if parent_workspace is None:
+        # Defensive — should not happen if a backlog was emitted, but
+        # rebuild the workspace context so final_review can read the
+        # design/reviews/diff.
+        async with async_session() as s:
+            p = (
+                await s.execute(select(Task).where(Task.id == parent.id))
+            ).scalar_one()
+            from agent.lifecycle.factory import home_dir_for_task
+            parent_workspace = await _prepare_parent_workspace(p)
+            repo_name = p.repo.name if p.repo else None
+            home_dir = await home_dir_for_task(p)
+            org_id = p.organization_id
 
-    if action == "revise":
-        await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
-        await architect.run_revision(parent.id)
-        # The revision may have appended new pending items — re-enter the
-        # caller (recovery will pick the parent up again on next dispatch).
-        # Simplest correct thing: recurse.
-        return await run_trio_parent(parent)
-    if action == "awaiting_clarification":
-        log.info(
-            "trio.parent.paused_for_clarification_at_final_checkpoint",
-            parent_id=parent.id,
-        )
-        return
-    if action == "blocked":
-        await _block_parent(
-            parent.id,
-            f"trio: final checkpoint blocked — {decision.get('reason', '')}",
-        )
-        return
-    # action in {"done", "continue"} → open the integration PR.
+    workspace_root = (
+        parent_workspace.root
+        if hasattr(parent_workspace, "root")
+        else str(parent_workspace)
+    )
 
     target = await _resolve_target_branch(parent.id)
+
+    await _drive_final_review_and_pr(
+        parent=parent,
+        workspace_root=workspace_root,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+        target_branch=target,
+    )
+
+
+async def _drive_final_review_and_pr(
+    *,
+    parent: Task,
+    workspace_root: str,
+    repo_name: str | None,
+    home_dir: str | None,
+    org_id: int | None,
+    target_branch: str,
+) -> None:
+    """ADR-015 §4 / Phase 7 — final review → optional gap-fix loop → PR.
+
+    Bounded at 3 gap-fix rounds. After 3 rounds with gaps still present
+    the parent is BLOCKED. On a passed verdict we open the integration
+    PR and transition to PR_CREATED — the PR-reviewer (Phase 5) runs
+    from there per the complex_large branch in ``coding._open_pr_and_advance``.
+    """
+
+    from agent.lifecycle.trio import final_reviewer, gap_fix
+
+    previous_gaps: list[dict] | None = None
+    previous_attempt_summary = ""
+
+    for round_idx in range(1, gap_fix.MAX_GAP_FIX_ROUNDS + 2):  # +1 for the bound check
+        # Park the task in FINAL_REVIEW for visibility.
+        async with async_session() as s:
+            p = (
+                await s.execute(select(Task).where(Task.id == parent.id))
+            ).scalar_one()
+            if p.status != TaskStatus.FINAL_REVIEW:
+                try:
+                    await transition(
+                        s, p, TaskStatus.FINAL_REVIEW,
+                        message=f"trio: final review round {round_idx}",
+                    )
+                except Exception:
+                    p.status = TaskStatus.FINAL_REVIEW
+                await s.commit()
+
+        review = await final_reviewer.run_final_review(
+            workspace_root=workspace_root,
+            parent_task_id=parent.id,
+            base_branch=target_branch,
+            previous_gaps=previous_gaps,
+            previous_attempt_summary=previous_attempt_summary,
+            repo_name=repo_name,
+            home_dir=home_dir,
+            org_id=org_id,
+        )
+
+        if review.verdict == "passed":
+            await _open_integration_pr_and_transition(
+                parent=parent, target_branch=target_branch
+            )
+            return
+
+        # gaps_found → architect gap-fix (bounded).
+        if round_idx > gap_fix.MAX_GAP_FIX_ROUNDS:
+            await _block_parent(
+                parent.id,
+                f"trio: final review still finds gaps after "
+                f"{gap_fix.MAX_GAP_FIX_ROUNDS} gap-fix rounds",
+            )
+            return
+
+        async with async_session() as s:
+            p = (
+                await s.execute(select(Task).where(Task.id == parent.id))
+            ).scalar_one()
+            try:
+                await transition(
+                    s, p, TaskStatus.ARCHITECT_GAP_FIX,
+                    message=(
+                        f"trio: gap-fix round {round_idx} — "
+                        f"{len(review.gaps)} gap(s) to close"
+                    ),
+                )
+            except Exception:
+                p.status = TaskStatus.ARCHITECT_GAP_FIX
+            await s.commit()
+
+        decision = await gap_fix.run_gap_fix(
+            parent_task_id=parent.id,
+            gaps=review.gaps,
+            round_idx=round_idx,
+        )
+        action = decision.get("action")
+        if action == "dispatch_new":
+            new_items = decision.get("items") or []
+            await _append_backlog_items(parent.id, new_items)
+            # Hop back into the per-item builder loop; the outer
+            # ``run_trio_parent`` recurse below picks the pending items
+            # up.
+            async with async_session() as s:
+                p = (
+                    await s.execute(select(Task).where(Task.id == parent.id))
+                ).scalar_one()
+                try:
+                    await transition(
+                        s, p, TaskStatus.TRIO_EXECUTING,
+                        message="trio: gap-fix dispatched new items",
+                    )
+                except Exception:
+                    p.status = TaskStatus.TRIO_EXECUTING
+                await s.commit()
+            previous_gaps = list(review.gaps)
+            previous_attempt_summary = (
+                f"round {round_idx}: dispatched {len(new_items)} new items"
+            )
+            await run_trio_parent(parent)
+            return
+        # architect escalated, blocked, or unknown action
+        await _block_parent(
+            parent.id,
+            f"trio: gap-fix architect emitted action={action!r} — "
+            f"{decision.get('reason', '')[:200]}",
+        )
+        return
+
+
+async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
+    """Append architect-emitted new items to the parent's trio_backlog.
+
+    Items default to ``status="pending"`` so the dispatcher picks them
+    up on the next per-item loop.
+    """
+
+    if not new_items:
+        return
+    async with async_session() as s:
+        p = (
+            await s.execute(select(Task).where(Task.id == parent_id))
+        ).scalar_one()
+        backlog = list(p.trio_backlog or [])
+        for item in new_items:
+            ni = dict(item)
+            ni.setdefault("status", "pending")
+            backlog.append(ni)
+        p.trio_backlog = backlog
+        await s.commit()
+
+
+async def _open_integration_pr_and_transition(
+    *,
+    parent: Task,
+    target_branch: str,
+) -> None:
+    """Open the integration PR + transition the parent to PR_CREATED."""
 
     async with async_session() as s:
         p = (
             await s.execute(select(Task).where(Task.id == parent.id))
         ).scalar_one()
-        pr_url = await _open_integration_pr(p, target)
+        pr_url = await _open_integration_pr(p, target_branch)
         p.pr_url = pr_url or None
         p.trio_phase = None
         await transition(s, p, TaskStatus.PR_CREATED, message="trio: integration PR opened")
@@ -453,5 +607,5 @@ async def run_trio_parent(
         "trio.parent.opened_final_pr",
         parent_id=parent.id,
         pr_url=pr_url,
-        target_branch=target,
+        target_branch=target_branch,
     )

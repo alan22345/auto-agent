@@ -600,15 +600,16 @@ async def _open_pr_and_advance(
         raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
 
     # ADR-015 §5 — simple flow runs the PR-reviewer (correctness scope).
-    # Complex flow (Phase 5) runs the artefact-scope PR-reviewer + one
-    # round of address-own-comments. Trio (complex_large) keeps the
-    # existing independent-review path until Phase 7.
+    # Complex flow (Phase 5) and complex_large parents (Phase 7) run the
+    # artefact-scope PR-reviewer + one round of address-own-comments. Trio
+    # child tasks (parent_task_id set) keep the legacy independent-review
+    # path until they're migrated to the dispatcher.
     complexity = getattr(task, "complexity", None)
     is_trio_child = getattr(task, "parent_task_id", None) is not None
     if complexity == "simple":
         await _run_simple_pr_review(task_id, task, workspace, pr_url, base_branch)
         return
-    if complexity == "complex" and not is_trio_child:
+    if complexity in ("complex", "complex_large") and not is_trio_child:
         await _run_complex_pr_review(task_id, task, workspace, pr_url, base_branch)
         return
 
