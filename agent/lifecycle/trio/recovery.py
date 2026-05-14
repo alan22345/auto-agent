@@ -41,13 +41,19 @@ async def resume_all_trio_parents() -> None:
             """Wrap run_trio_parent so an unobserved exception is logged
             with a full traceback. Without this wrapper, fire-and-forget
             asyncio.create_task swallows failures silently — bit us on
-            task 170 after the ADR-013 deploy."""
+            task 170 after the ADR-013 deploy. structlog.log.exception
+            doesn't capture sys.exc_info reliably under our processor
+            chain, so we format the traceback ourselves."""
             try:
                 await run_trio_parent(parent_task)
-            except Exception:
-                log.exception(
+            except Exception as exc:
+                import traceback
+                log.error(
                     "trio.recovery.run_failed",
                     parent_id=parent_task.id,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    traceback=traceback.format_exc(),
                 )
 
         for parent in rows:
