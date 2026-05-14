@@ -45,6 +45,7 @@ class TaskStatus(str, enum.Enum):
     CODING = "coding"
     VERIFYING = "verifying"          # freeform self-verification — runs after CODING, before PR_CREATED
     PR_CREATED = "pr_created"
+    PR_REVIEW = "pr_review"          # ADR-015 §5 — self-PR-review gate (Phase 4: simple flow)
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
     DONE = "done"

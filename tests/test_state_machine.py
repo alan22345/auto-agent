@@ -56,3 +56,50 @@ def test_awaiting_review_to_blocked() -> None:
     assert TaskStatus.BLOCKED in TRANSITIONS[TaskStatus.AWAITING_REVIEW], (
         "AWAITING_REVIEW should be able to transition to BLOCKED (review failed cycle 2)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Self-PR-review (ADR-015 §5) — PR_REVIEW state, Phase 4
+# ---------------------------------------------------------------------------
+
+
+def test_pr_review_status_exists() -> None:
+    """The PR_REVIEW enum member must exist so the state machine can refer to it."""
+
+    assert hasattr(TaskStatus, "PR_REVIEW"), (
+        "TaskStatus.PR_REVIEW must exist for the self-PR-review gate (ADR-015 §5)"
+    )
+
+
+def test_pr_created_to_pr_review() -> None:
+    """After PR is opened, the orchestrator hands off to the PR reviewer."""
+
+    assert TaskStatus.PR_REVIEW in TRANSITIONS[TaskStatus.PR_CREATED], (
+        "PR_CREATED should be able to transition to PR_REVIEW (ADR-015 §5)"
+    )
+
+
+def test_pr_review_to_done() -> None:
+    """A passing PR review on the simple flow terminates the task."""
+
+    assert TaskStatus.DONE in TRANSITIONS[TaskStatus.PR_REVIEW], (
+        "PR_REVIEW should be able to transition to DONE on pass"
+    )
+
+
+def test_pr_review_to_blocked() -> None:
+    """A failing PR review surfaces the issue for human visibility."""
+
+    assert TaskStatus.BLOCKED in TRANSITIONS[TaskStatus.PR_REVIEW], (
+        "PR_REVIEW should be able to transition to BLOCKED on fail"
+    )
+
+
+def test_pr_review_rejects_unspecified_targets() -> None:
+    """Make sure invalid transitions still reject (regression for §5 wiring)."""
+
+    allowed = TRANSITIONS[TaskStatus.PR_REVIEW]
+    # PR_REVIEW should NOT loop back to e.g. PLANNING; the simple flow has no
+    # planning step. (It can re-enter CODING via BLOCKED → CODING.)
+    assert TaskStatus.PLANNING not in allowed
+    assert TaskStatus.AWAITING_APPROVAL not in allowed

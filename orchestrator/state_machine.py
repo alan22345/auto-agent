@@ -40,7 +40,15 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.BLOCKED_ON_QUOTA,
         TaskStatus.TRIO_REVIEW,
     },
-    TaskStatus.PR_CREATED: {TaskStatus.AWAITING_CI},
+    TaskStatus.PR_CREATED: {
+        TaskStatus.AWAITING_CI,
+        TaskStatus.PR_REVIEW,        # ADR-015 §5 — self-PR-review gate (simple flow)
+    },
+    TaskStatus.PR_REVIEW: {          # ADR-015 §5 — verdict pass→DONE, fail→BLOCKED
+        TaskStatus.DONE,
+        TaskStatus.BLOCKED,
+        TaskStatus.FAILED,
+    },
     TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED, TaskStatus.TRIO_EXECUTING},  # CI pass/fail
     TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING, TaskStatus.BLOCKED},  # approved, changes, or cycle-2 failure
     TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},

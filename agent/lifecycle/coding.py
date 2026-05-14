@@ -563,7 +563,17 @@ async def _open_pr_and_advance(
     base_branch: str,
     branch_name: str,
 ) -> None:
-    """Push branch, create PR, kick off review. Idempotent — safe on retry."""
+    """Push branch, create PR, kick off review. Idempotent — safe on retry.
+
+    Simple-classified tasks (ADR-015 §5, Phase 4) take a different verify
+    branch: the new PR-reviewer in :mod:`agent.lifecycle.pr_reviewer` is the
+    *only* verify gate the simple flow has (no plan-approval, no
+    final-review), so it runs the shared ``verify_primitives.*`` end-to-end
+    against the PR diff and writes ``.auto-agent/pr_review.json``.
+
+    Complex / trio paths remain on ``review.handle_independent_review`` for
+    now — Phase 5+ migrates them.
+    """
     committed_now = await commit_pending_changes(workspace, task_id, task.title)
     if committed_now:
         log.warning(
@@ -589,7 +599,60 @@ async def _open_pr_and_advance(
     if not pr_url.startswith("http"):
         raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
 
+    # ADR-015 §5 — simple flow runs the PR-reviewer (correctness scope).
+    # Other complexities keep the existing handle_independent_review path
+    # until Phase 5 wires them through the same primitives.
+    if getattr(task, "complexity", None) == "simple":
+        await _run_simple_pr_review(task_id, task, workspace, pr_url, base_branch)
+        return
+
     await review.handle_independent_review(task_id, pr_url, branch_name)
+
+
+async def _run_simple_pr_review(
+    task_id: int,
+    task,
+    workspace: str,
+    pr_url: str,
+    base_branch: str,
+) -> None:
+    """Drive the PR-CREATED → PR_REVIEW → DONE/BLOCKED state walk.
+
+    Lives next to ``_open_pr_and_advance`` because it's the simple-flow's
+    only verify gate; pulling it out keeps the parent function focused on
+    the push+create cycle, which is the same for every flow.
+    """
+    from agent.lifecycle import pr_reviewer
+
+    await transition_task(task_id, "pr_created", f"PR created: {pr_url}")
+    await transition_task(task_id, "pr_review", "running self-PR-review (correctness scope)")
+
+    # Attach the base branch so pr_reviewer can compute the PR diff. We don't
+    # mutate the task object on the orchestrator side — this is local only.
+    task.base_branch = base_branch
+    result = await pr_reviewer.run_pr_review(
+        task=task,
+        workspace_root=workspace,
+        scope="correctness",
+    )
+
+    if result.verdict == "approved":
+        await transition_task(
+            task_id,
+            "done",
+            f"self-PR-review approved: {result.summary[:300]}",
+        )
+        return
+
+    # On fail: park the task in BLOCKED with the failure reasons attached
+    # for human visibility. Auto-fix of the reviewer's own comments is
+    # Phase 7; for now we don't loop back into CODING.
+    comments_blob = "; ".join(c.get("comment", "")[:200] for c in (result.comments or []))[:1500]
+    await transition_task(
+        task_id,
+        "blocked",
+        f"self-PR-review changes_requested: {comments_blob or result.summary[:300]}",
+    )
 
 
 async def _finish_coding(
