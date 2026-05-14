@@ -167,9 +167,7 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
     if not suggestions_data:
         log.warning(f"Architecture analysis for '{repo.name}' returned no parseable output")
         await publish(
-            architecture_analysis_failed(
-                repo_name=repo.name, reason="No parseable output"
-            )
+            architecture_analysis_failed(repo_name=repo.name, reason="No parseable output")
         )
         return
 
@@ -205,8 +203,135 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
     await session.flush()
     log.info(f"Architecture analysis for '{repo.name}': {len(new_suggestions)} suggestions created")
 
-    await publish(
-        architecture_suggestions_ready(
-            repo_name=repo.name, count=len(new_suggestions)
-        )
+    await publish(architecture_suggestions_ready(repo_name=repo.name, count=len(new_suggestions)))
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 freeform-mode gate entry points — ADR-015 §6.
+#
+# Sibling to ``agent/po_agent.py``'s ``po_*`` helpers. Thin wrappers that
+# delegate to ``ImprovementAgentStandin``; production call sites
+# go through ``agent.lifecycle.standin.run_freeform_gate`` for routing,
+# these named helpers exist for code paths that already know they want
+# the improvement-agent decision specifically.
+#
+# Each helper resumes the improvement agent's persisted session via the
+# optional ``session_blob`` kwarg. When no blob is supplied the standin
+# logs the ``fallback_default(source=heuristic)`` marker and proceeds —
+# it never escapes to the user.
+# ---------------------------------------------------------------------------
+
+
+async def improvement_answer_grill(
+    task,
+    question: str,
+    workspace_root: str,
+    *,
+    session_blob: dict | None = None,
+) -> None:
+    """Improvement-agent standin answers a grill question (freeform)."""
+
+    from agent.lifecycle.standin import ImprovementAgentStandin
+
+    repo = await _load_repo(task.repo_id)
+    standin = ImprovementAgentStandin(task=task, repo=repo)
+    await standin.answer_grill(
+        question,
+        {
+            "workspace_root": workspace_root,
+            "improvement_session": session_blob or {},
+        },
     )
+
+
+async def improvement_approve_plan(
+    task,
+    plan_md: str,
+    workspace_root: str,
+    *,
+    session_blob: dict | None = None,
+) -> None:
+    """Improvement-agent standin approves/rejects a plan."""
+
+    from agent.lifecycle.standin import ImprovementAgentStandin
+
+    repo = await _load_repo(task.repo_id)
+    standin = ImprovementAgentStandin(task=task, repo=repo)
+    await standin.approve_plan(
+        plan_md,
+        {
+            "workspace_root": workspace_root,
+            "improvement_session": session_blob or {},
+        },
+    )
+
+
+async def improvement_approve_design(
+    task,
+    design_md: str,
+    workspace_root: str,
+    *,
+    session_blob: dict | None = None,
+) -> None:
+    """Improvement-agent standin approves/rejects a complex_large design."""
+
+    from agent.lifecycle.standin import ImprovementAgentStandin
+
+    repo = await _load_repo(task.repo_id)
+    standin = ImprovementAgentStandin(task=task, repo=repo)
+    await standin.approve_design(
+        design_md,
+        {
+            "workspace_root": workspace_root,
+            "improvement_session": session_blob or {},
+        },
+    )
+
+
+async def improvement_review_pr(
+    task,
+    pr_diff: str,
+    pr_metadata: dict,
+    workspace_root: str,
+    *,
+    session_blob: dict | None = None,
+) -> None:
+    """Improvement-agent standin reviews a PR."""
+
+    from agent.lifecycle.standin import ImprovementAgentStandin
+
+    repo = await _load_repo(task.repo_id)
+    standin = ImprovementAgentStandin(task=task, repo=repo)
+    await standin.review_pr(
+        pr_diff,
+        pr_metadata,
+        {
+            "workspace_root": workspace_root,
+            "improvement_session": session_blob or {},
+        },
+    )
+
+
+async def _load_repo(repo_id: int | None):
+    """Mirror of ``agent.po_agent._load_repo`` — fetch the Repo row,
+    falling back to a stub when missing so the standin's heuristics
+    still fire instead of raising."""
+
+    if repo_id is None:
+        return _MinimalRepo(id=None)
+    async with async_session() as s:
+        row = (await s.execute(select(Repo).where(Repo.id == repo_id))).scalar_one_or_none()
+    return row or _MinimalRepo(id=repo_id)
+
+
+class _MinimalRepo:
+    """Same shape as ``po_agent._MinimalRepo``."""
+
+    def __init__(
+        self,
+        *,
+        id: int | None,  # noqa: A002 — mirrors ORM column name
+    ) -> None:
+        self.id = id
+        self.product_brief = None
+        self.mode = None

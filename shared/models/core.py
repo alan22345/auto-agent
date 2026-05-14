@@ -169,6 +169,15 @@ class Repo(Base):
     # into every PO prompt where the PO is asked to make a
     # product-shaped decision (today: architect clarification answers).
     product_brief = Column(Text, nullable=True)
+    # ADR-015 §7 — per-repo default mode. Read by ``mode_resolver`` at
+    # every gate, optionally overridden per task via ``Task.mode_override``.
+    # Domain: "freeform" | "human_in_loop". Default kept conservative so
+    # a repo created before the column existed routes through the
+    # human-in-loop path.
+    mode = Column(
+        String(32), nullable=False, default="human_in_loop",
+        server_default="human_in_loop",
+    )
     organization_id = Column(
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )
@@ -193,6 +202,11 @@ class Task(Base):
     plan = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     freeform_mode = Column(Boolean, default=False)
+    # ADR-015 §7 — per-task override of ``Repo.mode``. Bidirectional:
+    # a freeform repo can flip a single task to human_in_loop and vice
+    # versa. ``None`` means inherit from the repo. Domain:
+    # "freeform" | "human_in_loop" | None.
+    mode_override = Column(String(32), nullable=True)
     # Queue priority — lower number = picked up first. Default 100 (normal).
     # Set to 0 to jump to front. Freeform PO tasks default to 100.
     priority = Column(Integer, default=100, nullable=False)

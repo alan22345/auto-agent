@@ -6,6 +6,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+from typing import Literal
 
 from croniter import croniter
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
@@ -153,6 +154,10 @@ class CreateTaskRequest(BaseModel):
     source_id: str = Field(default="", max_length=512)
     repo_name: str | None = Field(default=None, max_length=256)
     created_by_user_id: int | None = None
+    # ADR-015 §7 — bidirectional per-task override of ``Repo.mode``.
+    # Phase 10 ships the backend; the UI toggle lands in Phase 12. When
+    # ``None`` the task inherits the repo's mode.
+    mode_override: Literal["freeform", "human_in_loop"] | None = None
 
 
 class TransitionRequest(BaseModel):
@@ -882,6 +887,7 @@ async def create_task(
         repo_id=repo.id if repo else None,
         created_by_user_id=owner_user_id,
         organization_id=caller_org_id,
+        mode_override=req.mode_override,
     )
     session.add(task)
     await session.commit()
