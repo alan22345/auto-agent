@@ -184,11 +184,9 @@ def _reviewer_prompt(
             "- The spec is authoritative. Don't reject for things the work item didn't ask for.",
             "- If the coder pushed back in their summary, weigh their argument seriously.",
             "",
-            "## Output",
-            "End your message with a verdict block:",
-            "```json",
-            '{"ok": <true|false>, "feedback": "<actionable, specific>"}',
-            "```",
+            "## How to commit your verdict",
+            "Call `submit_review_verdict(ok=<true|false>, feedback=\"...\")` ",
+            "EXACTLY ONCE at the end of your review. Then stop.",
         ]
     )
 
@@ -226,15 +224,10 @@ def _tiebreak_prompt(work_item: dict, transcript: list[TranscriptEntry]) -> str:
             "",
             "\n".join(transcript_str),
             "",
-            "## Output",
-            "End your message with a decision block:",
-            "```json",
-            '{"action": "accept|redo|revise_backlog|clarify",',
-            ' "reason": "<one short sentence>",',
-            ' "guidance": "<for `redo` — the specific fix to apply>",',
-            ' "new_items": [{"id": "...", "title": "...", "description": "..."}],',
-            ' "question": "<for `clarify` — what to ask the human>"}',
-            "```",
+            "## How to commit your decision",
+            "Call `submit_tiebreak_decision(action=..., reason=..., ...)` EXACTLY",
+            "ONCE. For `redo`, supply `guidance`. For `revise_backlog`, supply",
+            "`new_items`. For `clarify`, supply `question`. Then stop.",
         ]
     )
 
@@ -308,7 +301,18 @@ async def _run_reviewer(
     coder_summary: str,
     diff: str,
 ) -> TranscriptEntry:
-    """Spawn one reviewer subagent. Returns its transcript entry with verdict."""
+    """Spawn one reviewer subagent. Returns its transcript entry with verdict.
+
+    The reviewer commits its verdict via the ``submit_review_verdict`` tool.
+    Legacy JSON-block extraction is kept as a defensive fallback for models
+    that ignore the tool prompt — that lets us roll the tool migration in
+    without a hard cut-over.
+    """
+    from agent.tools.trio_decision import (
+        DecisionSink,
+        attach_review_verdict_tool,
+    )
+
     item_id = work_item.get("id", "item")
     session_id = _fresh_session_id(parent_task_id, f"reviewer-{item_id}-r{round_idx}")
     agent = create_agent(
@@ -323,15 +327,19 @@ async def _run_reviewer(
         home_dir=home_dir,
         org_id=org_id,
     )
+    sink = DecisionSink()
+    attach_review_verdict_tool(agent, sink)
+
     prompt = _reviewer_prompt(work_item, coder_summary=coder_summary, diff=diff)
     run_result = await agent.run(prompt)
     output = _result_output(run_result)
+    verdict = sink.review_verdict or _extract_verdict(output)
     return TranscriptEntry(
         role="reviewer",
         round=round_idx,
         output=output,
         tool_calls=_result_tool_calls(run_result, agent),
-        verdict=_extract_verdict(output),
+        verdict=verdict,
     )
 
 
@@ -472,6 +480,7 @@ async def architect_tiebreak(
         _JSON_BLOCK_RE,
         create_architect_agent,
     )
+    from agent.tools.trio_decision import DecisionSink, attach_tiebreak_tool
 
     agent = create_architect_agent(
         workspace=workspace,
@@ -482,9 +491,16 @@ async def architect_tiebreak(
         home_dir=home_dir,
         org_id=org_id,
     )
+    sink = DecisionSink()
+    attach_tiebreak_tool(agent, sink)
+
     prompt = _tiebreak_prompt(work_item, transcript)
     run_result = await agent.run(prompt)
     output = _result_output(run_result)
+
+    # Tool path: did the architect call submit_tiebreak_decision?
+    if sink.tiebreak is not None:
+        return sink.tiebreak
 
     decision: dict = {}
     matches = list(_JSON_BLOCK_RE.finditer(output))

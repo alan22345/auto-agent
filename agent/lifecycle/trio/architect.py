@@ -507,29 +507,58 @@ async def run_initial(parent_task_id: int) -> None:
         home_dir=home_dir,
         org_id=org_id,
     )
+
+    # Wire tool-based decision submission. The architect should end its run
+    # by calling either submit_backlog or submit_clarification. The JSON
+    # extraction below is a fallback for models that ignore the tools.
+    from agent.tools.trio_decision import (
+        DecisionSink,
+        attach_architect_decision_tools,
+    )
+
+    sink = DecisionSink()
+    attach_architect_decision_tools(agent, sink)
+
     run_result = await agent.run(
         f"Run the initial architecture pass for: {task_title}\n\n"
-        f"Task description:\n{task_description}",
+        f"Task description:\n{task_description}\n\n"
+        "When you're done, call submit_backlog with the work items "
+        "(or submit_clarification if you need a human answer first)."
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
 
-    # First: did the architect ask for clarification? If so, persist
-    # session + transition state instead of trying to parse a backlog.
-    clarification = _extract_clarification(output)
-    if clarification is not None:
+    # Tool-based path: read the decision sink first.
+    if sink.clarification:
         await _emit_clarification(
             parent_task_id=parent_task_id,
             agent=agent,
             workspace=workspace,
             output=output,
             tool_calls=tool_calls,
-            question=clarification,
+            question=sink.clarification,
             phase=ArchitectPhase.INITIAL,
         )
         return
 
-    backlog = _extract_backlog(output)
+    backlog = sink.backlog
+
+    # Legacy JSON-block fallback for models that ignore the tool prompt.
+    if backlog is None:
+        clarification = _extract_clarification(output)
+        if clarification is not None:
+            await _emit_clarification(
+                parent_task_id=parent_task_id,
+                agent=agent,
+                workspace=workspace,
+                output=output,
+                tool_calls=tool_calls,
+                question=clarification,
+                phase=ArchitectPhase.INITIAL,
+            )
+            return
+
+        backlog = _extract_backlog(output)
 
     if backlog is None:
         # Compliance-failure path — the architect violated "Never neither"
@@ -971,50 +1000,98 @@ async def checkpoint(
         home_dir=home_dir,
         org_id=org_id,
     )
+
+    # Wire tool-based decision submission. The agent's last act should be
+    # to call submit_checkpoint_decision (and optionally submit_backlog).
+    # The JSON-extraction fallback below stays so a model that ignores the
+    # tools doesn't silently fail — but the tool path is preferred.
+    from agent.tools.trio_decision import (
+        DecisionSink,
+        attach_architect_decision_tools,
+        attach_checkpoint_decision_tool,
+    )
+
+    sink = DecisionSink()
+    attach_architect_decision_tools(agent, sink)
+    attach_checkpoint_decision_tool(agent, sink)
+
     run_result = await agent.run(
         f"Run a checkpoint review for: {task_title}\n\n"
-        f"Task description:\n{checkpoint_description}",
+        f"Task description:\n{checkpoint_description}\n\n"
+        "When you're done, call submit_checkpoint_decision (and optionally "
+        "submit_backlog if amending the items)."
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
 
-    clarification = _extract_clarification(output)
-    if clarification is not None:
+    # Tool-based path: read from the decision sink.
+    if sink.clarification:
         await _emit_clarification(
             parent_task_id=parent_task_id,
             agent=agent,
             workspace=workspace,
             output=output,
             tool_calls=tool_calls,
-            question=clarification,
+            question=sink.clarification,
             phase=ArchitectPhase.CHECKPOINT,
         )
-        return {"action": "awaiting_clarification", "question": clarification}
+        return {"action": "awaiting_clarification", "question": sink.clarification}
 
-    payload = _extract_checkpoint_payload(output)
-
-    if payload is None:
-        log.error(
-            "architect.checkpoint.invalid_json",
-            task_id=parent_task_id,
-            output_preview=output[:300],
-        )
-        blocked = {"action": "blocked", "reason": "invalid checkpoint JSON"}
-        async with async_session() as s:
-            cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
-            s.add(ArchitectAttempt(
-                task_id=parent_task_id,
-                phase=ArchitectPhase.CHECKPOINT,
-                cycle=cycle,
-                reasoning=output or "",
-                decision=blocked,
+    if sink.checkpoint is not None:
+        decision = dict(sink.checkpoint)
+        # An amended backlog landed via submit_backlog → use it; otherwise
+        # keep the parent's existing backlog.
+        if sink.backlog is not None:
+            backlog = sink.backlog
+        else:
+            async with async_session() as s:
+                p = (
+                    await s.execute(select(Task).where(Task.id == parent_task_id))
+                ).scalar_one()
+                backlog = list(p.trio_backlog or [])
+    else:
+        # Fallback to legacy JSON extraction for models that emit JSON
+        # despite the tool prompt. Keeps backward compatibility if anyone's
+        # in mid-run during the rollout.
+        clarification = _extract_clarification(output)
+        if clarification is not None:
+            await _emit_clarification(
+                parent_task_id=parent_task_id,
+                agent=agent,
+                workspace=workspace,
+                output=output,
                 tool_calls=tool_calls,
-            ))
-            await s.commit()
-        return blocked
+                question=clarification,
+                phase=ArchitectPhase.CHECKPOINT,
+            )
+            return {"action": "awaiting_clarification", "question": clarification}
 
-    decision = payload["decision"]
-    backlog = payload["backlog"]
+        payload = _extract_checkpoint_payload(output)
+        if payload is None:
+            log.error(
+                "architect.checkpoint.invalid_decision",
+                task_id=parent_task_id,
+                output_preview=output[:300],
+                sink_log=sink.log,
+            )
+            blocked = {
+                "action": "blocked",
+                "reason": "no submit_checkpoint_decision tool call and no valid JSON fallback",
+            }
+            async with async_session() as s:
+                cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
+                s.add(ArchitectAttempt(
+                    task_id=parent_task_id,
+                    phase=ArchitectPhase.CHECKPOINT,
+                    cycle=cycle,
+                    reasoning=output or "",
+                    decision=blocked,
+                    tool_calls=tool_calls,
+                ))
+                await s.commit()
+            return blocked
+        decision = payload["decision"]
+        backlog = payload["backlog"]
 
     async with async_session() as s:
         parent = (
