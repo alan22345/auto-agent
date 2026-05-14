@@ -45,6 +45,10 @@ from agent.lifecycle.workspace_paths import (
     BACKLOG_PATH,
     DESIGN_PATH,
     FINAL_REVIEW_PATH,
+    slice_backlog_path,
+    slice_design_path,
+    slice_dir,
+    slice_reviews_dir,
 )
 from agent.lifecycle.workspace_reader import read_gate_file
 
@@ -86,17 +90,23 @@ async def _load_integrated_diff(workspace_root: str, *, base_branch: str) -> str
     return ""
 
 
-def _read_design(workspace_root: str) -> str:
-    text = read_gate_file(workspace_root, DESIGN_PATH, schema_version="1")
+def _read_design(workspace_root: str, *, slice_name: str | None = None) -> str:
+    rel = slice_design_path(slice_name) if slice_name else DESIGN_PATH
+    text = read_gate_file(workspace_root, rel, schema_version="1")
     if isinstance(text, str):
         return text
     return ""
 
 
-def _read_backlog_items(workspace_root: str) -> list[dict[str, Any]]:
+def _read_backlog_items(
+    workspace_root: str,
+    *,
+    slice_name: str | None = None,
+) -> list[dict[str, Any]]:
     """Read the backlog file and return its items, or empty list when missing."""
 
-    payload = read_gate_file(workspace_root, BACKLOG_PATH, schema_version="1")
+    rel = slice_backlog_path(slice_name) if slice_name else BACKLOG_PATH
+    payload = read_gate_file(workspace_root, rel, schema_version="1")
     if isinstance(payload, dict):
         items = payload.get("items")
         if isinstance(items, list):
@@ -104,11 +114,22 @@ def _read_backlog_items(workspace_root: str) -> list[dict[str, Any]]:
     return []
 
 
-def _read_reviews(workspace_root: str) -> dict[str, dict]:
-    """Walk ``.auto-agent/reviews/`` and return ``{item_id: review_dict}``."""
+def _read_reviews(
+    workspace_root: str,
+    *,
+    slice_name: str | None = None,
+) -> dict[str, dict]:
+    """Walk reviews directory and return ``{item_id: review_dict}``.
+
+    Root reviews live at ``.auto-agent/reviews/``; slice reviews at
+    ``.auto-agent/slices/<name>/reviews/``.
+    """
 
     out: dict[str, dict] = {}
-    directory = Path(workspace_root) / AUTO_AGENT_DIR / "reviews"
+    if slice_name:
+        directory = Path(workspace_root) / slice_reviews_dir(slice_name)
+    else:
+        directory = Path(workspace_root) / AUTO_AGENT_DIR / "reviews"
     if not directory.is_dir():
         return out
     for entry in sorted(directory.iterdir()):
@@ -341,15 +362,30 @@ async def _run_final_review_agent(
 # ---------------------------------------------------------------------------
 
 
-def _write_final_review_json(workspace_root: str, result: FinalReviewResult) -> None:
-    os.makedirs(os.path.join(workspace_root, AUTO_AGENT_DIR), exist_ok=True)
+def _final_review_rel_path(slice_name: str | None) -> str:
+    """Where the final-review verdict file lives — root or slice-scoped."""
+
+    if slice_name:
+        return f"{slice_dir(slice_name)}/final_review.json"
+    return FINAL_REVIEW_PATH
+
+
+def _write_final_review_json(
+    workspace_root: str,
+    result: FinalReviewResult,
+    *,
+    slice_name: str | None = None,
+) -> None:
+    rel = _final_review_rel_path(slice_name)
+    abs_path = os.path.join(workspace_root, rel)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     payload = {
         "schema_version": "1",
         "verdict": result.verdict,
         "gaps": result.gaps,
         "comments": result.comments,
     }
-    with open(os.path.join(workspace_root, FINAL_REVIEW_PATH), "w") as fh:
+    with open(abs_path, "w") as fh:
         json.dump(payload, fh, indent=2)
 
 
@@ -364,6 +400,7 @@ async def run_final_review(
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    slice_name: str | None = None,
 ) -> FinalReviewResult:
     """Run the final reviewer for one round.
 
@@ -379,11 +416,16 @@ async def run_final_review(
     If the file is missing after the agent's turn, retry once (per
     ADR-015 §12). If smoke produced gaps but the agent says ``passed``,
     we override with the smoke gaps — primitives are ground truth.
+
+    ``slice_name`` makes the reviewer slice-scoped — design.md / backlog /
+    reviews / final_review.json all read and write under
+    ``.auto-agent/slices/<name>/`` (ADR-015 §9). When ``None``, the root
+    namespace is used.
     """
 
-    design = _read_design(workspace_root)
-    items = _read_backlog_items(workspace_root)
-    reviews = _read_reviews(workspace_root)
+    design = _read_design(workspace_root, slice_name=slice_name)
+    items = _read_backlog_items(workspace_root, slice_name=slice_name)
+    reviews = _read_reviews(workspace_root, slice_name=slice_name)
     diff = await _load_integrated_diff(workspace_root, base_branch=base_branch)
     union_routes = _union_affected_routes(items)
     intent = design or "complex_large run"
@@ -417,7 +459,8 @@ async def run_final_review(
 
     # Clear any stale final_review.json so a previous round's verdict
     # doesn't accidentally satisfy this turn.
-    final_path = os.path.join(workspace_root, FINAL_REVIEW_PATH)
+    review_rel = _final_review_rel_path(slice_name)
+    final_path = os.path.join(workspace_root, review_rel)
     if os.path.isfile(final_path):
         os.remove(final_path)
 
@@ -438,7 +481,7 @@ async def run_final_review(
             org_id=org_id,
         )
 
-        payload = read_gate_file(workspace_root, FINAL_REVIEW_PATH, schema_version="1")
+        payload = read_gate_file(workspace_root, review_rel, schema_version="1")
         if isinstance(payload, dict):
             verdict = payload.get("verdict")
             agent_gaps = list(payload.get("gaps") or [])
@@ -460,7 +503,7 @@ async def run_final_review(
                 gaps=merged_gaps,
                 comments=comments,
             )
-            _write_final_review_json(workspace_root, result)
+            _write_final_review_json(workspace_root, result, slice_name=slice_name)
             return result
         log.warning(
             "final_review.missing_output",
@@ -475,11 +518,11 @@ async def run_final_review(
         verdict=final_verdict,
         gaps=smoke_gaps,
         comments=(
-            f"agent did not write {FINAL_REVIEW_PATH} after "
+            f"agent did not write {review_rel} after "
             f"{_MAX_MISSING_OUTPUT_RETRIES} attempts; using smoke-only verdict."
         ),
     )
-    _write_final_review_json(workspace_root, result)
+    _write_final_review_json(workspace_root, result, slice_name=slice_name)
     return result
 
 

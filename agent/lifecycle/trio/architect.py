@@ -58,6 +58,7 @@ def create_architect_agent(
     home_dir: str | None = None,
     org_id: int | None = None,
     session: Session | None = None,
+    slice_name: str | None = None,
 ):
     """Build an AgentLoop configured for the architect.
 
@@ -71,6 +72,11 @@ def create_architect_agent(
     has arrived. When ``None`` (the default), no session is attached and
     each call starts fresh — the same behaviour as before this kwarg
     existed.
+
+    ``slice_name`` switches the pinned-artefacts source from the root
+    ``.auto-agent/`` namespace to ``.auto-agent/slices/<name>/`` — used by
+    sub-architect runs (ADR-015 §9 / §13). When ``None`` (default), the
+    root namespace is used; behaviour is unchanged.
     """
     agent = create_agent(
         workspace=workspace,
@@ -97,7 +103,7 @@ def create_architect_agent(
     base_prompt = _SYSTEM_PROMPTS[phase]
     ws_root = workspace.root if hasattr(workspace, "root") else str(workspace)
     agent.system_prompt_override = apply_pinned_artefacts_to_system_prompt(
-        base_prompt, ws_root,
+        base_prompt, ws_root, slice_name=slice_name,
     )
     return agent
 

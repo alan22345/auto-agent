@@ -33,9 +33,12 @@ from agent.lifecycle.workspace_paths import (
     BACKLOG_PATH,
     DECISION_PATH,
     DESIGN_PATH,
+    slice_backlog_path,
+    slice_decision_path,
+    slice_design_path,
 )
 
-_SECTION_HEADER = "## .auto-agent/{name}"
+_SECTION_HEADER = "## {name}"
 
 
 def _read(path: str) -> str | None:
@@ -49,7 +52,30 @@ def _read(path: str) -> str | None:
         return None
 
 
-def build_pinned_block(workspace_root: str) -> str:
+def _paths_for(slice_name: str | None) -> tuple[str, str, str]:
+    """Return the (design, backlog, decision) relative paths.
+
+    When ``slice_name`` is set, the slice-scoped paths under
+    ``.auto-agent/slices/<name>/`` are returned; otherwise the root
+    workspace paths. Sub-architects pin their own slice artefacts so the
+    parent architect's design / backlog / decision don't bleed into the
+    sub-architect's system prompt (and vice versa).
+    """
+
+    if slice_name:
+        return (
+            slice_design_path(slice_name),
+            slice_backlog_path(slice_name),
+            slice_decision_path(slice_name),
+        )
+    return DESIGN_PATH, BACKLOG_PATH, DECISION_PATH
+
+
+def build_pinned_block(
+    workspace_root: str,
+    *,
+    slice_name: str | None = None,
+) -> str:
     """Build the pinned-artefacts markdown block for ``workspace_root``.
 
     Each present artefact gets its own section header so the architect
@@ -57,27 +83,33 @@ def build_pinned_block(workspace_root: str) -> str:
     skipped — the block is best-effort and safe to call before any
     artefact exists. Returns an empty string when none of the three
     files are on disk.
+
+    When ``slice_name`` is supplied the slice-scoped paths under
+    ``.auto-agent/slices/<name>/`` are pinned instead of the root
+    workspace files — this is the namespace boundary for sub-architects
+    (ADR-015 §9 / §13).
     """
 
+    design_rel, backlog_rel, decision_rel = _paths_for(slice_name)
     sections: list[str] = []
 
-    design = _read(os.path.join(workspace_root, DESIGN_PATH))
+    design = _read(os.path.join(workspace_root, design_rel))
     if design is not None:
-        sections.append(_SECTION_HEADER.format(name="design.md") + "\n\n" + design.rstrip() + "\n")
+        sections.append(_SECTION_HEADER.format(name=design_rel) + "\n\n" + design.rstrip() + "\n")
 
-    backlog = _read(os.path.join(workspace_root, BACKLOG_PATH))
+    backlog = _read(os.path.join(workspace_root, backlog_rel))
     if backlog is not None:
         sections.append(
-            _SECTION_HEADER.format(name="backlog.json")
+            _SECTION_HEADER.format(name=backlog_rel)
             + "\n\n```json\n"
             + backlog.rstrip()
             + "\n```\n"
         )
 
-    decision = _read(os.path.join(workspace_root, DECISION_PATH))
+    decision = _read(os.path.join(workspace_root, decision_rel))
     if decision is not None:
         sections.append(
-            _SECTION_HEADER.format(name="decision.json")
+            _SECTION_HEADER.format(name=decision_rel)
             + "\n\n```json\n"
             + decision.rstrip()
             + "\n```\n"
@@ -86,12 +118,14 @@ def build_pinned_block(workspace_root: str) -> str:
     if not sections:
         return ""
 
+    scope_label = f"sub-architect slice `{slice_name}`" if slice_name else "architect"
+    location_label = f"`.auto-agent/slices/{slice_name}/`" if slice_name else "`.auto-agent/`"
     intro = (
         "# Pinned artefacts (re-attached every resume — never compacted)\n\n"
-        "These three files are the architect's load-bearing context. They\n"
-        "live on disk under `.auto-agent/` and are the source of truth even\n"
-        "if the message buffer is compacted away. Re-read them via\n"
-        "`Read` whenever the running buffer drops detail.\n\n"
+        f"These three files are the {scope_label}'s load-bearing context.\n"
+        f"They live on disk under {location_label} and are the source of\n"
+        "truth even if the message buffer is compacted away. Re-read them\n"
+        "via `Read` whenever the running buffer drops detail.\n\n"
     )
     return intro + "\n".join(sections)
 
@@ -99,14 +133,19 @@ def build_pinned_block(workspace_root: str) -> str:
 def apply_pinned_artefacts_to_system_prompt(
     base_prompt: str,
     workspace_root: str,
+    *,
+    slice_name: str | None = None,
 ) -> str:
     """Append the pinned artefacts block to a base system prompt.
 
     Idempotent and side-effect-free; safe to call on every resume.
     Returns ``base_prompt`` unchanged when no artefacts exist.
+
+    ``slice_name`` toggles between root and slice-scoped pin sources —
+    see :func:`build_pinned_block`.
     """
 
-    block = build_pinned_block(workspace_root)
+    block = build_pinned_block(workspace_root, slice_name=slice_name)
     if not block:
         return base_prompt
     return base_prompt.rstrip() + "\n\n" + block

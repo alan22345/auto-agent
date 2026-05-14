@@ -355,12 +355,17 @@ async def dispatch_item(
     repo_name: str | None,
     home_dir: str | None,
     org_id: int | None,
+    slice_name: str | None = None,
 ) -> ItemResult:
     """Run one backlog item through up-to-``MAX_ROUNDS`` coder↔reviewer rounds.
 
     Returns an ``ItemResult``. The caller is responsible for persisting
     backlog updates and invoking the architect tiebreak when
     ``needs_tiebreak`` is true.
+
+    ``slice_name`` namespaces the heavy-reviewer verdict under
+    ``.auto-agent/slices/<name>/reviews/<id>.json`` for sub-architect
+    runs (ADR-015 §9). When ``None``, the root review path is used.
     """
     start_sha = await _git_head_sha(workspace)
     transcript: list[TranscriptEntry] = []
@@ -424,6 +429,7 @@ async def dispatch_item(
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
+            slice_name=slice_name,
         )
         reviewer_entry = TranscriptEntry(
             role="reviewer",

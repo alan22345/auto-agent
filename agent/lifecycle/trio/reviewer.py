@@ -44,7 +44,7 @@ from agent.lifecycle.verify_primitives import (
     grep_diff_for_stubs,
     inspect_ui,
 )
-from agent.lifecycle.workspace_paths import review_path
+from agent.lifecycle.workspace_paths import review_path, slice_review_path
 from shared.database import async_session
 from shared.models import Task, TaskStatus, TrioReviewAttempt
 
@@ -421,10 +421,16 @@ def _write_review_json(
     workspace_root: str,
     item_id: str,
     result: HeavyReviewResult,
+    slice_name: str | None = None,
 ) -> None:
-    """Persist the verdict so the orchestrator can read it via the skills bridge."""
+    """Persist the verdict so the orchestrator can read it via the skills bridge.
 
-    rel = review_path(item_id)
+    When ``slice_name`` is set the verdict lands under the slice's review
+    namespace ``.auto-agent/slices/<name>/reviews/<id>.json`` instead of
+    the root ``.auto-agent/reviews/<id>.json`` — ADR-015 §9.
+    """
+
+    rel = slice_review_path(slice_name, item_id) if slice_name else review_path(item_id)
     abs_path = os.path.join(workspace_root, rel)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     payload = {
@@ -448,6 +454,7 @@ async def run_heavy_review(
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    slice_name: str | None = None,
 ) -> HeavyReviewResult:
     """Run alignment + grep + smoke + UI for one backlog item.
 
@@ -463,6 +470,10 @@ async def run_heavy_review(
     On first failure the function short-circuits, writes
     ``reviews/<id>.json`` with ``verdict="fail"`` + synthesised reason
     and returns. All-green → ``verdict="pass"``.
+
+    ``slice_name`` namespaces the per-item verdict under
+    ``.auto-agent/slices/<name>/reviews/<id>.json`` for sub-architect
+    runs (ADR-015 §9). When ``None``, the root review path is used.
     """
 
     item_id = str(item.get("id") or "item")
@@ -489,7 +500,7 @@ async def run_heavy_review(
                 f"{alignment_text.strip()[:400]}"
             ),
         )
-        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name)
         return result
 
     # 2. Stub-grep ----------------------------------------------------------
@@ -505,7 +516,7 @@ async def run_heavy_review(
                 f"{v.file}:{v.line} — {v.snippet.strip()[:200]}"
             ),
         )
-        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name)
         return result
 
     # 3. Smoke --------------------------------------------------------------
@@ -543,7 +554,10 @@ async def run_heavy_review(
                         ),
                     )
                     _write_review_json(
-                        workspace_root=workspace_root, item_id=item_id, result=result
+                        workspace_root=workspace_root,
+                        item_id=item_id,
+                        result=result,
+                        slice_name=slice_name,
                     )
                     return result
                 smoke_summary = f"smoke: {len(route_results)} route(s) returned 2xx"
@@ -558,7 +572,10 @@ async def run_heavy_review(
                     ),
                 )
                 _write_review_json(
-                    workspace_root=workspace_root, item_id=item_id, result=result
+                    workspace_root=workspace_root,
+                    item_id=item_id,
+                    result=result,
+                    slice_name=slice_name,
                 )
                 return result
             else:
@@ -597,7 +614,10 @@ async def run_heavy_review(
                         ),
                     )
                     _write_review_json(
-                        workspace_root=workspace_root, item_id=item_id, result=result
+                        workspace_root=workspace_root,
+                        item_id=item_id,
+                        result=result,
+                        slice_name=slice_name,
                     )
                     return result
                 ui_summary = (
@@ -621,7 +641,12 @@ async def run_heavy_review(
             "alignment, no-defer stub-grep, smoke, and UI checks all passed."
         ),
     )
-    _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result)
+    _write_review_json(
+        workspace_root=workspace_root,
+        item_id=item_id,
+        result=result,
+        slice_name=slice_name,
+    )
     return result
 
 
