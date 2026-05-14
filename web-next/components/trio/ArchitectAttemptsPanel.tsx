@@ -51,11 +51,11 @@ function ArchitectRow({ a }: { a: ArchitectAttemptOut }) {
         </span>
       </div>
       {a.consult_question && (
-        <div className="mt-1 rounded bg-muted/40 px-2 py-1 text-[11px]">
+        <div className="mt-1 max-h-72 overflow-y-auto rounded bg-muted/40 px-2 py-1 text-[11px]">
           <div className="font-medium">Question</div>
-          <div>{a.consult_question}</div>
+          <div className="whitespace-pre-wrap break-words">{a.consult_question}</div>
           {a.consult_why && (
-            <div className="mt-1 text-muted-foreground">
+            <div className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">
               Why: {a.consult_why}
             </div>
           )}
@@ -66,7 +66,7 @@ function ArchitectRow({ a }: { a: ArchitectAttemptOut }) {
           <summary className="cursor-pointer text-muted-foreground">
             reasoning
           </summary>
-          <pre className="mt-1 whitespace-pre-wrap text-[11px]">
+          <pre className="mt-1 max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded border bg-background/60 p-2 text-[11px]">
             {a.reasoning}
           </pre>
         </details>
@@ -86,17 +86,17 @@ function ArchitectRow({ a }: { a: ArchitectAttemptOut }) {
         </div>
       )}
       {a.clarification_question && (
-        <div className="mt-2 rounded border-l-2 border-amber-500 pl-2">
+        <div className="mt-2 max-h-72 overflow-y-auto rounded border-l-2 border-amber-500 pl-2">
           <div className="text-[10px] font-semibold uppercase text-amber-700">
             Question
           </div>
-          <div className="whitespace-pre-wrap text-xs">
+          <div className="whitespace-pre-wrap break-words text-xs">
             {a.clarification_question}
           </div>
         </div>
       )}
       {a.clarification_answer && (
-        <div className="mt-1 rounded border-l-2 border-emerald-500 pl-2">
+        <div className="mt-1 max-h-72 overflow-y-auto rounded border-l-2 border-emerald-500 pl-2">
           <div className="flex items-center gap-1 text-[10px] font-semibold uppercase text-emerald-700">
             Answer
             {a.clarification_source && (
@@ -105,7 +105,7 @@ function ArchitectRow({ a }: { a: ArchitectAttemptOut }) {
               </span>
             )}
           </div>
-          <div className="whitespace-pre-wrap text-xs">
+          <div className="whitespace-pre-wrap break-words text-xs">
             {a.clarification_answer}
           </div>
         </div>

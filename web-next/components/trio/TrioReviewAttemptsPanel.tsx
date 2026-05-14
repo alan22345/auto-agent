@@ -36,7 +36,7 @@ function TrioReviewRow({ a }: { a: TrioReviewAttemptOut }) {
           <summary className="cursor-pointer text-muted-foreground">
             feedback
           </summary>
-          <pre className="mt-1 whitespace-pre-wrap text-[11px]">
+          <pre className="mt-1 max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded border bg-background/60 p-2 text-[11px]">
             {a.feedback}
           </pre>
         </details>
