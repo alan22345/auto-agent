@@ -113,6 +113,7 @@ async def test_classifier_prompt_names_the_three_buckets():
             {
                 "ui_only": False,
                 "multi_stage": False,
+                "needs_grill": True,
                 "classification": "complex",
                 "reasoning": ".",
             }
@@ -125,3 +126,95 @@ async def test_classifier_prompt_names_the_three_buckets():
         assert bucket in sent_prompt, f"prompt missing bucket label {bucket!r}"
     assert "ui_only" in sent_prompt
     assert "multi_stage" in sent_prompt
+    assert "needs_grill" in sent_prompt
+
+
+# ---------------------------------------------------------------------------
+# needs_grill — ADR-015 §1 — returned alongside classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_classifier_returns_needs_grill_true_when_llm_says_so():
+    """LLM answer `needs_grill: true` propagates onto the result."""
+    payload = json.dumps(
+        {
+            "ui_only": False,
+            "multi_stage": False,
+            "needs_grill": True,
+            "classification": "complex",
+            "reasoning": "Scope unclear; clarify before planning.",
+        }
+    )
+    with patch("agent.classifier.get_provider", return_value=_mock_provider(payload)):
+        result = await classify_task("Add caching", "Make things fast.")
+    assert result.needs_grill is True
+
+
+@pytest.mark.asyncio
+async def test_classifier_returns_needs_grill_false_for_unambiguous_task():
+    """Trivial / unambiguous tasks (`rename foo to bar`) come back with
+    needs_grill=False so the flow skips the grill phase."""
+    payload = json.dumps(
+        {
+            "ui_only": False,
+            "multi_stage": False,
+            "needs_grill": False,
+            "classification": "complex",
+            "reasoning": "Mechanical rename, no ambiguity.",
+        }
+    )
+    with patch("agent.classifier.get_provider", return_value=_mock_provider(payload)):
+        result = await classify_task(
+            "Rename helper_x to helper_y",
+            "Mechanical rename across the codebase.",
+        )
+    assert result.needs_grill is False
+
+
+@pytest.mark.asyncio
+async def test_classifier_llm_failure_defaults_needs_grill_to_true():
+    """When the classifier LLM call fails, default to grilling — the
+    safe path is to ask, not to skip."""
+    provider = MagicMock()
+    provider.complete = AsyncMock(side_effect=RuntimeError("Bedrock 503"))
+    with patch("agent.classifier.get_provider", return_value=provider):
+        result = await classify_task("Anything", "Anything")
+    assert result.needs_grill is True
+
+
+@pytest.mark.asyncio
+async def test_classifier_preserves_needs_grill_when_label_is_invalid():
+    """If the model emits an unknown classification label but valid
+    ui_only / multi_stage / needs_grill, the label is re-derived from
+    the binary answers and needs_grill is preserved."""
+    payload = json.dumps(
+        {
+            "ui_only": True,
+            "multi_stage": False,
+            "needs_grill": False,
+            "classification": "trivial",  # invalid label
+            "reasoning": "Just a copy tweak; no ambiguity.",
+        }
+    )
+    with patch("agent.classifier.get_provider", return_value=_mock_provider(payload)):
+        result = await classify_task("Tweak header copy", "Update wording")
+    assert result.classification == "simple"  # re-derived from ui_only=True
+    assert result.needs_grill is False
+
+
+@pytest.mark.asyncio
+async def test_classifier_defaults_needs_grill_true_when_field_missing():
+    """LLM omitted the needs_grill field — safe default is to grill."""
+    payload = json.dumps(
+        {
+            "ui_only": False,
+            "multi_stage": False,
+            "classification": "complex",
+            "reasoning": "Field omitted.",
+            # needs_grill missing on purpose
+        }
+    )
+    with patch("agent.classifier.get_provider", return_value=_mock_provider(payload)):
+        result = await classify_task("Anything", "Anything")
+    assert result.needs_grill is True

@@ -256,6 +256,14 @@ async def on_task_created(event: Event) -> None:
         if task.complexity is None:
             complexity, classification = await classify_task(task.title, task.description)
             task.complexity = complexity
+            # ADR-015 §1: translate the classifier's needs_grill answer into
+            # the grill-gate sentinel (intake_qa=[]). False means the task
+            # is unambiguous → skip grill regardless of complexity bucket.
+            # We don't overwrite an already-populated intake_qa (e.g. a
+            # pre-grilled suggestion that came in with intake_qa=[] from
+            # intake_qa_for_suggestion).
+            if not classification.needs_grill and task.intake_qa is None:
+                task.intake_qa = []
             await session.commit()
             payload = {"complexity": complexity.value, **classification.model_dump()}
         else:

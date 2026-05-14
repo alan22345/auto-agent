@@ -26,6 +26,14 @@ class ClassificationResult(BaseModel):
     reasoning: str = ""
     estimated_files: int = 0
     risk: RiskLevel = RiskLevel.LOW
+    # ADR-015 §1: returned alongside ``classification`` by the LLM-driven
+    # classifier in ``agent/classifier.py``. ``True`` ⇒ the flow runs the
+    # grill phase before any plan; ``False`` ⇒ the task is unambiguous and
+    # grill is skipped. Defaults to ``True`` for backwards-compat with
+    # existing callers that don't yet construct the field explicitly — the
+    # classifier itself always emits an explicit value (defaulting to
+    # ``True`` on LLM failure / missing-field, the safe-to-grill path).
+    needs_grill: bool = True
 
 
 # --- Task API types (used by all services that talk to the orchestrator) ---

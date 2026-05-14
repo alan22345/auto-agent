@@ -51,11 +51,11 @@ log = setup_logging("agent.lifecycle.planning")
 
 SUMMARY_MAX_AGE = timedelta(days=7)
 
-# Tasks where grilling is skipped — the agent goes straight to planning.
-# Simple tasks don't need design alignment; query/no-code tasks aren't planned;
-# tasks created from architecture-mode suggestions arrive pre-grilled
-# (intake_qa = []).
-_SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
+# ADR-015 §1: grill skip is driven by the classifier's needs_grill answer,
+# translated to intake_qa=[] at task creation. There is no per-complexity
+# skip list any more — a `simple` task with needs_grill=True grills, and a
+# `complex` task with needs_grill=False (mechanical rename, architecture-
+# mode suggestion, etc.) skips.
 
 # Hard cap on grill rounds to bound user fatigue. The grill prompt asks the
 # agent to aim for 3–7 questions and emit GRILL_DONE; this is a fail-safe in
@@ -112,20 +112,28 @@ def _extract_grill_done(output: str) -> str | None:
 def _should_run_grill(task) -> bool:
     """Decide whether the grill phase runs before planning for this task.
 
-    Four signals on ``task.intake_qa`` drive the gate:
+    Four signals on ``task.intake_qa`` drive the gate (ADR-015 §1 — the
+    per-complexity skip list was deleted; the classifier's ``needs_grill``
+    answer is now translated to ``intake_qa=[]`` at task creation, so the
+    gate reads a single signal):
+
       - ``None`` → grilling never started. Run grill (initial turn).
-      - ``[]`` → grilling explicitly skipped (simple tasks, architecture-
-        derived tasks). Skip.
+      - ``[]`` → grilling explicitly skipped — classifier answered
+        ``needs_grill=False``, or the task came from a pre-grilled
+        suggestion (e.g. architecture mode). Skip.
       - ``[…, {"question": GRILL_DONE_QUESTION_SENTINEL, …}]`` → grilling
         completed (sentinel appended after agent emitted GRILL_DONE). Skip.
       - ``[…, {"question": q, "answer": …}]`` (no sentinel) → grilling in
         progress. Run grill again so the agent can ask the next question
         OR emit GRILL_DONE.
 
+    Defensive guard: if the task has no complexity (classifier hasn't run
+    yet), don't grill — wait for classification first.
+
     The ``_MAX_GRILL_ROUNDS`` cap is enforced inside ``handle_planning``
     (it forces a synthetic GRILL_DONE rather than mutating gate semantics).
     """
-    if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
+    if not task.complexity:
         return False
     if task.intake_qa is None:
         return True

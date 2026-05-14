@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 from agent.lifecycle.planning import (
     _MAX_GRILL_ROUNDS,
-    _SKIP_GRILL_COMPLEXITIES,
     _extract_grill_done,
     _grill_round_count,
     _should_run_grill,
@@ -64,9 +63,21 @@ def test_should_run_grill_for_complex_task_with_no_intake_qa():
     assert _should_run_grill(_task("complex")) is True
 
 
-def test_should_skip_grill_for_simple_task():
-    assert _should_run_grill(_task("simple")) is False
-    assert _should_run_grill(_task("simple_no_code")) is False
+def test_should_skip_grill_when_classifier_pre_filled_empty_intake_qa():
+    """ADR-015 §1: classifier with needs_grill=False pre-fills intake_qa=[]
+    at intake. The planning gate skips grill via the empty-list sentinel,
+    not by classification bucket. A `complex` task with intake_qa=[] skips
+    grill, and a `simple` task without that sentinel will still grill —
+    classification no longer drives the skip."""
+    # Complex task with classifier-driven skip sentinel → no grill.
+    assert _should_run_grill(_task("complex", intake_qa=[])) is False
+    # Simple task without sentinel → grills (would have skipped under
+    # the deleted _SKIP_GRILL_COMPLEXITIES path).
+    assert _should_run_grill(_task("simple", intake_qa=None)) is True
+    # simple_no_code tasks never reach the planning gate (they short-
+    # circuit in run.py::on_task_classified), but defensively their
+    # gate behaviour is now identical: intake_qa=[] skips, None grills.
+    assert _should_run_grill(_task("simple_no_code", intake_qa=[])) is False
 
 
 def test_should_skip_grill_when_explicitly_complete():
@@ -101,10 +112,12 @@ def test_should_skip_grill_when_complexity_missing():
     assert _should_run_grill(_task(None)) is False
 
 
-def test_skip_grill_complexities_constants():
-    """Sanity — grill skips simple AND query/no-code paths."""
-    assert "simple" in _SKIP_GRILL_COMPLEXITIES
-    assert "simple_no_code" in _SKIP_GRILL_COMPLEXITIES
+def test_skip_grill_is_driven_by_intake_qa_not_classification():
+    """ADR-015 §1 deleted _SKIP_GRILL_COMPLEXITIES. The skip decision is
+    now driven by the classifier's needs_grill (translated to
+    intake_qa=[] at task creation) — never by complexity bucket alone."""
+    from agent.lifecycle import planning as planning_mod
+    assert not hasattr(planning_mod, "_SKIP_GRILL_COMPLEXITIES")
 
 
 # ---------------------------------------------------------------------------

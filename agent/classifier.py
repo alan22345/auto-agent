@@ -9,10 +9,17 @@ Buckets each task by asking the model three questions, in order:
    yes -> ``complex_large``.
 3. Otherwise -> ``complex``.
 
+The classifier also returns ``needs_grill`` (ADR-015 §1) — orthogonal to the
+bucket. ``True`` ⇒ the task is ambiguous and the flow must run grill-me
+before any planning / design / one-shot; ``False`` ⇒ the ask is unambiguous
+enough to skip the grill phase regardless of bucket.
+
 There is no keyword matching or word-count heuristic — those misclassified
 real work (e.g. marketing-copy pages that mention "research" routed through
 the no-code path). When the LLM call fails outright, we default to
-``complex`` as the safe middle bucket.
+``complex`` as the safe middle bucket and ``needs_grill=True`` as the safe
+grill path (better to clarify a known task than to skip clarification on an
+ambiguous one).
 """
 
 from __future__ import annotations
@@ -42,6 +49,14 @@ _PROMPT = """Classify this task by answering, in order:
    stages to complete (multiple sequential phases, several large
    sub-features that depend on each other, or a body of work too large
    to land in one focused change)?
+3. needs_grill — Has the user described the task with enough specificity
+   that no clarification is needed? If the ask is unambiguous (clear
+   scope, defined behaviour, all the inputs the implementer would need
+   are present), set needs_grill=false. If anything is ambiguous (unclear
+   scope, undefined behaviour, missing details, vague intent), set
+   needs_grill=true. When in doubt, prefer true — the cost of one extra
+   clarification round is far lower than the cost of building the wrong
+   thing.
 
 Rules:
 - ui_only=true                        -> classification = "simple"
@@ -52,7 +67,7 @@ Title: {title}
 Description: {description}
 
 Output ONLY this JSON object:
-{{"ui_only": <bool>, "multi_stage": <bool>, "classification": "simple|complex|complex_large", "reasoning": "<one sentence>"}}
+{{"ui_only": <bool>, "multi_stage": <bool>, "needs_grill": <bool>, "classification": "simple|complex|complex_large", "reasoning": "<one sentence>"}}
 """
 
 _RISK = {
@@ -90,6 +105,8 @@ async def classify_task(title: str, description: str) -> ClassificationResult:
             reasoning="LLM classifier unavailable; defaulted to complex",
             estimated_files=_ESTIMATED_FILES["complex"],
             risk=_RISK["complex"],
+            # Safe default on classifier failure: grill before planning.
+            needs_grill=True,
         )
 
     label = str(data.get("classification", "")).strip().lower()
@@ -105,10 +122,17 @@ async def classify_task(title: str, description: str) -> ClassificationResult:
         else:
             label = "complex"
 
+    # ADR-015 §1: needs_grill rides in the same JSON object as classification.
+    # Default to True when the field is missing — safer to clarify an
+    # already-clear task than to skip clarification on an ambiguous one.
+    raw_needs_grill = data.get("needs_grill", True)
+    needs_grill = bool(raw_needs_grill) if raw_needs_grill is not None else True
+
     reasoning = str(data.get("reasoning", "")).strip() or f"LLM-classified as {label}"
     return ClassificationResult(
         classification=label,
         reasoning=reasoning,
         estimated_files=_ESTIMATED_FILES[label],
         risk=_RISK[label],
+        needs_grill=needs_grill,
     )
