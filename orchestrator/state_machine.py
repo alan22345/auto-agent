@@ -91,6 +91,16 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.BLOCKED,
         TaskStatus.AWAITING_CLARIFICATION,
         TaskStatus.ARCHITECT_DESIGNING,      # validator rejected → re-design
+        # ADR-015 §9 / Phase 8 — architect spawned sub-architects instead
+        # of emitting a flat backlog.
+        TaskStatus.AWAITING_SUB_ARCHITECTS,
+    },
+    # ADR-015 §9 / Phase 8 — parent task paused while sub-architects run
+    # serially. All-done → FINAL_REVIEW (same path as a flat backlog drain);
+    # any slice failed permanently → BLOCKED.
+    TaskStatus.AWAITING_SUB_ARCHITECTS: {
+        TaskStatus.FINAL_REVIEW,
+        TaskStatus.BLOCKED,
     },
     # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
     TaskStatus.FINAL_REVIEW: {

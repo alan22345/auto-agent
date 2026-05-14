@@ -11,6 +11,7 @@ status transitions (``TRIO_EXECUTING → PR_CREATED`` / ``→ BLOCKED``) go
 through ``orchestrator.state_machine.transition`` to enforce the
 allowed-transitions check and log a ``TaskHistory`` row.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -27,9 +28,7 @@ log = structlog.get_logger()
 async def _set_trio_phase(parent_id: int, phase: TrioPhase | None) -> None:
     """Load the parent, set ``trio_phase``, commit. Avoids stale refs."""
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         p.trio_phase = phase
         await s.commit()
 
@@ -44,15 +43,11 @@ async def _resolve_target_branch(parent_id: int) -> str:
     from shared.models import FreeformConfig
 
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         if not p.freeform_mode or p.repo_id is None:
             return "main"
         cfg = (
-            await s.execute(
-                select(FreeformConfig).where(FreeformConfig.repo_id == p.repo_id)
-            )
+            await s.execute(select(FreeformConfig).where(FreeformConfig.repo_id == p.repo_id))
         ).scalar_one_or_none()
         if cfg is None:
             return "main"
@@ -84,7 +79,8 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
     except Exception as e:  # pragma: no cover — env-dependent
         log.warning(
             "trio.parent.gh_token_unavailable",
-            parent_id=parent.id, error=str(e),
+            parent_id=parent.id,
+            error=str(e),
         )
         return ""
 
@@ -99,11 +95,17 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
 
     create_res = await sh.run(
         [
-            "gh", "pr", "create",
-            "--base", target_branch,
-            "--head", integration_branch,
-            "--title", title,
-            "--body", body,
+            "gh",
+            "pr",
+            "create",
+            "--base",
+            target_branch,
+            "--head",
+            integration_branch,
+            "--title",
+            title,
+            "--body",
+            body,
         ],
         timeout=30,
         env=gh_env,
@@ -122,9 +124,7 @@ async def _block_parent(parent_id: int, message: str) -> None:
     """Transition parent to BLOCKED and clear trio_phase. Helper used by
     every terminal failure path in ``run_trio_parent``."""
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         await transition(s, p, TaskStatus.BLOCKED, message=message)
         p.trio_phase = None
         await s.commit()
@@ -134,9 +134,7 @@ async def _mark_item_done(parent_id: int, item_id: str, head_sha: str | None) ->
     """Set an item's status to 'done' in tasks.trio_backlog. JSONB requires a
     fresh list reference for SQLAlchemy to mark the column dirty."""
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
         for i, item in enumerate(backlog):
             if item.get("id") == item_id:
@@ -151,14 +149,14 @@ async def _mark_item_done(parent_id: int, item_id: str, head_sha: str | None) ->
 
 
 async def _replace_backlog_item(
-    parent_id: int, old_item_id: str, new_items: list[dict],
+    parent_id: int,
+    old_item_id: str,
+    new_items: list[dict],
 ) -> None:
     """Replace a single backlog item with one or more new items. Used by
     the architect's ``revise_backlog`` tiebreak decision."""
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
         out: list[dict] = []
         replaced = False
@@ -188,7 +186,8 @@ async def _ensure_integration_branch_checked_out(workspace: str, parent_id: int)
     integration_branch = f"trio/{parent_id}"
     res = await sh.run(
         ["git", "checkout", integration_branch],
-        cwd=workspace, timeout=30,
+        cwd=workspace,
+        timeout=30,
     )
     if res.failed:
         log.warning(
@@ -196,6 +195,95 @@ async def _ensure_integration_branch_checked_out(workspace: str, parent_id: int)
             parent_id=parent_id,
             stderr=(res.stderr or "")[:300],
         )
+
+
+async def _maybe_dispatch_sub_architects(parent: Task) -> bool:
+    """If the architect emitted ``spawn_sub_architects``, dispatch and finish.
+
+    ADR-015 §9 / Phase 8. Reads ``.auto-agent/decision.json``; on the
+    spawn action transitions the parent to ``AWAITING_SUB_ARCHITECTS``,
+    runs each slice through :mod:`agent.lifecycle.trio.sub_architect`
+    serially, then transitions to ``FINAL_REVIEW`` (all complete) or
+    ``BLOCKED`` (any slice failed).
+
+    Returns ``True`` when the spawn path was taken (caller should not
+    proceed into the per-item builder loop); ``False`` when no spawn
+    decision is present.
+    """
+
+    from agent.lifecycle.trio import architect_decision, sub_architect
+    from agent.lifecycle.trio.architect import _prepare_parent_workspace
+
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        # Detection requires a workspace path — re-use _prepare_parent_workspace
+        # which is idempotent (clone is cached per task).
+        workspace = await _prepare_parent_workspace(p)
+
+    workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
+
+    decision = architect_decision.read_decision(workspace_root)
+    if decision is None or decision.get("action") != "spawn_sub_architects":
+        return False
+
+    slices = (decision.get("payload") or {}).get("slices") or []
+    if not slices:
+        return False
+
+    log.info(
+        "trio.parent.spawn_sub_architects",
+        parent_id=parent.id,
+        slice_count=len(slices),
+    )
+
+    # Transition into AWAITING_SUB_ARCHITECTS to surface the pause on the UI.
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        try:
+            await transition(
+                s,
+                p,
+                TaskStatus.AWAITING_SUB_ARCHITECTS,
+                message=f"trio: spawning {len(slices)} sub-architect slice(s)",
+            )
+        except Exception:
+            p.status = TaskStatus.AWAITING_SUB_ARCHITECTS
+        await s.commit()
+
+    result = await sub_architect.dispatch_sub_architects(
+        parent_task=p,
+        workspace_root=workspace_root,
+        slices=slices,
+    )
+
+    if not result.ok:
+        await _block_parent(
+            parent.id,
+            f"trio: sub-architect dispatch failed — {result.blocked_reason}",
+        )
+        return True
+
+    # All slices completed — same path as a flat backlog drain: transition
+    # to FINAL_REVIEW. The final reviewer composes the design + slice
+    # backlogs + integrated diff via the existing _drive_final_review_and_pr.
+    target = await _resolve_target_branch(parent.id)
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        repo_name = p.repo.name if p.repo else None
+        from agent.lifecycle.factory import home_dir_for_task
+
+        home_dir = await home_dir_for_task(p)
+        org_id = p.organization_id
+
+    await _drive_final_review_and_pr(
+        parent=parent,
+        workspace_root=workspace_root,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+        target_branch=target,
+    )
+    return True
 
 
 async def run_trio_parent(
@@ -227,9 +315,7 @@ async def run_trio_parent(
         # progress. After a crash or a manual unblock we want to resume
         # the per-item loop from where we were, not restart.
         async with async_session() as _s:
-            _p = (
-                await _s.execute(select(Task).where(Task.id == parent.id))
-            ).scalar_one()
+            _p = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             has_backlog = bool(_p.trio_backlog)
         if not has_backlog:
             await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
@@ -239,6 +325,13 @@ async def run_trio_parent(
                 "trio.parent.resume_skipping_run_initial",
                 parent_id=parent.id,
             )
+
+    # ADR-015 §9 / Phase 8 — if the architect emitted spawn_sub_architects
+    # the per-item builder loop does not apply; the sub-architect dispatcher
+    # takes over. Detection lives here so a freshly-emitted decision.json
+    # routes correctly without bouncing through the per-item loop first.
+    if await _maybe_dispatch_sub_architects(parent):
+        return
 
     # Resolve once per cycle — re-cloning per item is wasteful and the
     # subagents share the workspace.
@@ -251,9 +344,7 @@ async def run_trio_parent(
         # Re-read the backlog each iteration in case the architect or a
         # tiebreak revised it.
         async with async_session() as s:
-            p = (
-                await s.execute(select(Task).where(Task.id == parent.id))
-            ).scalar_one()
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             if p.status == TaskStatus.BLOCKED:
                 return
             if p.status == TaskStatus.AWAITING_CLARIFICATION:
@@ -269,6 +360,7 @@ async def run_trio_parent(
             # Cache invariants we'll need outside the session.
             if parent_workspace is None:
                 from agent.lifecycle.factory import home_dir_for_task
+
                 parent_workspace = await _prepare_parent_workspace(p)
                 repo_name = p.repo.name if p.repo else None
                 home_dir = await home_dir_for_task(p)
@@ -293,7 +385,9 @@ async def run_trio_parent(
             await _mark_item_done(parent.id, item_id, result.head_sha)
             log.info(
                 "trio.parent.item_done",
-                parent_id=parent.id, item_id=item_id, head_sha=result.head_sha,
+                parent_id=parent.id,
+                item_id=item_id,
+                head_sha=result.head_sha,
             )
             # No per-item architect checkpoint — the reviewer subagent is
             # the per-item quality gate. Architect runs once after the
@@ -328,7 +422,9 @@ async def run_trio_parent(
         action = decision.get("action", "clarify")
         log.info(
             "trio.parent.tiebreak_decision",
-            parent_id=parent.id, item_id=item_id, action=action,
+            parent_id=parent.id,
+            item_id=item_id,
+            action=action,
             reason=decision.get("reason"),
         )
 
@@ -344,9 +440,7 @@ async def run_trio_parent(
             # avoid loops — second tiebreak on the same item escalates.
             guidance = str(decision.get("guidance", "")).strip()
             async with async_session() as s:
-                p = (
-                    await s.execute(select(Task).where(Task.id == parent.id))
-                ).scalar_one()
+                p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
                 new_backlog = list(p.trio_backlog or [])
                 for i, it in enumerate(new_backlog):
                     if it.get("id") == item_id:
@@ -391,10 +485,7 @@ async def run_trio_parent(
             # question and can re-trigger the parent after editing the
             # backlog item if needed. Real clarification resume for
             # tiebreaks is a follow-up.
-            question = str(
-                decision.get("question")
-                or "Trio is stuck; please advise."
-            )
+            question = str(decision.get("question") or "Trio is stuck; please advise.")
             await _block_parent(
                 parent.id,
                 f"trio: tiebreak escalation on item {item_id} — {question[:300]}",
@@ -418,19 +509,16 @@ async def run_trio_parent(
         # rebuild the workspace context so final_review can read the
         # design/reviews/diff.
         async with async_session() as s:
-            p = (
-                await s.execute(select(Task).where(Task.id == parent.id))
-            ).scalar_one()
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             from agent.lifecycle.factory import home_dir_for_task
+
             parent_workspace = await _prepare_parent_workspace(p)
             repo_name = p.repo.name if p.repo else None
             home_dir = await home_dir_for_task(p)
             org_id = p.organization_id
 
     workspace_root = (
-        parent_workspace.root
-        if hasattr(parent_workspace, "root")
-        else str(parent_workspace)
+        parent_workspace.root if hasattr(parent_workspace, "root") else str(parent_workspace)
     )
 
     target = await _resolve_target_branch(parent.id)
@@ -470,13 +558,13 @@ async def _drive_final_review_and_pr(
     for round_idx in range(1, gap_fix.MAX_GAP_FIX_ROUNDS + 2):  # +1 for the bound check
         # Park the task in FINAL_REVIEW for visibility.
         async with async_session() as s:
-            p = (
-                await s.execute(select(Task).where(Task.id == parent.id))
-            ).scalar_one()
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             if p.status != TaskStatus.FINAL_REVIEW:
                 try:
                     await transition(
-                        s, p, TaskStatus.FINAL_REVIEW,
+                        s,
+                        p,
+                        TaskStatus.FINAL_REVIEW,
                         message=f"trio: final review round {round_idx}",
                     )
                 except Exception:
@@ -495,9 +583,7 @@ async def _drive_final_review_and_pr(
         )
 
         if review.verdict == "passed":
-            await _open_integration_pr_and_transition(
-                parent=parent, target_branch=target_branch
-            )
+            await _open_integration_pr_and_transition(parent=parent, target_branch=target_branch)
             return
 
         # gaps_found → architect gap-fix (bounded).
@@ -510,15 +596,14 @@ async def _drive_final_review_and_pr(
             return
 
         async with async_session() as s:
-            p = (
-                await s.execute(select(Task).where(Task.id == parent.id))
-            ).scalar_one()
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             try:
                 await transition(
-                    s, p, TaskStatus.ARCHITECT_GAP_FIX,
+                    s,
+                    p,
+                    TaskStatus.ARCHITECT_GAP_FIX,
                     message=(
-                        f"trio: gap-fix round {round_idx} — "
-                        f"{len(review.gaps)} gap(s) to close"
+                        f"trio: gap-fix round {round_idx} — {len(review.gaps)} gap(s) to close"
                     ),
                 )
             except Exception:
@@ -538,21 +623,19 @@ async def _drive_final_review_and_pr(
             # ``run_trio_parent`` recurse below picks the pending items
             # up.
             async with async_session() as s:
-                p = (
-                    await s.execute(select(Task).where(Task.id == parent.id))
-                ).scalar_one()
+                p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
                 try:
                     await transition(
-                        s, p, TaskStatus.TRIO_EXECUTING,
+                        s,
+                        p,
+                        TaskStatus.TRIO_EXECUTING,
                         message="trio: gap-fix dispatched new items",
                     )
                 except Exception:
                     p.status = TaskStatus.TRIO_EXECUTING
                 await s.commit()
             previous_gaps = list(review.gaps)
-            previous_attempt_summary = (
-                f"round {round_idx}: dispatched {len(new_items)} new items"
-            )
+            previous_attempt_summary = f"round {round_idx}: dispatched {len(new_items)} new items"
             await run_trio_parent(parent)
             return
         # architect escalated, blocked, or unknown action
@@ -574,9 +657,7 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     if not new_items:
         return
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent_id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
         for item in new_items:
             ni = dict(item)
@@ -594,9 +675,7 @@ async def _open_integration_pr_and_transition(
     """Open the integration PR + transition the parent to PR_CREATED."""
 
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent.id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
         pr_url = await _open_integration_pr(p, target_branch)
         p.pr_url = pr_url or None
         p.trio_phase = None

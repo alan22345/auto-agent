@@ -70,3 +70,29 @@ def slice_grill_answer_path(name: str) -> str:
     """Parent → sub-architect grill answer relay — §10."""
 
     return f"{slice_dir(name)}/grill_answer.json"
+
+
+def slice_decision_path(name: str) -> str:
+    """Sub-architect's per-cycle decision file — mirrors top-level
+    ``decision.json`` but namespaced under the slice. Used by Phase 8's
+    1-level recursion bound check (sub-architects writing
+    ``spawn_sub_architects`` here is rejected).
+    """
+
+    return f"{slice_dir(name)}/decision.json"
+
+
+def slice_reviews_dir(name: str) -> str:
+    """Directory for per-item heavy-reviewer verdicts inside a slice.
+
+    Mirrors the top-level ``.auto-agent/reviews/`` layout but namespaced
+    so two slices can have an item with the same id without colliding.
+    """
+
+    return f"{slice_dir(name)}/reviews"
+
+
+def slice_review_path(name: str, item_id: str) -> str:
+    """Path to one item's heavy-review verdict under a slice."""
+
+    return f"{slice_reviews_dir(name)}/{item_id}.json"

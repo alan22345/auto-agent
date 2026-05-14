@@ -64,6 +64,10 @@ class TaskStatus(str, enum.Enum):
     # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
     FINAL_REVIEW              = "final_review"
     ARCHITECT_GAP_FIX         = "architect_gap_fix"
+    # ADR-015 §9 / Phase 8 — parent architect spawned sub-architects; the
+    # parent's main session is paused while they run serially. Only resumed
+    # briefly for the parent-answers-grill relay (§10).
+    AWAITING_SUB_ARCHITECTS   = "awaiting_sub_architects"
 
 
 class TrioPhase(str, enum.Enum):
