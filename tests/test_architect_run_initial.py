@@ -158,6 +158,23 @@ def test_extract_backlog_item_missing_required_field_returns_none():
     assert architect._extract_backlog(text) is None
 
 
+def test_extract_backlog_accepts_bare_triple_backtick_fence():
+    """The architect sometimes emits the backlog inside a bare ``` fence
+    (no ``json`` language tag). _extract_clarification already handles
+    that case; _extract_backlog must match so we don't fail extraction on
+    a model that picked the wrong fence flavour.
+    """
+    text = (
+        "Some reasoning.\n\n"
+        "```\n"
+        '{"backlog": [{"id": "a", "title": "T1", "description": "D1"}]}\n'
+        "```"
+    )
+    out = architect._extract_backlog(text)
+    assert out is not None
+    assert out[0]["id"] == "a"
+
+
 def test_extract_backlog_picks_last_valid_block_when_multiple():
     text = (
         "```json\n"
@@ -230,13 +247,21 @@ async def test_run_initial_writes_architecture_md_and_backlog(session):
 
 @pytest.mark.asyncio
 async def test_run_initial_marks_parent_blocked_on_invalid_json(session):
+    """Both turns fail to emit JSON — the parent must end up BLOCKED.
+
+    This is the regression case for task 169: the architect produced 30 KB
+    of prose with five numbered questions and no JSON envelope. The
+    follow-up retry (introduced in this test's sibling) must also fail to
+    yield JSON before we mark the parent blocked.
+    """
     await _skip_if_trio_columns_missing(session)
     parent = await _seed_parent(session)
     parent_id = parent.id
     stub_result = MagicMock(output="I refuse to output JSON.", tool_calls=[])
+    retry_result = MagicMock(output="Still no JSON, sorry.", tool_calls=[])
 
     loop = MagicMock()
-    loop.run = AsyncMock(return_value=stub_result)
+    loop.run = AsyncMock(side_effect=[stub_result, retry_result])
     loop.tool_call_log = []
 
     with (
@@ -248,6 +273,11 @@ async def test_run_initial_marks_parent_blocked_on_invalid_json(session):
         ),
     ):
         await architect.run_initial(parent_id)
+
+    # Retry attempted exactly once on the same agent, with resume=True.
+    assert loop.run.await_count == 2
+    second_call = loop.run.await_args_list[1]
+    assert second_call.kwargs.get("resume") is True
 
     refreshed = (
         await session.execute(select(Task).where(Task.id == parent_id))
@@ -263,3 +293,104 @@ async def test_run_initial_marks_parent_blocked_on_invalid_json(session):
     assert rows[0].phase == ArchitectPhase.INITIAL
     assert rows[0].decision is not None
     assert rows[0].decision.get("action") == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_run_initial_retries_and_succeeds_on_second_turn(session):
+    """First turn returns prose-with-questions (the task-169 failure mode);
+    a single focused retry produces the expected backlog JSON and the run
+    completes normally."""
+    await _skip_if_trio_columns_missing(session)
+    parent = await _seed_parent(session)
+    parent_id = parent.id
+
+    first = MagicMock(
+        output=(
+            "# Architecture pass\n\n"
+            "Five questions before I can commit:\n"
+            "1. ...\n2. ...\n3. ...\n4. ...\n5. ...\n"
+        ),
+        tool_calls=[],
+    )
+    retry = MagicMock(
+        output=(
+            "```json\n"
+            '{"backlog": [{"id": "w1", "title": "Scaffold", "description": "..."}]}\n'
+            "```"
+        ),
+        tool_calls=[],
+    )
+
+    loop = MagicMock()
+    loop.run = AsyncMock(side_effect=[first, retry])
+    loop.tool_call_log = []
+
+    with (
+        patch.object(architect, "async_session", _patched_async_session(session)),
+        patch.object(architect, "create_architect_agent", return_value=loop),
+        patch.object(
+            architect, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(
+            architect, "_commit_and_open_initial_pr",
+            new=AsyncMock(return_value="deadbeef"),
+        ),
+    ):
+        await architect.run_initial(parent_id)
+
+    assert loop.run.await_count == 2
+
+    refreshed = (
+        await session.execute(select(Task).where(Task.id == parent_id))
+    ).scalar_one()
+    # The parent should NOT be BLOCKED — the retry rescued the run.
+    assert refreshed.status != TaskStatus.BLOCKED
+    assert refreshed.trio_backlog is not None
+    assert refreshed.trio_backlog[0]["id"] == "w1"
+
+
+@pytest.mark.asyncio
+async def test_run_initial_retry_can_emit_clarification(session):
+    """If the architect's first turn is non-compliant prose but the retry
+    chooses to emit the clarification envelope, the parent should land in
+    AWAITING_CLARIFICATION via _emit_clarification — not BLOCKED."""
+    await _skip_if_trio_columns_missing(session)
+    parent = await _seed_parent(session)
+    parent_id = parent.id
+
+    first = MagicMock(
+        output="No JSON, just prose.",
+        tool_calls=[],
+    )
+    retry = MagicMock(
+        output=(
+            "```json\n"
+            '{"decision": {"action": "awaiting_clarification", '
+            '"question": "Pick stack: Next.js or Remix?"}}\n'
+            "```"
+        ),
+        tool_calls=[],
+    )
+
+    loop = MagicMock()
+    loop.run = AsyncMock(side_effect=[first, retry])
+    loop.tool_call_log = []
+    emit_mock = AsyncMock()
+
+    with (
+        patch.object(architect, "async_session", _patched_async_session(session)),
+        patch.object(architect, "create_architect_agent", return_value=loop),
+        patch.object(
+            architect, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(architect, "_emit_clarification", new=emit_mock),
+    ):
+        await architect.run_initial(parent_id)
+
+    assert loop.run.await_count == 2
+    emit_mock.assert_awaited_once()
+    assert emit_mock.await_args.kwargs["question"] == (
+        "Pick stack: Next.js or Remix?"
+    )

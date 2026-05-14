@@ -87,8 +87,30 @@ def create_architect_agent(
 # run_initial — the architect's first pass over a trio parent task.
 # ---------------------------------------------------------------------------
 
-# Matches the trailing ```json { ... } ``` block the architect prompt asks for.
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+# Matches the trailing ```json { ... } ``` block the architect prompt asks
+# for. Bare ``` fences (no language tag) are accepted too — the model
+# sometimes drops the ``json`` tag, and _extract_clarification already
+# tolerates that, so the two extractors must be symmetric.
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+
+# Sent as a follow-up turn when the architect's first reply contains
+# neither the backlog JSON nor a clarification JSON. Sometimes the model
+# rambles in prose with questions — this rescues those runs without
+# blocking the parent task.
+_MISSING_JSON_RETRY_PROMPT = (
+    "Your last message ended without the required JSON block. The "
+    "system can only read JSON — any prose questions or backlog items "
+    "above are invisible to it. Emit ONLY ONE of the following blocks "
+    "(no prose, no other text):\n\n"
+    "```json\n"
+    '{"backlog": [{"id": "...", "title": "...", "description": "..."}]}\n'
+    "```\n\n"
+    "OR (if open questions genuinely block the design):\n\n"
+    "```json\n"
+    '{"decision": {"action": "awaiting_clarification", '
+    '"question": "<numbered markdown list of your questions>"}}\n'
+    "```"
+)
 
 
 def _extract_backlog(text: str) -> list[dict] | None:
@@ -508,6 +530,46 @@ async def run_initial(parent_task_id: int) -> None:
         return
 
     backlog = _extract_backlog(output)
+
+    if backlog is None:
+        # Compliance-failure path — the architect violated "Never neither"
+        # from ARCHITECT_INITIAL_SYSTEM. Task 169 hit this: 30 KB of prose
+        # with five numbered questions and zero JSON envelope. Give the
+        # model one focused retry before blocking the parent.
+        log.warning(
+            "architect.run_initial.missing_json.retrying",
+            task_id=parent_task_id,
+            output_preview=output[:300],
+        )
+        try:
+            retry_result = await agent.run(_MISSING_JSON_RETRY_PROMPT, resume=True)
+        except Exception as exc:
+            log.error(
+                "architect.run_initial.retry_exception",
+                task_id=parent_task_id,
+                error=str(exc),
+            )
+            retry_result = None
+
+        if retry_result is not None:
+            retry_output = _result_output(retry_result)
+            retry_tool_calls = _result_tool_calls(retry_result, agent)
+            output = output + "\n\n--- retry ---\n\n" + retry_output
+            tool_calls = (tool_calls or []) + (retry_tool_calls or [])
+
+            clarification = _extract_clarification(retry_output)
+            if clarification is not None:
+                await _emit_clarification(
+                    parent_task_id=parent_task_id,
+                    agent=agent,
+                    workspace=workspace,
+                    output=output,
+                    tool_calls=tool_calls,
+                    question=clarification,
+                    phase=ArchitectPhase.INITIAL,
+                )
+                return
+            backlog = _extract_backlog(retry_output)
 
     if backlog is None:
         log.error(
