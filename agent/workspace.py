@@ -7,7 +7,9 @@ import shutil
 
 from agent import sh
 
-WORKSPACES_DIR = os.environ.get("WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces"))
+WORKSPACES_DIR = os.environ.get(
+    "WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces")
+)
 
 
 def _workspace_path(*, task_id: int, organization_id: int | None) -> str:
@@ -24,7 +26,9 @@ def _workspace_path(*, task_id: int, organization_id: int | None) -> str:
     return os.path.join(WORKSPACES_DIR, f"task-{task_id}")
 
 
-async def _run_git(*args: str, cwd: str | None = None, check: bool = False) -> tuple[str, str, int | None]:
+async def _run_git(
+    *args: str, cwd: str | None = None, check: bool = False
+) -> tuple[str, str, int | None]:
     """Run a git command asynchronously. Returns (stdout, stderr, returncode).
 
     Routes through ``agent.sh.run`` so this call inherits the seam's
@@ -119,6 +123,7 @@ async def clone_repo(
     # If not and we have a fallback, clone that then create the missing branch.
     if fallback_branch and not await _remote_branch_exists(authed_url, default_branch):
         import structlog
+
         log = structlog.get_logger()
         log.info(
             "dev_branch_missing_creating_from_fallback",
@@ -133,9 +138,11 @@ async def clone_repo(
                 await install_coauthor_hook(workspace, user_id)
             except Exception as e:
                 import structlog
+
                 structlog.get_logger().warning(
                     "coauthor_hook_install_failed",
-                    user_id=user_id, error=str(e),
+                    user_id=user_id,
+                    error=str(e),
                 )
         await _run_git("checkout", "-b", default_branch, cwd=workspace, check=True)
         await _run_git("push", "-u", "origin", default_branch, cwd=workspace, check=True)
@@ -157,8 +164,11 @@ async def clone_repo(
             await install_coauthor_hook(workspace, user_id)
         except Exception as e:
             import structlog
+
             structlog.get_logger().warning(
-                "coauthor_hook_install_failed", user_id=user_id, error=str(e),
+                "coauthor_hook_install_failed",
+                user_id=user_id,
+                error=str(e),
             )
 
     return workspace
@@ -260,6 +270,7 @@ async def commit_pending_changes(workspace: str, task_id: int, title: str) -> bo
     Returns True if a commit was made, False if there was nothing to commit.
     """
     import structlog
+
     _log = structlog.get_logger()
 
     # `git status --porcelain` lists both unstaged + untracked files
@@ -291,10 +302,15 @@ async def commit_pending_changes(workspace: str, task_id: int, title: str) -> bo
     message = f"Task #{task_id}: {safe_title}\n\nAuto-committed by auto-agent safety net."
     # Pass identity via -c flags so this works regardless of global/local git config
     await _run_git(
-        "-c", f"user.email={_AGENT_GIT_EMAIL}",
-        "-c", f"user.name={_AGENT_GIT_NAME}",
-        "commit", "-m", message,
-        cwd=workspace, check=True,
+        "-c",
+        f"user.email={_AGENT_GIT_EMAIL}",
+        "-c",
+        f"user.name={_AGENT_GIT_NAME}",
+        "commit",
+        "-m",
+        message,
+        cwd=workspace,
+        check=True,
     )
     return True
 
@@ -306,13 +322,19 @@ async def ensure_branch_has_commits(workspace: str, base_branch: str) -> None:
     HEAD (no new work to PR).
     """
     log_output, _, returncode = await _run_git(
-        "log", f"{base_branch}..HEAD", "--oneline", cwd=workspace,
+        "log",
+        f"{base_branch}..HEAD",
+        "--oneline",
+        cwd=workspace,
     )
     if returncode != 0:
         # The base branch may not exist locally; fetch and retry once
         await _run_git("fetch", "origin", base_branch, cwd=workspace)
         log_output, _, returncode = await _run_git(
-            "log", f"origin/{base_branch}..HEAD", "--oneline", cwd=workspace,
+            "log",
+            f"origin/{base_branch}..HEAD",
+            "--oneline",
+            cwd=workspace,
         )
         if returncode != 0:
             # If we still can't resolve the base, surface a clear error
@@ -338,3 +360,39 @@ def cleanup_workspace(task_id: int, organization_id: int | None = None) -> None:
     workspace = _workspace_path(task_id=task_id, organization_id=organization_id)
     if os.path.exists(workspace):
         shutil.rmtree(workspace)
+
+
+def migrate_trio_workspace(workspace: str) -> None:
+    """Rename a legacy ``.trio/`` directory to ``.auto-agent/`` — ADR-015 §12.
+
+    Per ADR-015 §15 all in-flight tasks are dropped at deploy time, so this
+    shim is defensive: it keeps the system robust to leftover artefacts on
+    disk. Behaviour:
+
+    - only ``.trio/`` present → rename to ``.auto-agent/``.
+    - only ``.auto-agent/`` present (or neither) → no-op.
+    - both present → log a warning and leave both alone (we do not want to
+      clobber whatever the new flow already wrote).
+    """
+
+    legacy = os.path.join(workspace, ".trio")
+    target = os.path.join(workspace, ".auto-agent")
+
+    legacy_exists = os.path.isdir(legacy)
+    target_exists = os.path.isdir(target)
+
+    if legacy_exists and not target_exists:
+        os.rename(legacy, target)
+        import structlog
+
+        structlog.get_logger().info("workspace.migrate_trio_to_auto_agent", workspace=workspace)
+        return
+
+    if legacy_exists and target_exists:
+        import structlog
+
+        structlog.get_logger().warning(
+            "workspace.migrate_trio_both_present",
+            workspace=workspace,
+            note="leaving .trio/ and .auto-agent/ in place — manual cleanup required",
+        )
