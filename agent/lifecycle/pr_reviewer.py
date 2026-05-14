@@ -1,45 +1,41 @@
-"""PR-reviewer agent role — ADR-015 §5 Phase 4 (correctness scope only).
+"""PR-reviewer agent role — ADR-015 §5 (Phases 4 + 5).
 
-The simple flow has no plan-approval and no final-review gate, so the
-PR reviewer is the **only** full verify gate the flow has. Per ADR-015
-§5 it runs the shared :mod:`agent.lifecycle.verify_primitives` against
-the open PR end-to-end:
+Two scopes:
 
-  1. ``grep_diff_for_stubs(diff)`` — block on no-defer violations.
-  2. ``boot_dev_server`` + ``exercise_routes(routes_inferred_from_diff)``.
-  3. ``inspect_ui`` for any UI route touched.
+- ``correctness`` (simple flow) — pure-Python pipeline running the shared
+  :mod:`agent.lifecycle.verify_primitives` end-to-end against the PR
+  diff. Implemented in Phase 4.
+- ``artefact`` (complex / complex_large) — LLM-authored review of PR
+  hygiene, commit narrative, description coherence, missing tests, and
+  unrelated changes. Implemented in Phase 5 via the ``submit-pr-review``
+  skill seam: the agent writes ``.auto-agent/pr_review.json`` and the
+  orchestrator reads it after ``agent.run`` returns. Two-retry-then-
+  escalate contract per ADR-015 §12 — missing file after the second
+  attempt raises :class:`MissingPRReviewError`.
 
-The verdict + comments are written to ``.auto-agent/pr_review.json`` so
-the orchestrator (and any human teammate) can pick them up with the same
-:mod:`agent.lifecycle.workspace_reader` primitives as every other gate
-file in the skills bridge.
+The verdict + comments land at the same on-disk path for both scopes
+(``.auto-agent/pr_review.json``) so the orchestrator's gate-file reader
+finds the same shape regardless of scope.
 
-Two scopes are defined in the ADR; only ``correctness`` lands in this
-phase:
-
-- ``correctness`` (simple flow) — what this module implements.
-- ``artefact``   (complex / complex_large) — deferred to Phase 7. Raises
-  :class:`ScopeNotYetImplemented` so a mis-routed call fails loudly
-  rather than producing a misleading verdict.
-
-Note on the skill seam: the matching ``submit-pr-review`` skill in
-``skills/auto-agent/`` is wired so a future iteration can drive the PR
-review through an *agent* invocation (LLM authors verdict + comments,
-writes ``pr_review.json`` via the skill). For Phase 4 the reviewer is a
-pure-Python pipeline of shared primitives — no LLM in the loop. We
-still write the same ``pr_review.json`` shape, so the file-format
-contract is stable when the LLM seam later replaces the body.
+After an ``artefact``-scope review returns non-empty ``comments``, the
+caller invokes :func:`address_own_comments` for **exactly one** coding
+turn. Per ADR-015 §5: "the same agent addresses its own comments" in
+one round — no second self-review.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from agent import sh
+from agent.lifecycle.factory import create_agent, home_dir_for_task
+from agent.lifecycle.route_inference import (
+    infer_routes_from_diff,
+    is_ui_route,
+)
 from agent.lifecycle.verify_primitives import (
     RouteResult,
     ServerHandle,
@@ -51,6 +47,7 @@ from agent.lifecycle.verify_primitives import (
     inspect_ui,
 )
 from agent.lifecycle.workspace_paths import AUTO_AGENT_DIR, PR_REVIEW_PATH
+from agent.lifecycle.workspace_reader import read_gate_file
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.pr_reviewer")
@@ -74,141 +71,18 @@ class PRReviewResult:
     summary: str = ""
 
 
-class ScopeNotYetImplemented(NotImplementedError):  # noqa: N818  # established pattern: QuotaExceeded, BootTimeout
-    """Raised when a caller invokes a PR-review scope this phase hasn't
-    built yet (currently: ``"artefact"``).
+class MissingPRReviewError(RuntimeError):
+    """Raised when the agent did not write ``pr_review.json`` after retries.
 
-    Subclass of :class:`NotImplementedError` so callers that have a broader
-    catch keep working, but the dedicated class lets tests pin the exact
-    deferral point without false positives on other ``NotImplementedError``
-    paths in the codebase. Phase 7 lands the artefact-scope prompt +
-    commit-narrative review and removes this raise site.
+    Per ADR-015 §12 the orchestrator retries the agent invocation once on
+    missing-output, then escalates. Callers should catch this and route
+    the task to ``BLOCKED`` (non-freeform) or to the standin (freeform —
+    Phase 10).
     """
 
 
-# ---------------------------------------------------------------------------
-# Route inference — simple regex over FastAPI decorators + Next.js pages.
-# ---------------------------------------------------------------------------
-
-
-_FASTAPI_DECORATOR_RE = re.compile(
-    r'@\w+\.(get|post|put|patch|delete)\(\s*"([^"]+)"',
-    re.IGNORECASE,
-)
-_FASTAPI_DECORATOR_SINGLE_QUOTE_RE = re.compile(
-    r"@\w+\.(get|post|put|patch|delete)\(\s*'([^']+)'",
-    re.IGNORECASE,
-)
-
-
-def _file_path_from_diff_header(line: str) -> str | None:
-    """Return the post-image filename from a '+++ b/<path>' diff header."""
-
-    if not line.startswith("+++ "):
-        return None
-    rest = line[4:].strip()
-    if rest.startswith("b/"):
-        return rest[2:]
-    if rest == "/dev/null":
-        return None
-    return rest
-
-
-def _route_from_nextjs_page_path(path: str) -> str | None:
-    """Map a Next.js App Router page path to its URL route.
-
-    Examples:
-      - ``web-next/app/(app)/dashboard/page.tsx`` → ``/dashboard``
-      - ``web-next/app/repos/[id]/page.tsx`` → ``/repos/[id]``
-      - ``web-next/app/page.tsx`` → ``/``
-
-    Returns ``None`` for non-page files. The mapping is intentionally
-    conservative: route-groups in parentheses (``(app)``) are stripped per
-    Next.js convention, but ``[param]`` segments are kept as-is — the
-    smoke-test harness can substitute them.
-    """
-
-    if not path.startswith("web-next/app/") or not path.endswith("/page.tsx"):
-        return None
-    inner = path[len("web-next/app/") : -len("/page.tsx")]
-    parts = [p for p in inner.split("/") if not (p.startswith("(") and p.endswith(")"))]
-    if not parts:
-        return "/"
-    return "/" + "/".join(parts)
-
-
-def infer_routes_from_diff(diff: str) -> list[str]:
-    """Return the de-duplicated list of routes touched by ``diff``.
-
-    Heuristic:
-      - any added line matching ``@<router>.get|post|put|patch|delete("...")``
-        contributes its path.
-      - any file added/modified under ``web-next/app/...page.tsx`` contributes
-        the URL implied by its directory.
-
-    Order-preserving so tests can assert on the first route.
-    """
-
-    routes: list[str] = []
-    seen: set[str] = set()
-
-    current_file: str | None = None
-    in_hunk = False
-
-    def _add(route: str) -> None:
-        if route and route not in seen:
-            routes.append(route)
-            seen.add(route)
-
-    for raw in (diff or "").splitlines():
-        header_path = _file_path_from_diff_header(raw)
-        if raw.startswith("+++ "):
-            current_file = header_path
-            in_hunk = False
-            if current_file:
-                page_route = _route_from_nextjs_page_path(current_file)
-                if page_route:
-                    _add(page_route)
-            continue
-        if raw.startswith("--- "):
-            in_hunk = False
-            continue
-        if raw.startswith("@@"):
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if raw.startswith("+") and not raw.startswith("+++"):
-            line = raw[1:]
-            for matcher in (_FASTAPI_DECORATOR_RE, _FASTAPI_DECORATOR_SINGLE_QUOTE_RE):
-                m = matcher.search(line)
-                if m:
-                    _add(m.group(2))
-
-    return routes
-
-
-# ---------------------------------------------------------------------------
-# UI-route heuristic — anything that looks like a frontend page route.
-# ---------------------------------------------------------------------------
-
-
-def _is_ui_route(route: str) -> bool:
-    """A route is treated as UI if it does not start with an API prefix.
-
-    Conservative: ``/api/...`` and ``/v1/...`` are obviously not UI. Anything
-    else (``/dashboard``, ``/`` , ``/widgets``) gets passed to
-    :func:`inspect_ui`. ``inspect_ui`` is itself graceful — it returns
-    ``playwright_not_installed`` when the browser binding is unavailable,
-    which the PR reviewer treats as a non-blocking skip (UI inspection is
-    advisory in this phase; the route exercise + stub-grep are the hard
-    gates).
-    """
-
-    if not route.startswith("/"):
-        return False
-    api_prefixes = ("/api/", "/v1/")
-    return not any(route.startswith(p) for p in api_prefixes)
+# Maximum agent retries on missing output, per ADR-015 §12.
+_MAX_MISSING_OUTPUT_RETRIES = 2
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +122,10 @@ async def _load_pr_diff(workspace_root: str, *, base_branch: str = "main") -> st
 def _write_pr_review_json(workspace_root: str, result: PRReviewResult) -> None:
     """Persist the verdict so the orchestrator can read it.
 
-    We write the file directly from Python because the agent-invocation seam
-    that would route this through the ``submit-pr-review`` skill isn't fully
-    wired in this phase (the simple-flow PR reviewer runs as a pure-Python
-    pipeline, not an agent prompt). The on-disk format matches the skill's
-    JSON shape exactly so a future Phase-7 swap to an LLM-author path is
-    file-format-compatible.
+    Used by the correctness-scope pipeline (pure Python). The artefact
+    scope routes the write through the ``submit-pr-review`` skill, which
+    the agent invokes during its turn; the orchestrator reads the same
+    shape afterwards via :func:`workspace_reader.read_gate_file`.
     """
 
     target = os.path.join(workspace_root, PR_REVIEW_PATH)
@@ -281,39 +153,231 @@ async def run_pr_review(
 ) -> PRReviewResult:
     """Run the self-PR-review for ``task`` against the workspace's PR diff.
 
-    ``scope`` selects the prompt / pipeline:
+    ``scope`` selects the pipeline:
 
     - ``"correctness"`` — pure-Python pipeline running the shared verify
       primitives end-to-end. Used by the simple flow as its only verify
-      gate. ✅ Implemented in this phase.
-    - ``"artefact"`` — LLM-authored review of PR hygiene, commit narrative,
-      and description coherence (no re-run of smoke; the final-review or
-      verify gate already covered correctness). 🛑 Phase 7. Raises
-      :class:`ScopeNotYetImplemented`.
-
-    The function always writes ``.auto-agent/pr_review.json`` on a normal
-    return so the orchestrator's gate-file reader finds something.
+      gate.
+    - ``"artefact"`` — LLM-authored review of PR hygiene, commit
+      narrative, and description coherence. The agent calls the
+      ``submit-pr-review`` skill, which writes
+      ``.auto-agent/pr_review.json``. The orchestrator reads it after
+      ``agent.run`` returns. Missing-output triggers 1 retry then
+      raises :class:`MissingPRReviewError`.
     """
 
     if scope == "artefact":
-        # Phase-7 placeholder: artefact-scope prompt + commit-narrative review.  # auto-agent: allow-stub
-        # Raising here is deliberate — a clearly-passing PRReviewResult would
-        # let a mis-routed call silently green-light a PR. The opt-out marker
-        # on the comment above is intentional: the no-defer grep would
-        # otherwise flag the phase-number reference; the typed exception is
-        # the actual safety net (callers know to catch it before Phase 7).
-        raise ScopeNotYetImplemented(
-            "artefact-scope PR review is not yet implemented (ADR-015 §5; lands in the next sub-phase)"
-        )
+        return await _run_artefact_review(task=task, workspace_root=workspace_root)
 
-    if scope != "correctness":
-        raise ValueError(f"unknown PR review scope: {scope!r}")
+    if scope == "correctness":
+        return await _run_correctness_review(task=task, workspace_root=workspace_root)
 
-    return await _run_correctness_review(task=task, workspace_root=workspace_root)
+    raise ValueError(f"unknown PR review scope: {scope!r}")
 
 
 # ---------------------------------------------------------------------------
-# Correctness scope implementation.
+# Artefact scope implementation (ADR-015 §5 Phase 5).
+# ---------------------------------------------------------------------------
+
+
+# Lens the agent applies. The body of the prompt enumerates the
+# artefact-scope checks from ADR-015 §5 so the LLM has a concrete rubric
+# rather than an ambient "review the PR" handwave.
+_ARTEFACT_REVIEW_PROMPT = """\
+You are reviewing an open pull request as a careful teammate would, on
+the PR artefact itself — not its correctness (the verify gate already
+covered that for complex / complex_large flows). Read:
+
+  - the PR title and description
+  - the commit narrative (titles and bodies, in order)
+  - the unified diff (below)
+  - any CI signals attached to the task
+
+Apply this rubric (ADR-015 §5):
+
+  1. Does the PR description coherently describe the change? Does it
+     mention every load-bearing decision in the diff (new flags,
+     migrations, behavioural changes)?
+  2. Do the commit titles tell a clean narrative? Are there any
+     "wip"/"fix"/"oops"-style messages that should be squashed?
+  3. Are there unrelated changes mixed in (drive-by edits in distant
+     files, accidental reformats)?
+  4. Are tests present for the added features? Missing-test PRs need a
+     comment.
+  5. If CI is failing, is there a clear path to green?
+
+Output your verdict by calling the ``submit-pr-review`` skill. The skill
+writes ``.auto-agent/pr_review.json`` with the verdict + comments. Use
+``verdict="approved"`` only when the rubric passes; otherwise
+``verdict="changes_requested"`` with one comment per item.
+
+==== Task title ====
+{task_title}
+
+==== Task description ====
+{task_description}
+
+==== PR URL ====
+{pr_url}
+
+==== Unified diff ====
+{diff}
+"""
+
+
+async def _run_artefact_review(
+    *,
+    task: Any,
+    workspace_root: str,
+) -> PRReviewResult:
+    """LLM-driven artefact-scope PR review using the ``submit-pr-review`` skill.
+
+    Two-attempt budget per ADR-015 §12 — the agent gets one retry to
+    write ``pr_review.json``; the second miss raises
+    :class:`MissingPRReviewError` so the caller can park the task.
+    """
+
+    base_branch = getattr(task, "base_branch", None) or "main"
+    diff = await _load_pr_diff(workspace_root, base_branch=base_branch)
+
+    prompt = _ARTEFACT_REVIEW_PROMPT.format(
+        task_title=getattr(task, "title", "") or "",
+        task_description=getattr(task, "description", "") or "",
+        pr_url=getattr(task, "pr_url", "") or "",
+        diff=diff,
+    )
+
+    # Clear any stale pr_review.json so we don't mis-attribute an old
+    # verdict to this run. Important when the same workspace is reused
+    # across retries.
+    pr_review_abs = os.path.join(workspace_root, PR_REVIEW_PATH)
+    if os.path.isfile(pr_review_abs):
+        os.remove(pr_review_abs)
+
+    last_output = ""
+    for attempt in range(_MAX_MISSING_OUTPUT_RETRIES):
+        agent = create_agent(
+            workspace_root,
+            readonly=True,  # artefact scope: read-only review
+            max_turns=15,
+            task_description=getattr(task, "description", None),
+            repo_name=getattr(task, "repo_name", None),
+            home_dir=await home_dir_for_task(task),
+            org_id=getattr(task, "organization_id", None),
+        )
+        attempt_prompt = prompt
+        if attempt > 0:
+            # Skills-bridge missing-output prompt amendment per ADR-015 §12.
+            attempt_prompt = (
+                "Your previous response did not write the pr_review.json file. "
+                "You MUST call the submit-pr-review skill before stopping.\n\n" + prompt
+            )
+        result = await agent.run(attempt_prompt)
+        last_output = getattr(result, "output", "") or ""
+
+        payload = read_gate_file(workspace_root, PR_REVIEW_PATH, schema_version="1")
+        if isinstance(payload, dict):
+            verdict = payload.get("verdict")
+            if verdict not in ("approved", "changes_requested"):
+                # Treat schema-shape failures as missing — retry once.
+                log.warning(
+                    "pr_review.artefact.bad_verdict",
+                    attempt=attempt,
+                    verdict=verdict,
+                )
+                continue
+            comments = payload.get("comments") or []
+            summary = payload.get("summary", "") or ""
+            return PRReviewResult(
+                verdict=verdict,
+                comments=list(comments),
+                summary=summary,
+            )
+        log.warning(
+            "pr_review.artefact.missing_output",
+            attempt=attempt,
+            output_preview=last_output[:200],
+        )
+
+    raise MissingPRReviewError(
+        f"agent did not write {PR_REVIEW_PATH} after "
+        f"{_MAX_MISSING_OUTPUT_RETRIES} attempts; last output: {last_output[:200]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Address-own-comments — exactly one coding turn (ADR-015 §5 Phase 5).
+# ---------------------------------------------------------------------------
+
+
+_ADDRESS_COMMENTS_PROMPT = """\
+Address these PR review comments by pushing fix-up commits or updating
+the PR description as appropriate. After this turn the user reviews —
+there is no second self-review pass, so make this round count.
+
+If a comment is purely about the PR description, edit the PR body (e.g.
+``gh pr edit --body ...``). If it's about the code, write or amend the
+relevant files and commit. If a comment turns out to be wrong on closer
+look, leave a reply explaining why — do not silently ignore it.
+
+Comments:
+
+{comments}
+"""
+
+
+async def address_own_comments(
+    *,
+    task: Any,
+    workspace_root: str,
+    comments: list[dict[str, Any]],
+) -> None:
+    """Run exactly ONE coding turn to address the PR-review comments.
+
+    No-op when ``comments`` is empty. The "one round bound" is enforced
+    by the structure of this function — it dispatches a single
+    ``agent.run`` call and returns. Callers that want a second round
+    must explicitly call it again, but ADR-015 §5 forbids that.
+    """
+
+    if not comments:
+        return
+
+    rendered_comments = "\n".join(
+        f"- {_render_comment(c)}" for c in comments if isinstance(c, dict)
+    )
+    prompt = _ADDRESS_COMMENTS_PROMPT.format(comments=rendered_comments)
+
+    agent = create_agent(
+        workspace_root,
+        max_turns=30,
+        task_id=getattr(task, "id", None),
+        task_description=getattr(task, "description", None),
+        repo_name=getattr(task, "repo_name", None),
+        home_dir=await home_dir_for_task(task),
+        org_id=getattr(task, "organization_id", None),
+    )
+    result = await agent.run(prompt)
+    log.info(
+        "pr_review.address_own_comments.complete",
+        comments_count=len(comments),
+        output_preview=(getattr(result, "output", "") or "")[:200],
+    )
+
+
+def _render_comment(c: dict[str, Any]) -> str:
+    path = c.get("path")
+    line = c.get("line")
+    text = c.get("comment", "")
+    if path and line is not None:
+        return f"{path}:{line} — {text}"
+    if path:
+        return f"{path} — {text}"
+    return str(text)
+
+
+# ---------------------------------------------------------------------------
+# Correctness scope implementation (Phase 4 — unchanged).
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +440,7 @@ async def _run_correctness_review(
         # -----------------------------------------------------------------
         if handle and handle.state == "running":
             for route, rr in route_results.items():
-                if not _is_ui_route(route) or not rr.ok:
+                if not is_ui_route(route) or not rr.ok:
                     continue
                 ui: UIResult = await inspect_ui(
                     route=route,

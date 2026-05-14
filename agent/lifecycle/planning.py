@@ -402,16 +402,36 @@ async def handle_planning(task_id: int, feedback: str | None = None) -> None:
         if routes:
             await set_task_affected_routes(task_id, routes)
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
-                json={
-                    "status": "awaiting_approval",
-                    "message": "Plan ready for review",
-                    "plan": output,
-                },
-            )
-            resp.raise_for_status()
+        # ADR-015 §5 Phase 5 — complex (non-large) flow writes the plan to
+        # ``.auto-agent/plan.md`` and parks at AWAITING_PLAN_APPROVAL. The
+        # UI / standin writes ``plan_approval.json`` to resume the task. The
+        # simple-flow (no plan-approval gate) keeps the legacy
+        # AWAITING_APPROVAL transition for now; complex_large is owned by
+        # the trio path and untouched by this phase.
+        if task.complexity == "complex":
+            from agent.lifecycle.plan_approval import write_plan
+            write_plan(workspace, output)
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                    json={
+                        "status": "awaiting_plan_approval",
+                        "message": "Plan ready for review (written to .auto-agent/plan.md)",
+                        "plan": output,
+                    },
+                )
+                resp.raise_for_status()
+        else:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
+                    json={
+                        "status": "awaiting_approval",
+                        "message": "Plan ready for review",
+                        "plan": output,
+                    },
+                )
+                resp.raise_for_status()
 
         await publish(task_plan_ready(task_id, plan=output))
 

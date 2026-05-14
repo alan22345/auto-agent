@@ -30,7 +30,6 @@ import pytest
 from agent.lifecycle import pr_reviewer
 from agent.lifecycle.pr_reviewer import (
     PRReviewResult,
-    ScopeNotYetImplemented,
     infer_routes_from_diff,
     run_pr_review,
 )
@@ -308,20 +307,263 @@ async def test_correctness_scope_writes_schema_versioned_pr_review(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
-# Artefact scope — deferred to Phase 7, raises typed sentinel.
+# Artefact scope — Phase 5 implementation (LLM-driven PR-as-artefact review).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_artefact_scope_raises_typed_sentinel(tmp_path: Path) -> None:
-    """The artefact scope is a known unimplemented branch — callers must
-    not invoke it from the simple-flow wiring until Phase 7."""
+async def test_artefact_scope_invokes_agent_with_submit_pr_review_skill(
+    tmp_path: Path,
+) -> None:
+    """The artefact scope runs a heavy agent whose prompt mentions the
+    ``submit-pr-review`` skill name (the seam ADR-015 §12 prescribes for
+    gated agent actions). The agent writes ``pr_review.json``; the
+    reviewer reads it and returns the result."""
 
-    with pytest.raises(ScopeNotYetImplemented):
+    workspace = tmp_path
+    captured_prompts: list[str] = []
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            captured_prompts.append(prompt)
+            # Simulate the agent invoking the submit-pr-review skill.
+            (workspace / ".auto-agent").mkdir(exist_ok=True)
+            (workspace / ".auto-agent" / "pr_review.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "verdict": "approved",
+                        "comments": [],
+                    }
+                )
+            )
+            res = AsyncMock()
+            res.output = "wrote pr_review.json"
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    assert isinstance(result, PRReviewResult)
+    assert result.verdict == "approved"
+    # The agent prompt must mention the submit-pr-review skill so CC knows
+    # which seam to use.
+    assert any("submit-pr-review" in p for p in captured_prompts), captured_prompts
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_returns_comments_when_agent_emits_them(
+    tmp_path: Path,
+) -> None:
+    """An agent-authored ``changes_requested`` verdict propagates back as
+    a non-empty ``comments`` list on the result."""
+
+    workspace = tmp_path
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            (workspace / ".auto-agent").mkdir(exist_ok=True)
+            (workspace / ".auto-agent" / "pr_review.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "verdict": "changes_requested",
+                        "comments": [
+                            {
+                                "path": "README.md",
+                                "comment": "PR description doesn't mention the feature flag",
+                            },
+                            {
+                                "comment": "Missing tests for the new endpoint",
+                            },
+                        ],
+                    }
+                )
+            )
+            res = AsyncMock()
+            res.output = "wrote pr_review.json"
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    assert result.verdict == "changes_requested"
+    assert len(result.comments) == 2
+    blob = json.dumps(result.comments)
+    assert "feature flag" in blob
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_writes_schema_versioned_pr_review(
+    tmp_path: Path,
+) -> None:
+    """The on-disk pr_review.json carries ``schema_version="1"``."""
+
+    workspace = tmp_path
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            (workspace / ".auto-agent").mkdir(exist_ok=True)
+            (workspace / ".auto-agent" / "pr_review.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "verdict": "approved",
+                        "comments": [],
+                    }
+                )
+            )
+            res = AsyncMock()
+            res.output = ""
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    payload = json.loads((workspace / ".auto-agent" / "pr_review.json").read_text())
+    assert payload["schema_version"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_retries_then_escalates_on_missing_file(
+    tmp_path: Path,
+) -> None:
+    """If the agent never writes ``pr_review.json``, the reviewer retries
+    once (skills-bridge contract) and then raises so the caller can
+    BLOCK the task."""
+
+    workspace = tmp_path
+
+    call_count = {"n": 0}
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            # Agent never writes the file — call count just tracks retries.
+            call_count["n"] += 1
+            res = AsyncMock()
+            res.output = "(agent forgot to write the file)"
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        pytest.raises(pr_reviewer.MissingPRReviewError),
+    ):
+        await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    # At least 2 attempts (the original + 1 retry) before escalation.
+    assert call_count["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Address-own-comments — one round bound.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_address_own_comments_runs_exactly_one_turn(tmp_path: Path) -> None:
+    """When the artefact-scope review returns non-empty comments, a single
+    coding turn runs with the comments as input. No second round."""
+
+    workspace = tmp_path
+    (workspace / ".auto-agent").mkdir()
+
+    class FakeAgent:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        async def run(self, prompt: str, **_kw):
+            self.calls.append(prompt)
+            res = AsyncMock()
+            res.output = "patched."
+            return res
+
+    fake = FakeAgent()
+    with (
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: fake),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        await pr_reviewer.address_own_comments(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            comments=[
+                {"comment": "Add a feature-flag note to the PR description."},
+                {"path": "tests/foo.py", "comment": "Cover the empty-list case."},
+            ],
+        )
+
+    assert len(fake.calls) == 1, "exactly one coding turn"
+    # Both comments must reach the agent.
+    assert "feature-flag" in fake.calls[0]
+    assert "empty-list" in fake.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_address_own_comments_skipped_when_empty(tmp_path: Path) -> None:
+    """No comments ⇒ no agent invocation at all."""
+
+    class FakeAgent:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, prompt: str, **_kw):
+            self.calls += 1
+            return AsyncMock(output="")
+
+    fake = FakeAgent()
+    with (
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: fake),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        await pr_reviewer.address_own_comments(
+            task=_FakeTask(),
+            workspace_root=str(tmp_path),
+            comments=[],
+        )
+
+    assert fake.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_still_raises_for_unknown_scope(
+    tmp_path: Path,
+) -> None:
+    """Unknown scopes still raise ``ValueError`` — defensive."""
+
+    with pytest.raises(ValueError):
         await run_pr_review(
             task=_FakeTask(),
             workspace_root=str(tmp_path),
-            scope="artefact",
+            scope="banana",  # type: ignore[arg-type]
         )
 
 

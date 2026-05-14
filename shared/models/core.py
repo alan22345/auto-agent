@@ -41,11 +41,13 @@ class TaskStatus(str, enum.Enum):
     QUEUED = "queued"
     PLANNING = "planning"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"  # ADR-015 §5 Phase 5 — complex-flow plan gate
     AWAITING_CLARIFICATION = "awaiting_clarification"
     CODING = "coding"
     VERIFYING = "verifying"          # freeform self-verification — runs after CODING, before PR_CREATED
     PR_CREATED = "pr_created"
     PR_REVIEW = "pr_review"          # ADR-015 §5 — self-PR-review gate (Phase 4: simple flow)
+    ADDRESSING_COMMENTS = "addressing_comments"  # ADR-015 §5 Phase 5 — one round of self-fixups
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
     DONE = "done"

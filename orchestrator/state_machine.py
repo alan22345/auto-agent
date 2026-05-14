@@ -18,9 +18,15 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },
     TaskStatus.PLANNING: {
         TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.AWAITING_PLAN_APPROVAL,  # ADR-015 §5 Phase 5 — complex-flow gate
         TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.BLOCKED_ON_QUOTA,
     },
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
+    TaskStatus.AWAITING_PLAN_APPROVAL: {                                    # ADR-015 §5 Phase 5
+        TaskStatus.CODING,   # approved
+        TaskStatus.BLOCKED,  # rejected
+        TaskStatus.PLANNING, # plan revision requested (future use)
+    },
     TaskStatus.AWAITING_CLARIFICATION: {
         TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED,
         TaskStatus.TRIO_EXECUTING,  # NEW — trio architect resume
@@ -45,6 +51,12 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.PR_REVIEW,        # ADR-015 §5 — self-PR-review gate (simple flow)
     },
     TaskStatus.PR_REVIEW: {          # ADR-015 §5 — verdict pass→DONE, fail→BLOCKED
+        TaskStatus.DONE,
+        TaskStatus.BLOCKED,
+        TaskStatus.FAILED,
+        TaskStatus.ADDRESSING_COMMENTS,  # ADR-015 §5 Phase 5 — artefact-scope comments to address
+    },
+    TaskStatus.ADDRESSING_COMMENTS: {  # ADR-015 §5 Phase 5 — single round of self-fixups
         TaskStatus.DONE,
         TaskStatus.BLOCKED,
         TaskStatus.FAILED,

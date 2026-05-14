@@ -600,13 +600,94 @@ async def _open_pr_and_advance(
         raise RuntimeError(f"gh pr create returned invalid URL: {pr_url!r}")
 
     # ADR-015 §5 — simple flow runs the PR-reviewer (correctness scope).
-    # Other complexities keep the existing handle_independent_review path
-    # until Phase 5 wires them through the same primitives.
-    if getattr(task, "complexity", None) == "simple":
+    # Complex flow (Phase 5) runs the artefact-scope PR-reviewer + one
+    # round of address-own-comments. Trio (complex_large) keeps the
+    # existing independent-review path until Phase 7.
+    complexity = getattr(task, "complexity", None)
+    is_trio_child = getattr(task, "parent_task_id", None) is not None
+    if complexity == "simple":
         await _run_simple_pr_review(task_id, task, workspace, pr_url, base_branch)
+        return
+    if complexity == "complex" and not is_trio_child:
+        await _run_complex_pr_review(task_id, task, workspace, pr_url, base_branch)
         return
 
     await review.handle_independent_review(task_id, pr_url, branch_name)
+
+
+async def _run_complex_pr_review(
+    task_id: int,
+    task,
+    workspace: str,
+    pr_url: str,
+    base_branch: str,
+) -> None:
+    """Drive the PR_CREATED → PR_REVIEW → ADDRESSING_COMMENTS → DONE walk.
+
+    ADR-015 §5 Phase 5 — complex flow self-PR-review:
+      1. Run the artefact-scope PR-reviewer (LLM authors verdict).
+      2. If verdict is ``changes_requested`` with comments, dispatch ONE
+         coding turn to address them (ADR-015 §5 "one round bound").
+      3. Transition to DONE when approved or after addressing comments.
+         On a hard failure (missing pr_review.json after retries), park
+         the task in BLOCKED.
+
+    The "one round" bound is structural: this function calls
+    ``address_own_comments`` exactly once and then transitions to DONE.
+    No loop.
+    """
+    from agent.lifecycle import pr_reviewer
+
+    await transition_task(task_id, "pr_created", f"PR created: {pr_url}")
+    await transition_task(task_id, "pr_review", "running self-PR-review (artefact scope)")
+
+    # Attach the base branch so pr_reviewer can compute the PR diff.
+    task.base_branch = base_branch
+    task.pr_url = pr_url
+    try:
+        result = await pr_reviewer.run_pr_review(
+            task=task,
+            workspace_root=workspace,
+            scope="artefact",
+        )
+    except pr_reviewer.MissingPRReviewError as e:
+        await transition_task(
+            task_id, "blocked",
+            f"self-PR-review unavailable (skill-bridge escalation): {e}"[:1500],
+        )
+        return
+
+    comments = list(result.comments or [])
+    if result.verdict == "approved" or not comments:
+        await transition_task(
+            task_id, "done",
+            f"self-PR-review approved: {result.summary[:300]}",
+        )
+        return
+
+    # changes_requested + non-empty comments ⇒ one address-own-comments turn.
+    await transition_task(
+        task_id, "addressing_comments",
+        f"PR-review surfaced {len(comments)} comment(s); addressing in one round",
+    )
+    try:
+        await pr_reviewer.address_own_comments(
+            task=task,
+            workspace_root=workspace,
+            comments=comments,
+        )
+    except Exception as e:
+        log.exception(f"Task #{task_id}: address_own_comments raised")
+        await transition_task(
+            task_id, "blocked",
+            f"address_own_comments failed: {e}"[:1500],
+        )
+        return
+
+    await transition_task(
+        task_id, "done",
+        "self-PR-review comments addressed; awaiting user review",
+    )
 
 
 async def _run_simple_pr_review(
