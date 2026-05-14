@@ -77,6 +77,13 @@ _MIN_DESCRIPTION_WORDS = 80
 # ---------------------------------------------------------------------------
 
 
+# Phase 9 (ADR-015 §8) extends the original set with the variants
+# adversarial agents emit to dodge the obvious ``# Phase N`` form:
+# the hyphen variant (``# Phase-N``), the lowercase variant
+# (``# phase N`` / ``# phase-N``), and the colon-suffixed variant
+# (``# Phase N:`` / ``# Phase-N:``). All variants are folded into a
+# single combined regex (``# Phase\s*-?\s*\d+\s*:?``) — case-insensitive,
+# matching the verify_primitives.grep_diff_for_stubs pattern set.
 _NO_DEFER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "raise NotImplementedError",
@@ -87,16 +94,12 @@ _NO_DEFER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"#\s*TODO\(\s*phase\b", re.IGNORECASE),
     ),
     (
-        "# Phase-N (hyphen variant)",
-        re.compile(r"#\s*Phase\s*-\s*\d+", re.IGNORECASE),
-    ),
-    (
         "# Phase N",
-        re.compile(r"#\s*Phase\s+\d+", re.IGNORECASE),
+        re.compile(r"#\s*Phase\s*-?\s*\d+\s*:?", re.IGNORECASE),
     ),
     (
         "Phase 1",
-        re.compile(r"\bPhase\s+\d+\b", re.IGNORECASE),
+        re.compile(r"\bPhase\s*-?\s*\d+\b", re.IGNORECASE),
     ),
     (
         "v2 ships",

@@ -252,6 +252,46 @@ def test_for_now_this_is_a_stub_in_title_rejected() -> None:
     assert any(r.field == "title" for r in result.rejections)
 
 
+def test_lowercase_phase_variant_in_description_rejected() -> None:
+    """``# phase 2`` (lowercase) must be flagged identically to ``# Phase 2``."""
+
+    from agent.lifecycle.trio.validators import validate_backlog
+
+    desc = " ".join(["word"] * 80) + " leave a # phase 2 marker"
+    item = _good_item(description=desc)
+    result = validate_backlog([item])
+
+    assert not result.ok
+    assert any(r.field == "description" for r in result.rejections)
+
+
+def test_lowercase_phase_hyphen_variant_in_description_rejected() -> None:
+    """``# phase-3`` (lowercase hyphen) must be flagged."""
+
+    from agent.lifecycle.trio.validators import validate_backlog
+
+    desc = " ".join(["word"] * 80) + " add # phase-3 marker"
+    item = _good_item(description=desc)
+    result = validate_backlog([item])
+
+    assert not result.ok
+    assert any(r.field == "description" for r in result.rejections)
+
+
+def test_phase_colon_variant_in_description_rejected() -> None:
+    """``# Phase 2:`` (colon suffix) and ``# Phase-2:`` must be flagged."""
+
+    from agent.lifecycle.trio.validators import validate_backlog
+
+    desc_colon = " ".join(["word"] * 80) + " # Phase 2: implement later"
+    desc_hyphen_colon = " ".join(["word"] * 80) + " # Phase-2: follow-up"
+
+    for desc in (desc_colon, desc_hyphen_colon):
+        result = validate_backlog([_good_item(description=desc)])
+        assert not result.ok, f"expected reject for {desc!r}"
+        assert any(r.field == "description" for r in result.rejections)
+
+
 def test_allow_stub_optout_does_not_exempt_backlog_text() -> None:
     """``# auto-agent: allow-stub`` is a code-line opt-out only.
 

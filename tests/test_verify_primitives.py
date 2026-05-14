@@ -464,6 +464,49 @@ def test_grep_handles_multi_file_diff():
     assert len(real) == 2
 
 
+def test_grep_catches_phase_hyphen_variant():
+    """The hyphen variant ``# Phase-N`` must be caught — Phase 4 evasion lesson.
+
+    Adversarial agents may emit ``# Phase-2`` to dodge the original
+    ``# Phase 2`` regex; the hyphen variant must be flagged identically.
+    """
+    from agent.lifecycle.verify_primitives import grep_diff_for_stubs
+
+    diff_hyphen = _make_diff("src/a.py", ["    # Phase-2 fills this in"])
+    diff_hyphen_no_space = _make_diff("src/b.py", ["    # Phase-1"])
+
+    for d in (diff_hyphen, diff_hyphen_no_space):
+        r = grep_diff_for_stubs(d)
+        real = [v for v in r.violations if not v.allowed_via_optout]
+        assert len(real) == 1, f"expected 1 violation in {d!r}, got {r.violations!r}"
+
+
+def test_grep_catches_lowercase_phase_variant():
+    """``# phase N`` lowercase must be caught — case-insensitive sweep."""
+    from agent.lifecycle.verify_primitives import grep_diff_for_stubs
+
+    diff_lower = _make_diff("src/a.py", ["    # phase 2: implement later"])
+    diff_lower_hyphen = _make_diff("src/b.py", ["    # phase-3 follow-up"])
+
+    for d in (diff_lower, diff_lower_hyphen):
+        r = grep_diff_for_stubs(d)
+        real = [v for v in r.violations if not v.allowed_via_optout]
+        assert len(real) == 1, f"expected 1 violation in {d!r}, got {r.violations!r}"
+
+
+def test_grep_catches_phase_colon_variants():
+    """``# Phase N:`` and ``# Phase-N:`` (colon suffix) must be caught."""
+    from agent.lifecycle.verify_primitives import grep_diff_for_stubs
+
+    diff_colon = _make_diff("src/a.py", ["    # Phase 2: real impl coming"])
+    diff_colon_hyphen = _make_diff("src/b.py", ["    # Phase-2: real impl coming"])
+
+    for d in (diff_colon, diff_colon_hyphen):
+        r = grep_diff_for_stubs(d)
+        real = [v for v in r.violations if not v.allowed_via_optout]
+        assert len(real) == 1, f"expected 1 violation in {d!r}, got {r.violations!r}"
+
+
 def test_grep_ignores_plus_plus_plus_header():
     """The ``+++ b/path`` line is a diff header, not an added code line."""
     from agent.lifecycle.verify_primitives import grep_diff_for_stubs

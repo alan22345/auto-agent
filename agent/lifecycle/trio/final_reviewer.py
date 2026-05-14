@@ -241,6 +241,18 @@ builder/review loop has finished; every item shipped with a passing
 heavy-review. Your job: look at the whole change end-to-end and decide
 whether the original design's goals are met or whether gaps remain.
 
+**No-defer rule (Rules — ADR-015 §8):**
+
+> Treat any `raise NotImplementedError`, `# TODO(phase`, `# Phase 1` /
+> `# Phase-1` / `# Phase 1:` (or any variant), 'Phase 1 fills this in',
+> `# v2 will`, `# in a future PR`, 'will be implemented later', 'for
+> now this is a stub', or equivalent in the integrated diff as a GAP.
+> Emit a `gaps_found` verdict so the architect closes them in the next
+> round — never approve a run with deferred work. If a stub is genuinely
+> warranted (e.g. an abstract base-class method), it must carry
+> `# auto-agent: allow-stub` and explain why; in that case it is not a
+> gap.
+
 Workspace context attached below:
   - The architect's design doc (the single approval artefact).
   - Every per-item review verdict.

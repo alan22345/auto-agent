@@ -586,3 +586,105 @@ def test_grep_diff_for_stubs_is_what_the_reviewer_calls() -> None:
     assert any(
         isinstance(v, Violation) and "NotImplementedError" in v.pattern for v in result.violations
     )
+
+
+# ---------------------------------------------------------------------------
+# Artefact scope — Phase 9 grep backstop. The artefact scope must short-
+# circuit to verdict=changes_requested BEFORE the LLM call when the diff
+# carries no-defer stubs; allow-stub-only diffs proceed to the LLM but
+# get surfaced in the PR description.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_short_circuits_on_stub_diff(tmp_path: Path) -> None:
+    """A diff with ``raise NotImplementedError`` must fail at the artefact
+    gate BEFORE any LLM agent is invoked. Layer 4 of the no-defer stack."""
+
+    workspace = tmp_path
+    agent_calls = {"n": 0}
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            agent_calls["n"] += 1
+            res = AsyncMock()
+            res.output = ""
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_WITH_STUB)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    assert result.verdict == "changes_requested"
+    # The LLM was never asked — the grep backstop fired first.
+    assert agent_calls["n"] == 0, "LLM must not be called when diff has stubs"
+    # The pr_review.json file was written by the Python backstop.
+    pr_review_path = workspace / ".auto-agent" / "pr_review.json"
+    assert pr_review_path.is_file()
+    payload = json.loads(pr_review_path.read_text())
+    assert payload["verdict"] == "changes_requested"
+    # The violation must surface in the comments so the human can see it.
+    blob = json.dumps(result.comments)
+    assert "NotImplementedError" in blob or "no-defer" in blob.lower()
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_allow_stub_diff_proceeds_to_llm(tmp_path: Path) -> None:
+    """A diff whose only stub is opted out via ``# auto-agent: allow-stub``
+    must NOT short-circuit. The LLM still runs (the artefact gate is for
+    PR hygiene); the allow-stub locations are recorded for surfacing.
+    """
+
+    workspace = tmp_path
+    optout_diff = textwrap.dedent(
+        """\
+        diff --git a/api/routes.py b/api/routes.py
+        --- a/api/routes.py
+        +++ b/api/routes.py
+        @@ -1,3 +1,5 @@
+         from fastapi import APIRouter
+         router = APIRouter()
+        +
+        +    raise NotImplementedError  # auto-agent: allow-stub
+        """
+    )
+    agent_calls = {"n": 0}
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            agent_calls["n"] += 1
+            (workspace / ".auto-agent").mkdir(exist_ok=True)
+            (workspace / ".auto-agent" / "pr_review.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "verdict": "approved",
+                        "comments": [],
+                    }
+                )
+            )
+            res = AsyncMock()
+            res.output = "ok"
+            return res
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=optout_diff)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    # The LLM ran because no blocking stub fired.
+    assert agent_calls["n"] >= 1
+    assert result.verdict == "approved"

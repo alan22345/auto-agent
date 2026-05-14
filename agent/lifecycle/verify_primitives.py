@@ -122,6 +122,20 @@ class StubResult:
     violations: list[Violation] = field(default_factory=list)
 
 
+@dataclass
+class AllowStubOptout:
+    """One ``# auto-agent: allow-stub`` annotation in the PR diff.
+
+    Surfaced in the PR description so a human reviewer (or improvement-
+    agent standin) sees the intentional opt-outs at review time —
+    ADR-015 §8.
+    """
+
+    file: str
+    line: int
+    snippet: str
+
+
 # Route alias — kept as a plain str for now (ADR §11: "Route is a string
 # (path) for now; future may extend").
 Route = str
@@ -561,11 +575,23 @@ async def inspect_ui(
 # The regex is matched against the added-line content (after the leading
 # ``+`` is stripped). Ordering is by specificity — more concrete patterns
 # first, broader backlog-text phrases last.
+#
+# Phase 9 (ADR-015 §8) extends the original set with the variants
+# adversarial agents emit to dodge the obvious ``# Phase N`` form:
+# the hyphen variant (``# Phase-N``), the lowercase variant
+# (``# phase N`` / ``# phase-N``), and the colon-suffixed variant
+# (``# Phase N:`` / ``# Phase-N:``). Hyphen and colon variants are
+# folded into the same regex (``\s*-?\s*\d+\s*:?``) so each maps to one
+# pattern label.
 _STUB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("raise NotImplementedError", re.compile(r"\braise\s+NotImplementedError\b")),
     ("# TODO(phase", re.compile(r"#\s*TODO\(\s*phase\b", re.IGNORECASE)),
     ("pass  # placeholder", re.compile(r"\bpass\b\s\s#\s*placeholder\b", re.IGNORECASE)),
-    ("# Phase N", re.compile(r"#\s*Phase\s+\d", re.IGNORECASE)),
+    # Combined Phase pattern — covers ``# Phase 1``, ``# Phase-1``,
+    # ``# phase 1``, ``# phase-1``, ``# Phase 1:``, ``# Phase-1:`` (and
+    # their lowercase versions). The optional hyphen + optional colon
+    # suffix make this one regex match every variant.
+    ("# Phase N", re.compile(r"#\s*Phase\s*-?\s*\d+\s*:?", re.IGNORECASE)),
     ("# v2 will", re.compile(r"#\s*v2\s+will\b", re.IGNORECASE)),
     ("# in a future PR", re.compile(r"#\s*in\s+a\s+future\s+PR\b", re.IGNORECASE)),
     ("Phase 1", re.compile(r"\bPhase\s+1\b")),
@@ -668,3 +694,107 @@ def grep_diff_for_stubs(diff: str) -> StubResult:
             new_line_no += 1
 
     return StubResult(violations=violations)
+
+
+# ---------------------------------------------------------------------------
+# Public: allow-stub surfacing helpers (ADR-015 §8)
+# ---------------------------------------------------------------------------
+
+
+def collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
+    """Walk a unified diff and return every ``# auto-agent: allow-stub`` line.
+
+    Used by the PR-creation path to surface intentional stubs in the PR
+    description, and by the PR-reviewer artefact scope to decide whether
+    a stub-grep hit should block (no opt-out) or surface only (opt-out).
+
+    The path-exclusion rules (tests/markdown) DO NOT apply here — an
+    allow-stub annotation on a markdown line is still an explicit
+    opt-out the human should see in the PR body.
+    """
+
+    optouts: list[AllowStubOptout] = []
+    current_file: str | None = None
+    new_line_no: int = 0
+    in_hunk = False
+
+    for raw in (diff or "").splitlines():
+        if raw.startswith("+++ "):
+            rest = raw[4:].strip()
+            if rest.startswith("b/"):
+                current_file = rest[2:]
+            elif rest == "/dev/null":
+                current_file = None
+            else:
+                current_file = rest
+            in_hunk = False
+            continue
+        if raw.startswith("--- "):
+            in_hunk = False
+            continue
+        if _HUNK_HEADER_RE.match(raw):
+            m = re.search(r"\+(\d+)(?:,\d+)?\s", raw)
+            new_line_no = int(m.group(1)) if m else 1
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            line_content = raw[1:]
+            if line_content.rstrip().endswith(_OPTOUT_SUFFIX):
+                optouts.append(
+                    AllowStubOptout(
+                        file=current_file or "<unknown>",
+                        line=new_line_no,
+                        snippet=line_content.rstrip("\n"),
+                    )
+                )
+            new_line_no += 1
+        elif raw.startswith("-"):
+            continue
+        else:
+            new_line_no += 1
+    return optouts
+
+
+_ALLOW_STUB_SECTION_HEADER = "## Allow-stub opt-outs in this PR"
+
+
+def format_allow_stub_section(optouts: list[AllowStubOptout]) -> str:
+    """Render the markdown section appended to PR bodies — ADR-015 §8.
+
+    Empty list → empty string (PRs without allow-stub get no section).
+    Each opt-out becomes one bullet ``- <file>:<line> — <snippet>``.
+    """
+
+    if not optouts:
+        return ""
+    lines = [
+        _ALLOW_STUB_SECTION_HEADER,
+        "",
+        (
+            "These lines were stubbed intentionally with an explicit opt-out "
+            "from the no-defer enforcement (ADR-015 §8). A human (or the "
+            "improvement-agent standin) should confirm each is justified."
+        ),
+        "",
+    ]
+    for o in optouts:
+        snippet = o.snippet.strip()
+        lines.append(f"- `{o.file}:{o.line}` — `{snippet}`")
+    return "\n".join(lines)
+
+
+def augment_pr_body_with_optouts(body: str, diff: str) -> str:
+    """Append the allow-stub section to ``body`` when ``diff`` carries any.
+
+    A no-op when the diff has zero opt-outs — keeps the PR body identical
+    so clean PRs don't gain a noisy empty section.
+    """
+
+    optouts = collect_allow_stub_optouts(diff)
+    section = format_allow_stub_section(optouts)
+    if not section:
+        return body
+    suffix = "\n\n" + section if not body.endswith("\n") else "\n" + section
+    return body + suffix

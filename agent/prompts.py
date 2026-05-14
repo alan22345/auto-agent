@@ -169,6 +169,20 @@ Description: {description}
 _CRITICAL_RULES = """\
 ## Critical rules
 
+### No-defer (Rules — ADR-015 §8)
+- Never produce deferred work. Never emit `raise NotImplementedError`, \
+`# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any variant \
+including hyphen and colon suffixes; lowercase too), 'Phase 1 fills this in', \
+`# v2 will`, `# in a future PR`, 'will be implemented later', 'for now this is \
+a stub', or any equivalent in code, comments, commit messages, or PR \
+descriptions. A backstop grep blocks PRs that contain these patterns.
+- If the work is too big for one cycle, push back on the spec or split it; \
+never defer.
+- If a stub is genuinely warranted (e.g. an abstract base-class method), \
+annotate the line with `# auto-agent: allow-stub` and explain in the \
+surrounding comment why the stub is acceptable. The opt-out surfaces in the \
+PR description so a human reviewer sees it.
+
 ### Root-cause analysis (MANDATORY for bug fixes)
 - If this is a bug fix, you MUST identify and fix the ROOT CAUSE, not just the symptom.
 - Trace the bug back to where the incorrect behavior originates.
@@ -240,6 +254,13 @@ Number sequentially (check existing files). Skip ADRs for trivial changes \
 REVIEW_PROMPT = """\
 ## Review checklist
 
+### No-defer (Rules — ADR-015 §8)
+0. **No deferred work**: REJECT and fix if the diff contains `raise NotImplementedError`, \
+`# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any variant — hyphen, colon, \
+lowercase), 'Phase 1 fills this in', `# v2 will`, `# in a future PR`, 'will be implemented \
+later', 'for now this is a stub', or any equivalent. If a stub is genuinely warranted \
+(e.g. abstract base-class method), it must carry `# auto-agent: allow-stub` and explain why.
+
 ### Correctness & root cause
 1. **Root cause**: If this is a bug fix, does it fix the root cause or just mask the symptom?
 2. **Correctness**: Does the logic handle all edge cases? Off-by-one, null/empty, concurrency?
@@ -284,6 +305,14 @@ Base branch: {base_branch}
 1. Run `git diff {base_branch}..HEAD` to see all changes.
 2. Read every changed file carefully.
 3. Review against this checklist:
+
+### No-defer (Rules — ADR-015 §8)
+   - Reject any `raise NotImplementedError`, `# TODO(phase`, `# Phase 1` / \
+`# Phase-1` / `# Phase 1:` (or any variant — hyphen, colon, lowercase), \
+'Phase 1 fills this in', `# v2 will`, `# in a future PR`, 'will be \
+implemented later', 'for now this is a stub', or equivalent in the diff. \
+If a stub is genuinely warranted (abstract base-class method), it must \
+carry `# auto-agent: allow-stub` and explain why.
 
 ### Correctness
    - Does the logic handle edge cases? Off-by-one? Null/empty? Race conditions?
@@ -548,10 +577,7 @@ def _grill_history(intake_qa: list[dict] | None) -> str:
     """
     if not intake_qa:
         return "(no questions asked yet)"
-    visible = [
-        qa for qa in intake_qa
-        if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL
-    ]
+    visible = [qa for qa in intake_qa if qa.get("question") != GRILL_DONE_QUESTION_SENTINEL]
     if not visible:
         return "(no questions asked yet)"
     lines = []
@@ -771,10 +797,11 @@ def build_pr_independent_review_prompt_with_ui_check(
     if not server_url or not affected_routes:
         return base + _UI_CHECK_PROMPT_SUFFIX_CODE_ONLY
     route_lines = "\n".join(
-        f"- {r.get('method', 'GET')} {r['path']} ({r.get('label', '')})"
-        for r in affected_routes
+        f"- {r.get('method', 'GET')} {r['path']} ({r.get('label', '')})" for r in affected_routes
     )
-    return base + f"""
+    return (
+        base
+        + f"""
 
 ## UI check (required)
 
@@ -799,21 +826,18 @@ If the code looks bad, set ``code_review.verdict`` to "NOT-OK". If a route does
 not render correctly, set ``ui_check.verdict`` to "NOT-OK". Both must be "OK"
 to ship.
 """
+    )
 
 
 def build_pr_review_response_prompt(title: str, description: str, comments: str) -> str:
-    return PR_REVIEW_RESPONSE_PROMPT.format(
-        title=title, description=description, comments=comments
-    )
+    return PR_REVIEW_RESPONSE_PROMPT.format(title=title, description=description, comments=comments)
 
 
 def build_repo_name_prompt(description: str) -> str:
     return REPO_NAME_PROMPT.format(description=description)
 
 
-def build_plan_independent_review_prompt(
-    title: str, description: str, plan: str
-) -> str:
+def build_plan_independent_review_prompt(title: str, description: str, plan: str) -> str:
     return PLAN_INDEPENDENT_REVIEW_PROMPT.format(
         title=title,
         description=description,
@@ -856,22 +880,28 @@ def build_po_analysis_prompt(
 
     competitors = _bullet_list(
         brief.competitors or [],
-        lambda c: f"- **{c.get('name','?')}** ({c.get('url','')}) — {c.get('why_relevant','')}",
+        lambda c: f"- **{c.get('name', '?')}** ({c.get('url', '')}) — {c.get('why_relevant', '')}",
     )
     findings = _bullet_list(
         brief.findings or [],
-        lambda f: f"- **{f.get('theme','?')}**: {f.get('observation','')}  "
-                  f"[sources: {', '.join(f.get('sources', []))}]",
+        lambda f: (
+            f"- **{f.get('theme', '?')}**: {f.get('observation', '')}  "
+            f"[sources: {', '.join(f.get('sources', []))}]"
+        ),
     )
     modality_gaps = _bullet_list(
         brief.modality_gaps or [],
-        lambda m: f"- **{m.get('modality','?')}**: {m.get('opportunity','')}  "
-                  f"[sources: {', '.join(m.get('sources', []))}]",
+        lambda m: (
+            f"- **{m.get('modality', '?')}**: {m.get('opportunity', '')}  "
+            f"[sources: {', '.join(m.get('sources', []))}]"
+        ),
     )
     strategic_themes = _bullet_list(
         brief.strategic_themes or [],
-        lambda t: f"- **{t.get('theme','?')}**: {t.get('why_now','')}  "
-                  f"[sources: {', '.join(t.get('sources', []))}]",
+        lambda t: (
+            f"- **{t.get('theme', '?')}**: {t.get('why_now', '')}  "
+            f"[sources: {', '.join(t.get('sources', []))}]"
+        ),
     )
 
     return PO_ANALYSIS_PROMPT.format(
@@ -1018,7 +1048,10 @@ you used browse_url, mention what you observed.
 
 
 def augment_coding_prompt_with_server(
-    base_prompt: str, *, port: int | None, affected_routes: list[dict],
+    base_prompt: str,
+    *,
+    port: int | None,
+    affected_routes: list[dict],
 ) -> str:
     """Append a dev-server block to the coding prompt when a server is running.
 
@@ -1028,8 +1061,7 @@ def augment_coding_prompt_with_server(
     if not port or not affected_routes:
         return base_prompt
     route_lines = "\n".join(
-        f"- {r.get('method', 'GET')} {r['path']}  ({r.get('label', '')})"
-        for r in affected_routes
+        f"- {r.get('method', 'GET')} {r['path']}  ({r.get('label', '')})" for r in affected_routes
     )
     block = f"""
 

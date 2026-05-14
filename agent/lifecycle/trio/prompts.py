@@ -1,4 +1,5 @@
 """Prompt templates for the trio agents."""
+
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
@@ -39,14 +40,19 @@ this in the next turn):**
 > instead. There is no item count cap — auto-agent must handle large
 > backlogs.
 
-**No-defer rule (a load-bearing project invariant):**
+**No-defer rule (a load-bearing project invariant — ADR-015 §8):**
 
 > Never produce deferred work. Never emit `raise NotImplementedError`,
-> `# TODO(phase`, `Phase 1 fills this in`, `v2 ships`,
-> `will be implemented later`, or any equivalent — neither in code nor
-> in backlog item text. If the work is too big for one item, split into
-> more items. If genuinely huge, emit `spawn_sub_architects` in the
-> decision turn.
+> `# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any
+> variant — the validator's regex is case-insensitive and catches hyphen
+> and colon suffixes too), 'Phase 1 fills this in', `# v2 will`,
+> `# in a future PR`, 'will be implemented later', 'for now this is a
+> stub', or any equivalent — neither in code nor in backlog item text
+> nor in this design doc. If the work is too big for one item, split
+> into more items. If genuinely huge, emit `spawn_sub_architects` in
+> the decision turn. If a stub is genuinely warranted (e.g. an abstract
+> base-class method), annotate the line with `# auto-agent: allow-stub`
+> and explain why in the surrounding comment.
 
 The design is what humans approve. Make it specific enough that an
 approver can say "yes, build this" without needing to also re-design.
@@ -79,14 +85,19 @@ Every backlog item MUST have:
 > via the `submit-architect-decision` skill instead. There is no item
 > count cap — auto-agent must handle large backlogs.
 
-**No-defer rule:**
+**No-defer rule (ADR-015 §8):**
 
 > Never produce deferred work. Never emit `raise NotImplementedError`,
-> `# TODO(phase`, `Phase 1 fills this in`, `v2 ships`,
-> `will be implemented later`, or any equivalent — neither in code nor
-> in backlog item text. The text validator runs the same regex on the
-> backlog item fields as the code-side stub grep. Forbidden phrases in
-> the description / title / justification fail the run.
+> `# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any
+> variant — the validator's regex is case-insensitive and catches hyphen
+> and colon suffixes too), 'Phase 1 fills this in', `# v2 will`,
+> `# in a future PR`, 'will be implemented later', 'for now this is a
+> stub', or any equivalent — neither in code nor in backlog item text.
+> The text validator runs the same regex on the backlog item fields as
+> the code-side stub grep. Forbidden phrases in the description / title
+> / justification fail the run. If a stub is genuinely warranted (e.g.
+> an abstract base-class method), annotate the line with
+> `# auto-agent: allow-stub` and explain why in the surrounding comment.
 
 The design doc you wrote in the prior turn is pinned in the system
 prompt above — re-read it, slice it into ≥5-point items, and call
@@ -109,6 +120,18 @@ You are the architect for a complex task. Your job:
    ADR. Examples: stack choice, data model decisions, ambiguous requirements.
 5. For product/UX-shaped tasks, call `request_market_brief` BEFORE picking
    the stack to ground decisions in the market shape.
+
+**No-defer rule (Rules — ADR-015 §8):**
+
+> Never produce deferred work. Never emit `raise NotImplementedError`,
+> `# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any
+> variant), 'Phase 1 fills this in', `# v2 will`, `# in a future PR`,
+> 'will be implemented later', 'for now this is a stub', or any
+> equivalent in code, backlog item text, ARCHITECTURE.md, or ADRs. If
+> the work is too big for one item, split into more items. If a stub is
+> genuinely warranted (e.g. an abstract base-class method), annotate the
+> line with `# auto-agent: allow-stub` and explain why in the
+> surrounding comment.
 
 You have a Product Owner you can consult when a product-shaped decision
 genuinely blocks the design. Use this only when (a) the answer materially
@@ -182,6 +205,17 @@ REJECT alignment failures like:
 - Diff implements the wrong feature or misses the stated requirement
 - Diff contradicts ARCHITECTURE.md's file layout / data model intent
 
+**No-defer rule (Rules — ADR-015 §8):**
+
+> Never approve deferred work. REJECT if the diff contains
+> `raise NotImplementedError`, `# TODO(phase`, `# Phase 1` / `# Phase-1`
+> / `# Phase 1:` (or any variant), 'Phase 1 fills this in', `# v2 will`,
+> `# in a future PR`, 'will be implemented later', 'for now this is a
+> stub', or any equivalent in code or in comments. If a stub is
+> genuinely warranted (e.g. an abstract base-class method), the line
+> must carry `# auto-agent: allow-stub` and the surrounding comment must
+> explain why — only then is it acceptable.
+
 **Your output:**
 
 Plain prose. End your message with an explicit verdict:
@@ -213,6 +247,18 @@ Decide:
 If you were re-entered because of a CI failure on the integration PR (the
 prompt will tell you), diagnose the failure and call `submit_backlog` with
 fix work items, then `submit_checkpoint_decision` with `action="revise"`.
+
+**No-defer rule (Rules — ADR-015 §8):**
+
+> Never produce deferred work. Never emit `raise NotImplementedError`,
+> `# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any
+> variant), 'Phase 1 fills this in', `# v2 will`, `# in a future PR`,
+> 'will be implemented later', 'for now this is a stub', or any
+> equivalent in code, backlog item text, ARCHITECTURE.md, or ADRs. If
+> the integration shipped with a stub reachable from a route, treat that
+> as a CI failure and emit fix items with `action="revise"`. If a stub
+> is genuinely warranted (e.g. an abstract base-class method), the line
+> must carry `# auto-agent: allow-stub` and explain why.
 
 **Your output:**
 

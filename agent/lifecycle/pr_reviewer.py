@@ -206,6 +206,20 @@ Apply this rubric (ADR-015 §5):
      comment.
   5. If CI is failing, is there a clear path to green?
 
+**No-defer rule (Rules — ADR-015 §8):**
+
+> Never approve a PR that contains `raise NotImplementedError`,
+> `# TODO(phase`, `# Phase 1` / `# Phase-1` / `# Phase 1:` (or any
+> variant), 'Phase 1 fills this in', `# v2 will`, `# in a future PR`,
+> 'will be implemented later', 'for now this is a stub', or any
+> equivalent in code or in PR-description text. A backstop Python grep
+> already short-circuits the LLM-driven review when blocking stubs are
+> present, but you must apply the same rule to anything that slipped
+> past — including PR-description language and commit messages. If a
+> stub is genuinely warranted (e.g. an abstract base-class method), it
+> must carry `# auto-agent: allow-stub` and explain why; only then is
+> it acceptable.
+
 Output your verdict by calling the ``submit-pr-review`` skill. The skill
 writes ``.auto-agent/pr_review.json`` with the verdict + comments. Use
 ``verdict="approved"`` only when the rubric passes; otherwise
@@ -235,10 +249,48 @@ async def _run_artefact_review(
     Two-attempt budget per ADR-015 §12 — the agent gets one retry to
     write ``pr_review.json``; the second miss raises
     :class:`MissingPRReviewError` so the caller can park the task.
+
+    Layer-4 backstop (ADR-015 §8): BEFORE the LLM call, grep the diff
+    for no-defer stubs. If any blocking violation (no allow-stub
+    opt-out) is found, short-circuit to ``verdict=changes_requested``
+    without invoking the LLM — the artefact gate is for hygiene; if the
+    diff has stubs that's a correctness failure that the LLM-author
+    doesn't need to weigh in on.
     """
 
     base_branch = getattr(task, "base_branch", None) or "main"
     diff = await _load_pr_diff(workspace_root, base_branch=base_branch)
+
+    # Layer-4 grep backstop — runs before the LLM call.
+    stub_result: StubResult = grep_diff_for_stubs(diff)
+    blocking_stubs = [v for v in stub_result.violations if not v.allowed_via_optout]
+    if blocking_stubs:
+        comments: list[dict[str, Any]] = [
+            {
+                "path": v.file,
+                "line": v.line,
+                "comment": (
+                    f"No-defer violation: '{v.pattern}' found — {v.snippet.strip()}. "
+                    f"This is the artefact-scope PR-review backstop (ADR-015 §8 layer 4); "
+                    f"add '# auto-agent: allow-stub' on the line if intentional."
+                ),
+            }
+            for v in blocking_stubs
+        ]
+        result = PRReviewResult(
+            verdict="changes_requested",
+            comments=comments,
+            summary=(
+                f"artefact backstop: {len(blocking_stubs)} no-defer stub(s) "
+                f"in diff; LLM review skipped."
+            ),
+        )
+        _write_pr_review_json(workspace_root, result)
+        log.info(
+            "pr_review.artefact.stub_backstop_triggered",
+            count=len(blocking_stubs),
+        )
+        return result
 
     prompt = _ARTEFACT_REVIEW_PROMPT.format(
         task_title=getattr(task, "title", "") or "",
