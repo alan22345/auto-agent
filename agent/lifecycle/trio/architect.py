@@ -534,10 +534,15 @@ async def _load_parent_for_run(parent_task_id: int) -> dict:
 async def _persist_architect_session(
     *,
     parent_task_id: int,
-    agent,  # AgentLoop
+    result,  # AgentResult from agent.run()
     workspace,
 ) -> str:
-    """Save the AgentLoop session to disk so the next phase can resume.
+    """Save the AgentResult's message history to disk so the next phase can resume.
+
+    ``AgentLoop`` does not stash ``messages`` on ``self`` — the message
+    history lives on the ``AgentResult`` returned by ``run()``. Passing
+    the agent itself (the Phase 6 shape) raised ``AttributeError`` in
+    production and silently parked tasks in ``TRIO_EXECUTING``.
 
     Returns the relative path (under the workspace root) that
     ``ArchitectAttempt.session_blob_path`` should record.
@@ -547,7 +552,9 @@ async def _persist_architect_session(
     session_id = f"trio-{parent_task_id}"
     storage_dir = workspace.root if hasattr(workspace, "root") else str(workspace)
     file_session = Session(session_id=session_id, storage_dir=storage_dir)
-    await file_session.save(agent.messages, agent.api_messages)
+    messages = getattr(result, "messages", []) or []
+    api_messages = getattr(result, "api_messages", []) or []
+    await file_session.save(messages, api_messages)
     return f"{session_id}.json"
 
 
@@ -603,7 +610,7 @@ async def run_design(parent_task_id: int) -> None:
     )
     session_blob_path = await _persist_architect_session(
         parent_task_id=parent_task_id,
-        agent=agent,
+        result=run_result,
         workspace=workspace,
     )
 
