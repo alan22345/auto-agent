@@ -37,7 +37,7 @@ import structlog
 
 from agent import sh
 from agent.lifecycle._naming import _fresh_session_id
-from agent.lifecycle.factory import create_agent, home_dir_for_task
+from agent.lifecycle.factory import create_agent
 from agent.lifecycle.trio.reviewer import _extract_verdict
 
 log = structlog.get_logger()

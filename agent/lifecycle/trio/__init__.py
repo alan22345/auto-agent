@@ -16,7 +16,7 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
-from agent.lifecycle.trio import architect, scheduler
+from agent.lifecycle.trio import architect, dispatcher
 from orchestrator.state_machine import transition
 from shared.database import async_session
 from shared.models import Task, TaskStatus, TrioPhase
@@ -118,6 +118,86 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
     return (create_res.stdout or "").strip()
 
 
+async def _block_parent(parent_id: int, message: str) -> None:
+    """Transition parent to BLOCKED and clear trio_phase. Helper used by
+    every terminal failure path in ``run_trio_parent``."""
+    async with async_session() as s:
+        p = (
+            await s.execute(select(Task).where(Task.id == parent_id))
+        ).scalar_one()
+        await transition(s, p, TaskStatus.BLOCKED, message=message)
+        p.trio_phase = None
+        await s.commit()
+
+
+async def _mark_item_done(parent_id: int, item_id: str, head_sha: str | None) -> None:
+    """Set an item's status to 'done' in tasks.trio_backlog. JSONB requires a
+    fresh list reference for SQLAlchemy to mark the column dirty."""
+    async with async_session() as s:
+        p = (
+            await s.execute(select(Task).where(Task.id == parent_id))
+        ).scalar_one()
+        backlog = list(p.trio_backlog or [])
+        for i, item in enumerate(backlog):
+            if item.get("id") == item_id:
+                new_item = dict(item)
+                new_item["status"] = "done"
+                if head_sha:
+                    new_item["head_sha"] = head_sha
+                backlog[i] = new_item
+                break
+        p.trio_backlog = backlog
+        await s.commit()
+
+
+async def _replace_backlog_item(
+    parent_id: int, old_item_id: str, new_items: list[dict],
+) -> None:
+    """Replace a single backlog item with one or more new items. Used by
+    the architect's ``revise_backlog`` tiebreak decision."""
+    async with async_session() as s:
+        p = (
+            await s.execute(select(Task).where(Task.id == parent_id))
+        ).scalar_one()
+        backlog = list(p.trio_backlog or [])
+        out: list[dict] = []
+        replaced = False
+        for item in backlog:
+            if not replaced and item.get("id") == old_item_id:
+                for ni in new_items:
+                    ni = dict(ni)
+                    ni.setdefault("status", "pending")
+                    out.append(ni)
+                replaced = True
+            else:
+                out.append(item)
+        p.trio_backlog = out
+        await s.commit()
+
+
+async def _ensure_integration_branch_checked_out(workspace: str, parent_id: int) -> None:
+    """Make sure the workspace is on ``trio/<parent_id>``.
+
+    The architect's initial pass may have left the workspace on a sub-branch
+    (``trio/<parent_id>/init``) after ``_commit_and_open_initial_pr``. The
+    dispatcher operates on the integration branch, so we explicitly check
+    it out before each item.
+    """
+    from agent import sh
+
+    integration_branch = f"trio/{parent_id}"
+    res = await sh.run(
+        ["git", "checkout", integration_branch],
+        cwd=workspace, timeout=30,
+    )
+    if res.failed:
+        log.warning(
+            "trio.parent.checkout_integration_failed",
+            parent_id=parent_id,
+            stderr=(res.stderr or "")[:300],
+        )
+
+
 async def run_trio_parent(
     parent: Task,
     *,
@@ -129,14 +209,14 @@ async def run_trio_parent(
     initial pass. Re-entry from a failed integration PR threads the CI
     log into a checkpoint pass so the architect can add fix work items.
 
-    Each iteration: re-read the parent's backlog, dispatch the next
-    pending item, await the child, run a checkpoint, and act on the
-    architect's decision (``continue`` / ``revise`` / ``done`` /
-    ``blocked``). On any failed/blocked child or ``blocked`` decision
-    the parent transitions to ``BLOCKED`` and we return early. When the
-    backlog is drained we open the final integration PR and transition
-    to ``PR_CREATED``.
+    Per ADR-013 the per-item loop no longer creates child Task rows. It
+    invokes :mod:`agent.lifecycle.trio.dispatcher`, which runs coder
+    and reviewer subagents inside the parent's slot. The dispatcher
+    returns an ``ItemResult``; this function persists backlog updates
+    and acts on architect tiebreak decisions.
     """
+    from agent.lifecycle.trio.architect import _prepare_parent_workspace
+
     if repair_context is None:
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         await architect.run_initial(parent.id)
@@ -144,107 +224,203 @@ async def run_trio_parent(
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
         await architect.checkpoint(parent.id, repair_context=repair_context)
 
+    # Resolve once per cycle — re-cloning per item is wasteful and the
+    # subagents share the workspace.
+    parent_workspace: str | None = None
+    repo_name: str | None = None
+    home_dir: str | None = None
+    org_id: int | None = None
+
     while True:
-        # Re-read the backlog each iteration in case a revision added or
-        # removed items.
+        # Re-read the backlog each iteration in case the architect or a
+        # tiebreak revised it.
         async with async_session() as s:
             p = (
                 await s.execute(select(Task).where(Task.id == parent.id))
             ).scalar_one()
             if p.status == TaskStatus.BLOCKED:
-                # ``architect.run_initial`` (or a prior iteration) already
-                # blocked us — nothing left to do.
                 return
             if p.status == TaskStatus.AWAITING_CLARIFICATION:
-                # Architect emitted awaiting_clarification — the parent is
-                # paused waiting for PO (freeform) or user answers. The
-                # dispatcher in run.py picks up
-                # ARCHITECT_CLARIFICATION_RESOLVED and calls
-                # ``architect.resume`` which re-enters the trio orchestrator.
-                # Exit cleanly here so we don't dispatch a child while
-                # the architect is still designing.
                 log.info(
                     "trio.parent.paused_for_clarification",
                     parent_id=parent.id,
                 )
                 return
-            backlog = p.trio_backlog or []
-            pending = [it for it in backlog if it.get("status") == "pending"]
+            backlog = list(p.trio_backlog or [])
+            pending = [(idx, it) for idx, it in enumerate(backlog) if it.get("status") == "pending"]
             if not pending:
                 break
+            # Cache invariants we'll need outside the session.
+            if parent_workspace is None:
+                from agent.lifecycle.factory import home_dir_for_task
+                parent_workspace = await _prepare_parent_workspace(p)
+                repo_name = p.repo.name if p.repo else None
+                home_dir = await home_dir_for_task(p)
+                org_id = p.organization_id
+
+        _, item = pending[0]
+        item_id = item.get("id", "(unknown)")
 
         await _set_trio_phase(parent.id, TrioPhase.AWAITING_BUILDER)
-        child = await scheduler.dispatch_next(parent)
-        if child is None:
-            break
+        await _ensure_integration_branch_checked_out(parent_workspace, parent.id)
 
-        finished = await scheduler.await_child(parent, child)
-        if finished.status in (TaskStatus.FAILED, TaskStatus.BLOCKED):
-            async with async_session() as s:
-                p = (
-                    await s.execute(select(Task).where(Task.id == parent.id))
-                ).scalar_one()
-                await transition(
-                    s, p, TaskStatus.BLOCKED,
-                    message=(
-                        f"trio: child #{finished.id} terminated "
-                        f"{finished.status.value}"
-                    ),
-                )
-                p.trio_phase = None
-                await s.commit()
-            log.info(
-                "trio.parent.blocked_on_child",
-                parent_id=parent.id,
-                child_id=finished.id,
-                child_status=finished.status.value,
-            )
-            return
-
-        await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
-        decision = await architect.checkpoint(
-            parent.id, child_task_id=finished.id,
+        result = await dispatcher.dispatch_item(
+            parent_task_id=parent.id,
+            work_item=item,
+            workspace=parent_workspace,
+            repo_name=repo_name,
+            home_dir=home_dir,
+            org_id=org_id,
         )
-        action = decision.get("action", "blocked")
 
-        if action == "revise":
-            await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
-            await architect.run_revision(parent.id)
-            continue
-        if action == "awaiting_clarification":
-            # checkpoint emitted clarification — _emit_clarification has
-            # already transitioned the parent to AWAITING_CLARIFICATION.
-            # Exit cleanly; resume runs after the answer lands.
+        if result.ok:
+            await _mark_item_done(parent.id, item_id, result.head_sha)
             log.info(
-                "trio.parent.paused_for_clarification_at_checkpoint",
+                "trio.parent.item_done",
+                parent_id=parent.id, item_id=item_id, head_sha=result.head_sha,
+            )
+            # No per-item architect checkpoint — the reviewer subagent is
+            # the per-item quality gate. Architect runs once after the
+            # whole backlog drains (below) to sanity-check the integration.
+            continue
+
+        if not result.needs_tiebreak:
+            # Terminal failure — coder produced no diff after 3 tries.
+            await _block_parent(
+                parent.id,
+                f"trio: item {item_id} terminated — {result.failure_reason}",
+            )
+            log.info(
+                "trio.parent.blocked_on_item",
                 parent_id=parent.id,
+                item_id=item_id,
+                reason=result.failure_reason,
             )
             return
-        if action == "done":
-            break
-        if action == "blocked":
+
+        # Coder↔reviewer didn't converge → architect tiebreak.
+        await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+        decision = await dispatcher.architect_tiebreak(
+            parent_task_id=parent.id,
+            work_item=item,
+            transcript=result.transcript,
+            workspace=parent_workspace,
+            repo_name=repo_name,
+            home_dir=home_dir,
+            org_id=org_id,
+        )
+        action = decision.get("action", "clarify")
+        log.info(
+            "trio.parent.tiebreak_decision",
+            parent_id=parent.id, item_id=item_id, action=action,
+            reason=decision.get("reason"),
+        )
+
+        if action == "accept":
+            head_sha = result.head_sha
+            await _mark_item_done(parent.id, item_id, head_sha)
+            continue
+
+        if action == "redo":
+            # Architect gave specific guidance; keep the item pending but
+            # append the architect's guidance to its description so the
+            # next coder run picks it up. Cap at one redo per item to
+            # avoid loops — second tiebreak on the same item escalates.
+            guidance = str(decision.get("guidance", "")).strip()
             async with async_session() as s:
                 p = (
                     await s.execute(select(Task).where(Task.id == parent.id))
                 ).scalar_one()
-                await transition(
-                    s, p, TaskStatus.BLOCKED,
-                    message=(
-                        f"trio: architect.checkpoint returned blocked — "
-                        f"{decision.get('reason', '')}"
-                    ),
-                )
-                p.trio_phase = None
+                new_backlog = list(p.trio_backlog or [])
+                for i, it in enumerate(new_backlog):
+                    if it.get("id") == item_id:
+                        bumped = dict(it)
+                        if bumped.get("architect_redo_count", 0) >= 1:
+                            # Second tiebreak on the same item — give up.
+                            await _block_parent(
+                                parent.id,
+                                f"trio: item {item_id} stuck after two architect tiebreaks",
+                            )
+                            return
+                        bumped["architect_redo_count"] = bumped.get("architect_redo_count", 0) + 1
+                        if guidance:
+                            bumped["description"] = (
+                                (bumped.get("description") or "")
+                                + "\n\n## Architect tiebreak guidance\n"
+                                + guidance
+                            )
+                        new_backlog[i] = bumped
+                        break
+                p.trio_backlog = new_backlog
                 await s.commit()
-            log.info(
-                "trio.parent.blocked_on_checkpoint",
-                parent_id=parent.id,
-                reason=decision.get("reason"),
+            continue
+
+        if action == "revise_backlog":
+            new_items = decision.get("new_items") or []
+            if not new_items:
+                await _block_parent(
+                    parent.id,
+                    f"trio: revise_backlog tiebreak produced no new_items for {item_id}",
+                )
+                return
+            await _replace_backlog_item(parent.id, item_id, new_items)
+            continue
+
+        if action == "clarify":
+            # Tiebreak escalation to a human. The clarification-resume path
+            # (architect.resume) re-enters architect.run_initial/checkpoint
+            # via a saved Session — we don't have a saved tiebreak session,
+            # so we block the parent with the question rather than emit a
+            # resumable clarification. Operators see the BLOCKED status +
+            # question and can re-trigger the parent after editing the
+            # backlog item if needed. Real clarification resume for
+            # tiebreaks is a follow-up.
+            question = str(
+                decision.get("question")
+                or "Trio is stuck; please advise."
+            )
+            await _block_parent(
+                parent.id,
+                f"trio: tiebreak escalation on item {item_id} — {question[:300]}",
             )
             return
-        # action == "continue" → loop iterates and dispatches next item.
 
-    # Backlog drained — open the final integration PR.
+        # Unknown action — fail safe and block.
+        await _block_parent(
+            parent.id,
+            f"trio: tiebreak returned unknown action '{action}'",
+        )
+        return
+
+    # Backlog drained — architect runs one final checkpoint over the
+    # integration branch's full diff before we open the integration PR.
+    # If it returns ``revise`` we loop back into the per-item phase; if
+    # ``done`` we open the PR; otherwise the parent is blocked.
+    await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
+    decision = await architect.checkpoint(parent.id)
+    action = decision.get("action", "done")
+
+    if action == "revise":
+        await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
+        await architect.run_revision(parent.id)
+        # The revision may have appended new pending items — re-enter the
+        # caller (recovery will pick the parent up again on next dispatch).
+        # Simplest correct thing: recurse.
+        return await run_trio_parent(parent)
+    if action == "awaiting_clarification":
+        log.info(
+            "trio.parent.paused_for_clarification_at_final_checkpoint",
+            parent_id=parent.id,
+        )
+        return
+    if action == "blocked":
+        await _block_parent(
+            parent.id,
+            f"trio: final checkpoint blocked — {decision.get('reason', '')}",
+        )
+        return
+    # action in {"done", "continue"} → open the integration PR.
+
     target = await _resolve_target_branch(parent.id)
 
     async with async_session() as s:

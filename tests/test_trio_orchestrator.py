@@ -1,12 +1,14 @@
 """Tests for ``agent.lifecycle.trio.run_trio_parent``.
 
-Same shape as the other trio tests in this suite: real DB session,
-``async_session`` patched to a factory that yields the test's
-transaction-wrapped session so every write rolls back cleanly. The
-agent-side seams (``architect.run_initial``, ``architect.checkpoint``,
-``scheduler.dispatch_next``, ``scheduler.await_child``,
-``_open_integration_pr``) are stubbed; the orchestrator itself drives
-the flow and persists status transitions against the real schema.
+After ADR-013 the orchestrator no longer creates child Task rows. It
+drives the backlog via ``dispatcher.dispatch_item`` and opens the
+integration PR when the backlog is drained. These tests mock the
+seams (``architect.run_initial``, ``architect.checkpoint``,
+``dispatcher.dispatch_item``, ``_prepare_parent_workspace``,
+``_open_integration_pr``) and verify the orchestrator's state
+transitions against a real Postgres session.
+
+Tests skip when the local DB doesn't have the trio migration applied.
 """
 from __future__ import annotations
 
@@ -20,8 +22,9 @@ from sqlalchemy import inspect, select
 
 import agent.lifecycle.trio as trio
 from agent.lifecycle.trio import architect as architect_mod
+from agent.lifecycle.trio import dispatcher as dispatcher_mod
 from agent.lifecycle.trio import run_trio_parent
-from agent.lifecycle.trio import scheduler as scheduler_mod
+from agent.lifecycle.trio.dispatcher import ItemResult
 from shared.models import (
     Organization,
     Plan,
@@ -29,23 +32,21 @@ from shared.models import (
     TaskComplexity,
     TaskSource,
     TaskStatus,
-    TrioPhase,
 )
 
 
 async def _skip_if_trio_columns_missing(session) -> None:
-    """Skip cleanly when the DB hasn't run the trio migration."""
     if not os.environ.get("DATABASE_URL"):
         pytest.skip("DATABASE_URL not set")
 
     def _trio_cols(sync_conn) -> set[str]:
         insp = inspect(sync_conn)
         cols = {c["name"] for c in insp.get_columns("tasks")}
-        return cols & {"parent_task_id", "trio_phase", "trio_backlog"}
+        return cols & {"trio_phase", "trio_backlog"}
 
     conn = await session.connection()
     present = await conn.run_sync(_trio_cols)
-    if len(present) < 3:
+    if len(present) < 2:
         pytest.skip(
             "trio columns not present in DATABASE_URL "
             "— run `alembic upgrade head`",
@@ -73,13 +74,8 @@ async def _seed_org(session) -> Organization:
     return org
 
 
-async def _seed_parent(session) -> Task:
+async def _seed_parent(session, *, backlog: list[dict]) -> Task:
     org = await _seed_org(session)
-    # NOTE: complexity is COMPLEX (not COMPLEX_LARGE) for local-DB compatibility
-    # — the orchestrator doesn't branch on complexity, so the choice is
-    # immaterial to what's under test here. test_trio_scheduler uses
-    # COMPLEX_LARGE and will skip on DBs that haven't had the 012 enum value
-    # backfilled; we deliberately stay one step out of that footgun.
     t = Task(
         title="Build app",
         description="Build app",
@@ -87,6 +83,7 @@ async def _seed_parent(session) -> Task:
         status=TaskStatus.TRIO_EXECUTING,
         complexity=TaskComplexity.COMPLEX,
         trio_phase=None,
+        trio_backlog=backlog,
         organization_id=org.id,
     )
     session.add(t)
@@ -95,486 +92,191 @@ async def _seed_parent(session) -> Task:
 
 
 def _patched_async_session(real_session):
-    """Yield ``real_session`` from ``async with async_session() as s``.
-
-    ``commit`` is forwarded to a flush so writes are visible to the test
-    but still inside the per-test savepoint that rolls back at teardown.
-    """
-    real_session.commit = AsyncMock(side_effect=lambda: real_session.flush())
-    real_session.close = AsyncMock()
-    real_session.refresh = AsyncMock()
-
     @asynccontextmanager
-    async def _factory():
-        yield real_session
+    async def factory():
+        class _Wrapper:
+            def __init__(self, s):
+                self._s = s
 
-    return _factory
+            async def execute(self, *a, **kw):
+                return await self._s.execute(*a, **kw)
 
+            def add(self, obj):
+                self._s.add(obj)
 
-# ---------------------------------------------------------------------------
-# Happy path: architect → 1 child (DONE) → checkpoint(done) → final PR.
-# ---------------------------------------------------------------------------
+            async def commit(self):
+                await self._s.flush()
+
+            async def flush(self):
+                await self._s.flush()
+
+        yield _Wrapper(real_session)
+
+    return factory
 
 
 @pytest.mark.asyncio
-async def test_run_trio_parent_drives_phases_in_order_and_opens_final_pr(
-    session, monkeypatch,
-):
+async def test_run_trio_parent_dispatches_each_item_and_opens_pr(session):
+    """Happy path: 2-item backlog, each dispatch_item ok, final checkpoint
+    returns done, integration PR opens."""
     await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
+    parent = await _seed_parent(
+        session,
+        backlog=[
+            {"id": "a", "title": "T1", "description": "D1", "status": "pending"},
+            {"id": "b", "title": "T2", "description": "D2", "status": "pending"},
+        ],
+    )
 
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
+    dispatch_calls: list[str] = []
 
-    phase_log: list[TrioPhase | None] = []
-
-    real_set_phase = trio._set_trio_phase
-
-    async def _spy_set_phase(pid, phase):
-        phase_log.append(phase)
-        await real_set_phase(pid, phase)
-
-    async def fake_initial(parent_task_id):
-        # Architect produces a single-item backlog.
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        p.trio_backlog = [
-            {"id": "w1", "title": "x", "description": "x", "status": "pending"},
-        ]
-        await session.flush()
-
-    async def fake_dispatch(p):
-        child = Task(
-            title="x", description="x",
-            source=TaskSource.MANUAL,
-            status=TaskStatus.DONE,
-            complexity=TaskComplexity.COMPLEX,
-            parent_task_id=p.id,
-            organization_id=p.organization_id,
+    async def fake_dispatch_item(*, work_item, **_kw):
+        dispatch_calls.append(work_item["id"])
+        return ItemResult(
+            ok=True, transcript=[], start_sha="s0", head_sha=f"h-{work_item['id']}",
         )
-        session.add(child)
-        await session.flush()
-        return child
-
-    async def fake_await(p, ch):
-        return ch
-
-    async def fake_checkpoint(parent_task_id, **kwargs):
-        # Mark the only item done — drains the backlog.
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        backlog = list(p.trio_backlog or [])
-        if backlog:
-            backlog[0]["status"] = "done"
-            p.trio_backlog = backlog
-            await session.flush()
-        return {"action": "done"}
-
-    async def fake_open_pr(p, target_branch):
-        # Verify the orchestrator picked the right target (no repo → main).
-        assert target_branch == "main"
-        return "https://github.com/x/y/pull/42"
 
     with (
-        patch.object(trio, "_set_trio_phase", new=_spy_set_phase),
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(scheduler_mod, "await_child", new=fake_await),
-        patch.object(architect_mod, "checkpoint", new=fake_checkpoint),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
+        patch.object(trio, "async_session", _patched_async_session(session)),
+        patch.object(architect_mod, "run_initial", new=AsyncMock(return_value=None)),
+        patch.object(
+            architect_mod, "checkpoint",
+            new=AsyncMock(return_value={"action": "done"}),
+        ),
+        patch.object(
+            architect_mod, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(
+            dispatcher_mod, "dispatch_item", new=AsyncMock(side_effect=fake_dispatch_item),
+        ),
+        patch.object(trio, "_open_integration_pr", new=AsyncMock(return_value="http://pr")),
+        patch.object(trio, "_ensure_integration_branch_checked_out", new=AsyncMock()),
     ):
         await run_trio_parent(parent)
 
+    assert dispatch_calls == ["a", "b"]
+
     refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
+        await session.execute(select(Task).where(Task.id == parent.id))
     ).scalar_one()
     assert refreshed.status == TaskStatus.PR_CREATED
-    assert refreshed.pr_url == "https://github.com/x/y/pull/42"
-    assert refreshed.trio_phase is None
-
-    # Phase order: ARCHITECTING → AWAITING_BUILDER → ARCHITECT_CHECKPOINT
-    # → None (cleared at end). Note: checkpoint(action="done") does NOT
-    # trigger another phase set before the loop breaks.
-    assert phase_log == [
-        TrioPhase.ARCHITECTING,
-        TrioPhase.AWAITING_BUILDER,
-        TrioPhase.ARCHITECT_CHECKPOINT,
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Failure path: child terminates BLOCKED → parent BLOCKED, no PR opened.
-# ---------------------------------------------------------------------------
+    assert refreshed.pr_url == "http://pr"
+    assert [it["status"] for it in refreshed.trio_backlog] == ["done", "done"]
 
 
 @pytest.mark.asyncio
-async def test_run_trio_parent_blocks_on_failed_child(session, monkeypatch):
+async def test_terminal_failure_blocks_parent(session):
+    """Dispatcher returns ok=False, needs_tiebreak=False → parent BLOCKED."""
     await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
+    parent = await _seed_parent(
+        session,
+        backlog=[{"id": "a", "title": "T", "description": "D", "status": "pending"}],
+    )
 
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
-
-    async def fake_initial(parent_task_id):
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        p.trio_backlog = [
-            {"id": "w1", "title": "x", "description": "x", "status": "pending"},
-        ]
-        await session.flush()
-
-    async def fake_dispatch(p):
-        child = Task(
-            title="x", description="x",
-            source=TaskSource.MANUAL,
-            status=TaskStatus.BLOCKED,
-            complexity=TaskComplexity.COMPLEX,
-            parent_task_id=p.id,
-            organization_id=p.organization_id,
-        )
-        session.add(child)
-        await session.flush()
-        return child
-
-    async def fake_await(p, ch):
-        return ch
-
-    open_pr_called = False
-
-    async def fake_open_pr(p, target_branch):
-        nonlocal open_pr_called
-        open_pr_called = True
-        return "https://example/pr/should-not-open"
-
+    bad_result = ItemResult(
+        ok=False,
+        transcript=[],
+        start_sha="s",
+        needs_tiebreak=False,
+        failure_reason="coder_produced_no_diff",
+    )
     with (
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(scheduler_mod, "await_child", new=fake_await),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
+        patch.object(trio, "async_session", _patched_async_session(session)),
+        patch.object(architect_mod, "run_initial", new=AsyncMock()),
+        patch.object(
+            architect_mod, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(
+            dispatcher_mod, "dispatch_item", new=AsyncMock(return_value=bad_result),
+        ),
+        patch.object(trio, "_ensure_integration_branch_checked_out", new=AsyncMock()),
     ):
         await run_trio_parent(parent)
 
     refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
+        await session.execute(select(Task).where(Task.id == parent.id))
     ).scalar_one()
     assert refreshed.status == TaskStatus.BLOCKED
-    assert refreshed.pr_url is None
-    assert refreshed.trio_phase is None
-    assert open_pr_called is False
-
-
-# ---------------------------------------------------------------------------
-# Decision "revise" loops back into a revision pass before the next dispatch.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_trio_parent_revise_runs_revision_then_continues(
-    session, monkeypatch,
-):
+async def test_tiebreak_accept_marks_item_done(session):
+    """Dispatcher needs tiebreak; architect returns accept → item done, loop continues."""
     await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
+    parent = await _seed_parent(
+        session,
+        backlog=[{"id": "a", "title": "T", "description": "D", "status": "pending"}],
+    )
 
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
-
-    async def fake_initial(parent_task_id):
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        p.trio_backlog = [
-            {"id": "w1", "title": "first", "description": "first", "status": "pending"},
-        ]
-        await session.flush()
-
-    dispatch_counter = {"n": 0}
-
-    async def fake_dispatch(p):
-        dispatch_counter["n"] += 1
-        child = Task(
-            title=f"c{dispatch_counter['n']}", description="x",
-            source=TaskSource.MANUAL,
-            status=TaskStatus.DONE,
-            complexity=TaskComplexity.COMPLEX,
-            parent_task_id=p.id,
-            organization_id=p.organization_id,
-        )
-        session.add(child)
-        await session.flush()
-        return child
-
-    async def fake_await(p, ch):
-        return ch
-
-    revision_called = {"n": 0}
-
-    async def fake_revision(parent_task_id):
-        # Revision rewrites the backlog — replace the (already in-progress)
-        # first item with a fresh pending one.
-        revision_called["n"] += 1
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        p.trio_backlog = [
-            {"id": "w2", "title": "post-rev", "description": "post-rev", "status": "pending"},
-        ]
-        await session.flush()
-
-    checkpoint_counter = {"n": 0}
-
-    async def fake_checkpoint(parent_task_id, **kwargs):
-        checkpoint_counter["n"] += 1
-        if checkpoint_counter["n"] == 1:
-            # First child merge: ask for a revision.
-            return {"action": "revise"}
-        # Second child merge: backlog drained — done.
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        backlog = list(p.trio_backlog or [])
-        for item in backlog:
-            if item.get("status") == "in_progress":
-                item["status"] = "done"
-        p.trio_backlog = backlog
-        await session.flush()
-        return {"action": "done"}
-
-    async def fake_open_pr(p, target_branch):
-        return "https://github.com/x/y/pull/99"
+    needs_tb = ItemResult(
+        ok=False, transcript=[], start_sha="s", head_sha="h",
+        needs_tiebreak=True,
+    )
 
     with (
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(architect_mod, "run_revision", new=fake_revision),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(scheduler_mod, "await_child", new=fake_await),
-        patch.object(architect_mod, "checkpoint", new=fake_checkpoint),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
+        patch.object(trio, "async_session", _patched_async_session(session)),
+        patch.object(architect_mod, "run_initial", new=AsyncMock()),
+        patch.object(
+            architect_mod, "checkpoint",
+            new=AsyncMock(return_value={"action": "done"}),
+        ),
+        patch.object(
+            architect_mod, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(
+            dispatcher_mod, "dispatch_item", new=AsyncMock(return_value=needs_tb),
+        ),
+        patch.object(
+            dispatcher_mod, "architect_tiebreak",
+            new=AsyncMock(return_value={"action": "accept", "reason": "spec ok"}),
+        ),
+        patch.object(trio, "_open_integration_pr", new=AsyncMock(return_value="")),
+        patch.object(trio, "_ensure_integration_branch_checked_out", new=AsyncMock()),
     ):
         await run_trio_parent(parent)
 
     refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
+        await session.execute(select(Task).where(Task.id == parent.id))
     ).scalar_one()
     assert refreshed.status == TaskStatus.PR_CREATED
-    assert revision_called["n"] == 1
-    assert dispatch_counter["n"] == 2
-    assert checkpoint_counter["n"] == 2
-
-
-# ---------------------------------------------------------------------------
-# Decision "blocked" from checkpoint → parent BLOCKED, no PR opened.
-# ---------------------------------------------------------------------------
+    assert refreshed.trio_backlog[0]["status"] == "done"
 
 
 @pytest.mark.asyncio
-async def test_run_trio_parent_blocks_on_checkpoint_blocked_decision(
-    session, monkeypatch,
-):
+async def test_tiebreak_clarify_blocks_parent_with_question(session):
+    """Clarify tiebreak blocks the parent (no resumable session today)."""
     await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
+    parent = await _seed_parent(
+        session,
+        backlog=[{"id": "a", "title": "T", "description": "D", "status": "pending"}],
+    )
 
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
-
-    async def fake_initial(parent_task_id):
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        p.trio_backlog = [
-            {"id": "w1", "title": "x", "description": "x", "status": "pending"},
-        ]
-        await session.flush()
-
-    async def fake_dispatch(p):
-        child = Task(
-            title="x", description="x",
-            source=TaskSource.MANUAL,
-            status=TaskStatus.DONE,
-            complexity=TaskComplexity.COMPLEX,
-            parent_task_id=p.id,
-            organization_id=p.organization_id,
-        )
-        session.add(child)
-        await session.flush()
-        return child
-
-    async def fake_await(p, ch):
-        return ch
-
-    async def fake_checkpoint(parent_task_id, **kwargs):
-        return {"action": "blocked", "reason": "design dead-end"}
-
-    open_pr_called = False
-
-    async def fake_open_pr(p, target_branch):
-        nonlocal open_pr_called
-        open_pr_called = True
-        return "should-not-open"
+    needs_tb = ItemResult(
+        ok=False, transcript=[], start_sha="s", needs_tiebreak=True,
+    )
 
     with (
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(scheduler_mod, "await_child", new=fake_await),
-        patch.object(architect_mod, "checkpoint", new=fake_checkpoint),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
+        patch.object(trio, "async_session", _patched_async_session(session)),
+        patch.object(architect_mod, "run_initial", new=AsyncMock()),
+        patch.object(
+            architect_mod, "_prepare_parent_workspace",
+            new=AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch.object(
+            dispatcher_mod, "dispatch_item", new=AsyncMock(return_value=needs_tb),
+        ),
+        patch.object(
+            dispatcher_mod, "architect_tiebreak",
+            new=AsyncMock(return_value={"action": "clarify", "question": "Which stack?"}),
+        ),
+        patch.object(trio, "_ensure_integration_branch_checked_out", new=AsyncMock()),
     ):
         await run_trio_parent(parent)
 
     refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
+        await session.execute(select(Task).where(Task.id == parent.id))
     ).scalar_one()
     assert refreshed.status == TaskStatus.BLOCKED
-    assert refreshed.trio_phase is None
-    assert open_pr_called is False
-
-
-# ---------------------------------------------------------------------------
-# Re-entry path: repair_context routes to checkpoint instead of run_initial.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_trio_parent_repair_context_invokes_checkpoint_first(
-    session, monkeypatch,
-):
-    await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
-
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
-
-    initial_called = False
-
-    async def fake_initial(parent_task_id):
-        nonlocal initial_called
-        initial_called = True
-
-    checkpoint_kwargs_seen: dict = {}
-
-    async def fake_checkpoint(parent_task_id, **kwargs):
-        # First call carries the repair_context; subsequent calls won't.
-        if "repair_context" in kwargs and not checkpoint_kwargs_seen:
-            checkpoint_kwargs_seen.update(kwargs)
-            # Seed a backlog so the loop has work to do.
-            p = (
-                await session.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
-            p.trio_backlog = [
-                {"id": "fix1", "title": "fix", "description": "fix", "status": "pending"},
-            ]
-            await session.flush()
-            return {"action": "continue"}
-        # Post-child checkpoint: mark backlog done.
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        backlog = list(p.trio_backlog or [])
-        for item in backlog:
-            if item.get("status") == "in_progress":
-                item["status"] = "done"
-        p.trio_backlog = backlog
-        await session.flush()
-        return {"action": "done"}
-
-    async def fake_dispatch(p):
-        child = Task(
-            title="fix", description="fix",
-            source=TaskSource.MANUAL,
-            status=TaskStatus.DONE,
-            complexity=TaskComplexity.COMPLEX,
-            parent_task_id=p.id,
-            organization_id=p.organization_id,
-        )
-        session.add(child)
-        await session.flush()
-        return child
-
-    async def fake_await(p, ch):
-        return ch
-
-    async def fake_open_pr(p, target_branch):
-        return "https://github.com/x/y/pull/7"
-
-    repair = {"ci_log": "boom", "failed_pr_url": "https://github.com/x/y/pull/6"}
-
-    with (
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(architect_mod, "checkpoint", new=fake_checkpoint),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(scheduler_mod, "await_child", new=fake_await),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
-    ):
-        await run_trio_parent(parent, repair_context=repair)
-
-    assert initial_called is False
-    assert checkpoint_kwargs_seen.get("repair_context") == repair
-
-    refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
-    ).scalar_one()
-    assert refreshed.status == TaskStatus.PR_CREATED
-
-
-# ---------------------------------------------------------------------------
-# After run_initial blocks the parent (invalid JSON path), we bail without
-# entering the dispatch loop.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_trio_parent_returns_early_if_initial_blocked_parent(
-    session, monkeypatch,
-):
-    await _skip_if_trio_columns_missing(session)
-    parent = await _seed_parent(session)
-    parent_id = parent.id
-
-    factory = _patched_async_session(session)
-    monkeypatch.setattr(trio, "async_session", factory)
-
-    async def fake_initial(parent_task_id):
-        # Simulate run_initial's "invalid JSON" path: parent transitions
-        # to BLOCKED, backlog stays empty.
-        from orchestrator.state_machine import transition
-
-        p = (
-            await session.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        await transition(session, p, TaskStatus.BLOCKED, message="bad json")
-        await session.flush()
-
-    dispatch_called = False
-
-    async def fake_dispatch(p):
-        nonlocal dispatch_called
-        dispatch_called = True
-        return None
-
-    open_pr_called = False
-
-    async def fake_open_pr(p, target_branch):
-        nonlocal open_pr_called
-        open_pr_called = True
-        return ""
-
-    with (
-        patch.object(architect_mod, "run_initial", new=fake_initial),
-        patch.object(scheduler_mod, "dispatch_next", new=fake_dispatch),
-        patch.object(trio, "_open_integration_pr", new=fake_open_pr),
-    ):
-        await run_trio_parent(parent)
-
-    refreshed = (
-        await session.execute(select(Task).where(Task.id == parent_id))
-    ).scalar_one()
-    assert refreshed.status == TaskStatus.BLOCKED
-    assert dispatch_called is False
-    assert open_pr_called is False
