@@ -225,7 +225,7 @@ The same pattern applies to durable cross-task lessons: when the architect or im
 
 ### 15. State wipe at deploy
 
-All existing `Task`, `Suggestion` (PO and improvement), `ArchitectAttempt`, and `TrioReviewAttempt` rows are dropped at deploy time. Auto-agent is an experiment; no migration logic for in-flight work under the old code paths.
+Drop all `Task` rows and all `Suggestion` rows (PO + improvement). Per-task children — `ArchitectAttempt`, `TrioReviewAttempt`, `VerifyAttempt`, `intake_qa`, etc. — cascade with the parent Task. **Do not** wipe `Repo`, `User`, `Session`, or any non-task-scoped data. Auto-agent is an experiment; no migration logic for in-flight work under the old code paths, but per-repo state (`product_brief`, `ARCHITECTURE.md`, smoke configs, mode flag) stays so the system is immediately usable post-deploy.
 
 ### 16. TDD implementation
 
