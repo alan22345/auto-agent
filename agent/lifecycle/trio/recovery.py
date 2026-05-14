@@ -36,8 +36,22 @@ async def resume_all_trio_parents() -> None:
             count=len(rows),
             task_ids=[r.id for r in rows],
         )
+
+        async def _run_with_exception_logging(parent_task: Task) -> None:
+            """Wrap run_trio_parent so an unobserved exception is logged
+            with a full traceback. Without this wrapper, fire-and-forget
+            asyncio.create_task swallows failures silently — bit us on
+            task 170 after the ADR-013 deploy."""
+            try:
+                await run_trio_parent(parent_task)
+            except Exception:
+                log.exception(
+                    "trio.recovery.run_failed",
+                    parent_id=parent_task.id,
+                )
+
         for parent in rows:
-            asyncio.create_task(run_trio_parent(parent))  # noqa: RUF006
+            asyncio.create_task(_run_with_exception_logging(parent))  # noqa: RUF006
 
     # AWAITING_CLARIFICATION + trio_phase set. The architect is
     # paused; if the answer landed pre-crash we re-publish RESOLVED so
