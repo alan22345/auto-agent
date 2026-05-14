@@ -22,7 +22,7 @@ class RiskLevel(str, Enum):
 
 
 class ClassificationResult(BaseModel):
-    classification: Literal["simple", "complex", "simple_no_code"]
+    classification: Literal["simple", "complex", "complex_large", "simple_no_code"]
     reasoning: str = ""
     estimated_files: int = 0
     risk: RiskLevel = RiskLevel.LOW

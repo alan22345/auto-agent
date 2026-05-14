@@ -254,7 +254,7 @@ async def on_task_created(event: Event) -> None:
 
         # Classify the task (unless pre-set at creation)
         if task.complexity is None:
-            complexity, classification = classify_task(task.title, task.description)
+            complexity, classification = await classify_task(task.title, task.description)
             task.complexity = complexity
             await session.commit()
             payload = {"complexity": complexity.value, **classification.model_dump()}
