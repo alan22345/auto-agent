@@ -68,12 +68,14 @@ class TaskStatus(str, enum.Enum):
     # parent's main session is paused while they run serially. Only resumed
     # briefly for the parent-answers-grill relay (§10).
     AWAITING_SUB_ARCHITECTS   = "awaiting_sub_architects"
+    ITERATING = "iterating"  # ADR-017: trio is re-iterating a PR on user feedback
 
 
 class TrioPhase(str, enum.Enum):
     ARCHITECTING         = "architecting"
     AWAITING_BUILDER     = "awaiting_builder"
     ARCHITECT_CHECKPOINT = "architect_checkpoint"
+    ARCHITECT_ITERATING  = "architect_iterating"  # ADR-017
 
 
 class TaskSource(str, enum.Enum):
