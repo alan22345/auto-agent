@@ -188,3 +188,95 @@ class TestMalformed:
         result = _parse("def broken(:\n    pass\n")
         # We still emit a file node at minimum.
         assert any(n.kind == "file" for n in result.nodes)
+
+
+class TestUnresolvedSites:
+    """Phase 3 (ADR-016 §3) — the parser exposes unresolved dispatch sites,
+    not just a count. Each site carries enough context for the LLM
+    gap-fill stage to attempt resolution without re-reading the file."""
+
+    def test_registry_dispatch_emits_site_with_registry_hint(self) -> None:
+        result = _parse(
+            "HANDLERS = {}\n"
+            "def dispatch(name, payload):\n"
+            "    return HANDLERS[name](payload)\n",
+        )
+        sites = result.unresolved_sites
+        assert sites, "expected at least one unresolved site"
+        site = sites[0]
+        assert site.file == "pkg/mod.py"
+        assert site.line == 3
+        assert "HANDLERS[name](payload)" in site.snippet
+        assert site.containing_node_id == "pkg/mod.py::dispatch"
+        assert site.pattern_hint == "registry"
+        # Surrounding window includes the dispatch function header.
+        assert "def dispatch" in site.surrounding_code
+
+    def test_attribute_call_on_imported_module_emits_dict_call_hint(self) -> None:
+        result = _parse(
+            "import os\n"
+            "def go():\n"
+            "    return os.getenv('X')\n",
+        )
+        sites = result.unresolved_sites
+        assert any(s.pattern_hint == "dict_call" for s in sites)
+        attr_site = next(s for s in sites if s.pattern_hint == "dict_call")
+        assert attr_site.containing_node_id == "pkg/mod.py::go"
+        assert "os.getenv" in attr_site.snippet
+
+    def test_self_unknown_method_emits_unknown_hint(self) -> None:
+        result = _parse(
+            "class Foo:\n"
+            "    def caller(self):\n"
+            "        return self.unknown_method()\n",
+        )
+        sites = result.unresolved_sites
+        assert sites
+        # Should be classified as ``unknown`` (we have no way to know
+        # whether ``unknown_method`` is inherited or fabricated).
+        assert any(
+            s.pattern_hint == "unknown"
+            and s.containing_node_id == "pkg/mod.py::Foo.caller"
+            for s in sites
+        )
+
+    def test_attribute_class_inheritance_emits_site(self) -> None:
+        result = _parse(
+            "import mod\n"
+            "class X(mod.Base):\n"
+            "    pass\n",
+        )
+        sites = result.unresolved_sites
+        assert sites
+        # The containing node for an inheritance site is the class id.
+        site = sites[0]
+        assert site.containing_node_id == "pkg/mod.py::X"
+        assert "class X" in site.snippet or "X(mod.Base)" in site.snippet
+
+    def test_unbound_identifier_call_emits_unknown_hint(self) -> None:
+        result = _parse(
+            "def caller():\n"
+            "    return mystery()\n",
+        )
+        sites = result.unresolved_sites
+        assert sites
+        site = sites[0]
+        assert site.pattern_hint == "unknown"
+        assert site.containing_node_id == "pkg/mod.py::caller"
+        assert "mystery()" in site.snippet
+
+    def test_getattr_dispatch_emits_getattr_hint(self) -> None:
+        result = _parse(
+            "def dispatch(obj, name):\n"
+            "    return getattr(obj, name)(42)\n",
+        )
+        sites = result.unresolved_sites
+        assert any(s.pattern_hint == "getattr" for s in sites)
+
+    def test_unresolved_dynamic_sites_count_matches_list_length(self) -> None:
+        result = _parse(
+            "HANDLERS = {}\n"
+            "def go(n):\n"
+            "    return HANDLERS[n]()\n",
+        )
+        assert result.unresolved_dynamic_sites == len(result.unresolved_sites)
