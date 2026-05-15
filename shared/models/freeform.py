@@ -66,7 +66,7 @@ class Suggestion(Base):
     category = Column(String(100), default="")  # ux_gap, feature, improvement, architecture
     priority = Column(Integer, default=3)  # 1=critical, 5=nice-to-have
     status = Column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     organization_id = Column(
         Integer, ForeignKey("organizations.id"), nullable=False, index=True,
     )

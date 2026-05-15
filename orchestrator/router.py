@@ -939,9 +939,9 @@ async def delete_task(
     task = await _get_task_in_org(session, task_id, org_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    # Delete history first (FK constraint)
-    await session.execute(select(TaskHistory).where(TaskHistory.task_id == task_id))
-    await session.execute(sql_delete(TaskHistory).where(TaskHistory.task_id == task_id))
+    # Child tables (task_history, gate_decisions, task_outcomes, all trio /
+    # verify / review attempts, task_messages) cascade on FK; suggestions and
+    # sub-tasks (parent_task_id) get SET NULL. See migration 044.
     await session.delete(task)
     await session.commit()
 

@@ -225,7 +225,9 @@ class Task(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     # Trio (architect/builder/reviewer) columns
-    parent_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    parent_task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     trio_phase = Column(SAEnum(TrioPhase, name="triophase"), nullable=True)
     trio_backlog = Column(JSONB, nullable=True)
     consulting_architect = Column(Boolean, nullable=False, default=False, server_default="false")
@@ -249,7 +251,7 @@ class TaskHistory(Base):
     __tablename__ = "task_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
     from_status = Column(Enum(TaskStatus), nullable=True)
     to_status = Column(Enum(TaskStatus), nullable=False)
     message = Column(Text, default="")
@@ -279,7 +281,9 @@ class GateDecision(Base):
     __tablename__ = "gate_decisions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
     # Domain: "grill" | "plan_approval" | "design_approval" | "pr_review".
     # Kept as a free-form String so a future gate can land without a
     # migration; consumers should treat unknown values as opaque.
@@ -330,7 +334,9 @@ class TaskOutcome(Base):
     __tablename__ = "task_outcomes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, unique=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
     pr_approved = Column(Boolean, nullable=True)  # True=merged, False=closed/rejected
     review_rounds = Column(Integer, default=0)  # How many review iterations
     time_to_complete_seconds = Column(Float, nullable=True)  # Total wall time
