@@ -2,8 +2,12 @@
 # Deploy auto-agent to the Azure VM.
 #
 # Usage:
-#   ./scripts/deploy.sh          # deploy + restart
-#   ./scripts/deploy.sh migrate  # deploy + run migration + restart
+#   ./scripts/deploy.sh   # rsync, build, run migrations, restart
+#
+# Migrations always run — skipping them once already silently bypassed the
+# design-approval gate by leaving stale .auto-agent/ artefacts in workspace
+# dirs that a later task with the same id reused. Make the foot-gun
+# impossible: every deploy is migrate+restart.
 #
 # Prerequisites:
 #   - SSH access to azureuser@172.190.26.82 (auto-agent-vm in AUTO-AGENT-RG)
@@ -28,15 +32,15 @@ rsync -avz \
   --exclude='.claude/settings.local.json' \
   "$SCRIPT_DIR/" "$VM:$REMOTE_DIR/"
 
-if [[ "${1:-}" == "migrate" ]]; then
-  echo "==> Running database migration..."
-  ssh "$VM" "cd $REMOTE_DIR && docker compose build auto-agent && docker compose run --rm -w /app -e PYTHONPATH=/app auto-agent alembic upgrade head"
-fi
-
-echo "==> Rebuilding and restarting container..."
+echo "==> Building image + running migrations..."
 # Pass GITHUB_TOKEN through so the build can install the private team-memory
-# package. The VM's .env GITHUB_TOKEN is reused here — `docker compose build`
-# reads the build args from compose.yml, which references ${GITHUB_TOKEN}.
+# package. Build before migrate so the migration step uses an image that
+# contains the new migration files. The final `up -d --build` below is a
+# no-op rebuild for the auto-agent container (image already cached) but is
+# still needed to bring web-next up.
+ssh "$VM" "cd $REMOTE_DIR && set -a && . .env && set +a && docker compose build auto-agent && docker compose run --rm -w /app -e PYTHONPATH=/app auto-agent alembic upgrade head"
+
+echo "==> Restarting containers..."
 ssh "$VM" "cd $REMOTE_DIR && set -a && . .env && set +a && docker compose up -d --build auto-agent web-next"
 
 echo "==> Waiting for health check..."

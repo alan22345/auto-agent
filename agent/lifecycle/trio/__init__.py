@@ -24,6 +24,7 @@ from agent.lifecycle.trio import architect, design_approval, dispatcher
 from agent.lifecycle.workspace_paths import DESIGN_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
+from shared.events import publish, task_pr_created
 from shared.models import Task, TaskComplexity, TaskStatus, TrioPhase
 
 log = structlog.get_logger()
@@ -94,21 +95,39 @@ async def _resolve_target_branch(parent_id: int) -> str:
 
 
 async def _open_integration_pr(parent: Task, target_branch: str) -> str:
-    """Open the final ``trio/<parent_id> → target_branch`` PR via gh CLI.
+    """Open the final ``<integration_branch> → target_branch`` PR via gh CLI.
 
-    The integration branch already lives on the remote (every child PR
-    merge pushed to it), so we do not push from here. We just shell out
-    to ``gh pr create``, using the same auth pattern Task 12 used for
-    the init PR (``shared.github_auth.get_github_token`` →
-    ``GH_TOKEN`` env). Returns the PR URL (gh prints it on stdout).
+    Phase 7.7 — three load-bearing properties:
 
-    Best-effort: if gh fails or no auth is available, returns an empty
-    string and logs the failure rather than crashing the orchestrator.
+    1. The workspace path is resolved (via ``_prepare_parent_workspace``,
+       which is idempotent / clone-cached per task). Prior code didn't
+       resolve it, so ``gh pr create`` ran from the orchestrator's cwd
+       and died with "fatal: not a git repository".
+    2. ``git push -u origin <branch>`` runs BEFORE ``gh pr create``, both
+       with ``cwd=workspace``. Child PR merges only put the branch on
+       the LOCAL working copy after the integration commit chain; the
+       branch may not yet exist upstream, so the push is mandatory.
+    3. On push or PR-create failure this function RAISES (RuntimeError).
+       The caller — ``_open_integration_pr_and_transition`` — treats the
+       exception as a signal to transition to BLOCKED instead of
+       PR_CREATED, which is what production needs to see when the PR
+       didn't actually open.
+
+    The integration branch name comes from the resolver, which reads
+    ``Task.integration_branch`` (new ``auto-agent/<slug>-<id>`` shape)
+    or falls back to ``trio/<id>`` for tasks created before Phase 7.7.
+
+    Returns the PR URL printed by ``gh pr create`` on stdout.
     """
     from agent import sh
+    from agent.lifecycle.trio.architect import _prepare_parent_workspace
+    from agent.lifecycle.trio.integration_branch import resolve_integration_branch
     from shared.github_auth import get_github_token
 
-    integration_branch = f"trio/{parent.id}"
+    integration_branch = resolve_integration_branch(parent)
+
+    workspace = await _prepare_parent_workspace(parent)
+    workspace_path = workspace.root if hasattr(workspace, "root") else str(workspace)
 
     try:
         token = await get_github_token(
@@ -121,17 +140,40 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
             parent_id=parent.id,
             error=str(e),
         )
-        return ""
+        raise RuntimeError(f"gh token unavailable: {e}") from e
 
     gh_env = {"GH_TOKEN": token} if token else {}
 
+    # 1. Push the integration branch upstream. Prior to Phase 7.7 this
+    #    step was missing — the production run for task 1 lost the
+    #    integration commits because nothing pushed them.
+    push_res = await sh.run(
+        ["git", "push", "-u", "origin", integration_branch],
+        cwd=workspace_path,
+        timeout=60,
+        env=gh_env,
+    )
+    if push_res.failed:
+        log.warning(
+            "trio.parent.integration_branch_push_failed",
+            parent_id=parent.id,
+            branch=integration_branch,
+            stderr=(push_res.stderr or "")[:500],
+        )
+        raise RuntimeError(
+            f"git push {integration_branch} failed: "
+            f"{(push_res.stderr or '').strip()[:500]}"
+        )
+
+    # 2. Open the PR. Must also run with cwd=workspace so gh can locate
+    #    the repository context (gh resolves the current branch + remote
+    #    relative to cwd).
     title = f"trio: integration — {parent.title}"
     body = (
         f"Final integration PR for trio parent #{parent.id}.\n\n"
         "Contains every child PR that landed on the integration branch "
         f"`{integration_branch}` during the trio cycle."
     )
-
     create_res = await sh.run(
         [
             "gh",
@@ -146,6 +188,7 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
             "--body",
             body,
         ],
+        cwd=workspace_path,
         timeout=30,
         env=gh_env,
     )
@@ -153,9 +196,13 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
         log.warning(
             "trio.parent.integration_pr_create_failed",
             parent_id=parent.id,
+            branch=integration_branch,
             stderr=(create_res.stderr or "")[:500],
         )
-        return ""
+        raise RuntimeError(
+            f"gh pr create failed for {integration_branch}: "
+            f"{(create_res.stderr or '').strip()[:500]}"
+        )
     return (create_res.stdout or "").strip()
 
 
@@ -213,16 +260,23 @@ async def _replace_backlog_item(
 
 
 async def _ensure_integration_branch_checked_out(workspace: str, parent_id: int) -> None:
-    """Make sure the workspace is on ``trio/<parent_id>``.
+    """Make sure the workspace is on the parent's integration branch.
 
     The architect's initial pass may have left the workspace on a sub-branch
-    (``trio/<parent_id>/init``) after ``_commit_and_open_initial_pr``. The
+    (``<integration_branch>/init``) after ``_commit_and_open_initial_pr``. The
     dispatcher operates on the integration branch, so we explicitly check
     it out before each item.
+
+    Phase 7.7 — the branch name comes from the resolver so new tasks see
+    ``auto-agent/<slug>-<id>`` and in-flight ones see the legacy
+    ``trio/<id>``.
     """
     from agent import sh
+    from agent.lifecycle.trio.integration_branch import resolve_integration_branch
 
-    integration_branch = f"trio/{parent_id}"
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
+        integration_branch = resolve_integration_branch(p)
     res = await sh.run(
         ["git", "checkout", integration_branch],
         cwd=workspace,
@@ -896,15 +950,44 @@ async def _open_integration_pr_and_transition(
     parent: Task,
     target_branch: str,
 ) -> None:
-    """Open the integration PR + transition the parent to PR_CREATED."""
+    """Open the integration PR + transition the parent to PR_CREATED.
+
+    Phase 7.7 — when ``_open_integration_pr`` raises (push failed or
+    ``gh pr create`` failed), the parent transitions to BLOCKED with the
+    failure reason. Prior code swallowed failure inside
+    ``_open_integration_pr`` and still transitioned to PR_CREATED with an
+    empty ``pr_url``, hiding the breakage.
+    """
 
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
-        pr_url = await _open_integration_pr(p, target_branch)
+        try:
+            pr_url = await _open_integration_pr(p, target_branch)
+        except Exception as e:
+            log.warning(
+                "trio.parent.integration_pr_failed",
+                parent_id=parent.id,
+                error=str(e),
+            )
+            p.trio_phase = None
+            await transition(
+                s,
+                p,
+                TaskStatus.BLOCKED,
+                message=f"trio: integration PR failed — {str(e)[:300]}",
+            )
+            await s.commit()
+            return
+
         p.pr_url = pr_url or None
         p.trio_phase = None
         await transition(s, p, TaskStatus.PR_CREATED, message="trio: integration PR opened")
         await s.commit()
+        branch = p.integration_branch or ""
+
+    await publish(
+        task_pr_created(parent.id, pr_url=pr_url or "", branch=branch),
+    )
 
     log.info(
         "trio.parent.opened_final_pr",

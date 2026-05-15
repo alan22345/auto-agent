@@ -115,6 +115,17 @@ class TaskEventType(StrEnum):
     # DESIGN_REJECTED event — rejection transitions to BLOCKED and the
     # task stays there until an operator unblocks it.
     DESIGN_APPROVED = "task.design_approved"
+    # ADR-015 Phase 7.7 — design/plan approval gates need a Slack/Telegram
+    # nudge so the user knows the gate is open and where to act. Fires
+    # from ``transition_task`` when the wire status is one of the two
+    # awaiting-approval values.
+    AWAITING_DESIGN_APPROVAL = "task.awaiting_design_approval"
+    AWAITING_PLAN_APPROVAL = "task.awaiting_plan_approval"
+    # Fires when the trio opens the integration PR (status → PR_CREATED).
+    # Trio used to transition silently, so the user got no notification
+    # between task.created and the (often-skipped) gate events. The factory
+    # carries pr_url + branch so dispatchers can deep-link to the PR.
+    PR_CREATED = "task.pr_created"
 
 
 class POEventType(StrEnum):
@@ -312,6 +323,37 @@ def task_blocked(task_id: int, error: str = "") -> Event:
     if error:
         payload["error"] = error
     return Event(type=TaskEventType.BLOCKED, task_id=task_id, payload=payload)
+
+
+def task_awaiting_design_approval(task_id: int, message: str = "") -> Event:
+    """ADR-015 Phase 7.7 — design ready, gate open. The dispatcher uses
+    ``message`` to surface the architect's note alongside the task URL.
+    """
+    payload: dict[str, Any] = {"message": message} if message else {}
+    return Event(
+        type=TaskEventType.AWAITING_DESIGN_APPROVAL, task_id=task_id, payload=payload,
+    )
+
+
+def task_awaiting_plan_approval(task_id: int, message: str = "") -> Event:
+    """ADR-015 Phase 7.7 — plan ready, gate open. Symmetric with the
+    design-approval factory above; carries the same fields.
+    """
+    payload: dict[str, Any] = {"message": message} if message else {}
+    return Event(
+        type=TaskEventType.AWAITING_PLAN_APPROVAL, task_id=task_id, payload=payload,
+    )
+
+
+def task_pr_created(task_id: int, *, pr_url: str = "", branch: str = "") -> Event:
+    """Trio integration PR opened. Carries pr_url so the Telegram/Slack
+    dispatcher can render a deep link to the review surface.
+    """
+    return Event(
+        type=TaskEventType.PR_CREATED,
+        task_id=task_id,
+        payload={"pr_url": pr_url, "branch": branch},
+    )
 
 
 def task_failed(task_id: int, error: str = "") -> Event:

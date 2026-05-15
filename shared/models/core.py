@@ -229,6 +229,11 @@ class Task(Base):
     trio_phase = Column(SAEnum(TrioPhase, name="triophase"), nullable=True)
     trio_backlog = Column(JSONB, nullable=True)
     consulting_architect = Column(Boolean, nullable=False, default=False, server_default="false")
+    # ADR-015 Phase 7.7 — the integration branch name (``auto-agent/<slug>-<id>``
+    # for new tasks). NULL for in-flight tasks created before the rename;
+    # those tasks fall back to the legacy ``trio/<id>`` shape via
+    # ``agent.lifecycle.trio.workspace_resolver.resolve_integration_branch``.
+    integration_branch = Column(String(255), nullable=True)
 
     repo = relationship("Repo", back_populates="tasks", lazy="selectin")
     history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")

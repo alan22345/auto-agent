@@ -149,5 +149,13 @@ def test_dispatcher_covers_only_intended_event_set():
         POEventType.ANALYSIS_STARTED,
         POEventType.SUGGESTIONS_READY,
         POEventType.ANALYSIS_FAILED,
+        # ADR-015 Phase 7.7 — gate-open notifications.
+        TaskEventType.AWAITING_DESIGN_APPROVAL,
+        TaskEventType.AWAITING_PLAN_APPROVAL,
+        # Trio integration-PR notification — pre-fix, opening the
+        # integration PR transitioned silently and the user got no
+        # notification between task.created and the (often skipped)
+        # gate events.
+        TaskEventType.PR_CREATED,
     }
     assert set(_NOTIFICATION_FORMATTERS.keys()) == expected

@@ -535,6 +535,39 @@ def _fmt_task_failed(p, info, _ff, _tid):
     return f"💥 *Task failed*\n{info}" + (f"\n\n{err[:600]}" if err else "")
 
 
+def _gate_task_url(task_id):
+    """Compose the web-next gate URL — ADR-015 Phase 7.7."""
+    base = (settings.app_base_url or "").rstrip("/")
+    suffix = f"/tasks/{task_id}" if task_id is not None else ""
+    return f"{base}{suffix}" if base else suffix
+
+
+def _fmt_task_awaiting_design_approval(p, info, _ff, tid):
+    note = (p.get("message") or "").strip()
+    note_text = f"\n\n{note}" if note else ""
+    url = _gate_task_url(tid)
+    return f"📐 *Design ready for approval*\n{info}{note_text}\n\nReview: {url}"
+
+
+def _fmt_task_awaiting_plan_approval(p, info, _ff, tid):
+    note = (p.get("message") or "").strip()
+    note_text = f"\n\n{note}" if note else ""
+    url = _gate_task_url(tid)
+    return f"📝 *Plan ready for approval*\n{info}{note_text}\n\nReview: {url}"
+
+
+def _fmt_task_pr_created(p, info, _ff, _tid):
+    pr_url = (p.get("pr_url") or "").strip()
+    branch = (p.get("branch") or "").strip()
+    branch_line = f"Branch `{branch}`\n" if branch else ""
+    pr_line = f"{pr_url}\n\n" if pr_url else ""
+    return (
+        f"🎉 *Integration PR opened*\n{info}\n"
+        f"{branch_line}{pr_line}"
+        "Review the diff and merge to land the change."
+    )
+
+
 def _fmt_po_suggestions_ready(p, info, _ff, _tid):
     repo = p.get("repo_name", "?")
     n = p.get("count", 0)
@@ -553,6 +586,10 @@ _NOTIFICATION_FORMATTERS = {
     TaskEventType.REVIEW_COMPLETE: _fmt_task_review_complete,
     TaskEventType.REJECTED: _fmt_task_rejected,
     TaskEventType.BLOCKED: _fmt_task_blocked,
+    # ADR-015 Phase 7.7 — gate-open notifications.
+    TaskEventType.AWAITING_DESIGN_APPROVAL: _fmt_task_awaiting_design_approval,
+    TaskEventType.AWAITING_PLAN_APPROVAL: _fmt_task_awaiting_plan_approval,
+    TaskEventType.PR_CREATED: _fmt_task_pr_created,
     TaskEventType.FAILED: _fmt_task_failed,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,
 }

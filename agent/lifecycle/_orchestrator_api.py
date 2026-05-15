@@ -9,7 +9,14 @@ from __future__ import annotations
 import httpx
 
 from shared.config import settings
-from shared.events import publish, task_blocked, task_done, task_failed
+from shared.events import (
+    publish,
+    task_awaiting_design_approval,
+    task_awaiting_plan_approval,
+    task_blocked,
+    task_done,
+    task_failed,
+)
 from shared.types import FreeformConfigData, RepoData, TaskData
 
 ORCHESTRATOR_URL = settings.orchestrator_url
@@ -57,10 +64,20 @@ async def set_task_affected_routes(task_id: int, routes: list[dict]) -> None:
         )
 
 
-_TERMINAL_FACTORIES = {
+# Wire-status → event factory. Covers both terminal states (failed,
+# blocked, done) and notification states that need a Slack/Telegram
+# nudge so a user knows a gate is open. ADR-015 Phase 7.7 added the two
+# awaiting-approval entries.
+_NOTIFY_FACTORIES = {
     "failed": lambda task_id, message: task_failed(task_id, error=message),
     "blocked": lambda task_id, message: task_blocked(task_id, error=message),
     "done": lambda task_id, _message: task_done(task_id),
+    "awaiting_design_approval": lambda task_id, message: (
+        task_awaiting_design_approval(task_id, message=message)
+    ),
+    "awaiting_plan_approval": lambda task_id, message: (
+        task_awaiting_plan_approval(task_id, message=message)
+    ),
 }
 
 
@@ -70,6 +87,6 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/transition",
             json={"status": status, "message": message},
         )
-    factory = _TERMINAL_FACTORIES.get(status)
+    factory = _NOTIFY_FACTORIES.get(status)
     if factory is not None:
         await publish(factory(task_id, message))

@@ -592,6 +592,51 @@ def _fmt_task_blocked(payload: dict[str, Any], task_info: str, _is_freeform: boo
     )
 
 
+def _gate_task_url(task_id: int | None) -> str:
+    """Compose the web-next gate URL — ADR-015 Phase 7.7."""
+    base = (settings.app_base_url or "").rstrip("/")
+    suffix = f"/tasks/{task_id}" if task_id is not None else ""
+    return f"{base}{suffix}" if base else suffix
+
+
+def _fmt_task_awaiting_design_approval(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None,
+) -> str:
+    note = (payload.get("message") or "").strip()
+    note_text = f"\n\n{note}" if note else ""
+    url = _gate_task_url(task_id)
+    return (
+        f"📐 *Design ready for approval*\n{task_info}{note_text}\n\n"
+        f"Review: {url}"
+    )
+
+
+def _fmt_task_awaiting_plan_approval(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None,
+) -> str:
+    note = (payload.get("message") or "").strip()
+    note_text = f"\n\n{note}" if note else ""
+    url = _gate_task_url(task_id)
+    return (
+        f"📝 *Plan ready for approval*\n{task_info}{note_text}\n\n"
+        f"Review: {url}"
+    )
+
+
+def _fmt_task_pr_created(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None,
+) -> str:
+    pr_url = (payload.get("pr_url") or "").strip()
+    branch = (payload.get("branch") or "").strip()
+    branch_line = f"Branch `{branch}`\n" if branch else ""
+    pr_line = f"{pr_url}\n\n" if pr_url else ""
+    return (
+        f"🎉 *Integration PR opened*\n{task_info}\n"
+        f"{branch_line}{pr_line}"
+        "Review the diff and merge to land the change."
+    )
+
+
 def _fmt_task_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
     error = payload.get("error", "unknown")
     return f"*Task failed.*\n{task_info}\nError: {error}"
@@ -688,6 +733,10 @@ _NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
     TaskEventType.REVIEW_COMMENTS_ADDRESSED: _fmt_task_review_comments_addressed,
     TaskEventType.DEV_DEPLOY_FAILED: _fmt_task_dev_deploy_failed,
     TaskEventType.SUBTASK_PROGRESS: _fmt_task_subtask_progress,
+    # ADR-015 Phase 7.7 — gate-open notifications.
+    TaskEventType.AWAITING_DESIGN_APPROVAL: _fmt_task_awaiting_design_approval,
+    TaskEventType.AWAITING_PLAN_APPROVAL: _fmt_task_awaiting_plan_approval,
+    TaskEventType.PR_CREATED: _fmt_task_pr_created,
     POEventType.ANALYSIS_QUEUED: _fmt_po_analysis_queued,
     POEventType.ANALYSIS_STARTED: _fmt_po_analysis_started,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,

@@ -209,15 +209,21 @@ async def _prepare_parent_workspace(parent: Task) -> str:
     """Prepare a workspace for the architect's initial pass.
 
     With a repo attached: clone via ``agent.workspace.clone_repo`` and
-    check out branch ``trio/<parent_id>`` off the repo's default branch
-    (creating it if necessary).
+    check out the parent's integration branch off the repo's default
+    branch (creating it if necessary). Phase 7.7 — the branch name is
+    ``auto-agent/<slug>-<task_id>`` for new tasks; in-flight tasks with
+    a NULL ``Task.integration_branch`` column fall back to the legacy
+    ``trio/<task_id>`` shape.
 
     Without a repo (cold-start tasks like "build a TODO app"): allocate
     an empty directory under the workspaces root and ``git init`` it so
-    the architect can scaffold + commit. The integration branch is still
-    created under ``trio/<parent_id>`` for symmetry with the repo path.
+    the architect can scaffold + commit. The integration branch follows
+    the same naming as the repo path.
     """
     from agent import sh
+    from agent.lifecycle.trio.integration_branch import (
+        ensure_integration_branch,
+    )
     from agent.workspace import (
         _AGENT_GIT_EMAIL,
         _AGENT_GIT_NAME,
@@ -226,7 +232,7 @@ async def _prepare_parent_workspace(parent: Task) -> str:
         create_branch,
     )
 
-    branch = f"trio/{parent.id}"
+    branch = await ensure_integration_branch(parent.id, parent.title)
 
     if parent.repo is not None:
         base_branch = parent.repo.default_branch or "main"
@@ -277,13 +283,14 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
     falls back to HEAD of the head branch if no remote is reachable).
     """
     from agent import sh
+    from agent.lifecycle.trio.integration_branch import resolve_integration_branch
     from agent.workspace import (
         commit_pending_changes,
         push_branch,
     )
 
-    integration_branch = f"trio/{parent.id}"
-    head_branch = f"trio/{parent.id}/init"
+    integration_branch = resolve_integration_branch(parent)
+    head_branch = f"{integration_branch}/init"
 
     # Sub-branch off the integration branch we're already on.
     await sh.run(
@@ -913,10 +920,11 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
     import time
 
     from agent import sh
+    from agent.lifecycle.trio.integration_branch import resolve_integration_branch
     from agent.workspace import commit_pending_changes, push_branch
 
-    integration_branch = f"trio/{parent.id}"
-    head_branch = f"trio/{parent.id}/consult-{int(time.time())}"
+    integration_branch = resolve_integration_branch(parent)
+    head_branch = f"{integration_branch}/consult-{int(time.time())}"
 
     # Sub-branch off whatever HEAD currently is (the integration branch).
     await sh.run(
