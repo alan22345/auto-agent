@@ -44,6 +44,59 @@ async def test_converse_returns_appended_messages_and_reply():
     assert appended[1].role == "assistant"
 
 
+async def test_converse_forces_bedrock_provider_to_dodge_claude_cli_passthrough():
+    """With LLM_PROVIDER=claude_cli on the VM, the pass-through ignores
+    ``tools=...`` so the assistant's approve/reject/etc. tool calls never
+    happen — Claude Code generates free-form prose instead. The fix is
+    the same escape hatch the structured-extractor uses: force a
+    tool-capable provider regardless of the project default.
+    """
+    history: list[Message] = []
+    fake_provider = AsyncMock()
+    fake_provider.complete.return_value = _resp(content="hello!")
+    with (
+        patch("agent.slack_assistant.get_provider", return_value=fake_provider) as gp,
+        patch("agent.slack_assistant.resolve_home_dir", return_value=None),
+    ):
+        await converse(
+            user_id=1,
+            text="hi",
+            history=history,
+            home_dir=None,
+            on_create_task=None,
+        )
+    gp.assert_called_once()
+    kwargs = gp.call_args.kwargs
+    assert kwargs.get("provider_override") == "bedrock", (
+        f"converse must escape claude_cli; got kwargs={kwargs}"
+    )
+
+
+async def test_approve_plan_tool_targets_gate_approval_endpoint():
+    """``_approve_plan`` must hit ``/tasks/{id}/approve-plan`` (ADR-015 §6 —
+    handles both AWAITING_PLAN_APPROVAL and AWAITING_DESIGN_APPROVAL), not
+    the legacy ``/tasks/{id}/approve`` which only accepts AWAITING_APPROVAL
+    and 400s on design gates. Production repro: task 5 sitting in
+    AWAITING_DESIGN_APPROVAL on 2026-05-15 — user said "approved", the
+    tool call would have 400'd."""
+    from agent.slack_assistant import _approve_plan
+
+    fake_client = AsyncMock()
+    fake_resp = AsyncMock()
+    fake_resp.status_code = 200
+    fake_resp.text = "{}"
+    fake_client.__aenter__.return_value = fake_client
+    fake_client.__aexit__.return_value = None
+    fake_client.post = AsyncMock(return_value=fake_resp)
+
+    with patch("agent.slack_assistant.httpx.AsyncClient", return_value=fake_client):
+        await _approve_plan(task_id=5, feedback="lgtm")
+
+    fake_client.post.assert_called_once()
+    url = fake_client.post.call_args.args[0]
+    assert url.endswith("/tasks/5/approve-plan"), f"expected /approve-plan, got {url}"
+
+
 async def test_converse_invokes_on_create_task_when_create_task_tool_fires():
     history: list[Message] = []
     fake_provider = AsyncMock()

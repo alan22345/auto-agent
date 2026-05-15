@@ -11,8 +11,10 @@ if TYPE_CHECKING:
 FocusKind = Literal["draft", "task", "none"]
 """v1 focus kinds. v2 will add 'freeform' and 'po_analysis'."""
 
-# 24h focus TTL, per design.
-FOCUS_TTL_HOURS = 24
+# Focus TTL — short enough that a stale task doesn't capture a fresh
+# conversation hours later, long enough that a user replying to a
+# notification within the same working session lands on the right task.
+FOCUS_TTL_HOURS = 4
 
 # Cap conversation history rows at the most recent N messages.
 MAX_HISTORY_MESSAGES = 200

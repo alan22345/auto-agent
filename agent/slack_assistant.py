@@ -58,7 +58,11 @@ You can:
 - Read a specific task's status, plan, or PR.
 - Create a new task on a named repo (after confirming the repo + the \
   description).
-- Approve or reject a plan that's awaiting approval.
+- Approve or reject a gate that's awaiting the user — either a plan \
+  (status ``awaiting_plan_approval`` / ``awaiting_approval``) or a \
+  design doc (status ``awaiting_design_approval``). The same tool \
+  handles both. When the user says "approve", "approved", "lgtm" or \
+  similar on a task in any of those states, call ``approve_plan``.
 - Send a clarification answer to a task that's asked one.
 - Cancel a running task.
 - List the available repos so you can match a name the user gave you \
@@ -145,8 +149,10 @@ _TOOL_DEFS: list[ToolDefinition] = [
     ToolDefinition(
         name="approve_plan",
         description=(
-            "Approve a plan that's awaiting approval. Optional feedback "
-            "is forwarded to the coding agent."
+            "Approve the current gate on a task — works for both plan "
+            "approval (``awaiting_plan_approval`` / ``awaiting_approval``) "
+            "and design approval (``awaiting_design_approval``). Optional "
+            "feedback is forwarded to the next phase."
         ),
         parameters={
             "type": "object",
@@ -280,10 +286,14 @@ async def _create_task(
 
 
 async def _approve_plan(task_id: int, feedback: str = "") -> dict:
+    # ``/approve-plan`` is the ADR-015 §6 gate endpoint that handles both
+    # AWAITING_PLAN_APPROVAL and AWAITING_DESIGN_APPROVAL. The legacy
+    # ``/approve`` endpoint only accepts AWAITING_APPROVAL and 400s on
+    # design gates — task 5 (2026-05-15) was the prod repro.
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
-            json={"approved": True, "feedback": feedback},
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve-plan",
+            json={"verdict": "approved", "comments": feedback},
         )
     return {
         "ok": resp.status_code == 200,
@@ -295,8 +305,8 @@ async def _approve_plan(task_id: int, feedback: str = "") -> dict:
 async def _reject_plan(task_id: int, feedback: str) -> dict:
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve",
-            json={"approved": False, "feedback": feedback},
+            f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve-plan",
+            json={"verdict": "rejected", "comments": feedback},
         )
     return {
         "ok": resp.status_code == 200,
@@ -380,7 +390,15 @@ async def converse(
     appended: list[Message] = [Message(role="user", content=text)]
     working = list(history) + list(appended)
 
-    provider = get_provider(model_override="fast", home_dir=home_dir)
+    # Force Bedrock regardless of settings.llm_provider — the claude_cli
+    # pass-through ignores ``tools=...`` (it short-circuits the API
+    # tool-use protocol), which silently breaks every tool call below.
+    # Same escape hatch as ``get_structured_extractor_provider``.
+    provider = get_provider(
+        model_override="fast",
+        provider_override="bedrock",
+        home_dir=home_dir,
+    )
 
     final_text = ""
     for _turn in range(MAX_TURNS_PER_REQUEST):

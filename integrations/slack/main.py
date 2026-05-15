@@ -306,8 +306,43 @@ async def send_slack_dm(
             from shared.task_channel import task_channel
 
             await task_channel(task_id).bind_slack_message(ts)
+            await _bump_messenger_focus(slack_user_id, task_id, org_id=org_id)
     except Exception:
         log.exception("Failed to send Slack DM")
+
+
+async def _bump_messenger_focus(
+    slack_user_id: str,
+    task_id: int,
+    *,
+    org_id: int | None,
+) -> None:
+    """Set the recipient's messenger focus to (task, task_id).
+
+    Why: a non-thread reply to a task notification (e.g. "approve" sent
+    as a fresh DM) goes through ``messenger_router.handle`` — if focus
+    is unset the router renders a "which task?" picker, breaking the
+    user's flow. Bumping focus on outbound notifications keeps the
+    conversation about the most recently mentioned task. TTL is
+    ``FOCUS_TTL_HOURS`` (see ``orchestrator.messenger_router.types``)
+    — the focus auto-expires so stale tasks don't capture future DMs.
+    """
+    try:
+        user = await _user_for_slack_id(slack_user_id, org_id=org_id)
+        if user is None:
+            return
+        from orchestrator.messenger_router.persistence import set_focus
+
+        async with async_session() as session:
+            await set_focus(
+                session,
+                user["id"],
+                focus_kind="task",
+                focus_id=task_id,
+            )
+            await session.commit()
+    except Exception:
+        log.exception("bump_messenger_focus_failed task_id=%s", task_id)
 
 
 # ---------------------------------------------------------------------------

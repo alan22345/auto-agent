@@ -115,7 +115,7 @@ async def set_focus(
     focus_kind: FocusKind,
     focus_id: int | None,
 ) -> None:
-    """Upsert user_focus + bump expires_at to now+24h."""
+    """Upsert user_focus + bump expires_at to now+``FOCUS_TTL_HOURS``."""
     now = datetime.now(UTC)
     expires = now + timedelta(hours=FOCUS_TTL_HOURS)
     stmt = (

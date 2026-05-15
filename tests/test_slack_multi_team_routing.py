@@ -83,6 +83,76 @@ import pytest  # noqa: E402
 
 
 @pytest.mark.asyncio
+async def test_send_slack_dm_with_task_id_bumps_messenger_focus(monkeypatch):
+    """Outbound DM about a task should bump the recipient's messenger
+    focus so a fresh-DM reply ("approve", "lgtm", etc.) doesn't trip the
+    picker. Production repro 2026-05-15: task 5 design-approval notice
+    landed in Slack → user replied "approve" → router saw focus=none →
+    rendered "which task?" picker, breaking the flow."""
+    from unittest.mock import AsyncMock
+
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    monkeypatch.setattr(slack_main.settings, "slack_bot_token", "xoxb-test")
+    slack_main._app = None
+
+    monkeypatch.setattr(
+        slack_main,
+        "_user_for_slack_id",
+        AsyncMock(return_value={"id": 42, "username": "u", "display_name": "U"}),
+    )
+
+    async def fake_open(users):
+        return {"channel": {"id": "D1"}}
+
+    async def fake_post(channel, text, mrkdwn):
+        return {"ts": "1.0"}
+
+    original_init = AsyncWebClient.__init__
+
+    def capture_init(self, token=None, **kw):
+        original_init(self, token=token, **kw)
+        self.conversations_open = fake_open
+        self.chat_postMessage = fake_post
+
+    monkeypatch.setattr(AsyncWebClient, "__init__", capture_init)
+
+    # Don't let the Redis-backed task_channel actually fire.
+    from shared import task_channel as tc_mod
+
+    tc_stub = MagicMock()
+    tc_stub.bind_slack_message = AsyncMock()
+    monkeypatch.setattr(tc_mod, "task_channel", lambda task_id: tc_stub)
+
+    set_focus_mock = AsyncMock()
+    monkeypatch.setattr(
+        "orchestrator.messenger_router.persistence.set_focus",
+        set_focus_mock,
+    )
+
+    # async_session is a context manager — give it a dummy session.
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_session():
+        s = AsyncMock()
+        s.commit = AsyncMock()
+        yield s
+
+    monkeypatch.setattr(slack_main, "async_session", fake_session)
+
+    await slack_main.send_slack_dm("UTARGET", "hello", task_id=5, org_id=None)
+
+    set_focus_mock.assert_called_once()
+    args = set_focus_mock.call_args.args
+    kwargs = set_focus_mock.call_args.kwargs
+    # set_focus(session, user_id, *, focus_kind, focus_id)
+    assert args[1] == 42, f"expected user_id=42, got args={args}"
+    assert kwargs["focus_kind"] == "task"
+    assert kwargs["focus_id"] == 5
+
+
+@pytest.mark.asyncio
 async def test_send_slack_dm_uses_per_org_bot_token(monkeypatch):
     """In multi-team mode, send_slack_dm(slack_user_id, text, org_id=42)
     fetches org 42's bot_token from the installation store, then posts
