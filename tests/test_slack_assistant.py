@@ -89,12 +89,60 @@ async def test_approve_plan_tool_targets_gate_approval_endpoint():
     fake_client.__aexit__.return_value = None
     fake_client.post = AsyncMock(return_value=fake_resp)
 
-    with patch("agent.slack_assistant.httpx.AsyncClient", return_value=fake_client):
-        await _approve_plan(task_id=5, feedback="lgtm")
+    with (
+        patch("agent.slack_assistant.httpx.AsyncClient", return_value=fake_client),
+        patch(
+            "agent.slack_assistant._internal_auth_headers",
+            AsyncMock(return_value={"Authorization": "Bearer test-token"}),
+        ),
+    ):
+        await _approve_plan(task_id=5, user_id=1, feedback="lgtm")
 
     fake_client.post.assert_called_once()
     url = fake_client.post.call_args.args[0]
     assert url.endswith("/tasks/5/approve-plan"), f"expected /approve-plan, got {url}"
+
+
+async def test_internal_auth_headers_returns_bearer_token():
+    """``_internal_auth_headers`` must mint a Bearer token so the orchestrator's
+    org-scoped dependency lets the request through. Production repro
+    2026-05-15: unauthenticated GET /api/tasks → 401 → empty list → AI told
+    user there were no tasks."""
+    from unittest.mock import MagicMock
+
+    from agent.slack_assistant import _internal_auth_headers
+
+    fake_user = MagicMock()
+    fake_user.id = 1
+    fake_user.username = "alan"
+
+    # Two execute() calls: the user lookup (scalar_one_or_none → user),
+    # then the org_id lookup (scalar_one_or_none → 1).
+    def _execute_side_effect(_stmt):
+        result = MagicMock()
+        if _execute_side_effect.calls == 0:
+            result.scalar_one_or_none = MagicMock(return_value=fake_user)
+        else:
+            result.scalar_one_or_none = MagicMock(return_value=1)
+        _execute_side_effect.calls += 1
+        return result
+
+    _execute_side_effect.calls = 0
+
+    fake_session = AsyncMock()
+    fake_session.execute = AsyncMock(side_effect=_execute_side_effect)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_async_session():
+        yield fake_session
+
+    with patch("shared.database.async_session", fake_async_session):
+        headers = await _internal_auth_headers(user_id=1)
+
+    assert "Authorization" in headers
+    assert headers["Authorization"].startswith("Bearer ")
 
 
 async def test_converse_injects_current_focus_into_system_prompt():

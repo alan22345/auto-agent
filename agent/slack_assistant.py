@@ -206,8 +206,55 @@ _TOOL_DEFS: list[ToolDefinition] = [
 # ---------------------------------------------------------------------------
 
 
+async def _internal_auth_headers(user_id: int) -> dict[str, str]:
+    """Mint a short-lived Bearer JWT for ``user_id`` so the assistant's
+    HTTP calls pass the orchestrator's org-scoped auth dependency.
+
+    Without this, every ``GET/POST /api/tasks…`` from the assistant
+    returns 401 — and the tool funcs (which only check for ``200``)
+    silently return empty results, so the AI ends up "blind" and tells
+    the user there are no tasks. Production repro 2026-05-15: task 5
+    in AWAITING_DESIGN_APPROVAL, ``list_my_tasks(active)`` returned
+    ``[]`` because the GET was unauthenticated.
+
+    Picks the user's first org membership as ``current_org_id`` —
+    fine for the current single-org-per-user deploy. Returns an empty
+    dict if the user or their membership can't be resolved; the caller
+    will then get a 401 (visible as ``status_code=401`` in the tool
+    result, which the AI can surface to the user).
+    """
+    from sqlalchemy import select
+
+    from orchestrator.auth import create_token
+    from shared.database import async_session
+    from shared.models import OrganizationMembership, User
+
+    async with async_session() as s:
+        user = (await s.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user is None:
+            return {}
+        org_id = (
+            await s.execute(
+                select(OrganizationMembership.org_id)
+                .where(OrganizationMembership.user_id == user_id)
+                .order_by(OrganizationMembership.org_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if org_id is None:
+            return {}
+        token = create_token(
+            user.id,
+            user.username,
+            current_org_id=org_id,
+            expires_seconds=120,
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
 async def _list_my_tasks(user_id: int, status: str = "active") -> list[dict]:
-    async with httpx.AsyncClient() as client:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
         if resp.status_code != 200:
             return []
@@ -229,8 +276,9 @@ async def _list_my_tasks(user_id: int, status: str = "active") -> list[dict]:
     ]
 
 
-async def _get_task(task_id: int) -> dict:
-    async with httpx.AsyncClient() as client:
+async def _get_task(task_id: int, user_id: int) -> dict:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
     if resp.status_code != 200:
         return {"error": f"task {task_id} not found"}
@@ -248,8 +296,9 @@ async def _get_task(task_id: int) -> dict:
     }
 
 
-async def _list_repos() -> list[dict]:
-    async with httpx.AsyncClient() as client:
+async def _list_repos(user_id: int) -> list[dict]:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
     if resp.status_code != 200:
         return []
@@ -277,7 +326,8 @@ async def _create_task(
         "repo_name": repo_name,
         "created_by_user_id": user_id,
     }
-    async with httpx.AsyncClient() as client:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/tasks", json=payload)
     if resp.status_code != 200:
         return {"error": f"create_task failed: {resp.status_code} {resp.text[:200]}"}
@@ -285,12 +335,13 @@ async def _create_task(
     return {"task_id": t["id"], "status": t["status"], "title": t["title"]}
 
 
-async def _approve_plan(task_id: int, feedback: str = "") -> dict:
+async def _approve_plan(task_id: int, user_id: int, feedback: str = "") -> dict:
     # ``/approve-plan`` is the ADR-015 §6 gate endpoint that handles both
     # AWAITING_PLAN_APPROVAL and AWAITING_DESIGN_APPROVAL. The legacy
     # ``/approve`` endpoint only accepts AWAITING_APPROVAL and 400s on
     # design gates — task 5 (2026-05-15) was the prod repro.
-    async with httpx.AsyncClient() as client:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve-plan",
             json={"verdict": "approved", "comments": feedback},
@@ -302,8 +353,9 @@ async def _approve_plan(task_id: int, feedback: str = "") -> dict:
     }
 
 
-async def _reject_plan(task_id: int, feedback: str) -> dict:
-    async with httpx.AsyncClient() as client:
+async def _reject_plan(task_id: int, user_id: int, feedback: str) -> dict:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/tasks/{task_id}/approve-plan",
             json={"verdict": "rejected", "comments": feedback},
@@ -320,8 +372,9 @@ async def _answer_clarification(task_id: int, answer: str) -> dict:
     return {"ok": True, "task_id": task_id}
 
 
-async def _cancel_task(task_id: int) -> dict:
-    async with httpx.AsyncClient() as client:
+async def _cancel_task(task_id: int, user_id: int) -> dict:
+    headers = await _internal_auth_headers(user_id)
+    async with httpx.AsyncClient(headers=headers) as client:
         resp = await client.post(f"{ORCHESTRATOR_URL}/tasks/{task_id}/cancel")
     return {
         "ok": resp.status_code == 200,
@@ -337,9 +390,9 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> tuple[Any, int 
         if name == "list_my_tasks":
             result = await _list_my_tasks(user_id, args.get("status", "active"))
         elif name == "get_task":
-            result = await _get_task(int(args["task_id"]))
+            result = await _get_task(int(args["task_id"]), user_id)
         elif name == "list_repos":
-            result = await _list_repos()
+            result = await _list_repos(user_id)
         elif name == "create_task":
             result = await _create_task(
                 user_id,
@@ -350,13 +403,17 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> tuple[Any, int 
             if isinstance(result, dict) and "task_id" in result:
                 created_task_id = int(result["task_id"])
         elif name == "approve_plan":
-            result = await _approve_plan(int(args["task_id"]), args.get("feedback", ""))
+            result = await _approve_plan(
+                int(args["task_id"]),
+                user_id,
+                args.get("feedback", ""),
+            )
         elif name == "reject_plan":
-            result = await _reject_plan(int(args["task_id"]), args["feedback"])
+            result = await _reject_plan(int(args["task_id"]), user_id, args["feedback"])
         elif name == "answer_clarification":
             result = await _answer_clarification(int(args["task_id"]), args["answer"])
         elif name == "cancel_task":
-            result = await _cancel_task(int(args["task_id"]))
+            result = await _cancel_task(int(args["task_id"]), user_id)
         else:
             result = {"error": f"unknown tool: {name}"}
     except KeyError as e:
@@ -372,7 +429,10 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> tuple[Any, int 
 # ---------------------------------------------------------------------------
 
 
-async def _build_system_prompt(current_focus: dict[str, Any] | None) -> str:
+async def _build_system_prompt(
+    current_focus: dict[str, Any] | None,
+    user_id: int,
+) -> str:
     """Compose the system prompt for one ``converse`` call.
 
     Baseline: :data:`SYSTEM_PROMPT`. When ``current_focus`` names a task,
@@ -383,7 +443,7 @@ async def _build_system_prompt(current_focus: dict[str, Any] | None) -> str:
     """
     if not (current_focus and current_focus.get("kind") == "task" and current_focus.get("id")):
         return SYSTEM_PROMPT
-    task = await _get_task(int(current_focus["id"]))
+    task = await _get_task(int(current_focus["id"]), user_id)
     if "error" in task:
         return SYSTEM_PROMPT
     title = (task.get("title") or "untitled")[:120]
@@ -436,7 +496,7 @@ async def converse(
         home_dir=home_dir,
     )
 
-    system = await _build_system_prompt(current_focus)
+    system = await _build_system_prompt(current_focus, user_id)
 
     final_text = ""
     for _turn in range(MAX_TURNS_PER_REQUEST):
