@@ -121,6 +121,9 @@ class ArchitectureEventType(StrEnum):
 class RepoEventType(StrEnum):
     ONBOARD = "repo.onboard"
     DELETED = "repo.deleted"
+    GRAPH_REQUESTED = "repo.graph_requested"
+    GRAPH_READY = "repo.graph_ready"
+    GRAPH_FAILED = "repo.graph_failed"
 
 
 class HumanEventType(StrEnum):
@@ -501,6 +504,46 @@ def repo_onboard(repo_id: int, repo_name: str) -> Event:
 
 def repo_deleted(repo_name: str) -> Event:
     return Event(type=RepoEventType.DELETED, task_id=0, payload={"repo_name": repo_name})
+
+
+def repo_graph_requested(*, repo_id: int, request_id: str) -> Event:
+    """ADR-016 §10 — the refresh endpoint publishes this; the analyser
+    handler consumes it. ``request_id`` is a UUID the caller can correlate
+    with the eventual READY/FAILED event."""
+    return Event(
+        type=RepoEventType.GRAPH_REQUESTED,
+        task_id=0,
+        payload={"repo_id": repo_id, "request_id": request_id},
+    )
+
+
+def repo_graph_ready(
+    *, repo_id: int, repo_graph_id: int, commit_sha: str, status: str,
+) -> Event:
+    """Published by the analyser after a row is written. ``status`` is one
+    of ``"ok"``, ``"partial"`` per ADR-016 §10."""
+    return Event(
+        type=RepoEventType.GRAPH_READY,
+        task_id=0,
+        payload={
+            "repo_id": repo_id,
+            "repo_graph_id": repo_graph_id,
+            "commit_sha": commit_sha,
+            "status": status,
+        },
+    )
+
+
+def repo_graph_failed(*, repo_id: int, error: str) -> Event:
+    """Published when the whole analysis fails (clone failure, lock
+    contention, DB write). Per-area parser failures are surfaced as
+    ``AreaStatus.failed`` inside a ``REPO_GRAPH_READY`` blob with
+    ``status="partial"`` — they are *not* published as failures."""
+    return Event(
+        type=RepoEventType.GRAPH_FAILED,
+        task_id=0,
+        payload={"repo_id": repo_id, "error": error},
+    )
 
 
 def human_message(task_id: int, message: str, source: str) -> Event:

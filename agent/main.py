@@ -19,6 +19,7 @@ from agent.lifecycle import (
     conflict_resolve,
     conversation,
     deploy,
+    graph_refresh,
     harness_onboard,
     planning,
     po_worker,
@@ -62,6 +63,7 @@ def register_handlers(bus: EventBus) -> None:
     bus.on(TaskEventType.MERGE_CONFLICT_DETECTED, conflict_resolve.handle)
     bus.on(POEventType.ANALYZE, po_worker.handle)
     bus.on(RepoEventType.ONBOARD, harness_onboard.handle)
+    bus.on(RepoEventType.GRAPH_REQUESTED, graph_refresh.handle)
     bus.on(HumanEventType.MESSAGE, conversation.route_human_message)
 
 

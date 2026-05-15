@@ -28,6 +28,9 @@ dependencies = [
     "psycopg2-binary>=2.9.12",
     "ptyprocess>=0.7.0",
     "playwright",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]

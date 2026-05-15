@@ -17,17 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.auth import (
     create_token,
-    current_org_id as current_org_id_dep,
-    current_user_id,
     hash_password,
     verify_password,
     verify_token,
+)
+from orchestrator.auth import (
+    current_org_id as current_org_id_dep,
 )
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
 from orchestrator.scoping import scoped
-from orchestrator.state_machine import InvalidTransition, get_task, transition
+from orchestrator.state_machine import InvalidTransition, transition
 from shared import quotas
 from shared.config import settings
 from shared.database import get_session
@@ -35,6 +36,7 @@ from shared.events import (
     po_analyze,
     publish,
     repo_deleted,
+    repo_graph_requested,
     repo_onboard,
     task_approved,
     task_cleanup,
@@ -52,6 +54,7 @@ from shared.models import (
     OrganizationMembership,
     Plan,
     Repo,
+    RepoGraph,
     RepoGraphConfig,
     ReviewAttempt,
     ScheduledTask,
@@ -73,6 +76,7 @@ from shared.types import (
     EnableRepoGraphRequest,
     FeedbackSummary,
     FreeformConfigData,
+    LatestRepoGraphData,
     LoginRequest,
     LoginResponse,
     MarketBriefResponse,
@@ -80,6 +84,7 @@ from shared.types import (
     PlanRead,
     RepoData,
     RepoGraphConfigData,
+    RepoGraphRefreshResponse,
     RepoResponse,
     ReviewAttemptOut,
     ScheduleResponse,
@@ -1897,21 +1902,28 @@ async def list_repo_graph_configs(
     return [_config_to_data(cfg, repo) for cfg, repo in result.all()]
 
 
-@router.post("/repos/{repo_id}/graph/refresh")
+@router.post(
+    "/repos/{repo_id}/graph/refresh",
+    response_model=RepoGraphRefreshResponse,
+    status_code=202,
+)
 async def refresh_repo_graph(
     repo_id: int,
+    response: Response,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
-) -> dict:
-    """Trigger a graph refresh.
+) -> RepoGraphRefreshResponse:
+    """Trigger a graph refresh (ADR-016 §10 — Phase 2).
 
-    Phase 1 of ADR-016 only ships the scaffolding; the analyser pipeline
-    (tree-sitter + LLM gap-fill + citation validation) lands in Phase 2.
-    Until then this endpoint deliberately returns 501 so the UI can
-    surface a clear "not implemented yet" message to the user instead of
-    silently succeeding. This is the **only** stub permitted in Phase 1
-    per the task spec — every other surface is fully wired.
+    Publishes a ``REPO_GRAPH_REQUESTED`` event and returns ``202 Accepted``
+    with the ``request_id`` the caller can correlate with the eventual
+    ``REPO_GRAPH_READY`` / ``REPO_GRAPH_FAILED`` event. The actual
+    analyser runs in the agent process — lock contention is detected
+    there and surfaces as a ``REPO_GRAPH_FAILED`` event with
+    ``error="analysis already running"``.
     """
+    import uuid
+
     repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
     if not repo:
         raise HTTPException(404, "Repo not found")
@@ -1923,14 +1935,68 @@ async def refresh_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Code-graph refresh is not implemented yet — the analyser ships "
-            "in Phase 2 of ADR-016. Phase 1 (this build) only configures "
-            "which repos are graph-enabled and on which branch."
-        ),
+    request_id = str(uuid.uuid4())
+    await publish(repo_graph_requested(repo_id=repo.id, request_id=request_id))
+    # status_code is set by the decorator; restate explicitly so the
+    # response model + status_code both come from this function for
+    # downstream openapi clarity.
+    response.status_code = 202
+    return RepoGraphRefreshResponse(request_id=request_id, status="accepted")
+
+
+@router.get(
+    "/repos/{repo_id}/graph/latest",
+    response_model=LatestRepoGraphData,
+)
+async def get_latest_repo_graph(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> LatestRepoGraphData:
+    """Return the latest completed analysis for ``repo_id``.
+
+    Used by ``/code-graph/{repoId}`` to render the freshness banner +
+    Cytoscape graph. ``blob`` is ``None`` until the first successful
+    analysis lands.
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
     )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    response = LatestRepoGraphData(
+        repo_id=repo.id,
+        analysis_branch=cfg.analysis_branch,
+    )
+
+    if cfg.last_analysis_id is None:
+        return response
+
+    row_result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        return response
+
+    response.repo_graph_id = row.id
+    response.commit_sha = row.commit_sha
+    response.generated_at = row.generated_at.isoformat() if row.generated_at else None
+    response.analyser_version = row.analyser_version
+    response.status = row.status  # type: ignore[assignment]
+    # ``graph_json`` is the dict form of RepoGraphBlob — let Pydantic
+    # validate before returning.
+    from shared.types import RepoGraphBlob
+
+    if row.graph_json:
+        response.blob = RepoGraphBlob.model_validate(row.graph_json)
+    return response
 
 
 @router.delete("/repos/{repo_name}")

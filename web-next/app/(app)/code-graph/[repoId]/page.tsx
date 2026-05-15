@@ -7,14 +7,17 @@ import { ArrowLeft, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BranchPicker } from '@/components/code-graph/branch-picker';
 import { RefreshButton } from '@/components/code-graph/refresh-button';
+import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
+import { GraphCanvas } from '@/components/code-graph/graph-canvas';
 import { ApiError } from '@/lib/api';
 import { disableRepoGraph } from '@/lib/code-graph';
 import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
 import { useCodeGraphConfig } from '@/hooks/useCodeGraphConfig';
+import { useRepoGraph } from '@/hooks/useRepoGraph';
 
-// ADR-016 §11 — per-repo settings page. The graph rendering itself
-// (Cytoscape, expand/collapse) lands in Phase 2/7; Phase 1 ships
-// configuration + the refresh trigger.
+// ADR-016 §11 — per-repo settings + graph page. Phase 2 wires the
+// Cytoscape canvas in below the freshness banner; Phase 7 polishes
+// node interactions + side-panel evidence.
 export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: string }> }) {
   const params = use(props.params);
   const repoId = Number(params.repoId);
@@ -25,6 +28,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
   );
+  const { data: latest } = useRepoGraph(Number.isFinite(repoId) ? repoId : null);
 
   const disableMutation = useMutation({
     mutationFn: () => disableRepoGraph(repoId),
@@ -70,7 +74,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
         </div>
       </header>
 
-      <section className="min-h-0 flex-1 space-y-8 overflow-auto">
+      <section className="min-h-0 flex-1 space-y-6 overflow-auto">
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : isError ? (
@@ -87,23 +91,30 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
           </p>
         ) : (
           <>
-            <FreshnessBanner config={config} />
+            {latest && <FreshnessBanner latest={latest} />}
 
-            <div className="space-y-4">
-              <h2 className="text-sm font-semibold">Branch</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <RefreshButton repoId={config.repo_id} />
+              <span className="ml-auto" />
               <BranchPicker config={config} />
             </div>
 
-            <div className="space-y-4">
-              <h2 className="text-sm font-semibold">Refresh</h2>
-              <RefreshButton repoId={config.repo_id} />
-            </div>
+            {latest?.blob ? (
+              <GraphCanvas blob={latest.blob} />
+            ) : (
+              <div
+                role="status"
+                className="flex h-[400px] items-center justify-center rounded-md border bg-card/40 text-sm text-muted-foreground"
+              >
+                Analysis in progress — first analysis can take a few minutes.
+              </div>
+            )}
 
-            <div className="space-y-4">
+            <div className="space-y-2 border-t pt-4">
               <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
               <p className="text-xs text-muted-foreground max-w-md">
-                Disabling graph analysis removes the config row. The on-disk workspace is
-                left as-is and re-cloned the next time you enable the graph.
+                Disabling graph analysis removes the config row. The on-disk workspace
+                is left as-is and re-cloned the next time you enable the graph.
               </p>
               <Button
                 variant="destructive"
@@ -122,27 +133,6 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
           </>
         )}
       </section>
-    </div>
-  );
-}
-
-function FreshnessBanner({
-  config,
-}: {
-  config: {
-    analysis_branch: string;
-    last_analysis_id?: number | null;
-    analyser_version?: string;
-    updated_at?: string | null;
-  };
-}) {
-  const text =
-    config.last_analysis_id == null
-      ? `No analysis yet on branch ${config.analysis_branch}.`
-      : `Graph from ${config.analysis_branch}, analysis #${config.last_analysis_id} (analyser ${config.analyser_version || 'unknown'}).`;
-  return (
-    <div className="rounded-md border bg-card/40 p-3 text-xs text-muted-foreground">
-      {text}
     </div>
   );
 }
