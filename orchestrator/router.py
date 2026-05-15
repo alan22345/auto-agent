@@ -34,6 +34,7 @@ from shared import quotas
 from shared.config import settings
 from shared.database import get_session
 from shared.events import (
+    human_message,
     po_analyze,
     publish,
     repo_deleted,
@@ -124,10 +125,9 @@ _task_creation_timestamps: list[float] = []
 
 def _seconds_until_utc_midnight() -> int:
     import datetime as _dt
+
     now = _dt.datetime.now(_dt.UTC)
-    tomorrow = (now + _dt.timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    tomorrow = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return int((tomorrow - now).total_seconds())
 
 
@@ -241,7 +241,9 @@ def _verify_cookie_or_header(cookie: str | None, authorization: str | None) -> d
 
 
 async def _get_task_in_org(
-    session: AsyncSession, task_id: int, org_id: int,
+    session: AsyncSession,
+    task_id: int,
+    org_id: int,
 ) -> Task | None:
     """Return the task only if it belongs to the caller's org. None otherwise.
 
@@ -256,7 +258,10 @@ async def _get_task_in_org(
 
 
 async def _get_repo_in_org(
-    session: AsyncSession, *, repo_id: int | None = None, name: str | None = None,
+    session: AsyncSession,
+    *,
+    repo_id: int | None = None,
+    name: str | None = None,
     org_id: int,
 ) -> Repo | None:
     """Return the repo only if it belongs to the caller's org. None otherwise.
@@ -276,9 +281,7 @@ async def _get_repo_in_org(
     # match when nothing exact exists — otherwise a repo "X" and a
     # legacy repo "owner/X" both match and scalar_one_or_none raises.
     exact_q = select(Repo).where(Repo.name == name)
-    exact = (
-        await session.execute(scoped(exact_q, Repo, org_id=org_id))
-    ).scalar_one_or_none()
+    exact = (await session.execute(scoped(exact_q, Repo, org_id=org_id))).scalar_one_or_none()
     if exact is not None:
         return exact
 
@@ -286,9 +289,7 @@ async def _get_repo_in_org(
         return None
 
     suffix_q = select(Repo).where(Repo.name.endswith(f"/{name}"))
-    return (
-        await session.execute(scoped(suffix_q, Repo, org_id=org_id))
-    ).scalars().first()
+    return (await session.execute(scoped(suffix_q, Repo, org_id=org_id))).scalars().first()
 
 
 # --- Auth endpoints ---
@@ -326,12 +327,12 @@ async def _resolve_active_org_id(session: AsyncSession, user: User) -> int:
 
 
 @router.post("/auth/login")
-async def login(req: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)):
+async def login(
+    req: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)
+):
     # Allow login by either username (legacy admin) or email (self-serve).
     result = await session.execute(
-        select(User).where(
-            (User.username == req.username) | (User.email == req.username)
-        )
+        select(User).where((User.username == req.username) | (User.email == req.username))
     )
     user = result.scalar_one_or_none()
     if not user or not verify_password(req.password, user.password_hash):
@@ -365,9 +366,7 @@ async def login(req: LoginRequest, response: Response, session: AsyncSession = D
             created_at=user.created_at.isoformat() if user.created_at else None,
             last_login=user.last_login.isoformat() if user.last_login else None,
             claude_auth_status=user.claude_auth_status,
-            claude_paired_at=(
-                user.claude_paired_at.isoformat() if user.claude_paired_at else None
-            ),
+            claude_paired_at=(user.claude_paired_at.isoformat() if user.claude_paired_at else None),
         ),
     )
 
@@ -390,9 +389,7 @@ async def get_me(
         created_at=user.created_at.isoformat() if user.created_at else None,
         last_login=user.last_login.isoformat() if user.last_login else None,
         claude_auth_status=user.claude_auth_status,
-        claude_paired_at=(
-            user.claude_paired_at.isoformat() if user.claude_paired_at else None
-        ),
+        claude_paired_at=(user.claude_paired_at.isoformat() if user.claude_paired_at else None),
         telegram_chat_id=user.telegram_chat_id,
         slack_user_id=user.slack_user_id,
     )
@@ -473,9 +470,7 @@ async def _allocate_username(session: AsyncSession, base: str) -> str:
     candidate = base
     suffix = 1
     while True:
-        existing = await session.execute(
-            select(User).where(User.username == candidate)
-        )
+        existing = await session.execute(select(User).where(User.username == candidate))
         if existing.scalar_one_or_none() is None:
             return candidate
         suffix += 1
@@ -529,9 +524,13 @@ async def signup(
     session.add(user)
     await session.flush()
 
-    session.add(OrganizationMembership(
-        org_id=org.id, user_id=user.id, role="owner",
-    ))
+    session.add(
+        OrganizationMembership(
+            org_id=org.id,
+            user_id=user.id,
+            role="owner",
+        )
+    )
     await session.commit()
     await session.refresh(user)
 
@@ -556,9 +555,7 @@ async def verify_email(
 ) -> dict:
     """Mark the user's email verified, clear the token, and set a session
     cookie so the click-through completes the signup in one step."""
-    result = await session.execute(
-        select(User).where(User.signup_token == token)
-    )
+    result = await session.execute(select(User).where(User.signup_token == token))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(404, "Invalid or expired verification link")
@@ -570,7 +567,9 @@ async def verify_email(
     await session.commit()
 
     jwt = create_token(
-        user_id=user.id, username=user.username, current_org_id=org_id,
+        user_id=user.id,
+        username=user.username,
+        current_org_id=org_id,
     )
     response.set_cookie(
         key=COOKIE_NAME,
@@ -637,7 +636,9 @@ async def list_my_secrets(
     from shared import secrets as _user_secrets
 
     keys = await _user_secrets.list_keys(
-        payload["user_id"], org_id=payload["current_org_id"], session=session,
+        payload["user_id"],
+        org_id=payload["current_org_id"],
+        session=session,
     )
     return SecretListResponse(keys=keys)
 
@@ -659,13 +660,20 @@ async def put_my_secret(
     org_id = payload["current_org_id"]
     if body.value is None or body.value == "":
         await _user_secrets.delete(
-            payload["user_id"], key, org_id=org_id, session=session,
+            payload["user_id"],
+            key,
+            org_id=org_id,
+            session=session,
         )
         await session.commit()
         return {"ok": True, "cleared": True}
 
     await _user_secrets.set(
-        payload["user_id"], key, body.value, org_id=org_id, session=session,
+        payload["user_id"],
+        key,
+        body.value,
+        org_id=org_id,
+        session=session,
     )
     await session.commit()
     return {"ok": True, "cleared": False}
@@ -685,7 +693,10 @@ async def delete_my_secret(
         raise HTTPException(404, "Unknown secret key")
 
     await _user_secrets.delete(
-        payload["user_id"], key, org_id=payload["current_org_id"], session=session,
+        payload["user_id"],
+        key,
+        org_id=payload["current_org_id"],
+        session=session,
     )
     await session.commit()
     return Response(status_code=204)
@@ -707,7 +718,10 @@ async def test_my_secret(
         raise HTTPException(404, "Unknown secret key")
 
     value = await _user_secrets.get(
-        payload["user_id"], key, org_id=payload["current_org_id"], session=session,
+        payload["user_id"],
+        key,
+        org_id=payload["current_org_id"],
+        session=session,
     )
     if not value:
         return SecretTestResponse(ok=False, detail="Not set")
@@ -726,9 +740,7 @@ async def test_my_secret(
         if r.status_code == 200:
             login = r.json().get("login", "")
             return SecretTestResponse(ok=True, detail=f"Authenticated as {login}")
-        return SecretTestResponse(
-            ok=False, detail=f"GitHub returned {r.status_code}"
-        )
+        return SecretTestResponse(ok=False, detail=f"GitHub returned {r.status_code}")
 
     if key == "anthropic_api_key":
         import httpx
@@ -749,9 +761,7 @@ async def test_my_secret(
         if r.status_code == 200:
             tok = r.json().get("input_tokens", "?")
             return SecretTestResponse(ok=True, detail=f"OK ({tok} tokens)")
-        return SecretTestResponse(
-            ok=False, detail=f"Anthropic returned {r.status_code}"
-        )
+        return SecretTestResponse(ok=False, detail=f"Anthropic returned {r.status_code}")
 
     return SecretTestResponse(ok=False, detail="No test handler for this key")
 
@@ -845,11 +855,15 @@ async def create_task(
     # Dedup check: scoped to caller's org when known so two tenants
     # receiving the same Slack message ID don't dedupe each other.
     dup = await find_duplicate_by_source_id(
-        session, req.source_id, organization_id=caller_org_id,
+        session,
+        req.source_id,
+        organization_id=caller_org_id,
     )
     if not dup:
         dup = await find_duplicate_by_title(
-            session, req.title, organization_id=caller_org_id,
+            session,
+            req.title,
+            organization_id=caller_org_id,
         )
     if dup:
         return _task_to_response(dup)
@@ -859,28 +873,24 @@ async def create_task(
     if req.repo_name:
         if caller_org_id is not None:
             repo = await _get_repo_in_org(
-                session, name=req.repo_name, org_id=caller_org_id,
+                session,
+                name=req.repo_name,
+                org_id=caller_org_id,
             )
         else:
-            result = await session.execute(
-                select(Repo).where(Repo.name == req.repo_name)
-            )
+            result = await session.execute(select(Repo).where(Repo.name == req.repo_name))
             repo = result.scalar_one_or_none()
 
     # Reject only if the user hasn't paired AND there's no fallback configured.
     # When a fallback is set (e.g. admin's user_id), unpaired users transparently
     # share the admin's Claude credentials.
     if owner_user_id is not None and settings.fallback_claude_user_id is None:
-        user_q = await session.execute(
-            select(User).where(User.id == owner_user_id)
-        )
+        user_q = await session.execute(select(User).where(User.id == owner_user_id))
         user_row = user_q.scalar_one_or_none()
         if user_row is not None and user_row.claude_auth_status != "paired":
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Connect your Claude account in Settings before queuing tasks."
-                ),
+                detail=("Connect your Claude account in Settings before queuing tasks."),
             )
 
     task = Task(
@@ -909,9 +919,13 @@ async def list_tasks(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> list[TaskData]:
-    query = scoped(select(Task), Task, org_id=org_id).order_by(
-        Task.created_at.desc(),
-    ).limit(50)
+    query = (
+        scoped(select(Task), Task, org_id=org_id)
+        .order_by(
+            Task.created_at.desc(),
+        )
+        .limit(50)
+    )
     if status:
         query = query.where(Task.status == status)
     result = await session.execute(query)
@@ -1094,6 +1108,7 @@ async def update_subtasks(
 
 class IntakeQaUpdate(BaseModel):
     """Update the grill-before-planning Q&A on a task."""
+
     intake_qa: list[dict]
 
 
@@ -1116,6 +1131,7 @@ async def update_intake_qa(
 
 class AffectedRoutesUpdate(BaseModel):
     """Planner-declared routes affected by a task (set during planning phase)."""
+
     routes: list[dict] = Field(default_factory=list)
 
 
@@ -1182,12 +1198,16 @@ async def list_verify_attempts(
     if not task:
         raise HTTPException(404, "Task not found")
     rows = (
-        await session.execute(
-            select(VerifyAttempt)
-            .where(VerifyAttempt.task_id == task_id)
-            .order_by(VerifyAttempt.cycle.asc()),
+        (
+            await session.execute(
+                select(VerifyAttempt)
+                .where(VerifyAttempt.task_id == task_id)
+                .order_by(VerifyAttempt.cycle.asc()),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_verify_attempt_to_out(r) for r in rows]
 
 
@@ -1205,12 +1225,16 @@ async def list_review_attempts(
     if not task:
         raise HTTPException(404, "Task not found")
     rows = (
-        await session.execute(
-            select(ReviewAttempt)
-            .where(ReviewAttempt.task_id == task_id)
-            .order_by(ReviewAttempt.cycle.asc()),
+        (
+            await session.execute(
+                select(ReviewAttempt)
+                .where(ReviewAttempt.task_id == task_id)
+                .order_by(ReviewAttempt.cycle.asc()),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_review_attempt_to_out(r) for r in rows]
 
 
@@ -1228,12 +1252,16 @@ async def list_architect_attempts(
     if not task:
         raise HTTPException(404, "Task not found")
     rows = (
-        await session.execute(
-            select(ArchitectAttempt)
-            .where(ArchitectAttempt.task_id == task_id)
-            .order_by(ArchitectAttempt.created_at.asc()),
+        (
+            await session.execute(
+                select(ArchitectAttempt)
+                .where(ArchitectAttempt.task_id == task_id)
+                .order_by(ArchitectAttempt.created_at.asc()),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [ArchitectAttemptOut.model_validate(r, from_attributes=True) for r in rows]
 
 
@@ -1251,12 +1279,16 @@ async def list_trio_review_attempts(
     if not task:
         raise HTTPException(404, "Task not found")
     rows = (
-        await session.execute(
-            select(TrioReviewAttempt)
-            .where(TrioReviewAttempt.task_id == task_id)
-            .order_by(TrioReviewAttempt.created_at.asc()),
+        (
+            await session.execute(
+                select(TrioReviewAttempt)
+                .where(TrioReviewAttempt.task_id == task_id)
+                .order_by(TrioReviewAttempt.created_at.asc()),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [TrioReviewAttemptOut.model_validate(r, from_attributes=True) for r in rows]
 
 
@@ -1400,10 +1432,7 @@ async def list_decisions(
                     re.sub(r"^\d+[-_]", "", stem).replace("-", " ").replace("_", " ").strip()
                     or stem
                 )
-                title = (
-                    _adr_title_from_markdown(body, fallback_title)
-                    if body else fallback_title
-                )
+                title = _adr_title_from_markdown(body, fallback_title) if body else fallback_title
                 out.append(
                     DecisionOut(
                         filename=filename,
@@ -1474,9 +1503,7 @@ async def post_task_message(
     if authorization:
         try:
             payload = _verify_auth_header(authorization)
-            user_result = await session.execute(
-                select(User).where(User.id == payload["user_id"])
-            )
+            user_result = await session.execute(select(User).where(User.id == payload["user_id"]))
             user = user_result.scalar_one_or_none()
             if user:
                 sender = user.display_name
@@ -1527,6 +1554,7 @@ async def mark_task_done(
 
     # Allow marking done from any state that has DONE as a valid transition
     from orchestrator.state_machine import TRANSITIONS
+
     if TaskStatus.DONE not in TRANSITIONS.get(task.status, set()):
         raise HTTPException(400, f"Cannot mark done from {task.status.value}")
 
@@ -1563,6 +1591,9 @@ async def add_task_message(
         )
     )
     await session.commit()
+    # ADR-017 — surface the message as a human.message event so
+    # route_human_message can dispatch it (e.g. to trio iteration).
+    await publish(human_message(task_id=task.id, message=req.message, source="web"))
     return {"ok": True}
 
 
@@ -1626,7 +1657,8 @@ def _task_workspace_root(task: Task) -> str:
     from agent.workspace import _workspace_path
 
     return _workspace_path(
-        task_id=task.id, organization_id=task.organization_id,
+        task_id=task.id,
+        organization_id=task.organization_id,
     )
 
 
@@ -1727,9 +1759,7 @@ async def approve_plan(
 
     # 2. Persist the gate decision (audit trail the web-next panel renders).
     gate_name = (
-        "design_approval"
-        if task.status == TaskStatus.AWAITING_DESIGN_APPROVAL
-        else "plan_approval"
+        "design_approval" if task.status == TaskStatus.AWAITING_DESIGN_APPROVAL else "plan_approval"
     )
     session.add(
         GateDecision(
@@ -1747,10 +1777,7 @@ async def approve_plan(
     # 3. Transition the state machine.
     approved_next, rejected_next = next_states
     to_status = approved_next if req.verdict == "approved" else rejected_next
-    message = (
-        f"Plan {req.verdict} by user"
-        + (f": {req.comments[:200]}" if req.comments else "")
-    )
+    message = f"Plan {req.verdict} by user" + (f": {req.comments[:200]}" if req.comments else "")
     starting_status = task.status
     task = await transition(session, task, to_status, message)
     await session.commit()
@@ -1788,10 +1815,7 @@ async def approve_plan(
     #    ``run_trio_parent`` and the architect emits the backlog. Plan-gate
     #    approvals (complex flow) are deliberately excluded — that flow's
     #    coding kick will be wired separately if/when it becomes load-bearing.
-    if (
-        starting_status == TaskStatus.AWAITING_DESIGN_APPROVAL
-        and req.verdict == "approved"
-    ):
+    if starting_status == TaskStatus.AWAITING_DESIGN_APPROVAL and req.verdict == "approved":
         try:
             from shared.events import Event, TaskEventType
 
@@ -1827,12 +1851,16 @@ async def list_gate_history(
     if task is None:
         raise HTTPException(404, "Task not found")
     rows = (
-        await session.execute(
-            select(GateDecision)
-            .where(GateDecision.task_id == task_id)
-            .order_by(GateDecision.created_at.asc()),
+        (
+            await session.execute(
+                select(GateDecision)
+                .where(GateDecision.task_id == task_id)
+                .order_by(GateDecision.created_at.asc()),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [
         GateDecisionOut(
             id=r.id,
@@ -1977,7 +2005,8 @@ async def delete_schedule(
     result = await session.execute(
         scoped(
             select(ScheduledTask).where(ScheduledTask.id == schedule_id),
-            ScheduledTask, org_id=org_id,
+            ScheduledTask,
+            org_id=org_id,
         )
     )
     schedule = result.scalar_one_or_none()
@@ -1997,7 +2026,8 @@ async def toggle_schedule(
     result = await session.execute(
         scoped(
             select(ScheduledTask).where(ScheduledTask.id == schedule_id),
-            ScheduledTask, org_id=org_id,
+            ScheduledTask,
+            org_id=org_id,
         )
     )
     schedule = result.scalar_one_or_none()
@@ -2018,7 +2048,9 @@ async def register_repo(
     org_id: int = Depends(current_org_id_dep),
 ) -> RepoResponse:
     repo = Repo(
-        name=req.name, url=req.url, default_branch=req.default_branch,
+        name=req.name,
+        url=req.url,
+        default_branch=req.default_branch,
         organization_id=org_id,
     )
     session.add(repo)
@@ -2032,9 +2064,7 @@ async def list_repos(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> list[RepoData]:
-    result = await session.execute(
-        scoped(select(Repo), Repo, org_id=org_id).order_by(Repo.name)
-    )
+    result = await session.execute(scoped(select(Repo), Repo, org_id=org_id).order_by(Repo.name))
     return [
         RepoData(
             id=r.id,
@@ -2112,10 +2142,9 @@ async def update_repo_branch(
     # Find all repo entries that match (short name, full name with org/), scoped to caller's org
     result = await session.execute(
         scoped(
-            select(Repo).where(
-                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-            ),
-            Repo, org_id=org_id,
+            select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))),
+            Repo,
+            org_id=org_id,
         )
     )
     repos = result.scalars().all()
@@ -2148,10 +2177,9 @@ async def refresh_repo_ci_checks(
 
     result = await session.execute(
         scoped(
-            select(Repo).where(
-                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-            ),
-            Repo, org_id=org_id,
+            select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))),
+            Repo,
+            org_id=org_id,
         )
     )
     repos = result.scalars().all()
@@ -2196,10 +2224,9 @@ async def trigger_harness_onboarding(
     """
     result = await session.execute(
         scoped(
-            select(Repo).where(
-                (Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))
-            ),
-            Repo, org_id=org_id,
+            select(Repo).where((Repo.name == repo_name) | (Repo.name.endswith(f"/{repo_name}"))),
+            Repo,
+            org_id=org_id,
         )
     )
     repo = result.scalars().first()
@@ -2362,9 +2389,7 @@ class FreeformConfigRequest(BaseModel):
         if v is None:
             return v
         if not BRANCH_NAME_RE.match(v):
-            raise ValueError(
-                "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed"
-            )
+            raise ValueError("Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed")
         return v
 
     @field_validator("analysis_cron", "architecture_cron")
@@ -2392,7 +2417,8 @@ async def upsert_freeform_config(
     result = await session.execute(
         scoped(
             select(FreeformConfig).where(FreeformConfig.repo_id == repo.id),
-            FreeformConfig, org_id=org_id,
+            FreeformConfig,
+            org_id=org_id,
         )
     )
     config = result.scalar_one_or_none()
@@ -2431,15 +2457,15 @@ async def list_freeform_configs(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> list[FreeformConfigData]:
-    result = await session.execute(
-        scoped(select(FreeformConfig), FreeformConfig, org_id=org_id)
-    )
+    result = await session.execute(scoped(select(FreeformConfig), FreeformConfig, org_id=org_id))
     configs = result.scalars().all()
     out = []
     for c in configs:
         repo_result = await session.execute(
             scoped(
-                select(Repo).where(Repo.id == c.repo_id), Repo, org_id=org_id,
+                select(Repo).where(Repo.id == c.repo_id),
+                Repo,
+                org_id=org_id,
             )
         )
         repo = repo_result.scalar_one_or_none()
@@ -2456,7 +2482,8 @@ async def delete_freeform_config(
     result = await session.execute(
         scoped(
             select(FreeformConfig).where(FreeformConfig.id == config_id),
-            FreeformConfig, org_id=org_id,
+            FreeformConfig,
+            org_id=org_id,
         )
     )
     config = result.scalar_one_or_none()
@@ -2550,9 +2577,13 @@ async def list_suggestions(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> list[SuggestionData]:
-    query = scoped(select(Suggestion), Suggestion, org_id=org_id).order_by(
-        Suggestion.created_at.desc(),
-    ).limit(100)
+    query = (
+        scoped(select(Suggestion), Suggestion, org_id=org_id)
+        .order_by(
+            Suggestion.created_at.desc(),
+        )
+        .limit(100)
+    )
     if status:
         query = query.where(Suggestion.status == status)
     if repo_name:
@@ -2574,7 +2605,8 @@ async def approve_suggestion(
     result = await session.execute(
         scoped(
             select(Suggestion).where(Suggestion.id == suggestion_id),
-            Suggestion, org_id=org_id,
+            Suggestion,
+            org_id=org_id,
         )
     )
     suggestion = result.scalar_one_or_none()
@@ -2618,7 +2650,8 @@ async def reject_suggestion(
     result = await session.execute(
         scoped(
             select(Suggestion).where(Suggestion.id == suggestion_id),
-            Suggestion, org_id=org_id,
+            Suggestion,
+            org_id=org_id,
         )
     )
     suggestion = result.scalar_one_or_none()
@@ -2649,7 +2682,10 @@ async def promote_task(
     branch_name = task.branch_name or f"auto-agent/task-{task_id}"
     repo_url = task.repo.url if task.repo else ""
     pr_url = await promote_task_to_main(
-        task.pr_url, branch_name, repo_url, user_id=task.created_by_user_id,
+        task.pr_url,
+        branch_name,
+        repo_url,
+        user_id=task.created_by_user_id,
     )
     if not pr_url:
         raise HTTPException(500, "Failed to create promotion PR")
@@ -2682,7 +2718,9 @@ async def revert_task(
             dev_branch = config.dev_branch or "dev"
 
     revert_url = await revert_task_from_dev(
-        task.pr_url, dev_branch, user_id=task.created_by_user_id,
+        task.pr_url,
+        dev_branch,
+        user_id=task.created_by_user_id,
     )
     if not revert_url:
         raise HTTPException(500, "Failed to create revert PR")
@@ -2743,9 +2781,7 @@ def _task_to_response(task: Task) -> TaskData:
     # know the override/inherit rule. ``mode_override`` wins over the repo
     # default; legacy rows with no repo attached fall back to None.
     mode_override = getattr(task, "mode_override", None)
-    repo_mode = (
-        getattr(task.repo, "mode", None) if getattr(task, "repo", None) else None
-    )
+    repo_mode = getattr(task.repo, "mode", None) if getattr(task, "repo", None) else None
     effective_mode = mode_override or repo_mode
     return TaskData(
         id=task.id,
@@ -2799,9 +2835,7 @@ async def seed_admin_user() -> None:
         result = await session.execute(select(User).limit(1))
         if result.scalar_one_or_none() is None:
             if not settings.admin_password:
-                log.warning(
-                    "No admin_password set and no users exist — set ADMIN_PASSWORD env var"
-                )
+                log.warning("No admin_password set and no users exist — set ADMIN_PASSWORD env var")
                 return
             admin = User(
                 username=settings.admin_username,
@@ -2850,9 +2884,7 @@ async def claude_pair_start(
 ) -> _PairStartResponse:
     payload = _verify_cookie_or_header(auto_agent_session, authorization)
     sess = await _claude_pairing.start_pairing(user_id=payload["user_id"])
-    return _PairStartResponse(
-        pairing_id=sess.pairing_id, authorize_url=sess.authorize_url
-    )
+    return _PairStartResponse(pairing_id=sess.pairing_id, authorize_url=sess.authorize_url)
 
 
 @router.post("/claude/pair/code")
