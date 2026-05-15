@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from agent.llm.types import Message
+from agent.llm.types import message_from_dict
 from agent.slack_assistant import converse
 from orchestrator.messenger_router import persistence as p
 from orchestrator.messenger_router.picker import parse_pick, render_picker
@@ -136,12 +136,21 @@ async def handle(
         focus_kind=focus_kind,
         focus_id=focus_id,
     )
-    history_msgs = [Message(**m) for m in conv.messages]
+    history_msgs = [message_from_dict(m) for m in conv.messages]
 
     async def _on_create_task(new_task_id: int) -> None:
         if focus_kind == "draft":
             await p.rebind_draft_to_task(session, conv.conversation_id, new_task_id=new_task_id)
         await p.set_focus(session, user_id, focus_kind="task", focus_id=new_task_id)
+
+    # Surface the current focus to the assistant so a bare "approve" /
+    # "cancel" / "what's the status" lands on the right task without it
+    # having to introspect or guess.
+    current_focus = (
+        {"kind": focus_kind, "id": focus_id}
+        if focus_kind == "task" and focus_id is not None
+        else None
+    )
 
     reply_text, appended = await converse(
         user_id=user_id,
@@ -149,6 +158,7 @@ async def handle(
         history=history_msgs,
         home_dir=home_dir,
         on_create_task=_on_create_task,
+        current_focus=current_focus,
     )
 
     # 7. Persist appended messages and bump focus TTL.

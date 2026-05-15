@@ -48,6 +48,30 @@ class TokenUsage:
         return self.input_tokens + self.output_tokens
 
 
+def message_from_dict(m: dict[str, Any]) -> Message:
+    """Reconstruct a :class:`Message` from its ``asdict()`` form.
+
+    Round-tripping through JSON storage (e.g.
+    ``messenger_conversations.messages_json``) loses dataclass typing on
+    ``tool_calls`` — it comes back as ``list[dict]``. Splatting via
+    ``Message(**m)`` stores the dicts as-is, then any wire-format mapper
+    that expects ``ToolCall`` instances crashes on ``tc.id``. Use this
+    helper instead so ``tool_calls`` is rehydrated correctly.
+    """
+    tool_calls_raw = m.get("tool_calls")
+    tool_calls: list[ToolCall] | None = None
+    if tool_calls_raw:
+        tool_calls = [ToolCall(**tc) for tc in tool_calls_raw]
+    return Message(
+        role=m["role"],
+        content=m.get("content", ""),
+        tool_calls=tool_calls,
+        tool_call_id=m.get("tool_call_id"),
+        tool_name=m.get("tool_name"),
+        token_estimate=m.get("token_estimate"),
+    )
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""

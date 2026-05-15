@@ -97,6 +97,70 @@ async def test_approve_plan_tool_targets_gate_approval_endpoint():
     assert url.endswith("/tasks/5/approve-plan"), f"expected /approve-plan, got {url}"
 
 
+async def test_converse_injects_current_focus_into_system_prompt():
+    """When the messenger router has a task focus, ``converse`` should
+    surface it in the system prompt so the AI calls approve/cancel on
+    that specific task instead of asking which task or listing all
+    tasks. Production repro 2026-05-15: focus was set to task 5
+    (AWAITING_DESIGN_APPROVAL), user said "approve", the AI ran
+    list_my_tasks(status="awaiting_approval") → empty list (wrong status
+    name) → "no tasks awaiting approval" because converse never told it
+    which task we were on.
+    """
+    history: list[Message] = []
+    fake_provider = AsyncMock()
+    fake_provider.complete.return_value = _resp(content="ok")
+    with (
+        patch("agent.slack_assistant.get_provider", return_value=fake_provider),
+        patch("agent.slack_assistant.resolve_home_dir", return_value=None),
+        patch(
+            "agent.slack_assistant._get_task",
+            AsyncMock(
+                return_value={
+                    "id": 5,
+                    "title": "Parallel universe screen",
+                    "status": "AWAITING_DESIGN_APPROVAL",
+                    "repo": "iot-apartment-simulator",
+                }
+            ),
+        ),
+    ):
+        await converse(
+            user_id=1,
+            text="approve",
+            history=history,
+            home_dir=None,
+            on_create_task=None,
+            current_focus={"kind": "task", "id": 5},
+        )
+
+    fake_provider.complete.assert_awaited()
+    system = fake_provider.complete.await_args.kwargs["system"]
+    assert "task #5" in system or "task_id=5" in system, "focus context missing from system prompt"
+    assert "AWAITING_DESIGN_APPROVAL" in system
+    assert "Parallel universe screen" in system
+
+
+async def test_converse_no_focus_keeps_baseline_system_prompt():
+    """No focus → no per-task addendum; baseline prompt only."""
+    fake_provider = AsyncMock()
+    fake_provider.complete.return_value = _resp(content="ok")
+    with (
+        patch("agent.slack_assistant.get_provider", return_value=fake_provider),
+        patch("agent.slack_assistant.resolve_home_dir", return_value=None),
+    ):
+        await converse(
+            user_id=1,
+            text="hi",
+            history=[],
+            home_dir=None,
+            on_create_task=None,
+        )
+    system = fake_provider.complete.await_args.kwargs["system"]
+    # Baseline prompt has no per-task addendum marker.
+    assert "Current task context" not in system
+
+
 async def test_converse_invokes_on_create_task_when_create_task_tool_fires():
     history: list[Message] = []
     fake_provider = AsyncMock()

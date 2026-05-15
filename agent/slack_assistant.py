@@ -372,6 +372,35 @@ async def _dispatch_tool(name: str, args: dict, user_id: int) -> tuple[Any, int 
 # ---------------------------------------------------------------------------
 
 
+async def _build_system_prompt(current_focus: dict[str, Any] | None) -> str:
+    """Compose the system prompt for one ``converse`` call.
+
+    Baseline: :data:`SYSTEM_PROMPT`. When ``current_focus`` names a task,
+    append a "Current task context" block with that task's id, title,
+    and status — so the assistant knows what "the task" / "approve" /
+    "cancel" refer to without having to call ``list_my_tasks`` and
+    pattern-match.
+    """
+    if not (current_focus and current_focus.get("kind") == "task" and current_focus.get("id")):
+        return SYSTEM_PROMPT
+    task = await _get_task(int(current_focus["id"]))
+    if "error" in task:
+        return SYSTEM_PROMPT
+    title = (task.get("title") or "untitled")[:120]
+    status = task.get("status") or "?"
+    return (
+        SYSTEM_PROMPT
+        + "\n\n## Current task context\n\n"
+        + f"The user is currently focused on task #{task['id']} "
+        + f'(title: "{title}", status: `{status}`). When they say '
+        + '"approve", "approved", "lgtm", "reject", "cancel", '
+        + 'or refer to "the task"/"this"/"it" without naming an '
+        + "id, act on THIS task — call the right tool with "
+        + f"task_id={task['id']} directly. Do not call list_my_tasks "
+        + "just to confirm which task they mean.\n"
+    )
+
+
 async def converse(
     *,
     user_id: int,
@@ -379,6 +408,7 @@ async def converse(
     history: list[Message],
     home_dir: str | None,
     on_create_task: Callable[[int], Awaitable[None]] | None = None,
+    current_focus: dict[str, Any] | None = None,
 ) -> tuple[str, list[Message]]:
     """Process one user message. Returns ``(reply_text, new_messages)``.
 
@@ -386,6 +416,12 @@ async def converse(
     and the final assistant reply — in order. The caller is responsible for
     persisting these and passing the full accumulated history on the next
     call.
+
+    ``current_focus`` (optional) describes the conversation's active
+    focus as understood by the messenger router — e.g.
+    ``{"kind": "task", "id": 5}``. When set, the assistant gets a
+    per-turn context block in the system prompt so a bare "approve" or
+    "cancel" lands on the right task without an extra round-trip.
     """
     appended: list[Message] = [Message(role="user", content=text)]
     working = list(history) + list(appended)
@@ -400,12 +436,14 @@ async def converse(
         home_dir=home_dir,
     )
 
+    system = await _build_system_prompt(current_focus)
+
     final_text = ""
     for _turn in range(MAX_TURNS_PER_REQUEST):
         try:
             response = await provider.complete(
                 messages=working,
-                system=SYSTEM_PROMPT,
+                system=system,
                 tools=_TOOL_DEFS,
                 max_tokens=2048,
             )
