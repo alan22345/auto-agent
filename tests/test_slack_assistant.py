@@ -154,6 +154,12 @@ async def test_converse_injects_current_focus_into_system_prompt():
     list_my_tasks(status="awaiting_approval") → empty list (wrong status
     name) → "no tasks awaiting approval" because converse never told it
     which task we were on.
+
+    Note: this fixture mirrors the *real* ``_get_task`` success-path
+    shape — which ALWAYS includes ``"error": ""`` even on success. An
+    earlier version of ``_build_system_prompt`` used ``"error" in task``
+    to detect failure, which is true for every result, so the focus
+    block was silently never injected.
     """
     history: list[Message] = []
     fake_provider = AsyncMock()
@@ -167,8 +173,13 @@ async def test_converse_injects_current_focus_into_system_prompt():
                 return_value={
                     "id": 5,
                     "title": "Parallel universe screen",
+                    "description": "...",
                     "status": "AWAITING_DESIGN_APPROVAL",
                     "repo": "iot-apartment-simulator",
+                    "plan": "",
+                    "pr_url": None,
+                    "error": "",  # real shape: always present
+                    "created_by_user_id": 1,
                 }
             ),
         ),

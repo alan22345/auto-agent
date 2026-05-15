@@ -444,7 +444,11 @@ async def _build_system_prompt(
     if not (current_focus and current_focus.get("kind") == "task" and current_focus.get("id")):
         return SYSTEM_PROMPT
     task = await _get_task(int(current_focus["id"]), user_id)
-    if "error" in task:
+    # ``_get_task`` always returns a dict with an ``"error"`` key on
+    # success (defaulting to ``""``) — so ``"error" in task`` is always
+    # True. The success path has an ``"id"`` key; the not-found path
+    # only has ``"error"``. Use ``"id"`` as the success marker.
+    if "id" not in task:
         return SYSTEM_PROMPT
     title = (task.get("title") or "untitled")[:120]
     status = task.get("status") or "?"
