@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     # same working tree.
     max_concurrent_workers: int = 5
 
+    # ADR-016 §9: dedicated per-repo workspace tree for the code-graph
+    # analyser. Kept separate from the task workspaces (which churn on every
+    # task branch checkout) so analyser fetches never contend with task
+    # checkouts. Override via env var ``GRAPH_WORKSPACES_DIR``.
+    graph_workspaces_dir: str = "/data/graph-workspaces"
+
     # Root for per-user data. Each user's Claude credentials live at
     # f"{users_data_dir}/{user_id}/.claude/".
     users_data_dir: str = "/data/users"

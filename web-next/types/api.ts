@@ -38,6 +38,15 @@ export interface CreateUserRequest {
   password: string;
   display_name: string;
 }
+/**
+ * Optional body for ``POST /api/repos/{repo_id}/graph``.
+ *
+ * All fields optional — the endpoint defaults the analysis branch to the
+ * repo's ``default_branch`` if the caller omits it.
+ */
+export interface EnableRepoGraphRequest {
+  analysis_branch?: string | null;
+}
 export interface FeedbackSummary {
   total_outcomes?: number;
   approved?: number;
@@ -237,6 +246,23 @@ export interface RepoData {
   harness_onboarded?: boolean;
   harness_pr_url?: string | null;
 }
+/**
+ * Per-repo code-graph settings (ADR-016 §8).
+ *
+ * Phase 1: ``last_analysis_id`` is always ``None`` and ``analyser_version``
+ * is the empty string — both are populated by the Phase 2 analyser.
+ */
+export interface RepoGraphConfigData {
+  repo_id: number;
+  repo_name: string;
+  repo_url: string;
+  analysis_branch: string;
+  analyser_version?: string;
+  workspace_path: string;
+  last_analysis_id?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
 export interface RepoResponse {
   id: number;
   name: string;
@@ -392,6 +418,12 @@ export interface TimelineEntry {
   to: string;
   message?: string;
   timestamp?: string | null;
+}
+/**
+ * Body for ``PATCH /api/repos/{repo_id}/graph``.
+ */
+export interface UpdateRepoGraphRequest {
+  analysis_branch: string;
 }
 export interface UsageSummary {
   plan: PlanRead;

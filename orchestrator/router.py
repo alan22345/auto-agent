@@ -52,6 +52,7 @@ from shared.models import (
     OrganizationMembership,
     Plan,
     Repo,
+    RepoGraphConfig,
     ReviewAttempt,
     ScheduledTask,
     Suggestion,
@@ -69,6 +70,7 @@ from shared.task_channel import task_channel
 from shared.types import (
     ChangeEmailRequest,
     CreateUserRequest,
+    EnableRepoGraphRequest,
     FeedbackSummary,
     FreeformConfigData,
     LoginRequest,
@@ -77,6 +79,7 @@ from shared.types import (
     OutcomeResponse,
     PlanRead,
     RepoData,
+    RepoGraphConfigData,
     RepoResponse,
     ReviewAttemptOut,
     ScheduleResponse,
@@ -89,6 +92,7 @@ from shared.types import (
     TaskData,
     TaskMessageData,
     TaskMessagePost,
+    UpdateRepoGraphRequest,
     UsageSummary,
     UserData,
     VerifyAttemptOut,
@@ -1736,6 +1740,197 @@ async def get_latest_market_brief(
         "summary": brief.summary,
         "partial": brief.partial,
     }
+
+
+# --- Code graph (ADR-016 Phase 1) -------------------------------------------
+
+
+def _config_to_data(cfg: RepoGraphConfig, repo: Repo) -> RepoGraphConfigData:
+    """Build the wire-format ``RepoGraphConfigData`` for one config row."""
+    return RepoGraphConfigData(
+        repo_id=cfg.repo_id,
+        repo_name=repo.name,
+        repo_url=repo.url,
+        analysis_branch=cfg.analysis_branch,
+        analyser_version=cfg.analyser_version or "",
+        workspace_path=cfg.workspace_path,
+        last_analysis_id=cfg.last_analysis_id,
+        created_at=cfg.created_at.isoformat() if cfg.created_at else None,
+        updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None,
+    )
+
+
+@router.post("/repos/{repo_id}/graph", response_model=RepoGraphConfigData)
+async def enable_repo_graph(
+    repo_id: int,
+    req: EnableRepoGraphRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoGraphConfigData:
+    """Enable code-graph analysis for a repo (ADR-016 §8).
+
+    Idempotent: re-enabling an already-enabled repo returns the existing
+    config row unchanged. The analysis branch defaults to the repo's
+    ``default_branch`` when the request body omits it.
+    """
+    # Local import — keeps the orchestrator/agent import direction one-way
+    # (orchestrator may consume agent, never the other way). ``agent``
+    # already imports from ``shared`` so the cycle stays acyclic.
+    from agent.graph_workspace import graph_workspace_path
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    existing_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        return _config_to_data(existing, repo)
+
+    branch = req.analysis_branch or repo.default_branch or "main"
+    if not BRANCH_NAME_RE.match(branch):
+        raise HTTPException(
+            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+        )
+
+    cfg = RepoGraphConfig(
+        repo_id=repo.id,
+        organization_id=org_id,
+        analysis_branch=branch,
+        analyser_version="",
+        workspace_path=graph_workspace_path(repo_id=repo.id),
+    )
+    session.add(cfg)
+    await session.commit()
+    await session.refresh(cfg)
+    return _config_to_data(cfg, repo)
+
+
+@router.get("/repos/{repo_id}/graph", response_model=RepoGraphConfigData)
+async def get_repo_graph_config(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoGraphConfigData:
+    """Return the code-graph config for a repo. 404 if disabled / missing."""
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+    return _config_to_data(cfg, repo)
+
+
+@router.patch("/repos/{repo_id}/graph", response_model=RepoGraphConfigData)
+async def update_repo_graph_config(
+    repo_id: int,
+    req: UpdateRepoGraphRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoGraphConfigData:
+    """Update the analysis branch. Other fields are server-managed."""
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    if not BRANCH_NAME_RE.match(req.analysis_branch):
+        raise HTTPException(
+            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+        )
+
+    result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    cfg.analysis_branch = req.analysis_branch
+    await session.commit()
+    await session.refresh(cfg)
+    return _config_to_data(cfg, repo)
+
+
+@router.delete("/repos/{repo_id}/graph")
+async def disable_repo_graph(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Disable code-graph analysis. Deletes the config row; the workspace
+    on disk is left as-is (Phase 2's analyser owns its lifecycle)."""
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    await session.delete(cfg)
+    await session.commit()
+    return {"disabled": repo.id}
+
+
+@router.get("/graph/configs", response_model=list[RepoGraphConfigData])
+async def list_repo_graph_configs(
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[RepoGraphConfigData]:
+    """List every graph-enabled repo for the caller's org."""
+    result = await session.execute(
+        select(RepoGraphConfig, Repo)
+        .join(Repo, Repo.id == RepoGraphConfig.repo_id)
+        .where(RepoGraphConfig.organization_id == org_id)
+        .order_by(Repo.name)
+    )
+    return [_config_to_data(cfg, repo) for cfg, repo in result.all()]
+
+
+@router.post("/repos/{repo_id}/graph/refresh")
+async def refresh_repo_graph(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Trigger a graph refresh.
+
+    Phase 1 of ADR-016 only ships the scaffolding; the analyser pipeline
+    (tree-sitter + LLM gap-fill + citation validation) lands in Phase 2.
+    Until then this endpoint deliberately returns 501 so the UI can
+    surface a clear "not implemented yet" message to the user instead of
+    silently succeeding. This is the **only** stub permitted in Phase 1
+    per the task spec — every other surface is fully wired.
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Code-graph refresh is not implemented yet — the analyser ships "
+            "in Phase 2 of ADR-016. Phase 1 (this build) only configures "
+            "which repos are graph-enabled and on which branch."
+        ),
+    )
 
 
 @router.delete("/repos/{repo_name}")

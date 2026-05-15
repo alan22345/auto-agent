@@ -622,3 +622,78 @@ class ReviewAttempt(Base):
 
     task = relationship("Task", back_populates="review_attempts")
 
+
+# --- Code graph (ADR-016) ----------------------------------------------------
+#
+# Two tables: per-repo settings (`RepoGraphConfig`, one row per opted-in repo)
+# and per-analysis output (`RepoGraph`, one row per completed analysis).
+# Phase 1 of ADR-016 creates the schema and populates `RepoGraphConfig`; the
+# analyser that writes `RepoGraph` rows lands in Phase 2.
+
+
+class RepoGraphConfig(Base):
+    """Per-repo opt-in settings for the code-graph feature (ADR-016 §8).
+
+    One row per repo that has graph analysis enabled. The repo_id PK keeps
+    the 1:1 relationship explicit — disabling the feature deletes the row.
+    """
+
+    __tablename__ = "repo_graph_configs"
+
+    repo_id = Column(
+        Integer,
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # The branch that gets analysed. Defaults to the repo's default_branch at
+    # enable time; user can change it via PATCH /api/repos/{id}/graph.
+    analysis_branch = Column(String(255), nullable=False)
+    # Version string of the analyser that produced ``last_analysis_id``. Empty
+    # string until the first successful analysis (Phase 2). Kept here rather
+    # than on RepoGraph so the freshness banner can be rendered without
+    # joining the (potentially-large) output row.
+    analyser_version = Column(String(64), nullable=False, server_default="", default="")
+    # Resolved on-disk workspace path (under GRAPH_WORKSPACES_DIR). Stored so
+    # operators can find the checkout without recomputing the layout.
+    workspace_path = Column(String(1024), nullable=False)
+    # FK to the most recent successful RepoGraph row; NULL until Phase 2 runs.
+    last_analysis_id = Column(
+        Integer,
+        ForeignKey("repo_graphs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+    )
+
+
+class RepoGraph(Base):
+    """One row per completed graph analysis (ADR-016 §8).
+
+    Phase 1 only declares the schema; rows are written by the analyser in
+    Phase 2. `graph_json` carries the full nested-node + edge blob.
+    """
+
+    __tablename__ = "repo_graphs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(
+        Integer,
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    commit_sha = Column(String(64), nullable=False)
+    generated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    analyser_version = Column(String(64), nullable=False)
+    # 'ok' / 'partial' — surface failures-isolated-per-area state in the UI.
+    status = Column(String(16), nullable=False, default="ok", server_default="ok")
+    graph_json = Column(JSONB, nullable=False)
+
