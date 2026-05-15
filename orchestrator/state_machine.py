@@ -49,6 +49,7 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PR_CREATED: {
         TaskStatus.AWAITING_CI,
         TaskStatus.PR_REVIEW,        # ADR-015 §5 — self-PR-review gate (simple flow)
+        TaskStatus.AWAITING_REVIEW,  # ADR-017 — trio falls through immediately; AWAITING_REVIEW is the long-lived "PR open" state
     },
     TaskStatus.PR_REVIEW: {          # ADR-015 §5 — verdict pass→DONE, fail→BLOCKED
         TaskStatus.DONE,

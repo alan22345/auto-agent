@@ -996,6 +996,10 @@ async def _open_integration_pr_and_transition(
         p.pr_url = pr_url or None
         p.trio_phase = None
         await transition(s, p, TaskStatus.PR_CREATED, message="trio: integration PR opened")
+        # ADR-017 — PR_CREATED is a single-fire transit event; AWAITING_REVIEW
+        # is the long-lived state. Fall through immediately so the task lands
+        # in the right phase for the iteration loop to engage.
+        await transition(s, p, TaskStatus.AWAITING_REVIEW, message="trio: awaiting review/feedback")
         await s.commit()
         branch = p.integration_branch or ""
 
