@@ -184,6 +184,43 @@ class RepoResponse(BaseModel):
     url: str
 
 
+# --- Code graph (ADR-016) ---
+
+
+class RepoGraphConfigData(BaseModel):
+    """Per-repo code-graph settings (ADR-016 §8).
+
+    Phase 1: ``last_analysis_id`` is always ``None`` and ``analyser_version``
+    is the empty string — both are populated by the Phase 2 analyser.
+    """
+
+    repo_id: int
+    repo_name: str
+    repo_url: str
+    analysis_branch: str
+    analyser_version: str = ""
+    workspace_path: str
+    last_analysis_id: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class EnableRepoGraphRequest(BaseModel):
+    """Optional body for ``POST /api/repos/{repo_id}/graph``.
+
+    All fields optional — the endpoint defaults the analysis branch to the
+    repo's ``default_branch`` if the caller omits it.
+    """
+
+    analysis_branch: str | None = Field(default=None, max_length=255)
+
+
+class UpdateRepoGraphRequest(BaseModel):
+    """Body for ``PATCH /api/repos/{repo_id}/graph``."""
+
+    analysis_branch: str = Field(min_length=1, max_length=255)
+
+
 # --- Linear types ---
 
 
