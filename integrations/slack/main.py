@@ -543,10 +543,16 @@ def _gate_task_url(task_id):
 
 
 def _fmt_task_awaiting_design_approval(p, info, _ff, tid):
-    note = (p.get("message") or "").strip()
-    note_text = f"\n\n{note}" if note else ""
+    design = (p.get("design_md") or "").strip()
     url = _gate_task_url(tid)
-    return f"📐 *Design ready for approval*\n{info}{note_text}\n\nReview: {url}"
+    if design:
+        trimmed = design[:1500]
+        truncated = "\n\n_(truncated — full doc in the dashboard)_" if len(design) > 1500 else ""
+        body = f"\n\n{trimmed}{truncated}"
+    else:
+        note = (p.get("message") or "").strip()
+        body = f"\n\n{note}" if note else ""
+    return f"📐 *Design ready for approval*\n{info}{body}\n\nReview: {url}"
 
 
 def _fmt_task_awaiting_plan_approval(p, info, _ff, tid):

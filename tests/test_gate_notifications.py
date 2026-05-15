@@ -186,6 +186,26 @@ def test_task_awaiting_design_approval_factory_shape():
     assert ev.payload["message"] == "design ready"
 
 
+def test_task_awaiting_design_approval_factory_carries_design_md():
+    """The full design body rides on the event payload so Slack/Telegram
+    can render it inline — analogous to ``task_plan_ready.plan``. Without
+    this, users only got the short "Design written to..." message and
+    had to click through to the dashboard to see the doc.
+    """
+    ev = task_awaiting_design_approval(
+        task_id=42, message="design ready", design_md="# Architecture\n\nBody here",
+    )
+    assert ev.payload["design_md"] == "# Architecture\n\nBody here"
+
+
+def test_task_awaiting_design_approval_factory_omits_empty_design_md():
+    """Empty ``design_md`` must not pollute the payload — symmetric with
+    the ``message`` omit-when-empty rule above.
+    """
+    ev = task_awaiting_design_approval(task_id=42, message="design ready", design_md="")
+    assert "design_md" not in ev.payload
+
+
 def test_task_awaiting_plan_approval_factory_shape():
     ev = task_awaiting_plan_approval(task_id=42, message="plan ready")
     assert ev.type == TaskEventType.AWAITING_PLAN_APPROVAL
@@ -210,6 +230,35 @@ def test_telegram_dispatcher_renders_awaiting_design_approval():
     assert "/tasks/7" in msg
 
 
+def test_telegram_dispatcher_renders_design_body_when_present():
+    """When ``design_md`` is in the payload, the dispatcher must render
+    the body inline — that's the whole point of the gate notification.
+    Falling back to just the URL means the user gets noise without value.
+    """
+    formatter = TELEGRAM_FORMATTERS.get(TaskEventType.AWAITING_DESIGN_APPROVAL)
+    body = "# Architecture\n\nWe split storage from compute because ..."
+    msg = formatter(
+        {"message": "ignored when body present", "design_md": body},
+        "Task #7: Build app",
+        False,
+        7,
+    )
+    assert body in msg
+    # The short "ignored" message should not leak through when the body is shown.
+    assert "ignored when body present" not in msg
+
+
+def test_telegram_dispatcher_truncates_long_design():
+    """Very large design docs are truncated so the notification fits in
+    one message. The dashboard has the full doc.
+    """
+    formatter = TELEGRAM_FORMATTERS.get(TaskEventType.AWAITING_DESIGN_APPROVAL)
+    big = "x" * 5000
+    msg = formatter({"design_md": big}, "Task #7: Build app", False, 7)
+    assert "truncated" in msg.lower()
+    assert msg.count("x") <= 1500
+
+
 def test_telegram_dispatcher_renders_awaiting_plan_approval():
     formatter = TELEGRAM_FORMATTERS.get(TaskEventType.AWAITING_PLAN_APPROVAL)
     assert formatter is not None, "Telegram dispatcher must wire AWAITING_PLAN_APPROVAL"
@@ -231,6 +280,27 @@ def test_slack_dispatcher_renders_awaiting_design_approval():
     assert isinstance(msg, str) and msg.strip()
     assert "design" in msg.lower()
     assert "/tasks/7" in msg
+
+
+def test_slack_dispatcher_renders_design_body_when_present():
+    formatter = SLACK_FORMATTERS.get(TaskEventType.AWAITING_DESIGN_APPROVAL)
+    body = "# Architecture\n\nWe split storage from compute because ..."
+    msg = formatter(
+        {"message": "ignored when body present", "design_md": body},
+        "Task #7: Build app",
+        False,
+        7,
+    )
+    assert body in msg
+    assert "ignored when body present" not in msg
+
+
+def test_slack_dispatcher_truncates_long_design():
+    formatter = SLACK_FORMATTERS.get(TaskEventType.AWAITING_DESIGN_APPROVAL)
+    big = "x" * 5000
+    msg = formatter({"design_md": big}, "Task #7: Build app", False, 7)
+    assert "truncated" in msg.lower()
+    assert msg.count("x") <= 1500
 
 
 def test_slack_dispatcher_renders_awaiting_plan_approval():

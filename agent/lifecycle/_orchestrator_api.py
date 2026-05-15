@@ -16,6 +16,8 @@ directly; this file follows the same pattern.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 from sqlalchemy import select
 
@@ -82,19 +84,21 @@ async def set_task_affected_routes(task_id: int, routes: list[dict]) -> None:
 # nudge so a user knows a gate is open. ADR-015 Phase 7.7 added the two
 # awaiting-approval entries.
 _NOTIFY_FACTORIES = {
-    "failed": lambda task_id, message: task_failed(task_id, error=message),
-    "blocked": lambda task_id, message: task_blocked(task_id, error=message),
-    "done": lambda task_id, _message: task_done(task_id),
-    "awaiting_design_approval": lambda task_id, message: (
-        task_awaiting_design_approval(task_id, message=message)
+    "failed": lambda task_id, message, _extras: task_failed(task_id, error=message),
+    "blocked": lambda task_id, message, _extras: task_blocked(task_id, error=message),
+    "done": lambda task_id, _message, _extras: task_done(task_id),
+    "awaiting_design_approval": lambda task_id, message, extras: (
+        task_awaiting_design_approval(task_id, message=message, **extras)
     ),
-    "awaiting_plan_approval": lambda task_id, message: (
-        task_awaiting_plan_approval(task_id, message=message)
+    "awaiting_plan_approval": lambda task_id, message, extras: (
+        task_awaiting_plan_approval(task_id, message=message, **extras)
     ),
 }
 
 
-async def transition_task(task_id: int, status: str, message: str = "") -> None:
+async def transition_task(
+    task_id: int, status: str, message: str = "", **extras: Any,
+) -> None:
     """Transition a task and publish the matching wire event.
 
     In-process: opens its own ``async_session``, runs the state machine,
@@ -103,6 +107,11 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
     let it propagate so callers see the failure instead of writing it
     only into a log line. Publish only fires after a successful commit,
     so a transition failure no longer falsely surfaces as a notification.
+
+    ``**extras`` are forwarded as keyword arguments to the matched event
+    factory — e.g. ``design_md=...`` for ``awaiting_design_approval`` —
+    so callers can ship rich payload through the same transition seam
+    without bypassing the state-machine gate.
     """
     from orchestrator.state_machine import transition
 
@@ -113,4 +122,4 @@ async def transition_task(task_id: int, status: str, message: str = "") -> None:
 
     factory = _NOTIFY_FACTORIES.get(status)
     if factory is not None:
-        await publish(factory(task_id, message))
+        await publish(factory(task_id, message, extras))

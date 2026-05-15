@@ -602,11 +602,19 @@ def _gate_task_url(task_id: int | None) -> str:
 def _fmt_task_awaiting_design_approval(
     payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None,
 ) -> str:
-    note = (payload.get("message") or "").strip()
-    note_text = f"\n\n{note}" if note else ""
+    design = (payload.get("design_md") or "").strip()
     url = _gate_task_url(task_id)
+    if design:
+        trimmed = design[:1500]
+        truncated = (
+            "\n\n_(truncated — full doc in the dashboard)_" if len(design) > 1500 else ""
+        )
+        body = f"\n\n{trimmed}{truncated}"
+    else:
+        note = (payload.get("message") or "").strip()
+        body = f"\n\n{note}" if note else ""
     return (
-        f"📐 *Design ready for approval*\n{task_info}{note_text}\n\n"
+        f"📐 *Design ready for approval*\n{task_info}{body}\n\n"
         f"Review: {url}"
     )
 

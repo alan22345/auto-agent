@@ -325,11 +325,21 @@ def task_blocked(task_id: int, error: str = "") -> Event:
     return Event(type=TaskEventType.BLOCKED, task_id=task_id, payload=payload)
 
 
-def task_awaiting_design_approval(task_id: int, message: str = "") -> Event:
+def task_awaiting_design_approval(
+    task_id: int, message: str = "", design_md: str = "",
+) -> Event:
     """ADR-015 Phase 7.7 — design ready, gate open. The dispatcher uses
     ``message`` to surface the architect's note alongside the task URL.
+
+    ``design_md`` carries the full body of ``.auto-agent/design.md`` so
+    Slack/Telegram can render it inline — analogous to how the plan body
+    rides on ``task_plan_ready``. Empty string means no body to show.
     """
-    payload: dict[str, Any] = {"message": message} if message else {}
+    payload: dict[str, Any] = {}
+    if message:
+        payload["message"] = message
+    if design_md:
+        payload["design_md"] = design_md
     return Event(
         type=TaskEventType.AWAITING_DESIGN_APPROVAL, task_id=task_id, payload=payload,
     )

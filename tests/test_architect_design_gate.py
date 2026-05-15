@@ -79,6 +79,57 @@ async def test_finalize_design_writes_and_transitions(tmp_path: Path) -> None:
     assert args[1] == "awaiting_design_approval"
 
 
+@pytest.mark.asyncio
+async def test_finalize_design_ships_design_md_in_event(tmp_path: Path) -> None:
+    """``finalize_design`` must forward the design body via ``design_md``
+    so the Slack/Telegram dispatcher can render it inline. Without this,
+    the user only sees "Design written to .auto-agent/design.md;
+    awaiting approval" — the original bug this regression test pins.
+    """
+    from agent.lifecycle.trio import design_approval
+
+    design_text = "# Architecture\n\nWe split storage from compute because ...\n"
+
+    transition_mock = AsyncMock()
+    with patch.object(design_approval, "transition_task", transition_mock):
+        await design_approval.finalize_design(
+            task_id=42,
+            workspace=str(tmp_path),
+            design_text=design_text,
+        )
+
+    _, kwargs = transition_mock.call_args
+    # The body is read from disk after write_design stamps the header, so
+    # the kwarg holds the on-disk content (header + design text), not just
+    # the raw design_text.
+    assert "design_md" in kwargs
+    assert design_text in kwargs["design_md"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_design_reads_skill_written_file(tmp_path: Path) -> None:
+    """When the agent wrote design.md via the ``submit-design`` skill,
+    ``finalize_design`` is called with ``design_text=None`` and must
+    still pick the body up off disk to ship in the event.
+    """
+    from agent.lifecycle.trio import design_approval
+    from agent.lifecycle.workspace_paths import AUTO_AGENT_DIR, DESIGN_PATH
+
+    (tmp_path / AUTO_AGENT_DIR).mkdir()
+    (tmp_path / DESIGN_PATH).write_text("# Skill-written design\n\nBody.")
+
+    transition_mock = AsyncMock()
+    with patch.object(design_approval, "transition_task", transition_mock):
+        await design_approval.finalize_design(
+            task_id=42,
+            workspace=str(tmp_path),
+            design_text=None,
+        )
+
+    _, kwargs = transition_mock.call_args
+    assert "Skill-written design" in kwargs["design_md"]
+
+
 # ---------------------------------------------------------------------------
 # 3. Approved verdict → ARCHITECT_BACKLOG_EMIT.
 # ---------------------------------------------------------------------------

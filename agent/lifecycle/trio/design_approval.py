@@ -76,14 +76,36 @@ async def finalize_design(
     the agent itself may have written ``design.md`` via the
     ``submit-design`` skill before this is called; passing ``None``
     just transitions the task without rewriting the file.
+
+    The full design body is read from disk (whether we just wrote it or
+    the agent did via the skill) and shipped in the awaiting-approval
+    event payload so the Slack/Telegram dispatcher renders the doc
+    inline — analogous to how ``task_plan_ready`` carries the plan body.
     """
 
     if design_text is not None:
         write_design(workspace, design_text, task_id=task_id)
+
+    design_md = ""
+    target = os.path.join(workspace, DESIGN_PATH)
+    try:
+        with open(target) as fh:
+            design_md = fh.read()
+    except FileNotFoundError:
+        # Skill should have written it; missing-file is a degraded path
+        # but not worth blocking the gate. The dispatcher renders without
+        # the body, the URL still works.
+        log.warning(
+            "design_approval.design_md_missing",
+            task_id=task_id,
+            path=target,
+        )
+
     await transition_task(
         task_id,
         "awaiting_design_approval",
         "Design written to .auto-agent/design.md; awaiting approval",
+        design_md=design_md,
     )
 
 
