@@ -21,6 +21,7 @@ Verdict path (heavy, Phase 7):
     builder with that reason as feedback (bounded; 3 cycles per item
     before architect tiebreak — see :mod:`agent.lifecycle.trio.dispatcher`).
 """
+
 from __future__ import annotations
 
 import json
@@ -37,14 +38,15 @@ from agent.lifecycle._naming import _fresh_session_id
 from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.lifecycle.route_inference import infer_routes_from_diff, is_ui_route
 from agent.lifecycle.trio.prompts import TRIO_REVIEWER_SYSTEM
+from agent.lifecycle.trio.smoke_agent import run_smoke_agent
 from agent.lifecycle.verify_primitives import (
     ServerHandle,
     boot_dev_server,
-    exercise_routes,
     grep_diff_for_stubs,
     inspect_ui,
 )
-from agent.lifecycle.workspace_paths import review_path, slice_review_path
+from agent.lifecycle.workspace_paths import DESIGN_PATH, review_path, slice_review_path
+from agent.lifecycle.workspace_reader import read_gate_file
 from shared.database import async_session
 from shared.models import Task, TaskStatus, TrioReviewAttempt
 
@@ -173,12 +175,11 @@ async def handle_trio_review(
     branch.
     """
     async with async_session() as session:
-        child = (
-            await session.execute(select(Task).where(Task.id == child_task_id))
-        ).scalar_one()
+        child = (await session.execute(select(Task).where(Task.id == child_task_id))).scalar_one()
         if child.parent_task_id is None:
             log.warning(
-                "trio.review.skipped_non_trio_child", child_id=child_task_id,
+                "trio.review.skipped_non_trio_child",
+                child_id=child_task_id,
             )
             return
         # Snapshot everything we'll need outside the session (the reviewer
@@ -200,7 +201,8 @@ async def handle_trio_review(
             # The caller should not reach this path in practice — trio
             # children inherit the parent's repo_id when one exists.
             log.error(
-                "trio.review.no_workspace_no_repo", child_id=child_task_id,
+                "trio.review.no_workspace_no_repo",
+                child_id=child_task_id,
             )
             return
         workspace = await _prepare_review_workspace(
@@ -232,16 +234,16 @@ async def handle_trio_review(
     verdict = _extract_verdict(output)
 
     async with async_session() as session:
-        child = (
-            await session.execute(select(Task).where(Task.id == child_task_id))
-        ).scalar_one()
+        child = (await session.execute(select(Task).where(Task.id == child_task_id))).scalar_one()
         existing = (
-            await session.execute(
-                select(TrioReviewAttempt).where(
-                    TrioReviewAttempt.task_id == child.id
+            (
+                await session.execute(
+                    select(TrioReviewAttempt).where(TrioReviewAttempt.task_id == child.id)
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         cycle = len(existing) + 1
 
         if verdict is None:
@@ -249,38 +251,49 @@ async def handle_trio_review(
                 "Reviewer produced invalid JSON. Please re-state the changes "
                 "made and re-trigger review."
             )
-            session.add(TrioReviewAttempt(
-                task_id=child.id,
-                cycle=cycle,
-                ok=False,
-                feedback=feedback,
-                tool_calls=tool_calls,
-            ))
+            session.add(
+                TrioReviewAttempt(
+                    task_id=child.id,
+                    cycle=cycle,
+                    ok=False,
+                    feedback=feedback,
+                    tool_calls=tool_calls,
+                )
+            )
             from orchestrator.state_machine import transition
+
             await transition(
-                session, child, TaskStatus.CODING,
+                session,
+                child,
+                TaskStatus.CODING,
                 message="trio review: invalid reviewer JSON",
             )
             await session.commit()
             log.info(
                 "trio.review.invalid_json",
-                child_id=child_task_id, cycle=cycle,
+                child_id=child_task_id,
+                cycle=cycle,
             )
             return
 
         ok = bool(verdict.get("ok"))
         feedback = str(verdict.get("feedback", ""))
-        session.add(TrioReviewAttempt(
-            task_id=child.id,
-            cycle=cycle,
-            ok=ok,
-            feedback=feedback,
-            tool_calls=tool_calls,
-        ))
+        session.add(
+            TrioReviewAttempt(
+                task_id=child.id,
+                cycle=cycle,
+                ok=ok,
+                feedback=feedback,
+                tool_calls=tool_calls,
+            )
+        )
         if not ok:
             from orchestrator.state_machine import transition
+
             await transition(
-                session, child, TaskStatus.CODING,
+                session,
+                child,
+                TaskStatus.CODING,
                 message=f"trio review failed (cycle {cycle}): {feedback[:200]}",
             )
         # On ok=true we DON'T transition here — _open_pr_and_advance handles
@@ -290,7 +303,9 @@ async def handle_trio_review(
 
     log.info(
         "trio.review.complete",
-        child_id=child_task_id, cycle=cycle, ok=ok,
+        child_id=child_task_id,
+        cycle=cycle,
+        ok=ok,
     )
 
     if ok:
@@ -500,7 +515,9 @@ async def run_heavy_review(
                 f"{alignment_text.strip()[:400]}"
             ),
         )
-        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name)
+        _write_review_json(
+            workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name
+        )
         return result
 
     # 2. Stub-grep ----------------------------------------------------------
@@ -516,77 +533,73 @@ async def run_heavy_review(
                 f"{v.file}:{v.line} — {v.snippet.strip()[:200]}"
             ),
         )
-        _write_review_json(workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name)
+        _write_review_json(
+            workspace_root=workspace_root, item_id=item_id, result=result, slice_name=slice_name
+        )
         return result
 
-    # 3. Smoke --------------------------------------------------------------
+    # 3. Smoke — ALWAYS via the dedicated smoke agent. ADR-015 §3 / Phase 7.8.
+    # The previous implementation had a vacuous-pass branch: when no routes
+    # were declared by the architect and none could be inferred from the
+    # diff, smoke was silently skipped and the item "passed" without any
+    # runtime verification. That bug shipped task 1's broken code. The smoke
+    # agent decides for itself what runtime verification means for this diff
+    # (boot+route, test suite, build/typecheck, ...). Skipped → fail.
+    design_md = read_gate_file(workspace_root, DESIGN_PATH, schema_version="1")
+    design_text = design_md if isinstance(design_md, str) else ""
+
+    smoke_result = await run_smoke_agent(
+        workspace_root=workspace_root,
+        item=item,
+        design=design_text,
+        diff=diff,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    if smoke_result.verdict != "pass":
+        first_failure = (
+            smoke_result.failures[0]
+            if smoke_result.failures
+            else smoke_result.summary or "smoke agent reported fail without details"
+        )
+        result = HeavyReviewResult(
+            verdict="fail",
+            alignment=alignment_text[:200] or "pass",
+            smoke=f"smoke: {smoke_result.summary[:300]}",
+            reason=(f"smoke agent failed: {first_failure[:400]}"),
+        )
+        _write_review_json(
+            workspace_root=workspace_root,
+            item_id=item_id,
+            result=result,
+            slice_name=slice_name,
+        )
+        return result
+
+    smoke_summary = f"smoke: {smoke_result.summary[:300]}"
+
+    # 4. UI inspection — a separate, advisory layer on top of smoke. The
+    # smoke agent has already proved the code runs; this layer screenshots
+    # any UI routes touched by the change and asks a vision LLM if the
+    # rendered page matches the item's stated intent.
     declared_routes = list(item.get("affected_routes") or [])
     inferred_routes = infer_routes_from_diff(diff)
-    union_routes: list[str] = []
-    seen: set[str] = set()
+    ui_routes: list[str] = []
+    seen_ui: set[str] = set()
     for r in declared_routes + inferred_routes:
-        if r and r not in seen:
-            union_routes.append(r)
-            seen.add(r)
+        if r and r not in seen_ui and is_ui_route(r):
+            ui_routes.append(r)
+            seen_ui.add(r)
 
-    smoke_summary = "n/a"
     ui_summary = "n/a"
     handle: ServerHandle | None = None
     try:
-        if union_routes:
+        if ui_routes:
             handle = await boot_dev_server(workspace=workspace_root)
             if handle.state == "running":
-                route_results = await exercise_routes(union_routes, handle=handle)
-                failed_routes = {r: rr for r, rr in route_results.items() if not rr.ok}
-                if failed_routes:
-                    first = next(iter(failed_routes.items()))
-                    route, rr = first
-                    result = HeavyReviewResult(
-                        verdict="fail",
-                        alignment=alignment_text[:200] or "pass",
-                        smoke=(
-                            f"smoke: route {route} returned status={rr.status}, "
-                            f"reason={rr.reason!r}"
-                        ),
-                        reason=(
-                            f"smoke check failed for {route}: status={rr.status}, "
-                            f"reason={rr.reason!r}"
-                        ),
-                    )
-                    _write_review_json(
-                        workspace_root=workspace_root,
-                        item_id=item_id,
-                        result=result,
-                        slice_name=slice_name,
-                    )
-                    return result
-                smoke_summary = f"smoke: {len(route_results)} route(s) returned 2xx"
-            elif handle.state == "failed":
-                result = HeavyReviewResult(
-                    verdict="fail",
-                    alignment=alignment_text[:200] or "pass",
-                    smoke=f"smoke: dev server boot failed — {handle.failure_reason}",
-                    reason=(
-                        f"smoke: dev server boot failed — {handle.failure_reason}; "
-                        f"cannot exercise affected routes {union_routes!r}."
-                    ),
-                )
-                _write_review_json(
-                    workspace_root=workspace_root,
-                    item_id=item_id,
-                    result=result,
-                    slice_name=slice_name,
-                )
-                return result
-            else:
-                smoke_summary = "smoke: skipped (no boot config)"
-
-            # 4. UI ---------------------------------------------------------
-            if handle.state == "running":
                 ui_failures: list[tuple[str, str]] = []
-                for route in union_routes:
-                    if not is_ui_route(route):
-                        continue
+                for route in ui_routes:
                     ui = await inspect_ui(
                         route=route,
                         intent=item.get("description") or item.get("title", ""),
@@ -594,7 +607,6 @@ async def run_heavy_review(
                     )
                     if not ui.ok:
                         if "playwright_not_installed" in (ui.reason or ""):
-                            # Advisory — Phase 4 precedent in pr_reviewer.
                             log.info(
                                 "trio.heavy_review.ui_inspection_skipped",
                                 route=route,
@@ -609,9 +621,7 @@ async def run_heavy_review(
                         alignment=alignment_text[:200] or "pass",
                         smoke=smoke_summary,
                         ui=f"ui: failed for {route} — {reason}",
-                        reason=(
-                            f"UI inspection failed for {route}: {reason}"
-                        ),
+                        reason=f"UI inspection failed for {route}: {reason}",
                     )
                     _write_review_json(
                         workspace_root=workspace_root,
@@ -620,13 +630,7 @@ async def run_heavy_review(
                         slice_name=slice_name,
                     )
                     return result
-                ui_summary = (
-                    "ui: all UI routes passed"
-                    if any(is_ui_route(r) for r in union_routes)
-                    else "n/a"
-                )
-        else:
-            smoke_summary = "smoke: no routes declared or inferred"
+                ui_summary = "ui: all UI routes passed"
     finally:
         if handle is not None:
             await handle.teardown()
@@ -637,9 +641,7 @@ async def run_heavy_review(
         alignment=alignment_text.strip()[:200] or "pass",
         smoke=smoke_summary,
         ui=ui_summary,
-        reason=(
-            "alignment, no-defer stub-grep, smoke, and UI checks all passed."
-        ),
+        reason=("alignment, no-defer stub-grep, smoke, and UI checks all passed."),
     )
     _write_review_json(
         workspace_root=workspace_root,

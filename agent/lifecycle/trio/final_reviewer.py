@@ -34,6 +34,7 @@ import structlog
 from agent import sh
 from agent.lifecycle.factory import create_agent
 from agent.lifecycle.route_inference import is_ui_route
+from agent.lifecycle.trio.smoke_agent import run_smoke_agent
 from agent.lifecycle.verify_primitives import (
     ServerHandle,
     boot_dev_server,
@@ -166,48 +167,63 @@ async def _smoke_and_ui(
     workspace_root: str,
     routes: list[str],
     intent: str,
+    design: str,
+    diff: str,
+    repo_name: str | None = None,
+    home_dir: str | None = None,
+    org_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Boot, exercise, and UI-inspect ``routes``.
+    """Run the dedicated smoke agent over the integrated change, then
+    inspect any UI routes.
 
     Returns ``(gaps, smoke_summary)``. Each gap dict has shape
     ``{"description": str, "affected_routes": [str]}``.
+
+    ADR-015 §4 / Phase 7.8: the integration-level smoke uses the same
+    dedicated smoke agent as the per-item heavy reviewer, so the rule
+    "auto-agent must run its own code before the PR is raised" applies
+    at integration time too. Skipped → gap. The UI layer remains
+    primitive-based because the smoke agent has already proved the code
+    runs; this is the visual-correctness sweep on top.
     """
 
     gaps: list[dict[str, Any]] = []
+
+    smoke_result = await run_smoke_agent(
+        workspace_root=workspace_root,
+        item=None,
+        design=design,
+        diff=diff,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    if smoke_result.verdict != "pass":
+        # The smoke agent already itemised failures; surface each as a gap.
+        for failure in smoke_result.failures or [smoke_result.summary or "smoke failed"]:
+            gaps.append(
+                {
+                    "description": (f"integration smoke failed: {failure[:400]}"),
+                    "affected_routes": list(routes),
+                }
+            )
+        return gaps, f"smoke: fail — {smoke_result.summary[:200]}"
+
+    smoke_summary = f"smoke: pass — {smoke_result.summary[:200]}"
+
     if not routes:
-        return gaps, "no routes to smoke"
+        return gaps, smoke_summary
 
     handle: ServerHandle | None = None
     try:
         handle = await boot_dev_server(workspace=workspace_root)
-        if handle.state == "failed":
-            gaps.append(
-                {
-                    "description": (
-                        f"dev server boot failed: {handle.failure_reason}; cannot smoke {routes!r}."
-                    ),
-                    "affected_routes": list(routes),
-                }
-            )
-            return gaps, f"boot_failed: {handle.failure_reason}"
-        if handle.state == "disabled":
-            return gaps, "smoke: skipped (no boot config)"
+        if handle.state != "running":
+            # UI inspection is best-effort once smoke has already passed
+            # — don't synthesise a gap just because we couldn't boot
+            # for the second time. The smoke agent proved the code runs.
+            return gaps, smoke_summary
 
         route_results = await exercise_routes(routes, handle=handle)
-        for route, rr in route_results.items():
-            if rr.ok:
-                continue
-            gaps.append(
-                {
-                    "description": (
-                        f"route {route} returned status={rr.status}, "
-                        f"reason={rr.reason!r}; expected 2xx with non-stub body."
-                    ),
-                    "affected_routes": [route],
-                }
-            )
-
-        # UI inspection — only on routes that returned 2xx (re-runs after).
         for route, rr in route_results.items():
             if not rr.ok or not is_ui_route(route):
                 continue
@@ -219,11 +235,6 @@ async def _smoke_and_ui(
                         "affected_routes": [route],
                     }
                 )
-
-        smoke_summary = (
-            f"smoke: {len(route_results)} routes exercised; "
-            f"{sum(1 for r in route_results.values() if not r.ok)} failures"
-        )
         return gaps, smoke_summary
     finally:
         if handle is not None:
@@ -446,6 +457,11 @@ async def run_final_review(
         workspace_root=workspace_root,
         routes=union_routes,
         intent=intent[:200],
+        design=design,
+        diff=diff,
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
     )
 
     # Round-aware prompt context.

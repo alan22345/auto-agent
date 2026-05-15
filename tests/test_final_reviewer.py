@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent.lifecycle.trio import final_reviewer
+from agent.lifecycle.trio.smoke_agent import SmokeAgentResult
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +30,14 @@ from agent.lifecycle.verify_primitives import (
     ServerHandle,
     UIResult,
 )
+
+
+def _pass_smoke() -> SmokeAgentResult:
+    return SmokeAgentResult(verdict="pass", summary="integration smoke green")
+
+
+def _fail_smoke(failure: str) -> SmokeAgentResult:
+    return SmokeAgentResult(verdict="fail", summary=failure, failures=[failure])
 
 
 def _seed_workspace(
@@ -89,6 +98,7 @@ async def test_final_review_pass_writes_final_review_json(tmp_path: Path) -> Non
 
     with (
         patch.object(final_reviewer, "_load_integrated_diff", AsyncMock(return_value="")),
+        patch.object(final_reviewer, "run_smoke_agent", AsyncMock(return_value=_pass_smoke())),
         patch.object(final_reviewer, "boot_dev_server", AsyncMock(return_value=_running_handle())),
         patch.object(final_reviewer, "exercise_routes", AsyncMock(return_value=route_results)),
         patch.object(final_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
@@ -127,12 +137,15 @@ async def test_final_review_gaps_found_writes_gap_list(tmp_path: Path) -> None:
         reviews={"T1": {"schema_version": "1", "verdict": "pass"}},
     )
 
-    bad_routes = {"/api/a": RouteResult(ok=False, status=500, body="boom", reason="server_5xx")}
-
     with (
         patch.object(final_reviewer, "_load_integrated_diff", AsyncMock(return_value="")),
+        patch.object(
+            final_reviewer,
+            "run_smoke_agent",
+            AsyncMock(return_value=_fail_smoke("/api/a returned 500 with boom")),
+        ),
         patch.object(final_reviewer, "boot_dev_server", AsyncMock(return_value=_running_handle())),
-        patch.object(final_reviewer, "exercise_routes", AsyncMock(return_value=bad_routes)),
+        patch.object(final_reviewer, "exercise_routes", AsyncMock(return_value={})),
         patch.object(final_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
         patch.object(
             final_reviewer,
@@ -149,6 +162,8 @@ async def test_final_review_gaps_found_writes_gap_list(tmp_path: Path) -> None:
 
     assert result.verdict == "gaps_found"
     assert result.gaps, "expected at least one gap"
+    # Smoke-agent failures attach the full route union as affected_routes so
+    # the architect's gap-fix turn can target whichever items own them.
     affected = []
     for g in result.gaps:
         affected.extend(g.get("affected_routes") or [])
@@ -156,14 +171,26 @@ async def test_final_review_gaps_found_writes_gap_list(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_review_unions_affected_routes(tmp_path: Path) -> None:
-    """Exercise_routes must be called with union of all items' affected_routes."""
+async def test_final_review_unions_affected_routes_for_ui_sweep(tmp_path: Path) -> None:
+    """Phase 7.8: smoke is now agent-owned (one ``run_smoke_agent`` call).
+
+    The route union still matters for the post-smoke UI inspection sweep —
+    we boot the dev server again and exercise the union of UI routes so
+    ``inspect_ui`` runs against each one that returned 2xx. Use UI
+    routes (``/dashboard``, ``/reports``, ``/settings``) so the sweep
+    actually fires.
+    """
 
     workspace = tmp_path
     items = [
-        {"id": "T1", "title": "A", "description": "x", "affected_routes": ["/a"]},
-        {"id": "T2", "title": "B", "description": "y", "affected_routes": ["/b", "/a"]},
-        {"id": "T3", "title": "C", "description": "z", "affected_routes": ["/c"]},
+        {"id": "T1", "title": "A", "description": "x", "affected_routes": ["/dashboard"]},
+        {
+            "id": "T2",
+            "title": "B",
+            "description": "y",
+            "affected_routes": ["/reports", "/dashboard"],
+        },
+        {"id": "T3", "title": "C", "description": "z", "affected_routes": ["/settings"]},
     ]
     _seed_workspace(
         workspace,
@@ -183,6 +210,7 @@ async def test_final_review_unions_affected_routes(tmp_path: Path) -> None:
 
     with (
         patch.object(final_reviewer, "_load_integrated_diff", AsyncMock(return_value="")),
+        patch.object(final_reviewer, "run_smoke_agent", AsyncMock(return_value=_pass_smoke())),
         patch.object(final_reviewer, "boot_dev_server", AsyncMock(return_value=_running_handle())),
         patch.object(final_reviewer, "exercise_routes", side_effect=fake_exercise),
         patch.object(final_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
@@ -197,7 +225,7 @@ async def test_final_review_unions_affected_routes(tmp_path: Path) -> None:
 
     assert seen, "exercise_routes never called"
     routes_used = set(seen[0])
-    assert routes_used == {"/a", "/b", "/c"}
+    assert routes_used == {"/dashboard", "/reports", "/settings"}
 
 
 @pytest.mark.asyncio
@@ -235,6 +263,7 @@ async def test_final_review_is_fresh_each_round(tmp_path: Path) -> None:
 
     with (
         patch.object(final_reviewer, "_load_integrated_diff", AsyncMock(return_value="")),
+        patch.object(final_reviewer, "run_smoke_agent", AsyncMock(return_value=_pass_smoke())),
         patch.object(final_reviewer, "boot_dev_server", AsyncMock(return_value=_running_handle())),
         patch.object(final_reviewer, "exercise_routes", AsyncMock(return_value={})),
         patch.object(final_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
