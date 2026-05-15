@@ -353,6 +353,23 @@ async def handle_clarification_event(event: Event) -> None:
         await handle_clarification_inbound(event.task_id, answer)
 
 
+async def handle_feedback_event(event: Event) -> None:
+    """EventBus entry for ``task.feedback``.
+
+    Fired by ``POST /tasks/{id}/messages`` whenever a user replies via Slack
+    thread or Telegram reply-to. Routes the message body through
+    ``handle_clarification_inbound``, which self-guards on
+    ``AWAITING_CLARIFICATION`` — non-clarification statuses are a no-op, so
+    other ``/messages`` traffic (e.g. web-UI pair-programming guidance to a
+    coding task) is unaffected.
+    """
+    if not event.task_id:
+        return
+    content = event.payload.get("content", "") if event.payload else ""
+    if content:
+        await handle_clarification_inbound(event.task_id, content)
+
+
 async def route_human_message(event: Event) -> None:
     """EventBus entry for ``human.message`` — routes by current task status.
 

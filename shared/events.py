@@ -395,11 +395,11 @@ def task_dev_deploy_failed(
     )
 
 
-def task_feedback(task_id: int, *, message_id: int, sender: str) -> Event:
+def task_feedback(task_id: int, *, message_id: int, sender: str, content: str = "") -> Event:
     return Event(
         type=TaskEventType.FEEDBACK,
         task_id=task_id,
-        payload={"message_id": message_id, "sender": sender},
+        payload={"message_id": message_id, "sender": sender, "content": content},
     )
 
 

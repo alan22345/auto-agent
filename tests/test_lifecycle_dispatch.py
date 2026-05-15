@@ -27,6 +27,7 @@ EVENT_TO_HANDLER = [
     ("task.query", "agent.lifecycle.query.handle"),
     ("task.cleanup", "agent.lifecycle.cleanup.handle"),
     ("task.clarification_response", "agent.lifecycle.conversation.handle_clarification_event"),
+    ("task.feedback", "agent.lifecycle.conversation.handle_feedback_event"),
     ("po.analyze", "agent.lifecycle.po_worker.handle"),
     ("repo.onboard", "agent.lifecycle.harness_onboard.handle"),
     ("human.message", "agent.lifecycle.conversation.route_human_message"),

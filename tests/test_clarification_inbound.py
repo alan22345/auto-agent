@@ -116,3 +116,48 @@ async def test_inbound_without_trio_phase_delegates_to_existing_handler(
         await handle_clarification_inbound(parent.id, "Use Postgres.")
 
     delegate.assert_called_once_with(parent.id, "Use Postgres.")
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_event_forwards_content_to_inbound():
+    """Slack/Telegram thread reply → POST /tasks/{id}/messages → task.feedback
+    event → handle_feedback_event extracts content and calls
+    handle_clarification_inbound, which (when status is AWAITING_CLARIFICATION)
+    resumes the grill loop.
+    """
+    from shared.events import Event, TaskEventType
+
+    inbound = AsyncMock()
+    with patch("agent.lifecycle.conversation.handle_clarification_inbound", inbound):
+        from agent.lifecycle.conversation import handle_feedback_event
+
+        await handle_feedback_event(
+            Event(
+                type=TaskEventType.FEEDBACK,
+                task_id=42,
+                payload={"message_id": 7, "sender": "slack:alice", "content": "React, please"},
+            )
+        )
+
+    inbound.assert_called_once_with(42, "React, please")
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_event_is_no_op_without_content():
+    """Missing or empty content → drop. Defensive against legacy producers
+    that haven't been updated to pass content yet."""
+    from shared.events import Event, TaskEventType
+
+    inbound = AsyncMock()
+    with patch("agent.lifecycle.conversation.handle_clarification_inbound", inbound):
+        from agent.lifecycle.conversation import handle_feedback_event
+
+        await handle_feedback_event(
+            Event(
+                type=TaskEventType.FEEDBACK,
+                task_id=42,
+                payload={"message_id": 7, "sender": "slack:alice"},
+            )
+        )
+
+    inbound.assert_not_called()

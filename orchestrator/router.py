@@ -1495,7 +1495,14 @@ async def post_task_message(
     # next turn, and publish an event for any other subscribers.
     formatted = f"{sender}: {content}" if sender not in ("anonymous",) else content
     await task_channel(task_id).push_guidance(formatted)
-    await publish(task_feedback(task_id=task_id, message_id=msg.id, sender=sender))
+    await publish(
+        task_feedback(
+            task_id=task_id,
+            message_id=msg.id,
+            sender=sender,
+            content=content,
+        )
+    )
 
     return TaskMessageData(
         id=msg.id,

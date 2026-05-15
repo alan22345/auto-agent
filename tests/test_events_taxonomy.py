@@ -311,7 +311,12 @@ def test_task_dev_deploy_failed():
 
 def test_task_feedback():
     ev = task_feedback(task_id=17, message_id=99, sender="alice")
-    assert ev.payload == {"message_id": 99, "sender": "alice"}
+    assert ev.payload == {"message_id": 99, "sender": "alice", "content": ""}
+
+
+def test_task_feedback_carries_content():
+    ev = task_feedback(task_id=17, message_id=99, sender="alice", content="hi")
+    assert ev.payload["content"] == "hi"
 
 
 def test_task_done():
