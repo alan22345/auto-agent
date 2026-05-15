@@ -44,6 +44,7 @@ from shared.events import (
     task_done,
     task_failed,
     task_feedback,
+    task_iteration_complete,
     task_plan_ready,
     task_query,
     task_rejected,
@@ -92,6 +93,7 @@ from shared.events import (
         (TaskEventType.DEV_DEPLOYED, "task.dev_deployed"),
         (TaskEventType.DEV_DEPLOY_FAILED, "task.dev_deploy_failed"),
         (TaskEventType.FEEDBACK, "task.feedback"),
+        (TaskEventType.ITERATION_COMPLETE, "task.iteration_complete"),
         (TaskEventType.DONE, "task.done"),
         (TaskEventType.START_QUEUED, "task.start_queued"),
         (TaskEventType.SUBTASK_PROGRESS, "task.subtask_progress"),
@@ -332,6 +334,13 @@ def test_task_start_queued():
 def test_task_subtask_progress():
     ev = task_subtask_progress(task_id=20, current=1, total=3, title="phase 1", status="running")
     assert ev.payload == {"current": 1, "total": 3, "title": "phase 1", "status": "running"}
+
+
+def test_task_iteration_complete():
+    ev = task_iteration_complete(task_id=42, summary="updated PR with your changes")
+    assert ev.type == TaskEventType.ITERATION_COMPLETE
+    assert ev.task_id == 42
+    assert ev.payload == {"summary": "updated PR with your changes"}
 
 
 def test_po_analyze():

@@ -85,6 +85,7 @@ class TaskEventType(StrEnum):
     DEV_DEPLOYED = "task.dev_deployed"
     DEV_DEPLOY_FAILED = "task.dev_deploy_failed"
     FEEDBACK = "task.feedback"
+    ITERATION_COMPLETE = "task.iteration_complete"
     DONE = "task.done"
     START_QUEUED = "task.start_queued"
     SUBTASK_PROGRESS = "task.subtask_progress"
@@ -400,6 +401,17 @@ def task_feedback(task_id: int, *, message_id: int, sender: str, content: str = 
         type=TaskEventType.FEEDBACK,
         task_id=task_id,
         payload={"message_id": message_id, "sender": sender, "content": content},
+    )
+
+
+def task_iteration_complete(task_id: int, *, summary: str = "") -> Event:
+    """ADR-017 — one trio iteration cycle finished pushing additive commits
+    to the integration branch. Slack/Telegram notifier renders this as
+    'updated PR with your changes'."""
+    return Event(
+        type=TaskEventType.ITERATION_COMPLETE,
+        task_id=task_id,
+        payload={"summary": summary},
     )
 
 
