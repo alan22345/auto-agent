@@ -221,6 +221,103 @@ class UpdateRepoGraphRequest(BaseModel):
     analysis_branch: str = Field(min_length=1, max_length=255)
 
 
+# --- Code graph blob schema (ADR-016 Phase 2) --------------------------------
+#
+# This is the **locked** wire schema for a single graph analysis result.
+# Phase 2 ships AST-derived nodes and edges; Phase 3 will add ``source_kind:
+# "llm"`` edges to the same shape without changing the schema. Adding fields
+# is allowed; removing or renaming requires a coordinated UI + analyser bump.
+
+
+class Node(BaseModel):
+    """One node in the hierarchical compound graph (ADR-016 §2).
+
+    ``id`` is the canonical Cytoscape id. ``parent`` points to the parent
+    compound node (area → file → class → function nesting). ``area`` is
+    duplicated on every node so query callers can filter without walking
+    the parent chain.
+    """
+
+    id: str
+    kind: Literal["area", "file", "class", "function"]
+    label: str
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    area: str
+    parent: str | None = None
+
+
+class EdgeEvidence(BaseModel):
+    """Cited proof of an edge's existence — see ADR-016 §3."""
+
+    file: str
+    line: int
+    snippet: str
+
+
+class Edge(BaseModel):
+    """One edge in the graph.
+
+    Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 will add
+    ``source_kind="llm"`` edges using the same fields — no schema change.
+    ``boundary_violation`` is reserved for Phase 5 and is always ``False``
+    in Phase 2 output.
+    """
+
+    source: str
+    target: str
+    kind: Literal["calls", "imports", "inherits", "http"]
+    evidence: EdgeEvidence
+    source_kind: Literal["ast", "llm"]
+    boundary_violation: bool = False
+
+
+class AreaStatus(BaseModel):
+    """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
+
+    name: str
+    status: Literal["ok", "partial", "failed"]
+    error: str | None = None
+    unresolved_dynamic_sites: int = 0
+
+
+class RepoGraphBlob(BaseModel):
+    """Full graph analysis output — the payload stored in
+    ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+    """
+
+    commit_sha: str
+    generated_at: datetime
+    analyser_version: str
+    areas: list[AreaStatus]
+    nodes: list[Node]
+    edges: list[Edge]
+
+
+class RepoGraphRefreshResponse(BaseModel):
+    """``POST /api/repos/{id}/graph/refresh`` response body."""
+
+    request_id: str
+    status: Literal["accepted"] = "accepted"
+
+
+class LatestRepoGraphData(BaseModel):
+    """``GET /api/repos/{id}/graph/latest`` payload — the freshness banner
+    + Cytoscape renderer consume this directly. ``blob`` is ``None`` when
+    no analysis has completed yet.
+    """
+
+    repo_id: int
+    analysis_branch: str
+    repo_graph_id: int | None = None
+    commit_sha: str | None = None
+    generated_at: str | None = None
+    analyser_version: str | None = None
+    status: Literal["ok", "partial", "failed"] | None = None
+    blob: RepoGraphBlob | None = None
+
+
 # --- Linear types ---
 
 
