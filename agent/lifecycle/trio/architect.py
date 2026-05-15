@@ -273,16 +273,19 @@ async def _prepare_parent_workspace(parent: Task) -> str:
 async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
     """Commit scaffold + ARCHITECTURE.md, open the init PR, auto-merge.
 
-    Sub-branches off the parent's integration branch ``trio/<parent_id>``
-    to a fresh ``trio/<parent_id>/init`` head, commits anything the
-    architect left in the working tree, pushes both branches, opens a
-    PR back to the integration branch via the gh CLI, and asks GitHub to
+    Sub-branches off the parent's integration branch to a sibling
+    ``<integration_branch>-init`` head (a sibling, not a sub-path —
+    git's refs are filesystem-backed, so a sub-path would D/F-conflict
+    with the integration branch file). Commits anything the architect
+    left in the working tree, pushes both branches, opens a PR back to
+    the integration branch via the gh CLI, and asks GitHub to
     auto-squash-merge it.
 
     Returns the merged commit SHA on the integration branch (best-effort;
     falls back to HEAD of the head branch if no remote is reachable).
     """
     from agent import sh
+    from agent.lifecycle.trio.branch_name import init_branch_name
     from agent.lifecycle.trio.integration_branch import resolve_integration_branch
     from agent.workspace import (
         commit_pending_changes,
@@ -290,7 +293,7 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
     )
 
     integration_branch = resolve_integration_branch(parent)
-    head_branch = f"{integration_branch}/init"
+    head_branch = init_branch_name(integration_branch)
 
     # Sub-branch off the integration branch we're already on.
     await sh.run(
@@ -920,11 +923,12 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
     import time
 
     from agent import sh
+    from agent.lifecycle.trio.branch_name import consult_branch_name
     from agent.lifecycle.trio.integration_branch import resolve_integration_branch
     from agent.workspace import commit_pending_changes, push_branch
 
     integration_branch = resolve_integration_branch(parent)
-    head_branch = f"{integration_branch}/consult-{int(time.time())}"
+    head_branch = consult_branch_name(integration_branch, ts=int(time.time()))
 
     # Sub-branch off whatever HEAD currently is (the integration branch).
     await sh.run(

@@ -262,10 +262,10 @@ async def _replace_backlog_item(
 async def _ensure_integration_branch_checked_out(workspace: str, parent_id: int) -> None:
     """Make sure the workspace is on the parent's integration branch.
 
-    The architect's initial pass may have left the workspace on a sub-branch
-    (``<integration_branch>/init``) after ``_commit_and_open_initial_pr``. The
-    dispatcher operates on the integration branch, so we explicitly check
-    it out before each item.
+    The architect's initial pass may have left the workspace on the
+    sibling init branch (``<integration_branch>-init``) after
+    ``_commit_and_open_initial_pr``. The dispatcher operates on the
+    integration branch, so we explicitly check it out before each item.
 
     Phase 7.7 — the branch name comes from the resolver so new tasks see
     ``auto-agent/<slug>-<id>`` and in-flight ones see the legacy

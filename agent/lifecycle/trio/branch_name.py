@@ -60,4 +60,30 @@ def integration_branch_name(task_id: int, title: str | None) -> str:
     return f"{_BRANCH_PREFIX}/{slug}-{task_id}"
 
 
-__all__ = ["integration_branch_name", "slugify_for_branch"]
+def init_branch_name(integration_branch: str) -> str:
+    """Head-branch name for the architect's initial PR — a *sibling* of
+    ``integration_branch``, NOT a sub-path.
+
+    Why: git stores refs as files on disk (``refs/heads/foo``) so a
+    branch named ``foo/init`` would need ``foo`` to be a directory. When
+    both exist, ``git checkout -B foo/init`` fails with "cannot lock
+    ref … exists; cannot create …" and the subsequent push reports
+    "src refspec foo/init does not match any". A dash separator keeps
+    the names flat siblings.
+    """
+    return f"{integration_branch}-init"
+
+
+def consult_branch_name(integration_branch: str, ts: int) -> str:
+    """Head-branch name for the consulting-architect cycle — sibling of
+    ``integration_branch``. See :func:`init_branch_name` for the
+    refs D/F-conflict rationale."""
+    return f"{integration_branch}-consult-{ts}"
+
+
+__all__ = [
+    "consult_branch_name",
+    "init_branch_name",
+    "integration_branch_name",
+    "slugify_for_branch",
+]
