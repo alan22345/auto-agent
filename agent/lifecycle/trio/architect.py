@@ -3,6 +3,7 @@
 Four phases: initial, consult, checkpoint, revision. Each persists an
 ``ArchitectAttempt`` row scoped to the trio parent task.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,12 +37,12 @@ log = structlog.get_logger()
 
 
 _SYSTEM_PROMPTS = {
-    "initial":      ARCHITECT_INITIAL_SYSTEM,
-    "consult":      ARCHITECT_CONSULT_SYSTEM,
-    "checkpoint":   ARCHITECT_CHECKPOINT_SYSTEM,
-    "revision":     ARCHITECT_INITIAL_SYSTEM,  # same shape as initial
+    "initial": ARCHITECT_INITIAL_SYSTEM,
+    "consult": ARCHITECT_CONSULT_SYSTEM,
+    "checkpoint": ARCHITECT_CHECKPOINT_SYSTEM,
+    "revision": ARCHITECT_INITIAL_SYSTEM,  # same shape as initial
     # ADR-015 §2 / §9 / Phase 6 — design + backlog-emit are separate turns.
-    "design":       ARCHITECT_DESIGN_SYSTEM,
+    "design": ARCHITECT_DESIGN_SYSTEM,
     "backlog_emit": ARCHITECT_BACKLOG_EMIT_SYSTEM,
 }
 
@@ -51,8 +52,12 @@ def create_architect_agent(
     task_id: int,
     task_description: str,
     phase: Literal[
-        "initial", "consult", "checkpoint", "revision",
-        "design", "backlog_emit",
+        "initial",
+        "consult",
+        "checkpoint",
+        "revision",
+        "design",
+        "backlog_emit",
     ],
     repo_name: str | None = None,
     home_dir: str | None = None,
@@ -103,7 +108,9 @@ def create_architect_agent(
     base_prompt = _SYSTEM_PROMPTS[phase]
     ws_root = workspace.root if hasattr(workspace, "root") else str(workspace)
     agent.system_prompt_override = apply_pinned_artefacts_to_system_prompt(
-        base_prompt, ws_root, slice_name=slice_name,
+        base_prompt,
+        ws_root,
+        slice_name=slice_name,
     )
     return agent
 
@@ -248,23 +255,28 @@ async def _prepare_parent_workspace(parent: Task) -> str:
 
     # Repo-less cold start — bootstrap an empty git workspace.
     workspace = os.path.join(
-        WORKSPACES_DIR, str(parent.organization_id), f"task-{parent.id}",
+        WORKSPACES_DIR,
+        str(parent.organization_id),
+        f"task-{parent.id}",
     )
     os.makedirs(workspace, exist_ok=True)
     if not os.path.isdir(os.path.join(workspace, ".git")):
         await sh.run(["git", "init", "-q"], cwd=workspace, timeout=30)
         await sh.run(
             ["git", "config", "user.email", _AGENT_GIT_EMAIL],
-            cwd=workspace, timeout=10,
+            cwd=workspace,
+            timeout=10,
         )
         await sh.run(
             ["git", "config", "user.name", _AGENT_GIT_NAME],
-            cwd=workspace, timeout=10,
+            cwd=workspace,
+            timeout=10,
         )
         # Seed an empty commit so HEAD exists before we branch off it.
         await sh.run(
             ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=workspace, timeout=10,
+            cwd=workspace,
+            timeout=10,
         )
     await create_branch(workspace, branch)
     return workspace
@@ -298,20 +310,25 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
     # Sub-branch off the integration branch we're already on.
     await sh.run(
         ["git", "checkout", "-B", head_branch],
-        cwd=workspace, timeout=30,
+        cwd=workspace,
+        timeout=30,
     )
 
     # Commit any pending scaffold + ARCHITECTURE.md the architect produced.
     # ``commit_pending_changes`` is a no-op when the working tree is clean.
     await commit_pending_changes(
-        workspace, parent.id, f"init: architecture + scaffold — {parent.title}",
+        workspace,
+        parent.id,
+        f"init: architecture + scaffold — {parent.title}",
     )
 
     # Try to push and open a PR. If there's no remote configured (cold-start
     # workspaces without a repo), fall back to HEAD locally so callers still
     # get a usable SHA without crashing.
     remote_check = await sh.run(
-        ["git", "remote"], cwd=workspace, timeout=10,
+        ["git", "remote"],
+        cwd=workspace,
+        timeout=10,
     )
     has_remote = bool((remote_check.stdout or "").strip())
 
@@ -322,7 +339,8 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
             # has somewhere to land.
             await sh.run(
                 ["git", "push", "-u", "origin", integration_branch],
-                cwd=workspace, timeout=30,
+                cwd=workspace,
+                timeout=30,
             )
 
             from shared.github_auth import get_github_token
@@ -335,11 +353,17 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
             }
             create_res = await sh.run(
                 [
-                    "gh", "pr", "create",
-                    "--base", integration_branch,
-                    "--head", head_branch,
-                    "--title", f"init: architecture + scaffold — {parent.title}",
-                    "--body", (
+                    "gh",
+                    "pr",
+                    "create",
+                    "--base",
+                    integration_branch,
+                    "--head",
+                    head_branch,
+                    "--title",
+                    f"init: architecture + scaffold — {parent.title}",
+                    "--body",
+                    (
                         "Initial architecture pass for trio parent "
                         f"#{parent.id}.\n\n"
                         "Contains ARCHITECTURE.md, any scaffold the architect "
@@ -347,7 +371,9 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
                         "builder cycle."
                     ),
                 ],
-                cwd=workspace, timeout=30, env=gh_env,
+                cwd=workspace,
+                timeout=30,
+                env=gh_env,
             )
             if create_res.failed:
                 log.warning(
@@ -360,19 +386,24 @@ async def _commit_and_open_initial_pr(parent: Task, workspace: str) -> str:
                 # pass (or immediately when there are none).
                 await sh.run(
                     ["gh", "pr", "merge", "--auto", "--squash"],
-                    cwd=workspace, timeout=30, env=gh_env,
+                    cwd=workspace,
+                    timeout=30,
+                    env=gh_env,
                 )
         except Exception as e:  # pragma: no cover — best-effort remote plumbing
             log.warning(
                 "architect.initial_pr_push_or_merge_failed",
-                task_id=parent.id, error=str(e),
+                task_id=parent.id,
+                error=str(e),
             )
 
     # Resolve the SHA we'll record. Prefer the local HEAD of the head branch
     # — that's what we committed, regardless of whether the auto-merge
     # completes synchronously.
     rev = await sh.run(
-        ["git", "rev-parse", "HEAD"], cwd=workspace, timeout=10,
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+        timeout=10,
     )
     sha = (rev.stdout or "").strip()
     return sha[:40] if sha else ""
@@ -452,57 +483,66 @@ async def _emit_clarification(
         if prior >= cap:
             log.warning(
                 "architect.clarification.loop_guard",
-                task_id=parent_task_id, prior_rounds=prior, cap=cap,
+                task_id=parent_task_id,
+                prior_rounds=prior,
+                cap=cap,
             )
-            parent = (
-                await s.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
+            parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
             await transition(
-                s, parent, TaskStatus.BLOCKED,
+                s,
+                parent,
+                TaskStatus.BLOCKED,
                 message=f"architect asked for clarification {prior + 1}x; capped at {cap}",
             )
-            s.add(ArchitectAttempt(
-                task_id=parent_task_id,
-                phase=phase,
-                cycle=_next_cycle_sync(prior + 1),
-                reasoning=output,
-                tool_calls=tool_calls,
-                clarification_question=question,
-                session_blob_path=session_blob_path,
-                decision={"action": "blocked",
-                          "reason": "clarification loop guard"},
-            ))
+            s.add(
+                ArchitectAttempt(
+                    task_id=parent_task_id,
+                    phase=phase,
+                    cycle=_next_cycle_sync(prior + 1),
+                    reasoning=output,
+                    tool_calls=tool_calls,
+                    clarification_question=question,
+                    session_blob_path=session_blob_path,
+                    decision={"action": "blocked", "reason": "clarification loop guard"},
+                )
+            )
             await s.commit()
             return
 
         # 3. Normal path: write the attempt row + transition + publish.
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
-        s.add(ArchitectAttempt(
-            task_id=parent_task_id,
-            phase=phase,
-            cycle=prior + 1,
-            reasoning=output,
-            tool_calls=tool_calls,
-            clarification_question=question,
-            session_blob_path=session_blob_path,
-            decision={"action": "awaiting_clarification"},
-        ))
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
+        s.add(
+            ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=phase,
+                cycle=prior + 1,
+                reasoning=output,
+                tool_calls=tool_calls,
+                clarification_question=question,
+                session_blob_path=session_blob_path,
+                decision={"action": "awaiting_clarification"},
+            )
+        )
         await transition(
-            s, parent, TaskStatus.AWAITING_CLARIFICATION,
+            s,
+            parent,
+            TaskStatus.AWAITING_CLARIFICATION,
             message="Architect needs answers",
         )
         await s.commit()
 
-    await publish(Event(
-        type=TaskEventType.ARCHITECT_CLARIFICATION_NEEDED,
-        task_id=parent_task_id,
-        payload={"question": question},
-    ))
+    await publish(
+        Event(
+            type=TaskEventType.ARCHITECT_CLARIFICATION_NEEDED,
+            task_id=parent_task_id,
+            payload={"question": question},
+        )
+    )
     log.info(
         "architect.clarification.emitted",
-        task_id=parent_task_id, round=prior + 1, question_preview=question[:120],
+        task_id=parent_task_id,
+        round=prior + 1,
+        question_preview=question[:120],
     )
 
 
@@ -566,9 +606,7 @@ async def _load_parent_for_run(parent_task_id: int) -> dict:
     just leave it absent — the new run paths handle that case).
     """
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         return {
             "task_description": parent.description or parent.title,
             "task_title": parent.title,
@@ -653,9 +691,7 @@ async def run_design(parent_task_id: int) -> None:
     tool_calls = _result_tool_calls(run_result, agent)
 
     # Persist the session so run_backlog_emit can resume from the design turn.
-    workspace_root = (
-        workspace.root if hasattr(workspace, "root") else str(workspace)
-    )
+    workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
 
     # Phase 7.6: stamp the design.md the architect's CC subprocess just wrote
     # with the task-id header. CC's submit-design skill writes the markdown
@@ -683,21 +719,24 @@ async def run_design(parent_task_id: int) -> None:
     except Exception as exc:  # pragma: no cover — journal is best-effort
         log.warning(
             "architect.run_design.journal_failed",
-            task_id=parent_task_id, error=str(exc),
+            task_id=parent_task_id,
+            error=str(exc),
         )
 
     # Persist the attempt row before flipping the gate so the design turn
     # is auditable even if finalize_design fails.
     async with async_session() as s:
-        s.add(ArchitectAttempt(
-            task_id=parent_task_id,
-            phase=ArchitectPhase.INITIAL,
-            cycle=1,
-            reasoning=output or "",
-            tool_calls=tool_calls,
-            session_blob_path=session_blob_path,
-            decision={"action": "submit_design"},
-        ))
+        s.add(
+            ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=ArchitectPhase.INITIAL,
+                cycle=1,
+                reasoning=output or "",
+                tool_calls=tool_calls,
+                session_blob_path=session_blob_path,
+                decision={"action": "submit_design"},
+            )
+        )
         await s.commit()
 
     # Flip the gate — orchestrator will park here until plan_approval.json lands.
@@ -722,9 +761,7 @@ async def run_initial(parent_task_id: int) -> None:
     a blocked attempt row instead.
     """
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         # Pre-resolve everything we'll need outside the session — the
         # architect run is long, and we don't want a stale connection.
         task_description = parent.description or parent.title
@@ -822,49 +859,51 @@ async def run_initial(parent_task_id: int) -> None:
             output_preview=output[:300],
         )
         async with async_session() as s:
-            parent = (
-                await s.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
+            parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
             # Best-effort transition — if the parent isn't in a status that
             # allows BLOCKED, fall back to writing the attempt row only.
             try:
                 from orchestrator.state_machine import transition
 
                 await transition(
-                    s, parent, TaskStatus.BLOCKED,
+                    s,
+                    parent,
+                    TaskStatus.BLOCKED,
                     message="architect.run_initial: invalid JSON backlog",
                 )
             except Exception:
                 parent.status = TaskStatus.BLOCKED
-            s.add(ArchitectAttempt(
-                task_id=parent.id,
-                phase=ArchitectPhase.INITIAL,
-                cycle=1,
-                reasoning=output,
-                decision={
-                    "action": "blocked",
-                    "reason": "invalid JSON from architect",
-                },
-                tool_calls=tool_calls,
-            ))
+            s.add(
+                ArchitectAttempt(
+                    task_id=parent.id,
+                    phase=ArchitectPhase.INITIAL,
+                    cycle=1,
+                    reasoning=output,
+                    decision={
+                        "action": "blocked",
+                        "reason": "invalid JSON from architect",
+                    },
+                    tool_calls=tool_calls,
+                )
+            )
             await s.commit()
         return
 
     commit_sha = await _commit_and_open_initial_pr(parent, workspace)
 
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         parent.trio_backlog = backlog
-        s.add(ArchitectAttempt(
-            task_id=parent.id,
-            phase=ArchitectPhase.INITIAL,
-            cycle=1,
-            reasoning=output,
-            commit_sha=commit_sha or None,
-            tool_calls=tool_calls,
-        ))
+        s.add(
+            ArchitectAttempt(
+                task_id=parent.id,
+                phase=ArchitectPhase.INITIAL,
+                cycle=1,
+                reasoning=output,
+                commit_sha=commit_sha or None,
+                tool_calls=tool_calls,
+            )
+        )
         await s.commit()
 
     log.info(
@@ -933,15 +972,20 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
     # Sub-branch off whatever HEAD currently is (the integration branch).
     await sh.run(
         ["git", "checkout", "-B", head_branch],
-        cwd=workspace, timeout=30,
+        cwd=workspace,
+        timeout=30,
     )
 
     await commit_pending_changes(
-        workspace, parent.id, f"consult: update ARCHITECTURE.md — {parent.title}",
+        workspace,
+        parent.id,
+        f"consult: update ARCHITECTURE.md — {parent.title}",
     )
 
     remote_check = await sh.run(
-        ["git", "remote"], cwd=workspace, timeout=10,
+        ["git", "remote"],
+        cwd=workspace,
+        timeout=10,
     )
     has_remote = bool((remote_check.stdout or "").strip())
 
@@ -950,7 +994,8 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
             await push_branch(workspace, head_branch)
             await sh.run(
                 ["git", "push", "-u", "origin", integration_branch],
-                cwd=workspace, timeout=30,
+                cwd=workspace,
+                timeout=30,
             )
 
             from shared.github_auth import get_github_token
@@ -963,11 +1008,17 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
             }
             create_res = await sh.run(
                 [
-                    "gh", "pr", "create",
-                    "--base", integration_branch,
-                    "--head", head_branch,
-                    "--title", f"consult: update ARCHITECTURE.md — {parent.title}",
-                    "--body", (
+                    "gh",
+                    "pr",
+                    "create",
+                    "--base",
+                    integration_branch,
+                    "--head",
+                    head_branch,
+                    "--title",
+                    f"consult: update ARCHITECTURE.md — {parent.title}",
+                    "--body",
+                    (
                         "Architecture clarification from mid-build consult for "
                         f"trio parent #{parent.id}.\n\n"
                         "Updates ARCHITECTURE.md in response to a builder "
@@ -975,7 +1026,9 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
                         "subsequent builder turns see the new guidance."
                     ),
                 ],
-                cwd=workspace, timeout=30, env=gh_env,
+                cwd=workspace,
+                timeout=30,
+                env=gh_env,
             )
             if create_res.failed:
                 log.warning(
@@ -986,16 +1039,21 @@ async def _commit_consult_doc_update(parent: Task, workspace: str) -> str:
             else:
                 await sh.run(
                     ["gh", "pr", "merge", "--auto", "--squash"],
-                    cwd=workspace, timeout=30, env=gh_env,
+                    cwd=workspace,
+                    timeout=30,
+                    env=gh_env,
                 )
         except Exception as e:  # pragma: no cover — best-effort remote plumbing
             log.warning(
                 "architect.consult_pr_push_or_merge_failed",
-                task_id=parent.id, error=str(e),
+                task_id=parent.id,
+                error=str(e),
             )
 
     rev = await sh.run(
-        ["git", "rev-parse", "HEAD"], cwd=workspace, timeout=10,
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+        timeout=10,
     )
     sha = (rev.stdout or "").strip()
     return sha[:40] if sha else ""
@@ -1025,9 +1083,7 @@ async def consult(
     Returns ``{"answer": str, "architecture_md_updated": bool}``.
     """
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         # Pre-resolve everything we'll need outside the session.
         task_description = parent.description or parent.title
         repo_name = parent.repo.name if parent.repo else None
@@ -1066,25 +1122,31 @@ async def consult(
 
     async with async_session() as s:
         existing = (
-            await s.execute(
-                select(ArchitectAttempt).where(
-                    (ArchitectAttempt.task_id == parent_task_id)
-                    & (ArchitectAttempt.phase == ArchitectPhase.CONSULT)
+            (
+                await s.execute(
+                    select(ArchitectAttempt).where(
+                        (ArchitectAttempt.task_id == parent_task_id)
+                        & (ArchitectAttempt.phase == ArchitectPhase.CONSULT)
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         cycle = len(existing) + 1
 
-        s.add(ArchitectAttempt(
-            task_id=parent_task_id,
-            phase=ArchitectPhase.CONSULT,
-            cycle=cycle,
-            reasoning=output,
-            consult_question=question,
-            consult_why=why,
-            commit_sha=commit_sha or None,
-            tool_calls=tool_calls,
-        ))
+        s.add(
+            ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=ArchitectPhase.CONSULT,
+                cycle=cycle,
+                reasoning=output,
+                consult_question=question,
+                consult_why=why,
+                commit_sha=commit_sha or None,
+                tool_calls=tool_calls,
+            )
+        )
         await s.commit()
 
     log.info(
@@ -1148,13 +1210,16 @@ async def _next_cycle(session, parent_id: int, phase: ArchitectPhase) -> int:
     ``consult`` — kept inline there to avoid breaking its tests).
     """
     existing = (
-        await session.execute(
-            select(ArchitectAttempt).where(
-                (ArchitectAttempt.task_id == parent_id)
-                & (ArchitectAttempt.phase == phase)
+        (
+            await session.execute(
+                select(ArchitectAttempt).where(
+                    (ArchitectAttempt.task_id == parent_id) & (ArchitectAttempt.phase == phase)
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return len(existing) + 1
 
 
@@ -1180,9 +1245,7 @@ async def checkpoint(
     is left untouched in that case.
     """
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         task_description = parent.description or parent.title
         task_title = parent.title
         repo_name = parent.repo.name if parent.repo else None
@@ -1195,8 +1258,7 @@ async def checkpoint(
     suffix = ""
     if child_task_id is not None:
         suffix = (
-            f"\n\nChild task #{child_task_id} just merged. "
-            "Review its diff via git log/git diff."
+            f"\n\nChild task #{child_task_id} just merged. Review its diff via git log/git diff."
         )
     elif repair_context is not None:
         ci_log = str(repair_context.get("ci_log", ""))[:4000]
@@ -1219,8 +1281,7 @@ async def checkpoint(
     )
 
     run_result = await agent.run(
-        f"Run a checkpoint review for: {task_title}\n\n"
-        f"Task description:\n{checkpoint_description}",
+        f"Run a checkpoint review for: {task_title}\n\nTask description:\n{checkpoint_description}",
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
@@ -1245,14 +1306,16 @@ async def checkpoint(
         }
         async with async_session() as s:
             cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
-            s.add(ArchitectAttempt(
-                task_id=parent_task_id,
-                phase=ArchitectPhase.CHECKPOINT,
-                cycle=cycle,
-                reasoning=output or "",
-                decision=blocked,
-                tool_calls=tool_calls,
-            ))
+            s.add(
+                ArchitectAttempt(
+                    task_id=parent_task_id,
+                    phase=ArchitectPhase.CHECKPOINT,
+                    cycle=cycle,
+                    reasoning=output or "",
+                    decision=blocked,
+                    tool_calls=tool_calls,
+                )
+            )
             await s.commit()
         return blocked
 
@@ -1277,25 +1340,23 @@ async def checkpoint(
         backlog = extracted["backlog"]
     else:
         async with async_session() as s:
-            p = (
-                await s.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
+            p = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
             backlog = list(p.trio_backlog or [])
 
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         parent.trio_backlog = backlog
         cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.CHECKPOINT)
-        s.add(ArchitectAttempt(
-            task_id=parent_task_id,
-            phase=ArchitectPhase.CHECKPOINT,
-            cycle=cycle,
-            reasoning=output,
-            decision=decision,
-            tool_calls=tool_calls,
-        ))
+        s.add(
+            ArchitectAttempt(
+                task_id=parent_task_id,
+                phase=ArchitectPhase.CHECKPOINT,
+                cycle=cycle,
+                reasoning=output,
+                decision=decision,
+                tool_calls=tool_calls,
+            )
+        )
         await s.commit()
 
     log.info(
@@ -1328,9 +1389,7 @@ async def run_revision(parent_task_id: int) -> None:
     blocked revision row.
     """
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         task_description = parent.description or parent.title
         task_title = parent.title
         repo_name = parent.repo.name if parent.repo else None
@@ -1340,8 +1399,7 @@ async def run_revision(parent_task_id: int) -> None:
     workspace = await _prepare_parent_workspace(parent)
 
     revision_description = (
-        f"{task_description}\n\n"
-        "[Revision pass — design changed. Rewrite ARCHITECTURE.md.]"
+        f"{task_description}\n\n[Revision pass — design changed. Rewrite ARCHITECTURE.md.]"
     )
 
     agent = create_architect_agent(
@@ -1354,8 +1412,7 @@ async def run_revision(parent_task_id: int) -> None:
         org_id=org_id,
     )
     run_result = await agent.run(
-        f"Run a revision pass for: {task_title}\n\n"
-        f"Task description:\n{revision_description}",
+        f"Run a revision pass for: {task_title}\n\nTask description:\n{revision_description}",
     )
     output = _result_output(run_result)
     tool_calls = _result_tool_calls(run_result, agent)
@@ -1382,49 +1439,51 @@ async def run_revision(parent_task_id: int) -> None:
             output_preview=output[:300],
         )
         async with async_session() as s:
-            parent = (
-                await s.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
+            parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
             try:
                 from orchestrator.state_machine import transition
 
                 await transition(
-                    s, parent, TaskStatus.BLOCKED,
+                    s,
+                    parent,
+                    TaskStatus.BLOCKED,
                     message="architect.run_revision: invalid JSON backlog",
                 )
             except Exception:
                 parent.status = TaskStatus.BLOCKED
             cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.REVISION)
-            s.add(ArchitectAttempt(
-                task_id=parent.id,
-                phase=ArchitectPhase.REVISION,
-                cycle=cycle,
-                reasoning=output or "",
-                decision={
-                    "action": "blocked",
-                    "reason": "invalid JSON from architect",
-                },
-                tool_calls=tool_calls,
-            ))
+            s.add(
+                ArchitectAttempt(
+                    task_id=parent.id,
+                    phase=ArchitectPhase.REVISION,
+                    cycle=cycle,
+                    reasoning=output or "",
+                    decision={
+                        "action": "blocked",
+                        "reason": "invalid JSON from architect",
+                    },
+                    tool_calls=tool_calls,
+                )
+            )
             await s.commit()
         return
 
     commit_sha = await _commit_and_open_initial_pr(parent, workspace)
 
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         parent.trio_backlog = backlog
         cycle = await _next_cycle(s, parent_task_id, ArchitectPhase.REVISION)
-        s.add(ArchitectAttempt(
-            task_id=parent.id,
-            phase=ArchitectPhase.REVISION,
-            cycle=cycle,
-            reasoning=output,
-            commit_sha=commit_sha or None,
-            tool_calls=tool_calls,
-        ))
+        s.add(
+            ArchitectAttempt(
+                task_id=parent.id,
+                phase=ArchitectPhase.REVISION,
+                cycle=cycle,
+                reasoning=output,
+                commit_sha=commit_sha or None,
+                tool_calls=tool_calls,
+            )
+        )
         await s.commit()
 
     log.info(
@@ -1458,9 +1517,7 @@ async def resume(parent_task_id: int) -> None:
     from agent.session import Session
 
     async with async_session() as s:
-        parent = (
-            await s.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         attempt = (
             await s.execute(
                 select(ArchitectAttempt)
@@ -1494,7 +1551,8 @@ async def resume(parent_task_id: int) -> None:
     if loaded is None:
         log.warning(
             "architect.resume.session_lost",
-            task_id=parent_task_id, path=storage_dir,
+            task_id=parent_task_id,
+            path=storage_dir,
         )
         # Fallback: re-run run_initial. The Q&A already exists on the
         # architect_attempts row and is visible to the architect via the
@@ -1538,9 +1596,12 @@ async def resume(parent_task_id: int) -> None:
         # Another round — loop guard applies inside _emit_clarification.
         await _emit_clarification(
             parent_task_id=parent_task_id,
-            agent=agent, workspace=workspace,
-            output=output, tool_calls=tool_calls,
-            question=clarification, phase=phase_for_resume,
+            agent=agent,
+            workspace=workspace,
+            output=output,
+            tool_calls=tool_calls,
+            question=clarification,
+            phase=phase_for_resume,
         )
         return
 
@@ -1551,51 +1612,54 @@ async def resume(parent_task_id: int) -> None:
         if backlog is None:
             log.error(
                 "architect.resume.invalid_json",
-                task_id=parent_task_id, output_preview=output[:300],
+                task_id=parent_task_id,
+                output_preview=output[:300],
             )
             async with async_session() as s2:
                 parent = (
-                    await s2.execute(
-                        select(Task).where(Task.id == parent_task_id)
-                    )
+                    await s2.execute(select(Task).where(Task.id == parent_task_id))
                 ).scalar_one()
                 try:
                     from orchestrator.state_machine import transition
 
                     await transition(
-                        s2, parent, TaskStatus.BLOCKED,
+                        s2,
+                        parent,
+                        TaskStatus.BLOCKED,
                         message="architect.resume: invalid JSON on resume",
                     )
                 except Exception:
                     parent.status = TaskStatus.BLOCKED
-                s2.add(ArchitectAttempt(
-                    task_id=parent.id,
-                    phase=phase_for_resume,
-                    cycle=next_cycle,
-                    reasoning=output,
-                    decision={
-                        "action": "blocked",
-                        "reason": "invalid JSON on resume",
-                    },
-                    tool_calls=tool_calls,
-                ))
+                s2.add(
+                    ArchitectAttempt(
+                        task_id=parent.id,
+                        phase=phase_for_resume,
+                        cycle=next_cycle,
+                        reasoning=output,
+                        decision={
+                            "action": "blocked",
+                            "reason": "invalid JSON on resume",
+                        },
+                        tool_calls=tool_calls,
+                    )
+                )
                 await s2.commit()
             return
 
         commit_sha = await _commit_and_open_initial_pr(parent, workspace)
         async with async_session() as s2:
-            parent = (
-                await s2.execute(select(Task).where(Task.id == parent_task_id))
-            ).scalar_one()
+            parent = (await s2.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
             parent.trio_backlog = backlog
-            s2.add(ArchitectAttempt(
-                task_id=parent_task_id,
-                phase=phase_for_resume,
-                cycle=next_cycle,
-                reasoning=output,
-                commit_sha=commit_sha or None,
-                tool_calls=tool_calls,
-            ))
+            s2.add(
+                ArchitectAttempt(
+                    task_id=parent_task_id,
+                    phase=phase_for_resume,
+                    cycle=next_cycle,
+                    reasoning=output,
+                    commit_sha=commit_sha or None,
+                    tool_calls=tool_calls,
+                )
+            )
             await s2.commit()
         log.info(
             "architect.resume.complete",
@@ -1610,9 +1674,7 @@ async def resume(parent_task_id: int) -> None:
     # the same helper checkpoint() uses, then mirror its row-write shape.
     payload = _extract_checkpoint_payload(output)
     async with async_session() as s2:
-        parent = (
-            await s2.execute(select(Task).where(Task.id == parent_task_id))
-        ).scalar_one()
+        parent = (await s2.execute(select(Task).where(Task.id == parent_task_id))).scalar_one()
         row = ArchitectAttempt(
             task_id=parent_task_id,
             phase=ArchitectPhase.CHECKPOINT,
@@ -1640,4 +1702,173 @@ async def resume(parent_task_id: int) -> None:
         phase=ArchitectPhase.CHECKPOINT.value,
         cycle=next_cycle,
         had_payload=isinstance(payload, dict),
+    )
+
+
+# ---------------------------------------------------------------------------
+# iterate — re-run the architect on user feedback (ADR-017).
+# ---------------------------------------------------------------------------
+
+_ITERATE_SYSTEM_PROMPT = """You are the architect re-iterating on a
+complex_large task in response to user feedback on its integration PR.
+
+You receive:
+  - The original task description.
+  - The current ``.auto-agent/design.md``.
+  - The PR diff (everything shipped so far).
+  - The existing trio_backlog (some items will be marked ``done``).
+  - The user's new feedback.
+
+Your job: emit a fresh backlog of new work items that address the
+feedback. Use ``submit_backlog`` with the same shape as the initial
+run. If an already-done item needs to be re-done, add it as a NEW item
+with a fresh id (e.g. ``S2.r1``) and ``status: pending``. Do not
+mutate or remove existing items — the audit trail of what shipped
+originally must survive.
+
+If the feedback can be answered without code changes (e.g. the user
+asks a question), emit an empty backlog and the loop will no-op.
+"""
+
+
+def _read_design_md(workspace_root: str, task_id: int) -> str:  # task_id reserved for future use
+    """Read .auto-agent/design.md from the workspace, empty string if missing."""
+    from agent.lifecycle.workspace_paths import DESIGN_PATH
+
+    path = os.path.join(workspace_root, DESIGN_PATH)
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return ""
+
+
+async def _read_pr_diff(workspace_root: str, parent: Task) -> str:
+    """git diff origin/<base>...<integration_branch>, truncated to 50 KB."""
+    from agent import sh
+    from agent.lifecycle.trio.integration_branch import resolve_integration_branch
+
+    integration_branch = resolve_integration_branch(parent)
+    base = parent.repo.default_branch if parent.repo else "main"
+    res = await sh.run(
+        ["git", "diff", f"origin/{base}...{integration_branch}"],
+        cwd=workspace_root,
+        timeout=60,
+    )
+    return (res.stdout or "")[:50000]
+
+
+def _build_iterate_user_prompt(
+    *,
+    task: Task,
+    design_md: str,
+    pr_diff: str,
+    existing_backlog: list[dict],
+    feedback: str,
+) -> str:
+    backlog_preview = "\n".join(
+        f"- {item.get('id')}: {item.get('title')} [{item.get('status', '?')}]"
+        for item in existing_backlog
+    )
+    return (
+        f"# Task\n\n{task.title}\n\n{task.description}\n\n"
+        f"# Existing design\n\n{design_md}\n\n"
+        f"# What shipped so far (diff)\n\n```diff\n{pr_diff}\n```\n\n"
+        f"# Existing backlog\n\n{backlog_preview or '(empty)'}\n\n"
+        f"# User feedback\n\n{feedback}\n"
+    )
+
+
+async def iterate(parent_id: int, *, iteration_context: dict) -> None:
+    """ADR-017 — re-iterate a complex_large task on user feedback.
+
+    Reads .auto-agent/design.md + the integration branch's PR diff +
+    existing trio_backlog, plus the user's feedback message, and asks
+    the architect to emit a fresh backlog of items needed to address
+    the feedback. New items are APPENDED to trio_backlog (not replaced)
+    so the audit of what shipped originally survives. Already-done
+    items are left alone; the per-item dispatcher only processes
+    ``pending``.
+    """
+    feedback = iteration_context.get("feedback", "")
+
+    async with async_session() as s:
+        parent = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
+        task_description = parent.description or parent.title
+        task_title = parent.title
+        repo_name = parent.repo.name if parent.repo else None
+        org_id = parent.organization_id
+        existing_backlog = list(parent.trio_backlog or [])
+        home_dir = await home_dir_for_task(parent)
+
+    workspace = await _prepare_parent_workspace(parent)
+    ws_root = workspace.root if hasattr(workspace, "root") else str(workspace)
+
+    design_md = _read_design_md(ws_root, parent_id)
+    pr_diff = await _read_pr_diff(ws_root, parent)
+
+    user_prompt = _build_iterate_user_prompt(
+        task=parent,
+        design_md=design_md,
+        pr_diff=pr_diff,
+        existing_backlog=existing_backlog,
+        feedback=feedback,
+    )
+
+    # Build an agent with the iterate-specific system prompt injected via
+    # the same factory pattern as run_initial / checkpoint.
+    agent = create_architect_agent(
+        workspace=workspace,
+        task_id=parent_id,
+        task_description=task_description,
+        phase="initial",  # reuse the INITIAL phase slot in the factory
+        repo_name=repo_name,
+        home_dir=home_dir,
+        org_id=org_id,
+    )
+    # Override the system prompt with the iterate-specific one.
+    agent.system_prompt_override = _ITERATE_SYSTEM_PROMPT
+
+    run_result = await agent.run(
+        f"Re-iterate on: {task_title}\n\n{user_prompt}",
+    )
+    output = _result_output(run_result)
+    tool_calls = _result_tool_calls(run_result, agent)
+
+    # Parse the backlog using the same regex-based extractor that the
+    # INITIAL/REVISION resume path uses (the format is identical).
+    new_items = _extract_backlog(output)
+
+    if new_items is None:
+        log.warning(
+            "architect.iterate.no_new_items",
+            task_id=parent_id,
+            output_preview=output[:300],
+        )
+        return
+
+    # APPEND new items to existing backlog — never replace, so the
+    # audit trail of what shipped originally is preserved.
+    async with async_session() as s:
+        parent = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
+        merged_backlog = list(parent.trio_backlog or []) + new_items
+        parent.trio_backlog = merged_backlog
+        cycle = await _next_cycle(s, parent_id, ArchitectPhase.CHECKPOINT)
+        s.add(
+            ArchitectAttempt(
+                task_id=parent_id,
+                phase=ArchitectPhase.CHECKPOINT,
+                cycle=cycle,
+                reasoning=output,
+                decision={"action": "iterate", "new_items": len(new_items)},
+                tool_calls=tool_calls,
+            )
+        )
+        await s.commit()
+
+    log.info(
+        "architect.iterate.complete",
+        task_id=parent_id,
+        new_items=len(new_items),
+        total_backlog=len(merged_backlog),
     )
