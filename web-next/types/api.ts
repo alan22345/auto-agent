@@ -13,6 +13,15 @@ export interface AffectedRoute {
   label: string;
 }
 /**
+ * Per-area outcome (ADR-016 §10 — failures isolated per area).
+ */
+export interface AreaStatus {
+  name: string;
+  status: "ok" | "partial" | "failed";
+  error?: string | null;
+  unresolved_dynamic_sites?: number;
+}
+/**
  * CI status for a commit.
  */
 export interface CIStatus {
@@ -37,6 +46,30 @@ export interface CreateUserRequest {
   username: string;
   password: string;
   display_name: string;
+}
+/**
+ * One edge in the graph.
+ *
+ * Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 will add
+ * ``source_kind="llm"`` edges using the same fields — no schema change.
+ * ``boundary_violation`` is reserved for Phase 5 and is always ``False``
+ * in Phase 2 output.
+ */
+export interface Edge {
+  source: string;
+  target: string;
+  kind: "calls" | "imports" | "inherits" | "http";
+  evidence: EdgeEvidence;
+  source_kind: "ast" | "llm";
+  boundary_violation?: boolean;
+}
+/**
+ * Cited proof of an edge's existence — see ADR-016 §3.
+ */
+export interface EdgeEvidence {
+  file: string;
+  line: number;
+  snippet: string;
 }
 /**
  * Optional body for ``POST /api/repos/{repo_id}/graph``.
@@ -81,6 +114,51 @@ export interface IntentVerdict {
   tool_calls?: {
     [k: string]: unknown;
   }[];
+}
+/**
+ * ``GET /api/repos/{id}/graph/latest`` payload — the freshness banner
+ * + Cytoscape renderer consume this directly. ``blob`` is ``None`` when
+ * no analysis has completed yet.
+ */
+export interface LatestRepoGraphData {
+  repo_id: number;
+  analysis_branch: string;
+  repo_graph_id?: number | null;
+  commit_sha?: string | null;
+  generated_at?: string | null;
+  analyser_version?: string | null;
+  status?: ("ok" | "partial" | "failed") | null;
+  blob?: RepoGraphBlob | null;
+}
+/**
+ * Full graph analysis output — the payload stored in
+ * ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+ */
+export interface RepoGraphBlob {
+  commit_sha: string;
+  generated_at: string;
+  analyser_version: string;
+  areas: AreaStatus[];
+  nodes: Node[];
+  edges: Edge[];
+}
+/**
+ * One node in the hierarchical compound graph (ADR-016 §2).
+ *
+ * ``id`` is the canonical Cytoscape id. ``parent`` points to the parent
+ * compound node (area → file → class → function nesting). ``area`` is
+ * duplicated on every node so query callers can filter without walking
+ * the parent chain.
+ */
+export interface Node {
+  id: string;
+  kind: "area" | "file" | "class" | "function";
+  label: string;
+  file?: string | null;
+  line_start?: number | null;
+  line_end?: number | null;
+  area: string;
+  parent?: string | null;
 }
 /**
  * A Linear issue returned from the GraphQL API.
@@ -262,6 +340,13 @@ export interface RepoGraphConfigData {
   last_analysis_id?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+/**
+ * ``POST /api/repos/{id}/graph/refresh`` response body.
+ */
+export interface RepoGraphRefreshResponse {
+  request_id: string;
+  status?: "accepted";
 }
 export interface RepoResponse {
   id: number;
