@@ -9,8 +9,7 @@ Every test mocks the provider — no real LLM calls.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +26,8 @@ from agent.graph_analyzer.types import UnresolvedSite
 from agent.llm.types import LLMResponse, Message, TokenUsage, ToolCall
 from shared.types import Node
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ----------------------------------------------------------------------
 # Test helpers
@@ -249,7 +250,11 @@ async def test_terminates_on_token_budget(tmp_path: Path) -> None:
         output_tokens=10,
     )
     next_one = _assistant_with_tool(
-        "grep", {"pattern": "y"}, call_id="c2", input_tokens=10, output_tokens=10,
+        "grep",
+        {"pattern": "y"},
+        call_id="c2",
+        input_tokens=10,
+        output_tokens=10,
     )
     provider = _sequenced_provider(burner, next_one)
     edges = await agent_escape(
@@ -273,7 +278,11 @@ async def test_terminates_on_output_token_budget(tmp_path: Path) -> None:
         output_tokens=AGENT_ESCAPE_MAX_TOTAL_OUTPUT_TOKENS + 100,
     )
     next_one = _assistant_with_tool(
-        "grep", {"pattern": "y"}, call_id="c2", input_tokens=10, output_tokens=10,
+        "grep",
+        {"pattern": "y"},
+        call_id="c2",
+        input_tokens=10,
+        output_tokens=10,
     )
     provider = _sequenced_provider(burner, next_one)
     edges = await agent_escape(

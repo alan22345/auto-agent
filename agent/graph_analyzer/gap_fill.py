@@ -95,7 +95,7 @@ def _build_system_prompt(
         "2. Cite the line where the call (not the definition) happens.\n"
         "3. evidence_snippet must be a substring of the file content at "
         "evidence_line (±2 lines tolerated).\n"
-        "4. If you cannot resolve the site, return {\"edges\": []}. "
+        '4. If you cannot resolve the site, return {"edges": []}. '
         "Do not guess.\n"
         "\n"
         "Candidate target nodes (graph ids):\n"

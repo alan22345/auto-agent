@@ -13,10 +13,13 @@ Both validators must be unconditional: there is no "skip in dev" flag.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent.graph_analyzer.validator import validate_citation, validate_target
 from shared.types import Edge, EdgeEvidence, Node
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _edge(*, snippet: str, line: int, file: str = "a.py", target: str = "x") -> Edge:
@@ -71,8 +74,7 @@ class TestValidateCitation:
         _write(
             tmp_path,
             "a.py",
-            "line one\nhandler = HANDLERS[event_type]\n"
-            "x\nx\nx\nx\nx\nx\nx\nx\n",
+            "line one\nhandler = HANDLERS[event_type]\nx\nx\nx\nx\nx\nx\nx\nx\n",
         )
         edge = _edge(snippet="handler = HANDLERS[event_type]", line=10)
         assert validate_citation(str(tmp_path), edge) is False

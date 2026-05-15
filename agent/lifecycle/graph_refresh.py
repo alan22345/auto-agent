@@ -100,7 +100,7 @@ async def run_refresh(*, repo_id: int, request_id: str) -> None:
                 branch=branch,
             )
             commit_sha = await _resolve_commit_sha(workspace=workspace)
-            blob = run_pipeline(workspace=workspace, commit_sha=commit_sha)
+            blob = await run_pipeline(workspace=workspace, commit_sha=commit_sha)
     except GraphWorkspaceLockTimeout:
         log.warning(
             "graph_refresh_lock_busy",

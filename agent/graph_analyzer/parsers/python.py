@@ -731,9 +731,12 @@ def _classify_call_pattern(callee, call_node, source: bytes) -> PatternHint:
     # identifier "getattr".
     if callee_type == "call":
         inner_callee = callee.children[0] if callee.children else None
-        if inner_callee is not None and inner_callee.type == "identifier":
-            if _node_text(inner_callee, source) == "getattr":
-                return "getattr"
+        if (
+            inner_callee is not None
+            and inner_callee.type == "identifier"
+            and _node_text(inner_callee, source) == "getattr"
+        ):
+            return "getattr"
 
     # ``mod.something()`` / ``obj.method()`` — attribute call. Routed
     # via decorators (FastAPI ``app.get(...)``, click groups, etc.) is

@@ -216,9 +216,7 @@ def _tool_grep(workspace_path: str, args: dict) -> str:
         for dirpath, dirnames, filenames in os.walk(root):
             # Skip common heavy dirs for performance.
             dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in {".git", "node_modules", ".venv", "__pycache__"}
+                d for d in dirnames if d not in {".git", "node_modules", ".venv", "__pycache__"}
             ]
             for fn in filenames:
                 files_to_scan.append(os.path.join(dirpath, fn))

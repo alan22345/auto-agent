@@ -69,4 +69,4 @@ class UnresolvedSite:
     shape the LLM prompt — the validator does not consume it."""
 
 
-__all__ = ["UnresolvedSite", "PatternHint"]
+__all__ = ["PatternHint", "UnresolvedSite"]

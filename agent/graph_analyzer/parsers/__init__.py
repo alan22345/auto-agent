@@ -19,9 +19,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from agent.graph_analyzer.types import UnresolvedSite
-
 if TYPE_CHECKING:
+    from agent.graph_analyzer.types import UnresolvedSite
     from shared.types import Edge, Node
 
 

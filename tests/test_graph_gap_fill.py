@@ -14,7 +14,7 @@ With a mocked provider returning canned JSON we exercise:
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,6 +23,9 @@ from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.types import UnresolvedSite
 from agent.llm.types import LLMResponse, Message
 from shared.types import Node
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _provider_returning(payload: dict | str) -> MagicMock:

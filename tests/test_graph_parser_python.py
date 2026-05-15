@@ -197,9 +197,7 @@ class TestUnresolvedSites:
 
     def test_registry_dispatch_emits_site_with_registry_hint(self) -> None:
         result = _parse(
-            "HANDLERS = {}\n"
-            "def dispatch(name, payload):\n"
-            "    return HANDLERS[name](payload)\n",
+            "HANDLERS = {}\ndef dispatch(name, payload):\n    return HANDLERS[name](payload)\n",
         )
         sites = result.unresolved_sites
         assert sites, "expected at least one unresolved site"
@@ -214,9 +212,7 @@ class TestUnresolvedSites:
 
     def test_attribute_call_on_imported_module_emits_dict_call_hint(self) -> None:
         result = _parse(
-            "import os\n"
-            "def go():\n"
-            "    return os.getenv('X')\n",
+            "import os\ndef go():\n    return os.getenv('X')\n",
         )
         sites = result.unresolved_sites
         assert any(s.pattern_hint == "dict_call" for s in sites)
@@ -226,25 +222,20 @@ class TestUnresolvedSites:
 
     def test_self_unknown_method_emits_unknown_hint(self) -> None:
         result = _parse(
-            "class Foo:\n"
-            "    def caller(self):\n"
-            "        return self.unknown_method()\n",
+            "class Foo:\n    def caller(self):\n        return self.unknown_method()\n",
         )
         sites = result.unresolved_sites
         assert sites
         # Should be classified as ``unknown`` (we have no way to know
         # whether ``unknown_method`` is inherited or fabricated).
         assert any(
-            s.pattern_hint == "unknown"
-            and s.containing_node_id == "pkg/mod.py::Foo.caller"
+            s.pattern_hint == "unknown" and s.containing_node_id == "pkg/mod.py::Foo.caller"
             for s in sites
         )
 
     def test_attribute_class_inheritance_emits_site(self) -> None:
         result = _parse(
-            "import mod\n"
-            "class X(mod.Base):\n"
-            "    pass\n",
+            "import mod\nclass X(mod.Base):\n    pass\n",
         )
         sites = result.unresolved_sites
         assert sites
@@ -255,8 +246,7 @@ class TestUnresolvedSites:
 
     def test_unbound_identifier_call_emits_unknown_hint(self) -> None:
         result = _parse(
-            "def caller():\n"
-            "    return mystery()\n",
+            "def caller():\n    return mystery()\n",
         )
         sites = result.unresolved_sites
         assert sites
@@ -267,16 +257,13 @@ class TestUnresolvedSites:
 
     def test_getattr_dispatch_emits_getattr_hint(self) -> None:
         result = _parse(
-            "def dispatch(obj, name):\n"
-            "    return getattr(obj, name)(42)\n",
+            "def dispatch(obj, name):\n    return getattr(obj, name)(42)\n",
         )
         sites = result.unresolved_sites
         assert any(s.pattern_hint == "getattr" for s in sites)
 
     def test_unresolved_dynamic_sites_count_matches_list_length(self) -> None:
         result = _parse(
-            "HANDLERS = {}\n"
-            "def go(n):\n"
-            "    return HANDLERS[n]()\n",
+            "HANDLERS = {}\ndef go(n):\n    return HANDLERS[n]()\n",
         )
         assert result.unresolved_dynamic_sites == len(result.unresolved_sites)
