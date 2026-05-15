@@ -71,26 +71,69 @@ from shared.events import (  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 1. transition_task publishes the new events.
+#
+# transition_task runs the state machine in-process — the HTTP loopback
+# variant 401'd silently because the agent has no auth context, so the
+# event used to fire even when the DB transition didn't. These tests pin
+# both that publish fires AND that publish fires ONLY after a successful
+# state-machine commit.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_transition_to_awaiting_design_approval_publishes_event(publisher):
-    """transition_task(... 'awaiting_design_approval' ...) emits an event."""
+def _fake_session_for_task(task):
+    """Build an async-context-manager session stub that yields ``task`` for
+    every ``execute(select(Task))``. Production opens its own session so
+    we can't pass one in; patching ``async_session`` to return this stub
+    is the cheapest way to drive the in-process state machine in a unit
+    test without standing up Postgres."""
 
-    fake_response = AsyncMock(return_value=None)
+    fake_result = MagicMock()
+    fake_result.scalar_one = lambda: task
 
-    class _Client:
+    class _Session:
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, *args, **kwargs):  # noqa: D401
-            return await fake_response()
+        async def execute(self, _stmt):
+            return fake_result
 
-    with patch("httpx.AsyncClient", return_value=_Client()):
+        async def commit(self):
+            return None
+
+        def add(self, _row):  # state_machine.transition does session.add(TaskHistory(...))
+            return None
+
+        async def flush(self):
+            return None
+
+    return _Session()
+
+
+@pytest.mark.asyncio
+async def test_transition_to_awaiting_design_approval_publishes_event(publisher):
+    """transition_task(... 'awaiting_design_approval' ...) emits an event."""
+
+    from shared.models import Task, TaskStatus
+
+    task = Task(
+        id=7,
+        title="t",
+        description="d",
+        source="web",
+        # State-machine edge: ARCHITECT_DESIGNING → AWAITING_DESIGN_APPROVAL.
+        # TRIO_EXECUTING goes through ARCHITECT_DESIGNING first (done by
+        # ``_advance_through_design_gate`` before ``architect.run_design``).
+        status=TaskStatus.ARCHITECT_DESIGNING,
+        organization_id=1,
+    )
+
+    with patch(
+        "agent.lifecycle._orchestrator_api.async_session",
+        lambda: _fake_session_for_task(task),
+    ):
         await transition_task(7, "awaiting_design_approval", "design ready")
 
     events = [
@@ -100,23 +143,27 @@ async def test_transition_to_awaiting_design_approval_publishes_event(publisher)
     assert events[0].task_id == 7
     # Message survives into the payload so the dispatcher can show it.
     assert events[0].payload.get("message") == "design ready"
+    # And the state machine actually moved the task.
+    assert task.status == TaskStatus.AWAITING_DESIGN_APPROVAL
 
 
 @pytest.mark.asyncio
 async def test_transition_to_awaiting_plan_approval_publishes_event(publisher):
-    fake_response = AsyncMock(return_value=None)
+    from shared.models import Task, TaskStatus
 
-    class _Client:
-        async def __aenter__(self):
-            return self
+    task = Task(
+        id=11,
+        title="t",
+        description="d",
+        source="web",
+        status=TaskStatus.PLANNING,  # AWAITING_PLAN_APPROVAL reachable from PLANNING
+        organization_id=1,
+    )
 
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, *args, **kwargs):
-            return await fake_response()
-
-    with patch("httpx.AsyncClient", return_value=_Client()):
+    with patch(
+        "agent.lifecycle._orchestrator_api.async_session",
+        lambda: _fake_session_for_task(task),
+    ):
         await transition_task(11, "awaiting_plan_approval", "plan ready")
 
     events = [

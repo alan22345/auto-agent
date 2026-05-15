@@ -499,6 +499,20 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     #    run the design pass. ``architect.run_design`` writes
     #    ``.auto-agent/design.md`` and parks the task at
     #    ``AWAITING_DESIGN_APPROVAL`` via ``finalize_design``.
+    #
+    # The state machine requires TRIO_EXECUTING → ARCHITECT_DESIGNING →
+    # AWAITING_DESIGN_APPROVAL — there's no direct edge from TRIO_EXECUTING
+    # to AWAITING_DESIGN_APPROVAL. Move the wire status here so the
+    # finalize_design call below validates.
+    async with async_session() as s:
+        p = (
+            await s.execute(select(Task).where(Task.id == parent.id))
+        ).scalar_one()
+        await transition(
+            s, p, TaskStatus.ARCHITECT_DESIGNING,
+            message="trio: architect designing",
+        )
+        await s.commit()
     await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
     await architect.run_design(parent.id)
     return False
