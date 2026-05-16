@@ -72,12 +72,7 @@ class TestDecoratedFunctions:
         """Wrapping by ``decorated_definition`` must not hide the body —
         statically-resolvable calls still produce edges."""
         result = _parse(
-            "def helper():\n"
-            "    return 1\n"
-            "\n"
-            "@router.get('/x')\n"
-            "def view():\n"
-            "    return helper()\n",
+            "def helper():\n    return 1\n\n@router.get('/x')\ndef view():\n    return helper()\n",
         )
         calls = [e for e in result.edges if e.kind == "calls"]
         assert any(
@@ -95,10 +90,7 @@ class TestDecoratedClasses:
 
     def test_decorated_class_methods_visible(self) -> None:
         result = _parse(
-            "@dataclass\n"
-            "class Foo:\n"
-            "    def bar(self):\n"
-            "        return 1\n",
+            "@dataclass\nclass Foo:\n    def bar(self):\n        return 1\n",
         )
         funcs = [n for n in result.nodes if n.kind == "function"]
         labels = [f.label for f in funcs]
@@ -111,10 +103,7 @@ class TestDecoratedClasses:
         """Methods inside a class can themselves be decorated — Phase 4
         must capture those for HTTP discovery on class-based routers."""
         result = _parse(
-            "class Routes:\n"
-            "    @router.get('/api/x')\n"
-            "    def list_x(self):\n"
-            "        return []\n",
+            "class Routes:\n    @router.get('/api/x')\n    def list_x(self):\n        return []\n",
         )
         funcs = [n for n in result.nodes if n.kind == "function"]
         assert [f.label for f in funcs] == ["Routes.list_x"]

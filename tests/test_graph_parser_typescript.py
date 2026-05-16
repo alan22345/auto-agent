@@ -153,8 +153,7 @@ class TestCalls:
         )
         calls = [e for e in result.edges if e.kind == "calls"]
         assert any(
-            e.source == "frontend/mod.ts::caller"
-            and e.target == "frontend/mod.ts::helper"
+            e.source == "frontend/mod.ts::caller" and e.target == "frontend/mod.ts::helper"
             for e in calls
         )
 
@@ -167,8 +166,7 @@ class TestCalls:
         )
         calls = [e for e in result.edges if e.kind == "calls"]
         assert any(
-            e.source == "frontend/mod.ts::Foo.bar"
-            and e.target == "frontend/mod.ts::Foo.baz"
+            e.source == "frontend/mod.ts::Foo.bar" and e.target == "frontend/mod.ts::Foo.baz"
             for e in calls
         )
 
@@ -205,7 +203,7 @@ class TestCalls:
     def test_dynamic_subscript_call_emits_unresolved_site(self) -> None:
         result = _parse(
             "function dyn() {\n"
-            '  const obj: Record<string, () => number> = {};\n'
+            "  const obj: Record<string, () => number> = {};\n"
             '  return obj["k"]();\n'
             "}\n",
         )
