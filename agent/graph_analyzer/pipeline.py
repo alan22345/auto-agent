@@ -35,6 +35,7 @@ import structlog
 import yaml
 
 from agent.graph_analyzer.agent_escape import agent_escape
+from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
@@ -48,11 +49,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-# Bumped from ``phase2-python-0.2.0`` to reflect Phase 3 capability.
-# Even when ``provider=None`` is passed the analyser version still
-# records that the binary is *capable* of LLM gap-fill — useful for
-# downstream consumers to tell graphs apart across phases.
-_ANALYSER_VERSION = "phase4-multi-0.4.0"
+# Bumped per phase as new capability lands. Phase 5 adds cross-area
+# boundary-violation flagging (ADR-016 §7) on top of Phase 4's HTTP
+# matching. Even when ``provider=None`` is passed the analyser version
+# still records that the binary is *capable* of LLM gap-fill — useful
+# for downstream consumers to tell graphs apart across phases.
+_ANALYSER_VERSION = "phase5-multi-0.5.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
@@ -190,14 +192,15 @@ def _analyse_area(
     workspace: str,
     area_name: str,
     patterns: list[str],
-) -> tuple[list[Node], list[Edge], list[UnresolvedSite], AreaStatus]:
+) -> tuple[list[Node], list[Edge], list[UnresolvedSite], set[str], AreaStatus]:
     """Run the parser dispatch over one area.
 
-    Returns the area's nodes, AST edges, unresolved sites, and an
-    :class:`AreaStatus` (``ok`` on success; ``failed`` if a parser
-    exception bubbled up). Individual files the parser handled
-    gracefully (e.g. tree-sitter ERROR-node recovery) do NOT fail the
-    area — only an unhandled exception does.
+    Returns the area's nodes, AST edges, unresolved sites, the union of
+    public-symbol ids contributed by every parsed file (Phase 5 — used
+    by the boundary-flagging stage), and an :class:`AreaStatus` (``ok``
+    on success; ``failed`` if a parser exception bubbled up). Individual
+    files the parser handled gracefully (e.g. tree-sitter ERROR-node
+    recovery) do NOT fail the area — only an unhandled exception does.
 
     Unresolved sites are returned to the pipeline so the gap-fill
     stage can run against them. ``AreaStatus.unresolved_dynamic_sites``
@@ -206,6 +209,7 @@ def _analyse_area(
     nodes: list[Node] = []
     edges: list[Edge] = []
     unresolved_sites: list[UnresolvedSite] = []
+    public_symbols: set[str] = set()
 
     # Area node — every area gets one root compound box.
     nodes.append(
@@ -257,12 +261,14 @@ def _analyse_area(
             nodes.extend(pr.nodes)
             edges.extend(pr.edges)
             unresolved_sites.extend(pr.unresolved_sites)
+            public_symbols.update(pr.public_symbols)
     except Exception as e:
         log.exception("graph_area_failed", area=area_name, error=str(e))
         return (
             nodes,
             edges,
             unresolved_sites,
+            public_symbols,
             AreaStatus(
                 name=area_name,
                 status="failed",
@@ -275,6 +281,7 @@ def _analyse_area(
         nodes,
         edges,
         unresolved_sites,
+        public_symbols,
         AreaStatus(
             name=area_name,
             status="ok",
@@ -317,9 +324,13 @@ async def run_pipeline(
     # only after every area's nodes are known (gives a richer candidate
     # pool to draw from than within-area-only).
     per_area_sites: list[tuple[str, list[UnresolvedSite]]] = []
+    # Union of per-area public-surface symbol ids. The Phase 5 boundary
+    # check reads this to decide whether a cross-area edge's target is
+    # part of the destination area's public surface.
+    all_public_symbols: set[str] = set()
 
     for name, patterns in areas:
-        nodes, edges, sites, status = _analyse_area(
+        nodes, edges, sites, public_symbols, status = _analyse_area(
             workspace=workspace,
             area_name=name,
             patterns=patterns,
@@ -327,6 +338,7 @@ async def run_pipeline(
         all_nodes.extend(nodes)
         all_edges.extend(edges)
         per_area_sites.append((name, sites))
+        all_public_symbols.update(public_symbols)
         statuses.append(status)
 
     # Gap-fill stage. Skipped when no provider is supplied.
@@ -360,6 +372,31 @@ async def run_pipeline(
             error_type=e.__class__.__name__,
         )
 
+    # Phase 5 (ADR-016 §7) — boundary-violation flagging.
+    #
+    # First, rewrite cross-area edges whose target is still a ``module:``
+    # placeholder to the actual file-level symbol id when one exists in
+    # the graph. The parser binds ``from area_b.public_api import x`` to
+    # ``module:area_b.public_api.x`` because per-file parsing has no
+    # awareness of other files; the pipeline is the first place that can
+    # resolve those references against the full node set. We only
+    # rewrite cross-area edges so that intra-area module: edges (which
+    # carry no boundary semantics) stay shaped the way Phase 2 callers
+    # expect.
+    all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
+
+    # Then, run the boundary flagger. It mutates no inputs — returns a
+    # new edge list with ``boundary_violation`` and ``violation_reason``
+    # populated. HTTP edges are unconditionally exempt; same-area edges
+    # are exempt; edges into area / file nodes are exempt.
+    rules = load_boundary_rules(workspace)
+    all_edges = flag_violations(
+        edges=all_edges,
+        nodes=all_nodes,
+        public_symbols=all_public_symbols,
+        rules=rules,
+    )
+
     return RepoGraphBlob(
         commit_sha=commit_sha,
         generated_at=datetime.now(UTC),
@@ -368,6 +405,94 @@ async def run_pipeline(
         nodes=all_nodes,
         edges=all_edges,
     )
+
+
+def _resolve_cross_area_module_targets(
+    edges: list[Edge],
+    nodes: list[Node],
+) -> list[Edge]:
+    """Rewrite ``module:<module>.<symbol>`` targets to ``<file>::<symbol>``
+    when (a) a matching node exists and (b) the resolved target's area
+    differs from the source's area.
+
+    Same-area edges keep their original ``module:`` target — Phase 2
+    callers (and existing tests) depend on that shape, and same-area
+    edges never feed the boundary check anyway.
+
+    Edges whose source has no matching node, whose target is not a
+    ``module:<dotted>.<symbol>`` shape, or whose computed resolution
+    has no matching node, are passed through unchanged.
+    """
+    # Build a lookup from synthetic ``module:`` ids to the real
+    # ``<file>::<symbol>`` ids for every class/function node in the graph.
+    # We compute the module form once per node by walking back from the
+    # node's file path.
+    module_lookup: dict[str, Node] = {}
+    for n in nodes:
+        if n.kind not in ("class", "function"):
+            continue
+        if not n.file:
+            continue
+        # Only file-level symbols (no nesting like ``Foo.method`` or
+        # ``outer.inner``) can be addressed via ``module:pkg.mod.symbol``.
+        # Nested function ids embed dots after ``::``; skip those.
+        suffix = n.id.split("::", 1)[-1]
+        if "." in suffix:
+            continue
+        module_dotted = _file_to_module(n.file)
+        if module_dotted is None:
+            continue
+        module_lookup[f"module:{module_dotted}.{suffix}"] = n
+
+    node_by_id: dict[str, Node] = {n.id: n for n in nodes}
+
+    rewritten: list[Edge] = []
+    for edge in edges:
+        if not edge.target.startswith("module:"):
+            rewritten.append(edge)
+            continue
+        resolved = module_lookup.get(edge.target)
+        if resolved is None:
+            rewritten.append(edge)
+            continue
+        source_node = node_by_id.get(edge.source)
+        if source_node is None or source_node.area == resolved.area:
+            # Same-area or unknown-source — leave target unchanged.
+            rewritten.append(edge)
+            continue
+        rewritten.append(
+            Edge(
+                source=edge.source,
+                target=resolved.id,
+                kind=edge.kind,
+                evidence=edge.evidence,
+                source_kind=edge.source_kind,
+                boundary_violation=edge.boundary_violation,
+                violation_reason=edge.violation_reason,
+            ),
+        )
+    return rewritten
+
+
+def _file_to_module(file_path: str) -> str | None:
+    """Convert a workspace-relative file path into its dotted module form.
+
+    ``a/b/c.py`` → ``a.b.c``. ``a/b/__init__.py`` → ``a.b``.
+    TypeScript files (``.ts`` / ``.tsx``) are converted the same way
+    (``frontend/mod.ts`` → ``frontend.mod``) — the parser uses the same
+    encoding when emitting synthetic ``module:`` ids.
+
+    Returns ``None`` for files with no recognised extension; callers
+    then skip the lookup for that node.
+    """
+    for ext in (".py", ".tsx", ".ts", ".jsx", ".js"):
+        if file_path.endswith(ext):
+            stem = file_path[: -len(ext)]
+            parts = stem.split("/")
+            if parts and parts[-1] == "__init__":
+                parts = parts[:-1]
+            return ".".join(parts)
+    return None
 
 
 async def _run_gap_fill_stage(
