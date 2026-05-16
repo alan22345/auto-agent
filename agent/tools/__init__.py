@@ -11,6 +11,7 @@ from agent.tools.file_write import FileWriteTool
 from agent.tools.git import GitTool
 from agent.tools.glob_tool import GlobTool
 from agent.tools.grep_tool import GrepTool
+from agent.tools.query_repo_graph import QueryRepoGraphTool
 from agent.tools.recall_memory import RecallMemoryTool
 from agent.tools.remember_memory import RememberMemoryTool
 from agent.tools.skill import SkillTool
@@ -38,6 +39,7 @@ def create_default_registry(
     registry.register(GitTool())
     registry.register(SkillTool())  # Load superpowers methodology
     registry.register(RecallMemoryTool())  # Query shared team-memory graph
+    registry.register(QueryRepoGraphTool())  # Query the repo's code graph (ADR-016 Phase 6)
 
     if with_web:
         from shared.config import settings
