@@ -934,7 +934,10 @@ async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
         # are post-CI. Anything earlier (planning, coding, intake) would be a
         # spurious review signal — log and skip.
         if task.status not in (
+            # ADR-017: PR_CREATED is transit-only; AWAITING_REVIEW and ITERATING
+            # are the long-lived "PR is open" states alongside AWAITING_CI.
             TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI, TaskStatus.AWAITING_REVIEW,
+            TaskStatus.ITERATING,
         ):
             log.info(f"LGTM on task #{task_id} in status {task.status.value} — skipping (not at PR stage)")
             return
@@ -1067,8 +1070,10 @@ async def on_po_suggestions_ready(event: Event) -> None:
                     TaskStatus.INTAKE, TaskStatus.CLASSIFYING, TaskStatus.QUEUED,
                     TaskStatus.PLANNING, TaskStatus.AWAITING_APPROVAL,
                     TaskStatus.AWAITING_CLARIFICATION, TaskStatus.CODING,
+                    # ADR-017: include ITERATING — a PR is open and being actively
+                    # worked on; counts as an active freeform slot.
                     TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI,
-                    TaskStatus.AWAITING_REVIEW, TaskStatus.BLOCKED,
+                    TaskStatus.AWAITING_REVIEW, TaskStatus.ITERATING, TaskStatus.BLOCKED,
                 ]),
             )
         )
@@ -1807,7 +1812,9 @@ async def _check_pr_merged(pr_url: str, token: str) -> bool:
             return False
         pr_data = resp.json()
         return pr_data.get("merged", False)
-REVIEW_POLL_STATUSES = {TaskStatus.AWAITING_REVIEW, TaskStatus.AWAITING_CI, TaskStatus.PR_CREATED}
+# ADR-017: ITERATING added — PR branch gets new commits during iteration;
+# CI re-runs and needs to be polled just like AWAITING_CI/AWAITING_REVIEW.
+REVIEW_POLL_STATUSES = {TaskStatus.AWAITING_REVIEW, TaskStatus.AWAITING_CI, TaskStatus.PR_CREATED, TaskStatus.ITERATING}
 
 # Track last seen comment ID per task to avoid re-processing
 _last_seen_comments: dict[int, int] = {}

@@ -22,6 +22,7 @@ LIVE_STATUSES = {
     TaskStatus.PR_CREATED,
     TaskStatus.AWAITING_CI,
     TaskStatus.AWAITING_REVIEW,
+    TaskStatus.ITERATING,  # ADR-017: PR open + actively re-iterating on feedback
     TaskStatus.BLOCKED,
 }
 
