@@ -305,6 +305,12 @@ class AreaStatus(BaseModel):
 class RepoGraphBlob(BaseModel):
     """Full graph analysis output — the payload stored in
     ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+
+    ``public_symbols`` (ADR-016 Phase 6 §12) is the union of per-area
+    public-surface node ids the pipeline computed at analysis time. The
+    ``query_repo_graph.public_surface`` op reads this directly rather
+    than re-deriving the convention rules from source bytes. Defaulted
+    to an empty list so blobs persisted before Phase 6 still deserialise.
     """
 
     commit_sha: str
@@ -313,6 +319,7 @@ class RepoGraphBlob(BaseModel):
     areas: list[AreaStatus]
     nodes: list[Node]
     edges: list[Edge]
+    public_symbols: list[str] = Field(default_factory=list)
 
 
 class RepoGraphRefreshResponse(BaseModel):

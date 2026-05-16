@@ -404,6 +404,7 @@ async def run_pipeline(
         areas=statuses,
         nodes=all_nodes,
         edges=all_edges,
+        public_symbols=sorted(all_public_symbols),
     )
 
 
