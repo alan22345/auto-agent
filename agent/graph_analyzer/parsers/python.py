@@ -67,6 +67,14 @@ _CLASS_NODE = "class_definition"
 _IMPORT_NODE = "import_statement"
 _IMPORT_FROM_NODE = "import_from_statement"
 _CALL_NODE = "call"
+# Real-world Python heavily uses decorators (FastAPI routes, Click commands,
+# dataclasses, pytest fixtures, …). Tree-sitter wraps a decorated def or
+# class in a ``decorated_definition`` node whose children are the decorators
+# plus the wrapped ``function_definition`` / ``class_definition``. Phase 4
+# descends through the wrapper so decorated defs become first-class graph
+# nodes and their decorator source is captured for the HTTP-matching stage.
+_DECORATED_NODE = "decorated_definition"
+_DECORATOR_NODE = "decorator"
 
 
 @dataclass
@@ -154,7 +162,8 @@ class PythonParser(Parser):
         """
         file_id = f"file:{rel_path}"
 
-        for child in root.children:
+        for raw_child in root.children:
+            child, decorators = _unwrap_decorated(raw_child, source)
             t = child.type
             if t == _IMPORT_NODE:
                 self._emit_import_edges(child, rel_path, area, source, result, scope)
@@ -175,6 +184,7 @@ class PythonParser(Parser):
                         line_end=child.end_point[0] + 1,
                         area=area,
                         parent=file_id,
+                        decorators=decorators,
                     ),
                 )
                 scope.module_bindings[cls_name] = cls_id
@@ -182,7 +192,8 @@ class PythonParser(Parser):
                 # Walk methods inside the class body.
                 body = _named_child(child, "block")
                 if body is not None:
-                    for member in body.children:
+                    for raw_member in body.children:
+                        member, member_decorators = _unwrap_decorated(raw_member, source)
                         if member.type == _FUNC_NODE:
                             self._emit_function_node(
                                 member,
@@ -192,6 +203,7 @@ class PythonParser(Parser):
                                 result,
                                 parent_id=cls_id,
                                 qualifier=cls_name + ".",
+                                decorators=member_decorators,
                             )
                             fname = self._first_identifier(member, source)
                             if fname is not None:
@@ -213,6 +225,7 @@ class PythonParser(Parser):
                     result,
                     parent_id=file_id,
                     qualifier="",
+                    decorators=decorators,
                 )
                 fname = self._first_identifier(child, source)
                 if fname is not None:
@@ -241,7 +254,8 @@ class PythonParser(Parser):
         body = _named_child(func_node, "block")
         if body is None:
             return
-        for child in body.children:
+        for raw_child in body.children:
+            child, decorators = _unwrap_decorated(raw_child, source)
             if child.type == _FUNC_NODE:
                 name = self._first_identifier(child, source)
                 if name is None:
@@ -256,6 +270,7 @@ class PythonParser(Parser):
                     result,
                     parent_id=parent_id,
                     qualifier=qualifier,
+                    decorators=decorators,
                 )
                 self._collect_nested(
                     child,
@@ -276,6 +291,7 @@ class PythonParser(Parser):
         *,
         parent_id: str,
         qualifier: str,
+        decorators: list[str] | None = None,
     ) -> None:
         name = self._first_identifier(node, source)
         if name is None:
@@ -291,6 +307,7 @@ class PythonParser(Parser):
                 line_end=node.end_point[0] + 1,
                 area=area,
                 parent=parent_id,
+                decorators=list(decorators) if decorators else [],
             ),
         )
 
@@ -414,6 +431,23 @@ class PythonParser(Parser):
         current_class: str | None,
         current_func: str | None,
     ) -> None:
+        # Decorated wrappers are transparent for inherit/call discovery —
+        # recurse into the wrapped def/class.
+        if node.type == _DECORATED_NODE:
+            inner = _wrapped_definition(node)
+            if inner is not None:
+                self._collect_inherits_and_calls(
+                    inner,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    scope,
+                    current_class=current_class,
+                    current_func=current_func,
+                )
+            return
+
         t = node.type
 
         if t == _CLASS_NODE:
@@ -772,6 +806,47 @@ def _named_child(node, type_name: str):
     for c in node.children:
         if c.type == type_name:
             return c
+    return None
+
+
+def _unwrap_decorated(node, source: bytes) -> tuple[object, list[str]]:
+    """Given a tree-sitter child, return the underlying definition node
+    and the decorator source list.
+
+    Tree-sitter wraps a decorated def/class in a ``decorated_definition``
+    whose children are ``decorator`` nodes (in source order) followed by
+    one ``function_definition`` / ``class_definition``. For undecorated
+    nodes we return ``(node, [])`` so callers can use one code path.
+
+    Decorator source is captured verbatim (with the leading ``@`` and the
+    full argument list, e.g. ``@router.get("/api/repos")``) — the HTTP
+    matching stage parses these strings; we deliberately do not pre-parse
+    them here.
+    """
+    if node.type != _DECORATED_NODE:
+        return node, []
+    decorators: list[str] = []
+    inner = None
+    for child in node.children:
+        if child.type == _DECORATOR_NODE:
+            decorators.append(_node_text(child, source).strip())
+        elif child.type in (_FUNC_NODE, _CLASS_NODE):
+            inner = child
+    if inner is None:
+        # Defensive: tree-sitter error recovery could leave us without
+        # a definition. Treat the wrapper itself as the "node" so the
+        # caller bails out on the type check.
+        return node, decorators
+    return inner, decorators
+
+
+def _wrapped_definition(node):
+    """Return the wrapped ``function_definition`` / ``class_definition`` of a
+    ``decorated_definition``, or ``None`` if absent (tree-sitter error
+    recovery edge case)."""
+    for child in node.children:
+        if child.type in (_FUNC_NODE, _CLASS_NODE):
+            return child
     return None
 
 

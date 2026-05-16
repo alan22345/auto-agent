@@ -246,6 +246,11 @@ class Node(BaseModel):
     line_end: int | None = None
     area: str
     parent: str | None = None
+    decorators: list[str] = Field(default_factory=list)
+    """Raw decorator source for decorated Python defs/classes (e.g.
+    ``["@router.get(\"/api/repos\")"]``). Captured by the parser; consumed
+    by the Phase 4 HTTP-matching stage to find FastAPI/Flask route handlers.
+    Always ``[]`` for non-Python nodes and for undecorated defs."""
 
 
 class EdgeEvidence(BaseModel):
