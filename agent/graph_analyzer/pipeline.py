@@ -36,6 +36,7 @@ import yaml
 
 from agent.graph_analyzer.agent_escape import agent_escape
 from agent.graph_analyzer.gap_fill import gap_fill_site
+from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
 from agent.graph_analyzer.validator import validate_citation, validate_target
 from shared.types import AreaStatus, Edge, Node, RepoGraphBlob
@@ -51,7 +52,7 @@ log = structlog.get_logger(__name__)
 # Even when ``provider=None`` is passed the analyser version still
 # records that the binary is *capable* of LLM gap-fill — useful for
 # downstream consumers to tell graphs apart across phases.
-_ANALYSER_VERSION = "phase3-python-0.3.0"
+_ANALYSER_VERSION = "phase4-multi-0.4.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
@@ -337,6 +338,27 @@ async def run_pipeline(
             per_area_sites=per_area_sites,
         )
         all_edges.extend(llm_edges)
+
+    # Cross-language HTTP matching (Phase 4). Runs after all per-area
+    # parsing + gap-fill because route discovery needs the full
+    # node list (including decorator metadata) and frontend HTTP
+    # calls need the full set of backend routes as candidates.
+    # Failures are isolated inside ``match_http_edges`` itself; we
+    # still defend against an outer exception here so the pipeline
+    # always assembles a blob.
+    try:
+        http_edges = await match_http_edges(
+            workspace_path=workspace,
+            nodes=all_nodes,
+            provider=provider,
+        )
+        all_edges.extend(http_edges)
+    except Exception as e:
+        log.warning(
+            "graph_http_match_stage_failed",
+            error=str(e),
+            error_type=e.__class__.__name__,
+        )
 
     return RepoGraphBlob(
         commit_sha=commit_sha,

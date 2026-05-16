@@ -92,9 +92,12 @@ class Parser(ABC):
 # ----------------------------------------------------------------------
 
 from agent.graph_analyzer.parsers.python import PythonParser  # noqa: E402
+from agent.graph_analyzer.parsers.typescript import TypeScriptParser  # noqa: E402
 
 _REGISTRY: dict[str, type[Parser]] = {
     ".py": PythonParser,
+    ".ts": TypeScriptParser,
+    ".tsx": TypeScriptParser,
 }
 
 # Singletons — parsing is stateless so we share an instance per process.

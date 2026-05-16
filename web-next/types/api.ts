@@ -159,6 +159,7 @@ export interface Node {
   line_end?: number | null;
   area: string;
   parent?: string | null;
+  decorators?: string[];
 }
 /**
  * A Linear issue returned from the GraphQL API.

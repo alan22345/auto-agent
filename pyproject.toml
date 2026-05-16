@@ -30,6 +30,7 @@ dependencies = [
     "playwright",
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",
+    "tree-sitter-typescript>=0.23",
     "pyyaml>=6.0",
 ]
 

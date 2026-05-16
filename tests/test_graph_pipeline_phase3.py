@@ -107,13 +107,13 @@ async def test_gap_fill_emits_llm_edge_for_registry_site(tmp_path: Path) -> None
     ``HANDLERS[name](payload)``. With a mocked provider that cites the
     snippet at the correct line, the blob carries a validated LLM edge."""
     ws = _setup_workspace(tmp_path)
-    # The site lives on line 30 of registry.py (the ``return HANDLERS[name](payload)`` line).
+    # The site lives on line 35 of registry.py (the ``return HANDLERS[name](payload)`` line).
     provider = _provider_returning_one_shot(
         {
             "edges": [
                 {
                     "target_node_id": "agent_area/registry.py::ping_handler",
-                    "evidence_line": 30,
+                    "evidence_line": 35,
                     "evidence_snippet": "return HANDLERS[name](payload)",
                 },
             ],
@@ -125,7 +125,7 @@ async def test_gap_fill_emits_llm_edge_for_registry_site(tmp_path: Path) -> None
         e.target == "agent_area/registry.py::ping_handler"
         and e.source == "agent_area/registry.py::dispatch"
         and e.evidence.file == "agent_area/registry.py"
-        and e.evidence.line == 30
+        and e.evidence.line == 35
         for e in llm_edges
     )
 
@@ -170,7 +170,7 @@ async def test_failed_target_drops_edge(tmp_path: Path) -> None:
             "edges": [
                 {
                     "target_node_id": "agent_area/registry.py::nonexistent_target",
-                    "evidence_line": 30,
+                    "evidence_line": 35,
                     "evidence_snippet": "return HANDLERS[name](payload)",
                 },
             ],
@@ -191,7 +191,7 @@ async def test_escape_triggers_when_gap_fill_empty(tmp_path: Path) -> None:
             "edges": [
                 {
                     "target_node_id": "agent_area/registry.py::ping_handler",
-                    "evidence_line": 30,
+                    "evidence_line": 35,
                     "evidence_snippet": "return HANDLERS[name](payload)",
                 },
             ],
