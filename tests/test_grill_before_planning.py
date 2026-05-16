@@ -59,37 +59,30 @@ def _task(complexity: str | None, intake_qa=None) -> SimpleNamespace:
     return SimpleNamespace(complexity=complexity, intake_qa=intake_qa)
 
 
-def test_should_run_grill_for_complex_task_with_no_intake_qa():
+def test_should_run_grill_for_any_classified_task_with_no_intake_qa():
+    """Policy 2026-05-16: grill ALWAYS runs regardless of complexity."""
     assert _should_run_grill(_task("complex")) is True
+    assert _should_run_grill(_task("complex_large")) is True
+    assert _should_run_grill(_task("simple")) is True
+    assert _should_run_grill(_task("simple_no_code")) is True
 
 
-def test_should_skip_grill_when_classifier_pre_filled_empty_intake_qa():
-    """ADR-015 §1: classifier with needs_grill=False pre-fills intake_qa=[]
-    at intake. The planning gate skips grill via the empty-list sentinel,
-    not by classification bucket. A `complex` task with intake_qa=[] skips
-    grill, and a `simple` task without that sentinel will still grill —
-    classification no longer drives the skip."""
-    # Complex task with classifier-driven skip sentinel → no grill.
-    assert _should_run_grill(_task("complex", intake_qa=[])) is False
-    # Simple task without sentinel → grills (would have skipped under
-    # the deleted _SKIP_GRILL_COMPLEXITIES path).
-    assert _should_run_grill(_task("simple", intake_qa=None)) is True
-    # simple_no_code tasks never reach the planning gate (they short-
-    # circuit in run.py::on_task_classified), but defensively their
-    # gate behaviour is now identical: intake_qa=[] skips, None grills.
-    assert _should_run_grill(_task("simple_no_code", intake_qa=[])) is False
+def test_should_run_grill_even_when_intake_qa_is_empty_list():
+    """Old code paths may have set intake_qa=[] as a 'skip' flag. The
+    new policy ignores that signal — the only way out of grilling is
+    the GRILL_DONE sentinel."""
+    assert _should_run_grill(_task("complex", intake_qa=[])) is True
+    assert _should_run_grill(_task("simple", intake_qa=[])) is True
 
 
-def test_should_skip_grill_when_explicitly_complete():
-    """[] = explicitly skipped; sentinel last entry = grilling done."""
-    # Empty list = explicit skip (e.g. simple task, architecture suggestion).
-    assert _should_run_grill(_task("complex", intake_qa=[])) is False
-    # Sentinel last entry = grilling complete via GRILL_DONE.
+def test_should_skip_grill_when_sentinel_present():
+    """Sentinel last entry = grilling complete via GRILL_DONE."""
     completed = [
         {"question": "q1", "answer": "a1"},
         {"question": GRILL_DONE_QUESTION_SENTINEL, "answer": "covered enough"},
     ]
     assert _should_run_grill(_task("complex", intake_qa=completed)) is False
+    assert _should_run_grill(_task("simple", intake_qa=completed)) is False
 
 
 def test_should_continue_grill_when_in_progress():
@@ -109,15 +102,8 @@ def test_should_continue_grill_when_in_progress():
 
 
 def test_should_skip_grill_when_complexity_missing():
+    """Defensive: don't grill before the classifier has run."""
     assert _should_run_grill(_task(None)) is False
-
-
-def test_skip_grill_is_driven_by_intake_qa_not_classification():
-    """ADR-015 §1 deleted _SKIP_GRILL_COMPLEXITIES. The skip decision is
-    now driven by the classifier's needs_grill (translated to
-    intake_qa=[] at task creation) — never by complexity bucket alone."""
-    from agent.lifecycle import planning as planning_mod
-    assert not hasattr(planning_mod, "_SKIP_GRILL_COMPLEXITIES")
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +279,11 @@ def test_grill_round_trip_state_evolution():
 # Architecture-suggestion path: empty intake_qa skips grilling
 # ---------------------------------------------------------------------------
 
-def test_architecture_derived_task_skips_grilling():
-    """Tasks created from architecture-mode suggestions arrive with intake_qa=[]
-    (empty list = 'grilling complete'). They go straight to planning."""
+def test_architecture_derived_task_still_grills():
+    """Policy 2026-05-16: even tasks born with intake_qa=[] (e.g. from
+    architecture-mode suggestions where the suggestion text was deemed
+    self-contained) now grill the user. The classifier's signal is
+    informational; the only way out of grilling is the GRILL_DONE
+    sentinel."""
     task = _task("complex", intake_qa=[])
-    assert _should_run_grill(task) is False
+    assert _should_run_grill(task) is True
