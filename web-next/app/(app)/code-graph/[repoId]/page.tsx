@@ -9,6 +9,7 @@ import { BranchPicker } from '@/components/code-graph/branch-picker';
 import { RefreshButton } from '@/components/code-graph/refresh-button';
 import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
 import { GraphCanvas } from '@/components/code-graph/graph-canvas';
+import { ViolationsPanel } from '@/components/code-graph/violations-panel';
 import { ApiError } from '@/lib/api';
 import { disableRepoGraph } from '@/lib/code-graph';
 import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
@@ -24,6 +25,11 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
   const router = useRouter();
   const qc = useQueryClient();
   const [disableError, setDisableError] = useState<string | null>(null);
+  // Lifted highlight state so clicks in the violations panel can drive
+  // an overlay style on the graph canvas (ADR-016 §7).
+  const [highlightedEdgeId, setHighlightedEdgeId] = useState<string | null>(
+    null,
+  );
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
@@ -100,7 +106,17 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
             </div>
 
             {latest?.blob ? (
-              <GraphCanvas blob={latest.blob} />
+              <>
+                <GraphCanvas
+                  blob={latest.blob}
+                  highlightedEdgeId={highlightedEdgeId}
+                />
+                <ViolationsPanel
+                  blob={latest.blob}
+                  highlightedEdgeId={highlightedEdgeId}
+                  onSelectEdge={setHighlightedEdgeId}
+                />
+              </>
             ) : (
               <div
                 role="status"

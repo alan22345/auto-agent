@@ -7,6 +7,11 @@
 // (calls=blue, imports=grey, inherits=purple) — Phase 7 polishes this;
 // here we ship a usable default.
 //
+// Phase 5 (ADR-016 §7) overlays a destructive style on edges with
+// ``boundary_violation === true``: thicker red dashed stroke that
+// overrides the kind-based colour. The flag + reason are carried on
+// the element data so a future side-panel can surface them.
+//
 // Failed areas (``AreaStatus.status === 'failed'``) get a red border
 // and surface their error through the node's tooltip data so users see
 // *why* an area's interior is missing.
@@ -22,12 +27,18 @@ const EDGE_COLOUR: Record<string, string> = {
   http: '#f97316',
 };
 
+// Destructive overlay applied to boundary-violation edges. Kept as a
+// constant so the unit test can assert it and the violations panel can
+// re-use the same hue for selected rows in a future polish pass.
+const VIOLATION_COLOUR = '#ef4444';
+
 interface Props {
   blob: RepoGraphBlob;
   className?: string;
+  highlightedEdgeId?: string | null;
 }
 
-export function GraphCanvas({ blob, className }: Props) {
+export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
 
@@ -56,7 +67,9 @@ export function GraphCanvas({ blob, className }: Props) {
       }
       if (cancelled || !containerRef.current) return;
 
-      const elements = blobToCytoscapeElements(blob, areaErrorById);
+      const elements = blobToCytoscapeElements(blob, areaErrorById, {
+        highlightedEdgeId: highlightedEdgeId ?? null,
+      });
       cy = cytoscape({
         container: containerRef.current,
         elements,
@@ -109,6 +122,23 @@ export function GraphCanvas({ blob, className }: Props) {
               'target-arrow-color': 'data(color)',
             },
           },
+          {
+            selector: 'edge[?boundaryViolation]',
+            style: {
+              width: 2.5,
+              'line-style': 'dashed',
+              'line-color': VIOLATION_COLOUR,
+              'target-arrow-color': VIOLATION_COLOUR,
+            },
+          },
+          {
+            selector: 'edge[?highlighted]',
+            style: {
+              width: 3.5,
+              'line-color': VIOLATION_COLOUR,
+              'target-arrow-color': VIOLATION_COLOUR,
+            },
+          },
         ],
       });
 
@@ -142,7 +172,7 @@ export function GraphCanvas({ blob, className }: Props) {
       if (cy) cy.destroy();
       cyRef.current = null;
     };
-  }, [blob, areaErrorById]);
+  }, [blob, areaErrorById, highlightedEdgeId]);
 
   return (
     <div
@@ -171,11 +201,20 @@ function buildAreaErrorMap(areas: AreaStatus[]): Record<string, string | null> {
   return m;
 }
 
+export interface BuildElementsOptions {
+  /** Edge id (``source->target:kind``) to mark with ``highlighted=1`` so
+   * the cytoscape selector can lift it visually. ``null`` / omitted =
+   * no highlight. */
+  highlightedEdgeId?: string | null;
+}
+
 export function blobToCytoscapeElements(
   blob: RepoGraphBlob,
   areaErrorById: Record<string, string | null>,
+  options: BuildElementsOptions = {},
 ): CyElement[] {
   const elements: CyElement[] = [];
+  const highlightedEdgeId = options.highlightedEdgeId ?? null;
 
   for (const n of blob.nodes as Node[]) {
     const failed = areaErrorById[n.id] != null;
@@ -193,17 +232,24 @@ export function blobToCytoscapeElements(
   }
 
   for (const e of blob.edges as Edge[]) {
+    const id = `${e.source}->${e.target}:${e.kind}`;
+    const isViolation = e.boundary_violation === true;
     elements.push({
       data: {
-        id: `${e.source}->${e.target}:${e.kind}`,
+        id,
         source: e.source,
         target: e.target,
         kind: e.kind,
-        color: EDGE_COLOUR[e.kind] ?? '#9ca3af',
+        color: isViolation
+          ? VIOLATION_COLOUR
+          : (EDGE_COLOUR[e.kind] ?? '#9ca3af'),
         snippet: e.evidence.snippet,
         evidenceFile: e.evidence.file,
         evidenceLine: e.evidence.line,
         sourceKind: e.source_kind,
+        boundaryViolation: isViolation ? 1 : undefined,
+        violationReason: e.violation_reason ?? undefined,
+        highlighted: highlightedEdgeId === id ? 1 : undefined,
       },
     });
   }
