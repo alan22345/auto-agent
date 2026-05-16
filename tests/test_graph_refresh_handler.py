@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -154,7 +154,7 @@ async def test_first_run_clones_and_publishes_ready(
     with (
         patch("agent.lifecycle.graph_refresh.async_session", new=factory),
         patch("agent.lifecycle.graph_refresh._run_git", new=fake_run_git),
-        patch("agent.lifecycle.graph_refresh.run_pipeline", return_value=blob),
+        patch("agent.lifecycle.graph_refresh.run_pipeline", new=AsyncMock(return_value=blob)),
     ):
         from agent.lifecycle.graph_refresh import run_refresh
 
@@ -215,7 +215,7 @@ async def test_subsequent_run_fetches_and_resets(
     with (
         patch("agent.lifecycle.graph_refresh.async_session", new=factory),
         patch("agent.lifecycle.graph_refresh._run_git", new=fake_run_git),
-        patch("agent.lifecycle.graph_refresh.run_pipeline", return_value=blob),
+        patch("agent.lifecycle.graph_refresh.run_pipeline", new=AsyncMock(return_value=blob)),
     ):
         from agent.lifecycle.graph_refresh import run_refresh
 
@@ -248,7 +248,7 @@ async def test_partial_status_propagates_to_row_and_event(
     with (
         patch("agent.lifecycle.graph_refresh.async_session", new=factory),
         patch("agent.lifecycle.graph_refresh._run_git", new=fake_run_git),
-        patch("agent.lifecycle.graph_refresh.run_pipeline", return_value=blob),
+        patch("agent.lifecycle.graph_refresh.run_pipeline", new=AsyncMock(return_value=blob)),
     ):
         from agent.lifecycle.graph_refresh import run_refresh
 

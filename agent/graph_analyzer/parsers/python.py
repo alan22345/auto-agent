@@ -34,7 +34,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.graph_analyzer.parsers import Parser, ParseResult
+from agent.graph_analyzer.types import PatternHint, UnresolvedSite
 from shared.types import Edge, EdgeEvidence, Node
+
+# Roughly how many source lines to capture around an unresolved site so the
+# LLM gap-fill prompt has enough context to disambiguate. The parser writes
+# this once per site rather than re-reading the file later.
+_SURROUNDING_LINES_BEFORE = 15
+_SURROUNDING_LINES_AFTER = 15
 
 # ----------------------------------------------------------------------
 # Lazy tree-sitter import — keep the dependency out of the import graph
@@ -437,10 +444,26 @@ class PythonParser(Parser):
                                     ),
                                 )
                             else:
-                                result.unresolved_dynamic_sites += 1
+                                _record_unresolved_site(
+                                    result,
+                                    rel_path=rel_path,
+                                    line_no=line_no,
+                                    snippet=line,
+                                    containing_node_id=cls_id,
+                                    source=source,
+                                    pattern_hint="unknown",
+                                )
                         elif arg.type == "attribute":
                             # ``class X(mod.Base)`` — unresolved in Phase 2.
-                            result.unresolved_dynamic_sites += 1
+                            _record_unresolved_site(
+                                result,
+                                rel_path=rel_path,
+                                line_no=line_no,
+                                snippet=line,
+                                containing_node_id=cls_id,
+                                source=source,
+                                pattern_hint="dict_call",
+                            )
                 # Recurse into class body with current_class set.
                 body = _named_child(node, "block")
                 if body is not None:
@@ -554,7 +577,15 @@ class PythonParser(Parser):
                 return
             # Unbound identifier — count as dynamic only if inside a function.
             if current_func is not None:
-                result.unresolved_dynamic_sites += 1
+                _record_unresolved_site(
+                    result,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    snippet=line,
+                    containing_node_id=current_func,
+                    source=source,
+                    pattern_hint=_classify_call_pattern(callee, node, source),
+                )
             return
 
         # ``self.method(...)`` — resolved when inside the class that defines
@@ -579,15 +610,40 @@ class PythonParser(Parser):
                     )
                     return
                 # ``self.unknown_method`` — unresolved (may be inherited).
-                result.unresolved_dynamic_sites += 1
+                _record_unresolved_site(
+                    result,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    snippet=line,
+                    containing_node_id=current_func,
+                    source=source,
+                    pattern_hint="unknown",
+                )
                 return
             # ``mod.something()`` or ``obj.method()`` — unresolved in Phase 2.
-            result.unresolved_dynamic_sites += 1
+            _record_unresolved_site(
+                result,
+                rel_path=rel_path,
+                line_no=line_no,
+                snippet=line,
+                containing_node_id=current_func,
+                source=source,
+                pattern_hint=_classify_call_pattern(callee, node, source),
+            )
             return
 
-        # ``obj.method()`` outside a class — unresolved.
+        # ``obj.method()`` / ``HANDLERS[name](...)`` outside the simple
+        # forms above — unresolved.
         if current_func is not None:
-            result.unresolved_dynamic_sites += 1
+            _record_unresolved_site(
+                result,
+                rel_path=rel_path,
+                line_no=line_no,
+                snippet=line,
+                containing_node_id=current_func,
+                source=source,
+                pattern_hint=_classify_call_pattern(callee, node, source),
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -605,6 +661,91 @@ class PythonParser(Parser):
 # Module-level utility helpers (kept out of the class so they can be
 # trivially reused if a TS parser lands and needs similar handling).
 # ----------------------------------------------------------------------
+
+
+def _record_unresolved_site(
+    result: ParseResult,
+    *,
+    rel_path: str,
+    line_no: int,
+    snippet: str,
+    containing_node_id: str,
+    source: bytes,
+    pattern_hint: PatternHint,
+) -> None:
+    """Append an :class:`UnresolvedSite` to ``result.unresolved_sites``.
+
+    The surrounding-code window is captured here so the gap-fill stage
+    doesn't need to re-read the file. ~30 lines centred on ``line_no``
+    is sufficient for any registry-style pattern; we clamp at file
+    boundaries.
+    """
+    surrounding = _surrounding_lines(
+        source,
+        line_no,
+        before=_SURROUNDING_LINES_BEFORE,
+        after=_SURROUNDING_LINES_AFTER,
+    )
+    result.unresolved_sites.append(
+        UnresolvedSite(
+            file=rel_path,
+            line=line_no,
+            snippet=snippet,
+            containing_node_id=containing_node_id,
+            surrounding_code=surrounding,
+            pattern_hint=pattern_hint,
+        ),
+    )
+
+
+def _surrounding_lines(source: bytes, line_no: int, *, before: int, after: int) -> str:
+    """Return a window of source lines centred on (1-indexed) ``line_no``.
+
+    Result is plain UTF-8 text — line terminators normalised to ``\\n``.
+    Clamps to file boundaries; never raises on out-of-range input.
+    """
+    if line_no < 1:
+        line_no = 1
+    lines = source.split(b"\n")
+    start = max(0, line_no - 1 - before)
+    end = min(len(lines), line_no - 1 + after + 1)
+    return b"\n".join(lines[start:end]).decode("utf-8", errors="replace")
+
+
+def _classify_call_pattern(callee, call_node, source: bytes) -> PatternHint:
+    """Best-effort heuristic for the :attr:`UnresolvedSite.pattern_hint`.
+
+    Looks at the callee node and (where relevant) the call's arguments
+    to guess whether this site is a registry-dict lookup, a ``getattr``
+    dispatch, an attribute call, or just an unknown bare identifier.
+    The hint is consumed by the gap-fill prompt only — the validator
+    does not use it, so a wrong hint never produces a wrong edge.
+    """
+    callee_type = callee.type
+
+    # ``HANDLERS[name](payload)`` — callee is a subscript expression.
+    if callee_type == "subscript":
+        return "registry"
+
+    # ``getattr(obj, name)(...)`` — callee is itself a call to a name
+    # identifier "getattr".
+    if callee_type == "call":
+        inner_callee = callee.children[0] if callee.children else None
+        if (
+            inner_callee is not None
+            and inner_callee.type == "identifier"
+            and _node_text(inner_callee, source) == "getattr"
+        ):
+            return "getattr"
+
+    # ``mod.something()`` / ``obj.method()`` — attribute call. Routed
+    # via decorators (FastAPI ``app.get(...)``, click groups, etc.) is
+    # a subset of this; we tag the broad case as ``"dict_call"`` (a
+    # historical name for "attribute-style call we can't resolve").
+    if callee_type == "attribute":
+        return "dict_call"
+
+    return "unknown"
 
 
 def _node_text(node, source: bytes) -> str:

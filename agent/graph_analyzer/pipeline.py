@@ -1,20 +1,27 @@
-"""End-to-end pipeline for ADR-016 Phase 2.
+"""End-to-end pipeline for ADR-016 Phases 2 + 3.
 
-Stages (matches the ADR §10 scope for Phase 2):
+Stages (matches ADR §10):
 
-1. Resolve area layout — read ``.auto-agent/graph.yml`` if present, else
-   default to top-level directories (with a stable skip-list).
+1. Resolve area layout — read ``.auto-agent/graph.yml`` if present,
+   else default to top-level directories (with a stable skip-list).
 2. For each area: walk files, dispatch by extension to the right parser
    (via :func:`agent.graph_analyzer.parsers.parser_for`), accumulate
-   nodes / edges / dynamic-site count.
-3. Per-area failure isolation — a parser exception marks the area
-   ``failed`` and continues with the next area.
-4. Assemble the :class:`shared.types.RepoGraphBlob`. Overall status:
+   nodes, AST edges, and unresolved-dispatch sites.
+3. **Phase 3 gap-fill** — per area, when an ``LLMProvider`` is
+   supplied: feed each :class:`UnresolvedSite` through
+   :func:`gap_fill_site`; fall back to :func:`agent_escape` when the
+   one-shot returns zero validatable edges. Every emitted edge is
+   then run through the unconditional citation + target validators
+   (``agent/graph_analyzer/validator.py``); failures are dropped.
+4. Per-area failure isolation — a parser exception marks the area
+   ``failed`` and continues with the next area. Gap-fill exceptions
+   for a single site never fail the area.
+5. Assemble the :class:`shared.types.RepoGraphBlob`. Overall status:
    ``ok`` if every area succeeded, ``partial`` if some did, ``failed``
    if none did.
 
-Phase 2 does *not* call into the LLM. Phase 3 lands the gap-fill stage
-between (2) and (4).
+When ``provider=None`` the pipeline behaves exactly as in Phase 2 —
+AST-only output, no LLM call.
 """
 
 from __future__ import annotations
@@ -27,18 +34,24 @@ from typing import TYPE_CHECKING
 import structlog
 import yaml
 
+from agent.graph_analyzer.agent_escape import agent_escape
+from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
+from agent.graph_analyzer.validator import validate_citation, validate_target
 from shared.types import AreaStatus, Edge, Node, RepoGraphBlob
 
 if TYPE_CHECKING:
     from agent.graph_analyzer.parsers import ParseResult
+    from agent.graph_analyzer.types import UnresolvedSite
+    from agent.llm.base import LLMProvider
 
 log = structlog.get_logger(__name__)
 
-# Phase 2 analyser version. Bumped on any change to the wire output —
-# new edge kind, schema additions, parser behaviour change. The string
-# lands in ``RepoGraph.analyser_version`` and the blob alike.
-_ANALYSER_VERSION = "phase2-python-0.2.0"
+# Bumped from ``phase2-python-0.2.0`` to reflect Phase 3 capability.
+# Even when ``provider=None`` is passed the analyser version still
+# records that the binary is *capable* of LLM gap-fill — useful for
+# downstream consumers to tell graphs apart across phases.
+_ANALYSER_VERSION = "phase3-python-0.3.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
@@ -176,18 +189,22 @@ def _analyse_area(
     workspace: str,
     area_name: str,
     patterns: list[str],
-) -> tuple[list[Node], list[Edge], int, AreaStatus]:
+) -> tuple[list[Node], list[Edge], list[UnresolvedSite], AreaStatus]:
     """Run the parser dispatch over one area.
 
-    Returns the area's nodes, edges, dynamic-site count, and an
+    Returns the area's nodes, AST edges, unresolved sites, and an
     :class:`AreaStatus` (``ok`` on success; ``failed`` if a parser
-    exception bubbled up). Individual files that the parser handled
+    exception bubbled up). Individual files the parser handled
     gracefully (e.g. tree-sitter ERROR-node recovery) do NOT fail the
     area — only an unhandled exception does.
+
+    Unresolved sites are returned to the pipeline so the gap-fill
+    stage can run against them. ``AreaStatus.unresolved_dynamic_sites``
+    is the count of those sites.
     """
     nodes: list[Node] = []
     edges: list[Edge] = []
-    dynamic_sites = 0
+    unresolved_sites: list[UnresolvedSite] = []
 
     # Area node — every area gets one root compound box.
     nodes.append(
@@ -238,30 +255,30 @@ def _analyse_area(
                 continue
             nodes.extend(pr.nodes)
             edges.extend(pr.edges)
-            dynamic_sites += pr.unresolved_dynamic_sites
+            unresolved_sites.extend(pr.unresolved_sites)
     except Exception as e:
         log.exception("graph_area_failed", area=area_name, error=str(e))
         return (
             nodes,
             edges,
-            dynamic_sites,
+            unresolved_sites,
             AreaStatus(
                 name=area_name,
                 status="failed",
                 error=str(e) or e.__class__.__name__,
-                unresolved_dynamic_sites=dynamic_sites,
+                unresolved_dynamic_sites=len(unresolved_sites),
             ),
         )
 
     return (
         nodes,
         edges,
-        dynamic_sites,
+        unresolved_sites,
         AreaStatus(
             name=area_name,
             status="ok",
             error=None,
-            unresolved_dynamic_sites=dynamic_sites,
+            unresolved_dynamic_sites=len(unresolved_sites),
         ),
     )
 
@@ -271,28 +288,55 @@ def _analyse_area(
 # ----------------------------------------------------------------------
 
 
-def run_pipeline(*, workspace: str, commit_sha: str) -> RepoGraphBlob:
-    """Run the full Phase 2 pipeline against ``workspace``.
+async def run_pipeline(
+    *,
+    workspace: str,
+    commit_sha: str,
+    provider: LLMProvider | None = None,
+) -> RepoGraphBlob:
+    """Run the full Phase 2 + Phase 3 pipeline against ``workspace``.
 
-    The caller is responsible for cloning / fetching / resetting the
-    workspace and supplying the resolved ``commit_sha``. The pipeline
-    only reads — never writes, fetches, or shells out.
+    Args:
+        workspace: Absolute path to a prepared workspace. The caller
+            owns clone/fetch/reset; the pipeline only reads.
+        commit_sha: Resolved HEAD sha for the blob's record.
+        provider: Optional LLM provider. When ``None``, the pipeline
+            emits AST-only edges (Phase 2 behaviour). When provided,
+            each :class:`UnresolvedSite` runs through one-shot gap-fill
+            and (on empty/invalid result) the bounded agent-escape;
+            validated LLM edges land in the blob with
+            ``source_kind="llm"``.
     """
     areas = _discover_areas(workspace)
 
     all_nodes: list[Node] = []
     all_edges: list[Edge] = []
     statuses: list[AreaStatus] = []
+    # Per-area unresolved sites are kept aside so we can run gap-fill
+    # only after every area's nodes are known (gives a richer candidate
+    # pool to draw from than within-area-only).
+    per_area_sites: list[tuple[str, list[UnresolvedSite]]] = []
 
     for name, patterns in areas:
-        nodes, edges, _dyn, status = _analyse_area(
+        nodes, edges, sites, status = _analyse_area(
             workspace=workspace,
             area_name=name,
             patterns=patterns,
         )
         all_nodes.extend(nodes)
         all_edges.extend(edges)
+        per_area_sites.append((name, sites))
         statuses.append(status)
+
+    # Gap-fill stage. Skipped when no provider is supplied.
+    if provider is not None:
+        llm_edges = await _run_gap_fill_stage(
+            workspace=workspace,
+            provider=provider,
+            nodes=all_nodes,
+            per_area_sites=per_area_sites,
+        )
+        all_edges.extend(llm_edges)
 
     return RepoGraphBlob(
         commit_sha=commit_sha,
@@ -302,6 +346,109 @@ def run_pipeline(*, workspace: str, commit_sha: str) -> RepoGraphBlob:
         nodes=all_nodes,
         edges=all_edges,
     )
+
+
+async def _run_gap_fill_stage(
+    *,
+    workspace: str,
+    provider: LLMProvider,
+    nodes: list[Node],
+    per_area_sites: list[tuple[str, list[UnresolvedSite]]],
+) -> list[Edge]:
+    """For each unresolved site, run gap-fill (and on empty/invalid
+    result, agent-escape). Validate every emitted edge against the
+    actual workspace; drop failures. Returns the surviving LLM edges.
+
+    Validation order:
+      1. Soft filter inside gap-fill / escape: target in candidate pool.
+      2. ``validate_citation`` against the workspace.
+      3. ``validate_target`` against the final node set.
+
+    Step 1 is a fast belt-and-braces check; steps 2 + 3 are the
+    unconditional gates promised by ADR-016 §3.
+    """
+    validated: list[Edge] = []
+    for area_name, sites in per_area_sites:
+        candidates = _candidate_pool_for_area(nodes, area_name)
+        for site in sites:
+            try:
+                llm_edges = await gap_fill_site(
+                    provider=provider,
+                    workspace_path=workspace,
+                    site=site,
+                    candidate_nodes=candidates,
+                )
+            except Exception as e:
+                log.warning(
+                    "graph_gap_fill_site_unexpected",
+                    site=site.containing_node_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                )
+                llm_edges = []
+
+            # Escalate to bounded agent-loop if one-shot was empty OR if
+            # every emitted edge fails the validation gates.
+            survivors = _validate_edges(workspace, llm_edges, nodes)
+            if not survivors:
+                try:
+                    escape_edges = await agent_escape(
+                        provider=provider,
+                        workspace_path=workspace,
+                        site=site,
+                        candidate_nodes=candidates,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "graph_agent_escape_site_unexpected",
+                        site=site.containing_node_id,
+                        error=str(e),
+                        error_type=e.__class__.__name__,
+                    )
+                    escape_edges = []
+                survivors = _validate_edges(workspace, escape_edges, nodes)
+
+            validated.extend(survivors)
+    return validated
+
+
+def _validate_edges(
+    workspace: str,
+    edges: list[Edge],
+    nodes: list[Node],
+) -> list[Edge]:
+    """Apply ``validate_citation`` and ``validate_target`` to ``edges``.
+
+    Both checks must pass for an edge to survive. The function never
+    raises — drops are logged inside the validator helpers.
+    """
+    out: list[Edge] = []
+    for edge in edges:
+        if not validate_citation(workspace, edge):
+            continue
+        if not validate_target(edge, nodes):
+            continue
+        out.append(edge)
+    return out
+
+
+def _candidate_pool_for_area(
+    nodes: list[Node],
+    area_name: str,
+) -> list[Node]:
+    """Order ``nodes`` by likely relevance to ``area_name``.
+
+    Priority: nodes inside this area first, then nodes from any other
+    area. The downstream gap-fill / escape modules apply their own
+    150-node cap, so this is purely an *ordering* concern — we never
+    drop nodes here.
+
+    Phase 5 will introduce the proper "visible to this file via imports"
+    filter. For Phase 3 the area-first ordering is enough.
+    """
+    in_area = [n for n in nodes if n.area == area_name]
+    out_area = [n for n in nodes if n.area != area_name]
+    return in_area + out_area
 
 
 def overall_status(statuses: list[AreaStatus]) -> str:

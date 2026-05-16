@@ -41,6 +41,7 @@ from agent.graph_workspace import (
     GraphWorkspaceLockTimeout,
     graph_workspace_lock,
 )
+from agent.llm import get_provider
 from shared.database import async_session
 from shared.events import (
     Event,
@@ -100,7 +101,11 @@ async def run_refresh(*, repo_id: int, request_id: str) -> None:
                 branch=branch,
             )
             commit_sha = await _resolve_commit_sha(workspace=workspace)
-            blob = run_pipeline(workspace=workspace, commit_sha=commit_sha)
+            blob = await run_pipeline(
+                workspace=workspace,
+                commit_sha=commit_sha,
+                provider=get_provider(),
+            )
     except GraphWorkspaceLockTimeout:
         log.warning(
             "graph_refresh_lock_busy",

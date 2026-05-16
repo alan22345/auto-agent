@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from agent.graph_analyzer.types import UnresolvedSite
     from shared.types import Edge, Node
 
 
@@ -27,16 +28,32 @@ if TYPE_CHECKING:
 class ParseResult:
     """One file's contribution to the graph.
 
-    ``unresolved_dynamic_sites`` is the count of detected dispatch sites
-    the parser could *not* resolve statically (registry dicts, ``getattr``,
+    ``unresolved_sites`` lists every dispatch site the parser detected
+    but could not resolve statically (registry dicts, ``getattr``,
     decorator-driven dispatch, attribute calls on imported modules,
-    etc.). Phase 2 counts but does not resolve them — Phase 3's LLM
-    gap-fill turns these into edges.
+    etc.). Phase 2 emitted only a count; Phase 3 emits the sites
+    themselves so the gap-fill stage can feed each one to the LLM.
+
+    Phase 2 callers that only need the count can read
+    ``len(parse_result.unresolved_sites)``.
     """
 
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
-    unresolved_dynamic_sites: int = 0
+    unresolved_sites: list[UnresolvedSite] = field(default_factory=list)
+
+    @property
+    def unresolved_dynamic_sites(self) -> int:
+        """Backwards-compatible accessor — count of unresolved sites.
+
+        Kept as a property so existing call sites continue to read
+        ``result.unresolved_dynamic_sites`` without change while the
+        underlying data has been promoted from a plain int to a real
+        list. The :class:`shared.types.AreaStatus` public blob still
+        carries this as an ``int`` field — only the parser/pipeline
+        seam exposes the richer shape.
+        """
+        return len(self.unresolved_sites)
 
 
 class Parser(ABC):
