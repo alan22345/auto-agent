@@ -24,7 +24,7 @@ from agent.lifecycle.trio import architect, design_approval, dispatcher
 from agent.lifecycle.workspace_paths import DESIGN_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
-from shared.events import publish, task_pr_created
+from shared.events import publish, task_iteration_complete, task_pr_created
 from shared.models import Task, TaskComplexity, TaskStatus, TrioPhase
 
 log = structlog.get_logger()
@@ -161,8 +161,7 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
             stderr=(push_res.stderr or "")[:500],
         )
         raise RuntimeError(
-            f"git push {integration_branch} failed: "
-            f"{(push_res.stderr or '').strip()[:500]}"
+            f"git push {integration_branch} failed: {(push_res.stderr or '').strip()[:500]}"
         )
 
     # 2. Open the PR. Must also run with cwd=workspace so gh can locate
@@ -505,11 +504,11 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     # to AWAITING_DESIGN_APPROVAL. Move the wire status here so the
     # finalize_design call below validates.
     async with async_session() as s:
-        p = (
-            await s.execute(select(Task).where(Task.id == parent.id))
-        ).scalar_one()
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
         await transition(
-            s, p, TaskStatus.ARCHITECT_DESIGNING,
+            s,
+            p,
+            TaskStatus.ARCHITECT_DESIGNING,
             message="trio: architect designing",
         )
         await s.commit()
@@ -582,12 +581,16 @@ async def run_trio_parent(
     parent: Task,
     *,
     repair_context: dict | None = None,
+    iteration_context: dict | None = None,
 ) -> None:
     """Drive a parent task through the trio cycle, open the final PR.
 
-    Fresh entry (``repair_context is None``) runs the architect's
+    Fresh entry (both context kwargs ``None``) runs the architect's
     initial pass. Re-entry from a failed integration PR threads the CI
-    log into a checkpoint pass so the architect can add fix work items.
+    log into a checkpoint pass (``repair_context``) so the architect can
+    add fix work items. Re-entry from user iteration feedback (``iteration_context``)
+    routes to ``architect.iterate`` and skips final-PR creation (the PR
+    already exists — the per-item loop pushes new commits to it).
 
     Per ADR-013 the per-item loop no longer creates child Task rows. It
     invokes :mod:`agent.lifecycle.trio.dispatcher`, which runs coder
@@ -605,7 +608,15 @@ async def run_trio_parent(
     """
     from agent.lifecycle.trio.architect import _prepare_parent_workspace
 
-    if repair_context is not None:
+    if iteration_context is not None:
+        # ADR-017 — user sent feedback on an existing PR.  The architect
+        # appends new pending backlog items; the per-item loop below picks
+        # them up naturally.  We do NOT open a second integration PR at the
+        # tail — the existing PR already covers the branch; we just push new
+        # commits to it and transition back to AWAITING_REVIEW.
+        await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_ITERATING)
+        await architect.iterate(parent.id, iteration_context=iteration_context)
+    elif repair_context is not None:
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECT_CHECKPOINT)
         await architect.checkpoint(parent.id, repair_context=repair_context)
     else:
@@ -788,6 +799,29 @@ async def run_trio_parent(
         await _block_parent(
             parent.id,
             f"trio: tiebreak returned unknown action '{action}'",
+        )
+        return
+
+    # ADR-017 — iteration tail: the per-item loop pushed new commits onto
+    # the existing integration branch.  The PR is already open; opening a
+    # second one would duplicate it.  Transition ITERATING → AWAITING_REVIEW
+    # and publish task_iteration_complete so downstream listeners (UI, Slack)
+    # know the PR has been updated.
+    if iteration_context is not None:
+        async with async_session() as s:
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            await transition(
+                s,
+                p,
+                TaskStatus.AWAITING_REVIEW,
+                message="trio: iteration complete — PR updated with new commits",
+            )
+            await s.commit()
+        await publish(
+            task_iteration_complete(
+                parent.id,
+                summary="updated PR with your changes",
+            )
         )
         return
 

@@ -12,33 +12,44 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.INTAKE: {TaskStatus.CLASSIFYING},
     TaskStatus.CLASSIFYING: {TaskStatus.QUEUED, TaskStatus.FAILED},
     TaskStatus.QUEUED: {
-        TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.DONE,
-        TaskStatus.BLOCKED_ON_AUTH, TaskStatus.BLOCKED_ON_QUOTA,
+        TaskStatus.PLANNING,
+        TaskStatus.CODING,
+        TaskStatus.DONE,
+        TaskStatus.BLOCKED_ON_AUTH,
+        TaskStatus.BLOCKED_ON_QUOTA,
         TaskStatus.TRIO_EXECUTING,
     },
     TaskStatus.PLANNING: {
-        TaskStatus.AWAITING_APPROVAL, TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.AWAITING_APPROVAL,
+        TaskStatus.AWAITING_CLARIFICATION,
         TaskStatus.AWAITING_PLAN_APPROVAL,  # ADR-015 §5 Phase 5 — complex-flow gate
-        TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.BLOCKED_ON_QUOTA,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.BLOCKED_ON_QUOTA,
     },
     TaskStatus.AWAITING_APPROVAL: {TaskStatus.CODING, TaskStatus.PLANNING},  # approved or revision
-    TaskStatus.AWAITING_PLAN_APPROVAL: {                                    # ADR-015 §5 Phase 5
-        TaskStatus.CODING,   # approved
+    TaskStatus.AWAITING_PLAN_APPROVAL: {  # ADR-015 §5 Phase 5
+        TaskStatus.CODING,  # approved
         TaskStatus.BLOCKED,  # rejected
-        TaskStatus.PLANNING, # plan revision requested (future use)
+        TaskStatus.PLANNING,  # plan revision requested (future use)
     },
     TaskStatus.AWAITING_CLARIFICATION: {
-        TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED,
+        TaskStatus.PLANNING,
+        TaskStatus.CODING,
+        TaskStatus.FAILED,
         TaskStatus.TRIO_EXECUTING,  # NEW — trio architect resume
     },  # user replied
     TaskStatus.CODING: {
-        TaskStatus.VERIFYING,                                          # freeform self-verification gate
-        TaskStatus.PR_CREATED, TaskStatus.AWAITING_CLARIFICATION,
-        TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE,
+        TaskStatus.VERIFYING,  # freeform self-verification gate
+        TaskStatus.PR_CREATED,
+        TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.DONE,
         TaskStatus.BLOCKED_ON_QUOTA,
         TaskStatus.TRIO_REVIEW,
     },
-    TaskStatus.VERIFYING: {                                            # freeform self-verification
+    TaskStatus.VERIFYING: {  # freeform self-verification
         TaskStatus.PR_CREATED,
         TaskStatus.CODING,
         TaskStatus.BLOCKED,
@@ -48,10 +59,10 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },
     TaskStatus.PR_CREATED: {
         TaskStatus.AWAITING_CI,
-        TaskStatus.PR_REVIEW,        # ADR-015 §5 — self-PR-review gate (simple flow)
+        TaskStatus.PR_REVIEW,  # ADR-015 §5 — self-PR-review gate (simple flow)
         TaskStatus.AWAITING_REVIEW,  # ADR-017 — trio falls through immediately; AWAITING_REVIEW is the long-lived "PR open" state
     },
-    TaskStatus.PR_REVIEW: {          # ADR-015 §5 — verdict pass→DONE, fail→BLOCKED
+    TaskStatus.PR_REVIEW: {  # ADR-015 §5 — verdict pass→DONE, fail→BLOCKED
         TaskStatus.DONE,
         TaskStatus.BLOCKED,
         TaskStatus.FAILED,
@@ -62,20 +73,49 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.BLOCKED,
         TaskStatus.FAILED,
     },
-    TaskStatus.AWAITING_CI: {TaskStatus.AWAITING_REVIEW, TaskStatus.CODING, TaskStatus.FAILED, TaskStatus.TRIO_EXECUTING},  # CI pass/fail
-    TaskStatus.AWAITING_REVIEW: {TaskStatus.DONE, TaskStatus.CODING, TaskStatus.BLOCKED},  # approved, changes, or cycle-2 failure
-    TaskStatus.BLOCKED: {TaskStatus.CODING, TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.DONE},
-    TaskStatus.BLOCKED_ON_AUTH: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
-    TaskStatus.BLOCKED_ON_QUOTA: {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.FAILED},
+    TaskStatus.AWAITING_CI: {
+        TaskStatus.AWAITING_REVIEW,
+        TaskStatus.CODING,
+        TaskStatus.FAILED,
+        TaskStatus.TRIO_EXECUTING,
+    },  # CI pass/fail
+    TaskStatus.AWAITING_REVIEW: {
+        TaskStatus.DONE,
+        TaskStatus.CODING,
+        TaskStatus.BLOCKED,
+        TaskStatus.ITERATING,
+    },  # approved, changes, cycle-2 failure, or ADR-017 iteration feedback
+    # ADR-017 — trio iteration: user gives PR feedback → ITERATING; architect
+    # appends new backlog items; per-item loop drains → AWAITING_REVIEW again.
+    TaskStatus.ITERATING: {TaskStatus.AWAITING_REVIEW, TaskStatus.BLOCKED},
+    TaskStatus.BLOCKED: {
+        TaskStatus.CODING,
+        TaskStatus.PLANNING,
+        TaskStatus.FAILED,
+        TaskStatus.DONE,
+    },
+    TaskStatus.BLOCKED_ON_AUTH: {
+        TaskStatus.QUEUED,
+        TaskStatus.PLANNING,
+        TaskStatus.CODING,
+        TaskStatus.FAILED,
+    },
+    TaskStatus.BLOCKED_ON_QUOTA: {
+        TaskStatus.QUEUED,
+        TaskStatus.PLANNING,
+        TaskStatus.CODING,
+        TaskStatus.FAILED,
+    },
     TaskStatus.TRIO_EXECUTING: {
-        TaskStatus.PR_CREATED, TaskStatus.BLOCKED,
+        TaskStatus.PR_CREATED,
+        TaskStatus.BLOCKED,
         TaskStatus.AWAITING_CLARIFICATION,  # NEW — architect needs answers
         # ADR-015 §2 / Phase 6 — design-doc gate enters from TRIO_EXECUTING.
         TaskStatus.ARCHITECT_DESIGNING,
         # ADR-015 §4 / Phase 7 — backlog drained → final review.
         TaskStatus.FINAL_REVIEW,
     },
-    TaskStatus.TRIO_REVIEW:    {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED},
+    TaskStatus.TRIO_REVIEW: {TaskStatus.PR_CREATED, TaskStatus.CODING, TaskStatus.BLOCKED},
     # ADR-015 §2 / Phase 6 — design + backlog-emit chain for complex_large.
     TaskStatus.ARCHITECT_DESIGNING: {
         TaskStatus.AWAITING_DESIGN_APPROVAL,
@@ -84,14 +124,14 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },
     TaskStatus.AWAITING_DESIGN_APPROVAL: {
         TaskStatus.ARCHITECT_BACKLOG_EMIT,  # approved
-        TaskStatus.BLOCKED,                  # rejected
-        TaskStatus.ARCHITECT_DESIGNING,      # re-design requested (future use)
+        TaskStatus.BLOCKED,  # rejected
+        TaskStatus.ARCHITECT_DESIGNING,  # re-design requested (future use)
     },
     TaskStatus.ARCHITECT_BACKLOG_EMIT: {
-        TaskStatus.TRIO_EXECUTING,           # backlog emitted → builder dispatch
+        TaskStatus.TRIO_EXECUTING,  # backlog emitted → builder dispatch
         TaskStatus.BLOCKED,
         TaskStatus.AWAITING_CLARIFICATION,
-        TaskStatus.ARCHITECT_DESIGNING,      # validator rejected → re-design
+        TaskStatus.ARCHITECT_DESIGNING,  # validator rejected → re-design
         # ADR-015 §9 / Phase 8 — architect spawned sub-architects instead
         # of emitting a flat backlog.
         TaskStatus.AWAITING_SUB_ARCHITECTS,
@@ -105,13 +145,13 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },
     # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
     TaskStatus.FINAL_REVIEW: {
-        TaskStatus.PR_CREATED,        # verdict=passed → PR creation path
-        TaskStatus.ARCHITECT_GAP_FIX, # verdict=gaps_found → architect resumes
-        TaskStatus.BLOCKED,           # exhausted gap-fix rounds
+        TaskStatus.PR_CREATED,  # verdict=passed → PR creation path
+        TaskStatus.ARCHITECT_GAP_FIX,  # verdict=gaps_found → architect resumes
+        TaskStatus.BLOCKED,  # exhausted gap-fix rounds
     },
     TaskStatus.ARCHITECT_GAP_FIX: {
-        TaskStatus.TRIO_EXECUTING,    # architect dispatched new items
-        TaskStatus.BLOCKED,           # architect escalated or out of rounds
+        TaskStatus.TRIO_EXECUTING,  # architect dispatched new items
+        TaskStatus.BLOCKED,  # architect escalated or out of rounds
     },
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},
@@ -139,12 +179,14 @@ async def transition(
         )
 
     task.status = to_status
-    session.add(TaskHistory(
-        task_id=task.id,
-        from_status=from_status,
-        to_status=to_status,
-        message=message,
-    ))
+    session.add(
+        TaskHistory(
+            task_id=task.id,
+            from_status=from_status,
+            to_status=to_status,
+            message=message,
+        )
+    )
     await session.flush()
     return task
 
