@@ -34,6 +34,14 @@ class ParseResult:
     etc.). Phase 2 emitted only a count; Phase 3 emits the sites
     themselves so the gap-fill stage can feed each one to the LLM.
 
+    ``public_symbols`` (Phase 5 — ADR-016 §7) is the set of node ids the
+    parser considers part of this file's public surface for cross-area
+    consumption. Determined by language conventions (Python: ``__all__``
+    plus the no-underscore-prefix rule; TypeScript: ``export`` plus
+    path-segment / filename rules). The pipeline unions these across all
+    files in an area to compute the area's public surface, then flags
+    cross-area edges that reach non-public symbols.
+
     Phase 2 callers that only need the count can read
     ``len(parse_result.unresolved_sites)``.
     """
@@ -41,6 +49,7 @@ class ParseResult:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
     unresolved_sites: list[UnresolvedSite] = field(default_factory=list)
+    public_symbols: set[str] = field(default_factory=set)
 
     @property
     def unresolved_dynamic_sites(self) -> int:

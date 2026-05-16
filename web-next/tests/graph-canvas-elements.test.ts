@@ -96,4 +96,45 @@ describe('blobToCytoscapeElements', () => {
     expect(imports!.data.sourceKind).toBe('ast');
     expect(imports!.data.snippet).toMatch(/Animal/);
   });
+
+  it('surfaces boundary_violation and violation_reason on edge data', () => {
+    // Phase 5 — flagged edges carry ``boundaryViolation=1`` and the
+    // reason string so the cytoscape selector can apply a destructive
+    // overlay and the side panel can correlate rows.
+    const flaggedBlob: RepoGraphBlob = {
+      ...blob,
+      edges: [
+        {
+          source: 'agent/dog.py::Dog.describe',
+          target: 'agent/dog.py::Dog.speak',
+          kind: 'calls',
+          evidence: {
+            file: 'agent/dog.py',
+            line: 5,
+            snippet: 'self.speak()',
+          },
+          source_kind: 'ast',
+          boundary_violation: true,
+          violation_reason: 'internal_access',
+        },
+      ],
+    };
+    const els = blobToCytoscapeElements(flaggedBlob, {});
+    const edge = els.find((e) => e.data.kind === 'calls');
+    expect(edge!.data.boundaryViolation).toBe(1);
+    expect(edge!.data.violationReason).toBe('internal_access');
+    // Colour switches to the destructive overlay so the cytoscape style
+    // selector has data to bind onto.
+    expect(edge!.data.color).toBe('#ef4444');
+  });
+
+  it('marks the highlighted edge id with highlighted=1', () => {
+    const els = blobToCytoscapeElements(blob, {}, {
+      highlightedEdgeId: 'agent/dog.py::Dog.describe->agent/dog.py::Dog.speak:calls',
+    });
+    const calls = els.find((e) => e.data.kind === 'calls');
+    expect(calls!.data.highlighted).toBe(1);
+    const imports = els.find((e) => e.data.kind === 'imports');
+    expect(imports!.data.highlighted).toBeUndefined();
+  });
 });
