@@ -125,10 +125,16 @@ async def test_handle_feedback_event_forwards_content_to_inbound():
     handle_clarification_inbound, which (when status is AWAITING_CLARIFICATION)
     resumes the grill loop.
     """
+    from types import SimpleNamespace
+
     from shared.events import Event, TaskEventType
 
+    fake_task = SimpleNamespace(id=42, status="awaiting_clarification")
     inbound = AsyncMock()
-    with patch("agent.lifecycle.conversation.handle_clarification_inbound", inbound):
+    with (
+        patch("agent.lifecycle.conversation.get_task", AsyncMock(return_value=fake_task)),
+        patch("agent.lifecycle.conversation.handle_clarification_inbound", inbound),
+    ):
         from agent.lifecycle.conversation import handle_feedback_event
 
         await handle_feedback_event(
@@ -161,3 +167,38 @@ async def test_handle_feedback_event_is_no_op_without_content():
         )
 
     inbound.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_event_reemits_human_message_for_awaiting_review():
+    """ADR-017 — Slack/Telegram thread reply on a trio task in AWAITING_REVIEW
+    must re-emit as human.message so route_human_message dispatches it to
+    the iteration handler. (For AWAITING_CLARIFICATION the existing path
+    still calls handle_clarification_inbound.)"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from agent.lifecycle.conversation import handle_feedback_event
+    from shared.events import Event, HumanEventType, TaskEventType
+
+    fake_task = SimpleNamespace(
+        id=5, status="awaiting_review", complexity="complex_large",
+    )
+    publish_mock = AsyncMock()
+    with (
+        patch("agent.lifecycle.conversation.get_task",
+              AsyncMock(return_value=fake_task)),
+        patch("agent.lifecycle.conversation.publish", publish_mock),
+    ):
+        await handle_feedback_event(Event(
+            type=TaskEventType.FEEDBACK,
+            task_id=5,
+            payload={"message_id": 1, "sender": "slack:alan",
+                     "content": "make it smaller"},
+        ))
+
+    publish_mock.assert_awaited_once()
+    emitted = publish_mock.await_args.args[0]
+    assert emitted.type == HumanEventType.MESSAGE
+    assert emitted.task_id == 5
+    assert emitted.payload["message"] == "make it smaller"

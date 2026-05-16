@@ -41,6 +41,7 @@ from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.workspace import WORKSPACES_DIR
 from shared.events import (
     Event,
+    human_message,
     publish,
     task_blocked,
     task_clarification_needed,
@@ -369,18 +370,38 @@ async def handle_clarification_event(event: Event) -> None:
 async def handle_feedback_event(event: Event) -> None:
     """EventBus entry for ``task.feedback``.
 
-    Fired by ``POST /tasks/{id}/messages`` whenever a user replies via Slack
-    thread or Telegram reply-to. Routes the message body through
-    ``handle_clarification_inbound``, which self-guards on
-    ``AWAITING_CLARIFICATION`` — non-clarification statuses are a no-op, so
-    other ``/messages`` traffic (e.g. web-UI pair-programming guidance to a
-    coding task) is unaffected.
+    Fired by ``POST /tasks/{id}/messages`` whenever a user replies via
+    Slack thread or Telegram reply-to. Routing:
+      * AWAITING_CLARIFICATION → ``handle_clarification_inbound`` (grill /
+        clarification resume).
+      * AWAITING_REVIEW or ITERATING → re-emit as ``human.message`` so
+        route_human_message can dispatch to trio iteration (ADR-017).
+      * Anything else → drop (logged by handle_clarification_inbound's
+        own status guard).
     """
     if not event.task_id:
         return
     content = event.payload.get("content", "") if event.payload else ""
-    if content:
-        await handle_clarification_inbound(event.task_id, content)
+    if not content:
+        return
+
+    task = await get_task(event.task_id)
+    status = getattr(task, "status", None)
+    if hasattr(status, "value"):
+        status = status.value
+
+    if status in ("awaiting_review", "iterating"):
+        # Re-emit so the existing route_human_message → iteration path picks it up.
+        sender = event.payload.get("sender", "") if event.payload else ""
+        source = sender.split(":", 1)[0] if ":" in sender else "thread"
+        await publish(
+            human_message(task_id=event.task_id, message=content, source=source),
+        )
+        return
+
+    # Fallback: clarification grill / inbound. The handler guards on
+    # AWAITING_CLARIFICATION internally so non-clarification tasks no-op.
+    await handle_clarification_inbound(event.task_id, content)
 
 
 async def route_human_message(event: Event) -> None:
