@@ -141,6 +141,18 @@ class PythonParser(Parser):
             current_func=None,
         )
 
+        # ---- Pass 3 (Phase 5): public-surface inference. ----
+        # Skipped entirely for implicitly-private files so the symbol set
+        # stays empty (matches the test contract).
+        if not _file_is_implicitly_private(rel_path):
+            dunder_all = _parse_dunder_all(tree.root_node, source)
+            result.public_symbols = _compute_public_symbols(
+                root=tree.root_node,
+                source=source,
+                rel_path=rel_path,
+                dunder_all=dunder_all,
+            )
+
         return result
 
     # ------------------------------------------------------------------
@@ -877,6 +889,114 @@ def _module_from_path(rel_path: str) -> str:
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts)
+
+
+# ----------------------------------------------------------------------
+# Public-surface inference (ADR-016 Phase 5 §7)
+# ----------------------------------------------------------------------
+
+
+def _file_is_implicitly_private(rel_path: str) -> bool:
+    """True iff ``rel_path`` is structurally private to its own file.
+
+    Files under ``tests/`` (anywhere in the path), files whose basename
+    starts with ``test_``, and files whose basename starts with ``_``
+    are implicitly private — their symbols never appear in any area's
+    public surface, even if ``__all__`` tries to expose them.
+    """
+    parts = rel_path.split("/")
+    if "tests" in parts:
+        return True
+    basename = parts[-1] if parts else rel_path
+    if basename.startswith("_"):
+        return True
+    return basename.startswith("test_")
+
+
+def _parse_dunder_all(root, source: bytes) -> set[str] | None:
+    """Return the set of names listed in a module-level ``__all__``.
+
+    The convention is a top-level assignment whose RHS is a list / tuple
+    / set of string literals. We walk the AST best-effort: any
+    expression we can't read as a literal collection of strings causes
+    us to return ``None`` (the convention-based path applies). The
+    parser never raises — malformed ``__all__`` quietly degrades.
+    """
+    for child in root.children:
+        if child.type != "expression_statement":
+            continue
+        # Inside an expression_statement we expect a single assignment.
+        for inner in child.children:
+            if inner.type != "assignment":
+                continue
+            # tree-sitter exposes left/right as named children — we walk
+            # the top-level children and pick the first identifier as
+            # the target name.
+            target = None
+            value = None
+            for k in inner.children:
+                if k.type == "identifier" and target is None:
+                    target = _node_text(k, source)
+                elif k.type in ("list", "tuple", "set") and value is None:
+                    value = k
+            if target != "__all__" or value is None:
+                continue
+            names: set[str] = set()
+            for el in value.children:
+                if el.type == "string":
+                    for frag in el.children:
+                        if frag.type == "string_content":
+                            names.add(_node_text(frag, source))
+            return names
+    return None
+
+
+def _compute_public_symbols(
+    *,
+    root,
+    source: bytes,
+    rel_path: str,
+    dunder_all: set[str] | None,
+) -> set[str]:
+    """Compute the file's public surface.
+
+    Rules (precedence top → bottom):
+
+    1. When ``dunder_all`` is non-``None``, only names appearing in
+       it are public — overrides the no-underscore-prefix rule.
+    2. Otherwise, a top-level function or class is public iff its name
+       does not start with a single underscore.
+
+    The output is a set of node ids (``"<file>::<name>"``). Methods and
+    inner functions are not included — only top-level symbols matter
+    for cross-area visibility.
+    """
+    out: set[str] = set()
+    for raw_child in root.children:
+        child, _decorators = _unwrap_decorated(raw_child, source)
+        if child.type not in (_FUNC_NODE, _CLASS_NODE):
+            continue
+        # First identifier child is the symbol's name.
+        name = None
+        for c in child.children:
+            if c.type == "identifier":
+                name = _node_text(c, source)
+                break
+        if name is None:
+            continue
+        if dunder_all is not None:
+            if name in dunder_all:
+                out.add(f"{rel_path}::{name}")
+            continue
+        if name.startswith("_"):
+            continue
+        out.add(f"{rel_path}::{name}")
+    return out
+
+
+# ----------------------------------------------------------------------
+# Relative-import resolution
+# ----------------------------------------------------------------------
 
 
 def _resolve_relative(rel_path: str, dots: int, name: str) -> str:

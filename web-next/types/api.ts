@@ -50,10 +50,24 @@ export interface CreateUserRequest {
 /**
  * One edge in the graph.
  *
- * Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 will add
- * ``source_kind="llm"`` edges using the same fields — no schema change.
- * ``boundary_violation`` is reserved for Phase 5 and is always ``False``
- * in Phase 2 output.
+ * Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 added
+ * ``source_kind="llm"`` edges using the same fields.
+ *
+ * Phase 5 (ADR-016 §7) starts populating ``boundary_violation`` and adds
+ * the companion ``violation_reason`` field. ``violation_reason`` is one
+ * of:
+ *
+ * * ``"internal_access"`` — a cross-area edge whose target is private to
+ *   its area (convention-based public-surface inference); flagged by the
+ *   pipeline's boundary stage.
+ * * ``"explicit_rule:<index>"`` — the edge matches an explicit
+ *   ``boundaries.forbid`` rule from ``.auto-agent/graph.yml``; the
+ *   ``<index>`` is the 0-based position of the rule in the file. Takes
+ *   precedence over an internal-access reason.
+ * * ``None`` — the edge does not violate any boundary.
+ *
+ * HTTP edges (``kind="http"``) are NEVER flagged — they are an
+ * intentional cross-language pattern, not a layering breach.
  */
 export interface Edge {
   source: string;
@@ -62,6 +76,7 @@ export interface Edge {
   evidence: EdgeEvidence;
   source_kind: "ast" | "llm";
   boundary_violation?: boolean;
+  violation_reason?: string | null;
 }
 /**
  * Cited proof of an edge's existence — see ADR-016 §3.

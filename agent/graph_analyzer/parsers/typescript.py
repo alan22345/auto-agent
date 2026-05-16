@@ -142,6 +142,17 @@ class TypeScriptParser(Parser):
             current_func=None,
         )
 
+        # Pass 3 (Phase 5) — public-surface inference. Skipped for files
+        # whose path segments mark them as implicitly private; otherwise
+        # walks the top level once more pulling names out of the
+        # ``export``-wrapped declarations.
+        if not _file_is_implicitly_private(rel_path):
+            result.public_symbols = _compute_public_symbols(
+                root=tree.root_node,
+                source=source,
+                rel_path=rel_path,
+            )
+
         return result
 
     # ------------------------------------------------------------------
@@ -1001,6 +1012,73 @@ def _strip_ts_ext(path: str) -> str:
         if path.endswith(ext):
             return path[: -len(ext)]
     return path
+
+
+# ----------------------------------------------------------------------
+# Public-surface inference (ADR-016 Phase 5 §7)
+# ----------------------------------------------------------------------
+
+
+def _file_is_implicitly_private(rel_path: str) -> bool:
+    """True iff ``rel_path`` is structurally private to its own file.
+
+    Path-segment rules: any segment named ``internal`` or ``private``
+    marks the file private. Filename rules: a basename starting with
+    ``_`` marks the file private. The check operates on the
+    forward-slash-normalised workspace-relative path.
+    """
+    parts = rel_path.split("/")
+    for seg in parts[:-1]:
+        if seg in ("internal", "private"):
+            return True
+    basename = parts[-1] if parts else rel_path
+    return basename.startswith("_")
+
+
+def _compute_public_symbols(
+    *,
+    root,
+    source: bytes,
+    rel_path: str,
+) -> set[str]:
+    """Walk the module top level and collect node ids of ``export``-ed
+    declarations.
+
+    Recognised declaration kinds inside an ``export_statement``:
+      * ``function_declaration`` — ``export function foo()``
+      * ``class_declaration`` — ``export class Foo``
+      * ``interface_declaration`` — ``export interface Foo``
+      * ``type_alias_declaration`` — ``export type Foo = ...``
+      * ``lexical_declaration`` — ``export const FOO = ...`` (any number
+        of variable_declarator children).
+
+    Non-exported declarations and re-exports (``export { foo }``,
+    ``export * from "..."``) are ignored — the v1 spec covers value
+    declarations.
+    """
+    out: set[str] = set()
+    for child in root.children:
+        if child.type != _EXPORT_NODE:
+            continue
+        for inner in child.children:
+            if inner.type in (_FUNC_NODE, _CLASS_NODE):
+                name = _identifier_of(inner, source) or _type_identifier(inner, source)
+                if name is not None:
+                    out.add(f"{rel_path}::{name}")
+            elif inner.type in (_INTERFACE_NODE, _TYPE_ALIAS_NODE):
+                name = _type_identifier(inner, source)
+                if name is not None:
+                    out.add(f"{rel_path}::{name}")
+            elif inner.type == _LEXICAL_DECLARATION:
+                for declr in inner.children:
+                    if declr.type != _VARIABLE_DECLARATOR:
+                        continue
+                    for cc in declr.children:
+                        if cc.type == "identifier":
+                            name = _node_text(cc, source)
+                            out.add(f"{rel_path}::{name}")
+                            break
+    return out
 
 
 __all__ = ["TypeScriptParser"]
