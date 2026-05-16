@@ -49,12 +49,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-# Bumped per phase as new capability lands. Phase 5 adds cross-area
-# boundary-violation flagging (ADR-016 §7) on top of Phase 4's HTTP
-# matching. Even when ``provider=None`` is passed the analyser version
-# still records that the binary is *capable* of LLM gap-fill — useful
-# for downstream consumers to tell graphs apart across phases.
-_ANALYSER_VERSION = "phase5-multi-0.5.0"
+# Bumped per phase as new capability lands. Phase 7 adds partial-mode
+# (per-area) refresh on top of Phase 5/6. Even when ``provider=None``
+# is passed the analyser version still records that the binary is
+# *capable* of LLM gap-fill — useful for downstream consumers to tell
+# graphs apart across phases.
+_ANALYSER_VERSION = "phase7-multi-0.7.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
@@ -396,6 +396,163 @@ async def run_pipeline(
         public_symbols=all_public_symbols,
         rules=rules,
     )
+
+    return RepoGraphBlob(
+        commit_sha=commit_sha,
+        generated_at=datetime.now(UTC),
+        analyser_version=_ANALYSER_VERSION,
+        areas=statuses,
+        nodes=all_nodes,
+        edges=all_edges,
+        public_symbols=sorted(all_public_symbols),
+    )
+
+
+async def run_partial_pipeline(
+    *,
+    workspace: str,
+    commit_sha: str,
+    target_area: str,
+    previous_blob: RepoGraphBlob,
+    provider: LLMProvider | None = None,
+) -> RepoGraphBlob:
+    """Re-analyse a single area and splice the result into the previous
+    blob (ADR-016 §10 — Phase 7).
+
+    Contract:
+
+    * Only ``target_area``'s files are re-parsed. Nodes and edges from
+      every other area are preserved verbatim from ``previous_blob``.
+    * HTTP matching re-runs across the full node set so a new route in
+      the target area can match an inherited frontend call.
+    * Cross-area boundary flagging re-runs across the full edge set so
+      changes in the target area's public surface re-validate inherited
+      cross-area edges.
+    * Failure isolation: a parser exception inside the target area
+      records ``AreaStatus.status="failed"`` for that area, but never
+      drops the surviving inherited data.
+    * When ``target_area`` is not present in the workspace's discovered
+      area list AND not in ``previous_blob.areas``, the blob records an
+      ``AreaStatus(name=target_area, status="failed", error="unknown
+      area")``. The pipeline still produces a complete blob.
+
+    The output is otherwise indistinguishable from a full refresh
+    against the same workspace state — same node ids, same edge keys,
+    same boundary flags.
+    """
+    discovered = _discover_areas(workspace)
+    discovered_by_name = dict(discovered)
+
+    # ------------------------------------------------------------------
+    # 1. Inherited data — everything *not* in the target area.
+    # ------------------------------------------------------------------
+    inherited_nodes: list[Node] = [n for n in previous_blob.nodes if n.area != target_area]
+    inherited_node_ids = {n.id for n in inherited_nodes}
+    # Inherited edges = those whose source node is preserved. Edges
+    # whose source lives inside the target area are dropped because the
+    # target area is being fully re-parsed.
+    previous_node_areas = {n.id: n.area for n in previous_blob.nodes}
+    inherited_edges: list[Edge] = [
+        e
+        for e in previous_blob.edges
+        if previous_node_areas.get(e.source, target_area) != target_area
+    ]
+    inherited_public_symbols = {
+        s
+        for s in previous_blob.public_symbols
+        if previous_node_areas.get(s, target_area) != target_area
+    }
+    inherited_statuses = [a for a in previous_blob.areas if a.name != target_area]
+
+    # ------------------------------------------------------------------
+    # 2. Re-analyse the target area (when discoverable).
+    # ------------------------------------------------------------------
+    target_nodes: list[Node] = []
+    target_edges: list[Edge] = []
+    target_sites: list[UnresolvedSite] = []
+    target_public_symbols: set[str] = set()
+    target_status: AreaStatus
+
+    if target_area in discovered_by_name:
+        (
+            target_nodes,
+            target_edges,
+            target_sites,
+            target_public_symbols,
+            target_status,
+        ) = _analyse_area(
+            workspace=workspace,
+            area_name=target_area,
+            patterns=discovered_by_name[target_area],
+        )
+    else:
+        # Unknown area — record a failure entry but still produce a
+        # complete blob with the inherited data intact.
+        target_status = AreaStatus(
+            name=target_area,
+            status="failed",
+            error="unknown area",
+            unresolved_dynamic_sites=0,
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Assemble the full node + edge set for cross-area re-validation.
+    # ------------------------------------------------------------------
+    all_nodes = inherited_nodes + target_nodes
+    all_edges = inherited_edges + target_edges
+    all_public_symbols = inherited_public_symbols | target_public_symbols
+
+    # 4. Gap-fill the target area's unresolved sites (when a provider
+    # is supplied).
+    if provider is not None and target_sites:
+        llm_edges = await _run_gap_fill_stage(
+            workspace=workspace,
+            provider=provider,
+            nodes=all_nodes,
+            per_area_sites=[(target_area, target_sites)],
+        )
+        all_edges.extend(llm_edges)
+
+    # 5. Cross-language HTTP matching — re-runs across the whole graph
+    # because a new route in the target area may now match an inherited
+    # frontend call (and vice-versa). Inherited HTTP edges from the
+    # previous blob are dropped first so we don't double-count.
+    all_edges = [e for e in all_edges if e.kind != "http"]
+    try:
+        http_edges = await match_http_edges(
+            workspace_path=workspace,
+            nodes=all_nodes,
+            provider=provider,
+        )
+        all_edges.extend(http_edges)
+    except Exception as e:
+        log.warning(
+            "graph_partial_http_match_stage_failed",
+            error=str(e),
+            error_type=e.__class__.__name__,
+        )
+
+    # 6. Cross-area module-target resolution. Inherited edges already
+    # carry resolved targets, so this is a no-op for them; it primarily
+    # rewrites freshly-parsed target_edges that reference inherited
+    # symbols via ``module:`` placeholders.
+    all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
+
+    # 7. Boundary flagging — re-runs across the full edge set.
+    rules = load_boundary_rules(workspace)
+    all_edges = flag_violations(
+        edges=all_edges,
+        nodes=all_nodes,
+        public_symbols=all_public_symbols,
+        rules=rules,
+    )
+
+    # 8. Areas — preserved order: inherited statuses (in their previous
+    # order) + the target area's fresh status. If the previous blob
+    # already had a status entry for the target_area we drop it and
+    # take the fresh one instead.
+    statuses = [*inherited_statuses, target_status]
+    _ = inherited_node_ids  # silence "assigned but unused" linters
 
     return RepoGraphBlob(
         commit_sha=commit_sha,
