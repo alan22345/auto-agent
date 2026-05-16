@@ -57,6 +57,19 @@ from shared.types import TaskData
 log = setup_logging("agent.lifecycle.conversation")
 
 
+def _is_trio(task) -> bool:
+    """True for complex_large tasks driven by the trio dispatcher (ADR-013).
+
+    Accepts either ORM Task (with TaskComplexity enum) or TaskData
+    (string complexity) — both surface as ``.complexity`` and we
+    normalise via ``.value`` if present.
+    """
+    complexity = getattr(task, "complexity", None)
+    if hasattr(complexity, "value"):
+        complexity = complexity.value
+    return complexity == "complex_large"
+
+
 # Track which tasks have an active conversation running. Module-level sets
 # guard against re-entrant in-process invocations (a second message arriving
 # while the first is still running) — duplicate messages are pushed as
@@ -396,7 +409,11 @@ async def route_human_message(event: Event) -> None:
         await handle_clarification_inbound(task_id, comments)
     elif task.status == "blocked":
         await handle_blocked_response(task_id, task, comments)
+    elif task.status in ("awaiting_review", "iterating") and _is_trio(task):
+        from agent.lifecycle.trio import iteration
+        await iteration.handle_iteration_feedback(task_id, comments)
     elif task.status in ("pr_created", "awaiting_ci", "awaiting_review", "coding") and task.pr_url:
+        # Non-trio path — existing PR-review-comment iteration (simple/complex flows).
         await review.handle_pr_review_comments(task_id, comments)
     elif task.status == "coding" and not task.pr_url:
         # Agent is actively coding — push as guidance for next turn
