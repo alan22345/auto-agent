@@ -56,9 +56,7 @@ async def _user_for_chat_id(chat_id: str) -> dict | None:
     from shared.models import User
 
     async with async_session() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_chat_id == str(chat_id))
-        )
+        result = await session.execute(select(User).where(User.telegram_chat_id == str(chat_id)))
         user = result.scalar_one_or_none()
         if user is None:
             return None
@@ -196,12 +194,8 @@ async def _handle_update(update: dict[str, Any]) -> None:
     if reply_msg_id and not text.startswith("/"):
         task_id = await task_id_for_telegram_message(reply_msg_id)
         if task_id is not None:
-            await _post_task_feedback(
-                task_id, text, sender=f"telegram:{user['username']}"
-            )
-            await send_telegram_async(
-                f"✉️ Sent to task #{task_id}.", chat_id=chat_id
-            )
+            await _post_task_feedback(task_id, text, sender=f"telegram:{user['username']}")
+            await send_telegram_async(f"✉️ Sent to task #{task_id}.", chat_id=chat_id)
             return
 
     if text.startswith("/"):
@@ -216,10 +210,8 @@ async def _handle_update(update: dict[str, Any]) -> None:
 
     # Check if user is rejecting with feedback (e.g. "reject: needs more detail")
     if lower.startswith("reject"):
-        feedback = text[len("reject"):].lstrip(": ").strip()
-        await _handle_approval(
-            approved=False, feedback=feedback, chat_id=chat_id, user=user
-        )
+        feedback = text[len("reject") :].lstrip(": ").strip()
+        await _handle_approval(approved=False, feedback=feedback, chat_id=chat_id, user=user)
         return
 
     # Any other free-text message creates a task on behalf of this user.
@@ -262,15 +254,14 @@ async def _handle_approval(
             resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
             tasks = [TaskData.model_validate(t) for t in resp.json()]
             awaiting = [
-                t for t in tasks
+                t
+                for t in tasks
                 if t.status == "awaiting_approval"
                 and (user_id is None or t.created_by_user_id == user_id)
             ]
 
             if not awaiting:
-                await send_telegram_async(
-                    "No tasks of yours awaiting approval.", chat_id=chat_id
-                )
+                await send_telegram_async("No tasks of yours awaiting approval.", chat_id=chat_id)
                 return
 
             task = awaiting[0]  # Approve the most recent one
@@ -285,17 +276,13 @@ async def _handle_approval(
                     chat_id=chat_id,
                 )
             else:
-                await send_telegram_async(
-                    f"Failed to approve: {resp.text[:200]}", chat_id=chat_id
-                )
+                await send_telegram_async(f"Failed to approve: {resp.text[:200]}", chat_id=chat_id)
     except Exception:
         log.exception("Error handling approval")
         await send_telegram_async("Error processing approval.", chat_id=chat_id)
 
 
-async def _handle_command(
-    text: str, chat_id: str | None = None, user: dict | None = None
-) -> None:
+async def _handle_command(text: str, chat_id: str | None = None, user: dict | None = None) -> None:
     """Process Telegram commands. ``chat_id`` is the sender's chat — every
     response goes back there. ``user`` is the resolved auto-agent user
     (used to scope listings to the sender's own tasks)."""
@@ -312,10 +299,7 @@ async def _handle_command(
                 resp = await client.get(f"{ORCHESTRATOR_URL}/tasks")
                 tasks_raw = resp.json()
             tasks = [TaskData.model_validate(t) for t in tasks_raw]
-            mine = [
-                t for t in tasks
-                if user_id is None or t.created_by_user_id == user_id
-            ]
+            mine = [t for t in tasks if user_id is None or t.created_by_user_id == user_id]
             active = [t for t in mine if t.status not in ("done", "failed")]
             if active:
                 lines = [f"#{t.id} [{t.status}] {t.title[:60]}" for t in active[:5]]
@@ -511,39 +495,55 @@ async def _handle_command(
 # ---------------------------------------------------------------------------
 
 
-def _fmt_task_created(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_created(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     return f"📋 *New task created*\n{task_info}"
 
 
-def _fmt_task_start_planning(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_start_planning(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     feedback = payload.get("feedback")
     if feedback:
         return f"✏️ *Revising plan* based on your feedback\n{task_info}"
     return f"🔍 *Planning started*\n{task_info}"
 
 
-def _fmt_task_start_coding(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_start_coding(
+    _payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     return f"⚡ *Coding started*\n{task_info}"
 
 
-def _fmt_task_rejected(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_rejected(
+    _payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     return f"↩️ *Plan rejected* — revising\n{task_info}"
 
 
-def _fmt_task_done(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_done(
+    _payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     return f"🎉 *Task done*\n{task_info}"
 
 
-def _fmt_task_ci_passed(_payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_ci_passed(
+    _payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     return f"*CI passed* — ready for your review.\n{task_info}"
 
 
-def _fmt_task_ci_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_ci_failed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     reason = payload.get("reason", "")
     return f"❌ *CI failed* — retrying\n{task_info}\n{reason}"
 
 
-def _fmt_task_review_complete(payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_review_complete(
+    payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None
+) -> str:
     pr_url = payload.get("pr_url", "")
     review = payload.get("review", "")
     approved = payload.get("approved", False)
@@ -564,7 +564,9 @@ def _fmt_task_review_complete(payload: dict[str, Any], task_info: str, is_freefo
     )
 
 
-def _fmt_task_plan_ready(payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_plan_ready(
+    payload: dict[str, Any], task_info: str, is_freeform: bool, _task_id: int | None
+) -> str:
     plan = payload.get("plan", "")
     plan_preview = plan[:1500] if plan else "No plan details available."
     if is_freeform:
@@ -575,7 +577,9 @@ def _fmt_task_plan_ready(payload: dict[str, Any], task_info: str, is_freeform: b
     )
 
 
-def _fmt_task_clarification_needed(payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None) -> str:
+def _fmt_task_clarification_needed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None
+) -> str:
     question = payload.get("question", "")
     return (
         f"*Clarification needed*\n{task_info}\n\n❓ {question}\n\n"
@@ -583,7 +587,9 @@ def _fmt_task_clarification_needed(payload: dict[str, Any], task_info: str, _is_
     )
 
 
-def _fmt_task_blocked(payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None) -> str:
+def _fmt_task_blocked(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None
+) -> str:
     reason = payload.get("error", "")
     reason_text = f"\nReason: {reason}" if reason else ""
     return (
@@ -600,39 +606,40 @@ def _gate_task_url(task_id: int | None) -> str:
 
 
 def _fmt_task_awaiting_design_approval(
-    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None,
+    payload: dict[str, Any],
+    task_info: str,
+    _is_freeform: bool,
+    task_id: int | None,
 ) -> str:
     design = (payload.get("design_md") or "").strip()
     url = _gate_task_url(task_id)
     if design:
         trimmed = design[:1500]
-        truncated = (
-            "\n\n_(truncated — full doc in the dashboard)_" if len(design) > 1500 else ""
-        )
+        truncated = "\n\n_(truncated — full doc in the dashboard)_" if len(design) > 1500 else ""
         body = f"\n\n{trimmed}{truncated}"
     else:
         note = (payload.get("message") or "").strip()
         body = f"\n\n{note}" if note else ""
-    return (
-        f"📐 *Design ready for approval*\n{task_info}{body}\n\n"
-        f"Review: {url}"
-    )
+    return f"📐 *Design ready for approval*\n{task_info}{body}\n\nReview: {url}"
 
 
 def _fmt_task_awaiting_plan_approval(
-    payload: dict[str, Any], task_info: str, _is_freeform: bool, task_id: int | None,
+    payload: dict[str, Any],
+    task_info: str,
+    _is_freeform: bool,
+    task_id: int | None,
 ) -> str:
     note = (payload.get("message") or "").strip()
     note_text = f"\n\n{note}" if note else ""
     url = _gate_task_url(task_id)
-    return (
-        f"📝 *Plan ready for approval*\n{task_info}{note_text}\n\n"
-        f"Review: {url}"
-    )
+    return f"📝 *Plan ready for approval*\n{task_info}{note_text}\n\nReview: {url}"
 
 
 def _fmt_task_pr_created(
-    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None,
+    payload: dict[str, Any],
+    task_info: str,
+    _is_freeform: bool,
+    _task_id: int | None,
 ) -> str:
     pr_url = (payload.get("pr_url") or "").strip()
     branch = (payload.get("branch") or "").strip()
@@ -645,12 +652,26 @@ def _fmt_task_pr_created(
     )
 
 
-def _fmt_task_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_iteration_complete(
+    payload: dict[str, Any],
+    task_info: str,
+    _is_freeform: bool,
+    _task_id: int | None,
+) -> str:
+    summary = (payload.get("summary") or "updated PR with your changes").strip()
+    return f"✅ *Iteration complete*\n{task_info}\n{summary}"
+
+
+def _fmt_task_failed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     error = payload.get("error", "unknown")
     return f"*Task failed.*\n{task_info}\nError: {error}"
 
 
-def _fmt_task_dev_deployed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_dev_deployed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     pr_url = payload.get("pr_url", "")
     branch = payload.get("branch", "")
     deploy_output = payload.get("output", "")
@@ -664,23 +685,28 @@ def _fmt_task_dev_deployed(payload: dict[str, Any], task_info: str, _is_freeform
     )
 
 
-def _fmt_task_dev_deploy_failed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_dev_deploy_failed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     pr_url = payload.get("pr_url", "")
     output = payload.get("output", "")
     return f"❌ *Dev deployment failed*\n{task_info}\n{pr_url}\n\n{output}"
 
 
-def _fmt_task_review_comments_addressed(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_review_comments_addressed(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     pr_url = payload.get("pr_url", "")
     output = payload.get("output", "")
     output_preview = output[:500] if output else ""
-    return (
-        f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}"
-        + (f"\n\n{output_preview}" if output_preview else "")
+    return f"*Review comments addressed* — changes pushed.\n{task_info}\n{pr_url}" + (
+        f"\n\n{output_preview}" if output_preview else ""
     )
 
 
-def _fmt_task_subtask_progress(payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_task_subtask_progress(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     current = payload.get("current", "?")
     total = payload.get("total", "?")
     title = payload.get("title", "")
@@ -689,29 +715,35 @@ def _fmt_task_subtask_progress(payload: dict[str, Any], task_info: str, _is_free
     return f"{icon} *Subtask {current}/{total}* — {title} [{status}]\n{task_info}"
 
 
-def _fmt_po_analysis_queued(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_po_analysis_queued(
+    payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     repo_name = payload.get("repo_name", "unknown")
     position = payload.get("position", "?")
     return f"⏳ *PO analysis queued* for `{repo_name}` (position {position})"
 
 
-def _fmt_po_analysis_started(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_po_analysis_started(
+    payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     repo_name = payload.get("repo_name", "unknown")
     return f"🔄 *PO analysis started* for `{repo_name}`"
 
 
-def _fmt_po_suggestions_ready(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_po_suggestions_ready(
+    payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     repo_name = payload.get("repo_name", "unknown")
     count = payload.get("count", 0)
     return f"🧠 *PO analysis complete* — {count} new suggestions for `{repo_name}`"
 
 
-def _fmt_po_analysis_failed(payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None) -> str:
+def _fmt_po_analysis_failed(
+    payload: dict[str, Any], _task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
     repo_name = payload.get("repo_name", "unknown")
     reason = payload.get("reason", "")
-    return f"❌ *PO analysis failed* for `{repo_name}`" + (
-        f"\nReason: {reason}" if reason else ""
-    )
+    return f"❌ *PO analysis failed* for `{repo_name}`" + (f"\nReason: {reason}" if reason else "")
 
 
 # `Formatter` takes (payload, task_info, is_freeform, task_id) and returns the
@@ -745,6 +777,7 @@ _NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
     TaskEventType.AWAITING_DESIGN_APPROVAL: _fmt_task_awaiting_design_approval,
     TaskEventType.AWAITING_PLAN_APPROVAL: _fmt_task_awaiting_plan_approval,
     TaskEventType.PR_CREATED: _fmt_task_pr_created,
+    TaskEventType.ITERATION_COMPLETE: _fmt_task_iteration_complete,
     POEventType.ANALYSIS_QUEUED: _fmt_po_analysis_queued,
     POEventType.ANALYSIS_STARTED: _fmt_po_analysis_started,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,
@@ -821,6 +854,4 @@ async def _notify_user(event: Event) -> None:
             return
 
     message = formatter(event.payload or {}, task_info, is_freeform, event.task_id)
-    await send_telegram_async(
-        message, task_id=event.task_id, chat_id=target_chat
-    )
+    await send_telegram_async(message, task_id=event.task_id, chat_id=target_chat)

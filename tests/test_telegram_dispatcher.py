@@ -48,9 +48,7 @@ RENDERED_EVENTS = [
     task_start_planning(task_id=1),
     task_start_planning(task_id=1, feedback="please redo"),
     task_plan_ready(task_id=1, plan="Step 1\nStep 2"),
-    task_review_complete(
-        task_id=1, review="lgtm", pr_url="http://x", approved=True
-    ),
+    task_review_complete(task_id=1, review="lgtm", pr_url="http://x", approved=True),
     task_review_complete(
         task_id=1,
         review="needs fix",
@@ -60,12 +58,8 @@ RENDERED_EVENTS = [
     ),
     task_blocked(task_id=1, error="needs input"),
     task_failed(task_id=1, error="boom"),
-    task_subtask_progress(
-        task_id=1, current=1, total=3, title="phase 1", status="running"
-    ),
-    task_subtask_progress(
-        task_id=1, current=3, total=3, title="phase 3", status="done"
-    ),
+    task_subtask_progress(task_id=1, current=1, total=3, title="phase 1", status="running"),
+    task_subtask_progress(task_id=1, current=3, total=3, title="phase 3", status="done"),
     po_analysis_queued(repo_name="acme/widget", position=2),
     po_analysis_started(repo_name="acme/widget"),
     po_suggestions_ready(repo_name="acme/widget", count=3),
@@ -145,17 +139,23 @@ def test_dispatcher_covers_only_intended_event_set():
         TaskEventType.REVIEW_COMMENTS_ADDRESSED,
         TaskEventType.DEV_DEPLOY_FAILED,
         TaskEventType.SUBTASK_PROGRESS,
+        TaskEventType.AWAITING_DESIGN_APPROVAL,
+        TaskEventType.AWAITING_PLAN_APPROVAL,
+        TaskEventType.PR_CREATED,
+        TaskEventType.ITERATION_COMPLETE,
         POEventType.ANALYSIS_QUEUED,
         POEventType.ANALYSIS_STARTED,
         POEventType.SUGGESTIONS_READY,
         POEventType.ANALYSIS_FAILED,
-        # ADR-015 Phase 7.7 — gate-open notifications.
-        TaskEventType.AWAITING_DESIGN_APPROVAL,
-        TaskEventType.AWAITING_PLAN_APPROVAL,
-        # Trio integration-PR notification — pre-fix, opening the
-        # integration PR transitioned silently and the user got no
-        # notification between task.created and the (often skipped)
-        # gate events.
-        TaskEventType.PR_CREATED,
     }
     assert set(_NOTIFICATION_FORMATTERS.keys()) == expected
+
+
+def test_iteration_complete_renders_in_telegram():
+    from integrations.telegram.main import _NOTIFICATION_FORMATTERS
+    from shared.events import TaskEventType
+
+    assert TaskEventType.ITERATION_COMPLETE in _NOTIFICATION_FORMATTERS
+    fmt = _NOTIFICATION_FORMATTERS[TaskEventType.ITERATION_COMPLETE]
+    msg = fmt({"summary": "updated PR with your changes"}, "task info", False, 42)
+    assert "updated PR" in msg

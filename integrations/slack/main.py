@@ -609,6 +609,15 @@ def _fmt_task_pr_created(p, info, _ff, _tid):
     )
 
 
+def _fmt_task_iteration_complete(p, info, _ff, tid):
+    summary = (p.get("summary") or "updated PR with your changes").strip()
+    url = _gate_task_url(tid)
+    return (
+        f"✅ *Iteration complete*\n{info}\n{summary}\n\n"
+        f"PR updated with new commits. Open the task: {url}"
+    )
+
+
 def _fmt_po_suggestions_ready(p, info, _ff, _tid):
     repo = p.get("repo_name", "?")
     n = p.get("count", 0)
@@ -631,6 +640,7 @@ _NOTIFICATION_FORMATTERS = {
     TaskEventType.AWAITING_DESIGN_APPROVAL: _fmt_task_awaiting_design_approval,
     TaskEventType.AWAITING_PLAN_APPROVAL: _fmt_task_awaiting_plan_approval,
     TaskEventType.PR_CREATED: _fmt_task_pr_created,
+    TaskEventType.ITERATION_COMPLETE: _fmt_task_iteration_complete,
     TaskEventType.FAILED: _fmt_task_failed,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,
 }
