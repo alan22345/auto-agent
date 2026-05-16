@@ -87,7 +87,8 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },  # approved, changes, cycle-2 failure, or ADR-017 iteration feedback
     # ADR-017 — trio iteration: user gives PR feedback → ITERATING; architect
     # appends new backlog items; per-item loop drains → AWAITING_REVIEW again.
-    TaskStatus.ITERATING: {TaskStatus.AWAITING_REVIEW, TaskStatus.BLOCKED},
+    # Also allow ITERATING → DONE for merge-during-iteration race (GitHub webhook).
+    TaskStatus.ITERATING: {TaskStatus.AWAITING_REVIEW, TaskStatus.BLOCKED, TaskStatus.DONE},
     TaskStatus.BLOCKED: {
         TaskStatus.CODING,
         TaskStatus.PLANNING,
