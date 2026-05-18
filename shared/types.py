@@ -22,7 +22,7 @@ class RiskLevel(str, Enum):
 
 
 class ClassificationResult(BaseModel):
-    classification: Literal["simple", "complex", "simple_no_code"]
+    classification: Literal["simple", "complex", "complex_large", "simple_no_code", "scaffold"]
     reasoning: str = ""
     estimated_files: int = 0
     risk: RiskLevel = RiskLevel.LOW
@@ -659,3 +659,209 @@ class ReviewAttemptOut(BaseModel):
     log_tail: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
+
+
+# --- Architect/Builder/Reviewer trio types ---
+
+
+class WorkItem(BaseModel):
+    """One backlog item the architect dispatches to a builder child task."""
+    id: str
+    title: str
+    description: str
+    status: Literal["pending", "in_progress", "done", "skipped"] = "pending"
+    assigned_task_id: int | None = None
+    discovered_in_attempt_id: int | None = None
+
+
+class RepairContext(BaseModel):
+    """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
+    ci_log: str
+    failed_pr_url: str
+
+
+class ArchitectDecision(BaseModel):
+    """The decision field on an ArchitectAttempt row when phase=checkpoint."""
+    action: Literal["continue", "revise", "done", "awaiting_clarification", "blocked"]
+    reason: str | None = None
+    question: str | None = None  # only when action=awaiting_clarification
+
+
+class ArchitectAttemptOut(BaseModel):
+    """API shape for an architect_attempts row."""
+    id: int
+    task_id: int
+    phase: Literal["initial", "consult", "checkpoint", "revision"]
+    cycle: int
+    reasoning: str
+    decision: dict | None = None
+    consult_question: str | None = None
+    consult_why: str | None = None
+    architecture_md_after: str | None = None
+    commit_sha: str | None = None
+    tool_calls: list[dict]
+    # Clarification fields (set when decision.action="awaiting_clarification").
+    # session_blob_path stays internal — not exposed here.
+    clarification_question: str | None = None
+    clarification_answer: str | None = None
+    clarification_source: Literal["user", "po"] | None = None
+    created_at: datetime
+
+
+class TrioReviewAttemptOut(BaseModel):
+    """API shape for a trio_review_attempts row."""
+    id: int
+    task_id: int
+    cycle: int
+    ok: bool
+    feedback: str
+    tool_calls: list[dict]
+    created_at: datetime
+
+
+class DecisionOut(BaseModel):
+    """API shape for one ADR file under ``docs/decisions/``."""
+    filename: str
+    title: str
+    url: str
+
+
+# --- Gate decision audit types — ADR-015 §6 Phase 12 ---
+
+
+class PlanApprovalRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/approve-plan.
+
+    Writes ``.auto-agent/plan_approval.json`` and persists a
+    :class:`shared.models.GateDecision` row so the gate-history audit
+    panel can render the human's verdict alongside any standin ones.
+    """
+
+    verdict: Literal["approved", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class GateDecisionOut(BaseModel):
+    """One row in the gate-history audit panel — ADR-015 §6.
+
+    Stable wire shape across user and standin sources so the panel
+    doesn't have to branch on origin to render an entry.
+    """
+
+    id: int
+    task_id: int
+    gate: str  # "grill" | "plan_approval" | "design_approval" | "pr_review"
+    source: str  # "user" | "po_standin" | "improvement_standin"
+    agent_id: str | None = None
+    verdict: str
+    comments: str = ""
+    cited_context: list[str] = Field(default_factory=list)
+    fallback_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class GateArtefact(BaseModel):
+    """Markdown content the human or standin is being asked to approve.
+
+    Returned by GET /api/tasks/{id}/gate-artefact so the web-next UI can
+    render ``.auto-agent/plan.md`` (complex flow) or ``.auto-agent/design.md``
+    (complex_large flow) without the orchestrator hard-coding which file
+    is "the artefact" — the resolution is driven by task status.
+    """
+
+    kind: Literal["plan", "design"]
+    path: str
+    body: str
+
+
+# --- Scaffold (ADR-018) gate types ---
+
+
+class ScaffoldIntentGrillAnswerRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/intent-grill-answer.
+
+    Writes ``.auto-agent/intent_grill_answer.json`` so the intent-grill
+    agent's session can resume with the user's answer to its pending
+    question (ADR-018 §2).
+    """
+
+    answer: str = Field(min_length=1, max_length=20_000)
+
+
+class ScaffoldRootAdrVerdictRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/root-adr-verdict.
+
+    The verdict is applied via
+    ``agent.lifecycle.scaffold.root_adr_approval.apply_verdict`` which
+    persists the verdict to ``.auto-agent/root_adr_approval.json`` and
+    transitions the state machine (ADR-018 §4).
+    """
+
+    verdict: Literal["approved", "revise", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class ScaffoldDomainAdrVerdictRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/domain-adr-verdict.
+
+    The endpoint records a per-domain verdict; the parent advances to
+    DISPATCHING_DOMAIN_BUILDS only when every domain ADR has a
+    non-``revise`` verdict (ADR-018 §6).
+    """
+
+    domain_slug: str = Field(min_length=1, max_length=128)
+    verdict: Literal["approved", "revise", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class ScaffoldDomainAdrEntry(BaseModel):
+    """One domain ADR entry returned by
+    GET /api/tasks/{id}/scaffold/domain-adrs.
+
+    ``approval`` is omitted when no verdict file exists yet for the slug;
+    when present it carries the latest persisted verdict so the UI can
+    render the current state without a second round-trip.
+    """
+
+    slug: str
+    name: str = ""
+    index: int
+    markdown: str = ""
+    approval: dict | None = None
+
+
+class ScaffoldArtefactMarkdown(BaseModel):
+    """Markdown body of a scaffold artefact (intent.md or root ADR).
+
+    Symmetric with :class:`GateArtefact` but kept distinct because
+    scaffold artefacts don't carry a ``kind`` discriminator — the
+    endpoint URL fixes the file.
+    """
+
+    markdown: str
+
+
+class ScaffoldDomainGrillAnswerRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/domain-grill-answer.
+
+    Writes ``.auto-agent/domain_grill_answers/<slug>.json`` so the
+    domain-grill agent's session can resume with the user's answer to
+    its pending question (ADR-018 §5, Stage 8). The ``domain_slug``
+    identifies which domain's grill is being answered.
+    """
+
+    domain_slug: str = Field(min_length=1, max_length=128)
+    answer: str = Field(min_length=1, max_length=20_000)
+
+
+class ScaffoldDomainGrillQuestion(BaseModel):
+    """The pending domain-grill question for one domain.
+
+    Returned by GET /api/tasks/{id}/scaffold/domain-grill-question?slug=...
+    when the SCAFFOLD parent is parked in ``AWAITING_DOMAIN_GRILL`` and
+    a question file has been written under
+    ``.auto-agent/domain_grill_questions/<slug>.json``.
+    """
+
+    domain_slug: str
+    question: str

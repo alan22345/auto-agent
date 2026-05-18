@@ -245,27 +245,22 @@ async def create_repo_and_scaffold_task(
     if not title.lower().startswith(("scaffold", "build", "create")):
         title = f"Scaffold: {title}"
 
-    scaffold_description = (
-        f"This is a brand-new empty repository. Scaffold the initial codebase from scratch.\n\n"
-        f"## What the user wants\n{description}\n\n"
-        f"## Instructions\n"
-        f"1. Pick an appropriate tech stack and project structure for what the user described.\n"
-        f"2. Initialize the project: package manifests, .gitignore, README, and any setup files needed.\n"
-        f"3. Implement a working first version that demonstrates the core functionality end-to-end.\n"
-        f"4. Commit your work with a clear message.\n"
-        f"\n"
-        f"The repo currently only contains an auto-generated README. Feel free to overwrite it."
-    )
-
+    # ADR-018 — SCAFFOLD complexity routes to ``run_scaffold_parent`` (see
+    # run.py::on_task_classified), which kicks off the intent-grill phase
+    # before architects/builders run. The intent-grill phase produces the
+    # refined intent.md the architects read, so we store the user's raw
+    # description here verbatim instead of the long templated scaffold
+    # instructions the old single-trio flow needed.
+    #
+    # Status stays at INTAKE so the standard ``on_task_created`` pipeline
+    # picks the task up; the SCAFFOLD branch in ``on_task_classified``
+    # owns the transition to AWAITING_INTENT_GRILL.
     task = Task(
         title=title,
-        description=scaffold_description,
+        description=description,
         source=TaskSource.MANUAL,
         status=TaskStatus.INTAKE,
-        # Pre-classify scaffold tasks as complex so they go through the
-        # planning + auto-review pipeline regardless of what the keyword
-        # classifier might guess from the description text.
-        complexity=TaskComplexity.COMPLEX,
+        complexity=TaskComplexity.SCAFFOLD,
         repo_id=primary_repo.id,
         freeform_mode=True,
         organization_id=organization_id,

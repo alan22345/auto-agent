@@ -61,13 +61,13 @@ from shared.models import (
     Suggestion,
     SuggestionStatus,
     Task,
+    TaskComplexity,
     TaskHistory,
     TaskMessage,
     TaskSource,
     TaskStatus,
     User,
     VerifyAttempt,
-    intake_qa_for_suggestion,
 )
 from shared.task_channel import task_channel
 from shared.types import (
@@ -89,6 +89,13 @@ from shared.types import (
     RepoGraphRefreshResponse,
     RepoResponse,
     ReviewAttemptOut,
+    ScaffoldArtefactMarkdown,
+    ScaffoldDomainAdrEntry,
+    ScaffoldDomainAdrVerdictRequest,
+    ScaffoldDomainGrillAnswerRequest,
+    ScaffoldDomainGrillQuestion,
+    ScaffoldIntentGrillAnswerRequest,
+    ScaffoldRootAdrVerdictRequest,
     ScheduleResponse,
     SecretListResponse,
     SecretPutRequest,
@@ -1370,6 +1377,915 @@ async def approve_task(
     return _task_to_response(task)
 
 
+# ADR-015 §2 + §6 Phase 12 — plan/design approval gate, persisted gate
+# history audit log, and the markdown body the UI renders for the user.
+
+_GATE_STATUS_TO_ARTEFACT: dict[TaskStatus, tuple[str, str]] = {
+    # task status → (artefact kind, relative path under workspace)
+    TaskStatus.AWAITING_PLAN_APPROVAL: ("plan", ".auto-agent/plan.md"),
+    TaskStatus.AWAITING_DESIGN_APPROVAL: ("design", ".auto-agent/design.md"),
+}
+
+_GATE_STATUS_TO_NEXT: dict[TaskStatus, tuple[TaskStatus, TaskStatus]] = {
+    # task status → (next on approved, next on rejected)
+    TaskStatus.AWAITING_PLAN_APPROVAL: (TaskStatus.CODING, TaskStatus.BLOCKED),
+    TaskStatus.AWAITING_DESIGN_APPROVAL: (
+        TaskStatus.ARCHITECT_BACKLOG_EMIT,
+        TaskStatus.BLOCKED,
+    ),
+}
+
+
+def _task_workspace_root(task: Task) -> str:
+    """Resolve the on-disk workspace root for a task.
+
+    Imported lazily so this module doesn't take a build-time dependency
+    on the agent layer (legacy `orchestrator → web` boundary stays
+    one-way).
+    """
+
+    from agent.workspace import _workspace_path
+
+    return _workspace_path(
+        task_id=task.id,
+        organization_id=task.organization_id,
+    )
+
+
+@router.get("/tasks/{task_id}/gate-artefact", response_model=GateArtefact)
+async def get_gate_artefact(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GateArtefact:
+    """Return the markdown artefact (plan.md / design.md) for the current gate.
+
+    The web-next approval surface calls this to render the body the user
+    is about to approve or reject. Resolution is driven by task status
+    (plan for AWAITING_PLAN_APPROVAL, design for AWAITING_DESIGN_APPROVAL)
+    so the UI never needs to know which file lives where.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    mapping = _GATE_STATUS_TO_ARTEFACT.get(task.status)
+    if mapping is None:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting plan/design approval",
+        )
+    kind, rel_path = mapping
+    abs_path = os.path.join(_task_workspace_root(task), rel_path)
+    if not os.path.exists(abs_path):
+        raise HTTPException(
+            404,
+            f"Gate artefact missing on disk: {rel_path} — orchestrator did not write it",
+        )
+    with open(abs_path) as fh:
+        body = fh.read()
+    # Phase 7.6 — strip the task-id header from design.md before serving to
+    # the UI so the rendered design stays clean. (Header lives only on
+    # design.md, not plan.md, but strip_design_header is a no-op when no
+    # header is present.)
+    if kind == "design":
+        from agent.lifecycle.workspace_paths import strip_design_header
+
+        body = strip_design_header(body)
+    return GateArtefact(kind=kind, path=rel_path, body=body)
+
+
+@router.post("/tasks/{task_id}/approve-plan", response_model=TaskData)
+async def approve_plan(
+    task_id: int,
+    req: PlanApprovalRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Approve or reject the current plan/design gate — ADR-015 §2 / §6.
+
+    Writes ``.auto-agent/plan_approval.json`` (the contract the
+    plan-approval lifecycle module reads), persists a ``GateDecision``
+    row with ``source="user"`` so the audit panel can render the
+    decision, publishes a symmetric ``standin.decision`` event so any
+    live consumers (web-next websocket, telemetry) see the user's verdict
+    in the same shape as a standin's, and transitions the state machine.
+
+    Accepts both AWAITING_PLAN_APPROVAL (complex flow) and
+    AWAITING_DESIGN_APPROVAL (complex_large flow) — the design doc is the
+    single approval artefact per §2; only the post-approval state differs.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    next_states = _GATE_STATUS_TO_NEXT.get(task.status)
+    if next_states is None:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting plan/design approval",
+        )
+
+    # 1. Write the canonical gate file — same contract the freeform
+    #    standin writes; the plan_approval lifecycle module reads either.
+    workspace = _task_workspace_root(task)
+    auto_dir = os.path.join(workspace, ".auto-agent")
+    os.makedirs(auto_dir, exist_ok=True)
+    approval_path = os.path.join(auto_dir, "plan_approval.json")
+    import json as _json
+
+    with open(approval_path, "w") as fh:
+        _json.dump(
+            {
+                "schema_version": "1",
+                "verdict": req.verdict,
+                "comments": req.comments,
+                "source": "user",
+                "agent_id": None,
+                "written_at": datetime.now(UTC).isoformat(),
+            },
+            fh,
+            indent=2,
+        )
+
+    # 2. Persist the gate decision (audit trail the web-next panel renders).
+    gate_name = (
+        "design_approval" if task.status == TaskStatus.AWAITING_DESIGN_APPROVAL else "plan_approval"
+    )
+    session.add(
+        GateDecision(
+            task_id=task.id,
+            gate=gate_name,
+            source="user",
+            agent_id=None,
+            verdict=req.verdict,
+            comments=req.comments,
+            cited_context=[],
+            fallback_reasons=[],
+        )
+    )
+
+    # 3. Transition the state machine.
+    approved_next, rejected_next = next_states
+    to_status = approved_next if req.verdict == "approved" else rejected_next
+    message = f"Plan {req.verdict} by user" + (f": {req.comments[:200]}" if req.comments else "")
+    starting_status = task.status
+    task = await transition(session, task, to_status, message)
+    await session.commit()
+
+    # 4. Publish a standin.decision event symmetric with the freeform path
+    #    — same event type, same payload shape, so the web-next gate-history
+    #    refresh trigger and any other consumers don't have to branch.
+    try:
+        from shared.events import Event
+
+        await publish(
+            Event(
+                type="standin.decision",
+                task_id=task.id,
+                payload={
+                    "standin_kind": "user",
+                    "agent_id": None,
+                    "gate": gate_name,
+                    "decision": req.verdict,
+                    "cited_context": [],
+                    "task_id": task.id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "fallback_reasons": [],
+                    "source": "user",
+                },
+            )
+        )
+    except Exception:  # pragma: no cover — event publish is audit-only
+        pass
+
+    # 5. ADR-015 §2 / Phase 7.5 — wake the orchestrator on design approval.
+    #    The state-machine transition above moves a complex_large task to
+    #    ARCHITECT_BACKLOG_EMIT, but nothing else picks it up. Emit a
+    #    DESIGN_APPROVED event so the orchestrator's handler re-enters
+    #    ``run_trio_parent`` and the architect emits the backlog. Plan-gate
+    #    approvals (complex flow) are deliberately excluded — that flow's
+    #    coding kick will be wired separately if/when it becomes load-bearing.
+    if starting_status == TaskStatus.AWAITING_DESIGN_APPROVAL and req.verdict == "approved":
+        try:
+            from shared.events import Event, TaskEventType
+
+            await publish(
+                Event(
+                    type=TaskEventType.DESIGN_APPROVED,
+                    task_id=task.id,
+                )
+            )
+        except Exception:  # pragma: no cover — best-effort wake signal
+            pass
+
+    return _task_to_response(task)
+
+
+@router.get(
+    "/tasks/{task_id}/gate-history",
+    response_model=list[GateDecisionOut],
+)
+async def list_gate_history(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[GateDecisionOut]:
+    """Return every persisted gate decision for a task — ADR-015 §6.
+
+    Oldest decision first so the audit panel reads top-to-bottom in the
+    same order the gates fired. Both user-driven and freeform-standin
+    decisions land in the same table via the symmetric write paths, so
+    this endpoint doesn't branch on origin.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    rows = (
+        (
+            await session.execute(
+                select(GateDecision)
+                .where(GateDecision.task_id == task_id)
+                .order_by(GateDecision.created_at.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        GateDecisionOut(
+            id=r.id,
+            task_id=r.task_id,
+            gate=r.gate,
+            source=r.source,
+            agent_id=r.agent_id,
+            verdict=r.verdict or "",
+            comments=r.comments or "",
+            cited_context=list(r.cited_context or []),
+            fallback_reasons=list(r.fallback_reasons or []),
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# ADR-018 Stage 5 — scaffold gate endpoints.
+#
+# A SCAFFOLD parent task passes through three user-facing gates:
+#   • AWAITING_INTENT_GRILL          — user answers the agent's question.
+#   • AWAITING_ROOT_ADR_APPROVAL     — user verdicts the root ADR.
+#   • AWAITING_DOMAIN_ADR_APPROVAL   — user verdicts each domain ADR.
+#
+# All three POST endpoints mirror ``approve-plan``'s style: cookie/header
+# auth, org scoping via ``_get_task_in_org``, a websocket
+# ``standin.decision`` publish so live UIs see the verdict on the same
+# event channel as the trio gates, and returning the updated
+# :class:`TaskData`. Transition rules live in the scaffold lifecycle
+# package; the router is a thin glue layer.
+# ---------------------------------------------------------------------------
+
+
+# Captures the title from the first ``# ...`` heading. We strip a
+# leading ``[…]`` ADR-style prefix (e.g. ``# [ADR-002] Billing``) only
+# when one is actually present so plain headings like ``# Auth domain``
+# round-trip unchanged.
+_SCAFFOLD_ADR_NAME_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+_SCAFFOLD_ADR_BRACKET_PREFIX_RE = re.compile(r"^\[[^\]]*\]\s*")
+
+
+def _publish_scaffold_decision(
+    *,
+    task_id: int,
+    gate: str,
+    verdict: str,
+    comments: str,
+    extra: dict | None = None,
+) -> None:
+    """Fire-and-forget publish of a ``standin.decision`` event.
+
+    Symmetric with the publish in ``approve_plan`` so the
+    gate-history WS refresh and any other live consumers see scaffold
+    verdicts on the same channel as plan/design verdicts.
+    """
+
+    try:
+        from shared.events import Event
+
+        payload: dict = {
+            "standin_kind": "user",
+            "agent_id": None,
+            "gate": gate,
+            "decision": verdict,
+            "cited_context": [],
+            "task_id": task_id,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "fallback_reasons": [],
+            "source": "user",
+            "comments": comments,
+        }
+        if extra:
+            payload.update(extra)
+        import asyncio as _asyncio
+
+        _asyncio.create_task(  # noqa: RUF006 — fire-and-forget audit publish
+            publish(
+                Event(
+                    type="standin.decision",
+                    task_id=task_id,
+                    payload=payload,
+                )
+            )
+        )
+    except Exception:  # pragma: no cover — event publish is audit-only
+        pass
+
+
+def _dispatch_scaffold_driver(task_id: int) -> None:
+    """Fire-and-forget re-invocation of ``run_scaffold_parent``.
+
+    Imported lazily so the router does not take a build-time dependency
+    on the agent layer at module load. The driver loads its own fresh
+    task row, so we only need to hand it an in-memory shell with the id
+    populated — but the easier path is to reload from the DB before
+    calling.
+    """
+
+    import asyncio as _asyncio
+
+    async def _go() -> None:
+        try:
+            from agent.lifecycle.scaffold import run_scaffold_parent
+            from shared.database import async_session as _async_session_local
+
+            async with _async_session_local() as s:
+                t = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+            await run_scaffold_parent(t)
+        except Exception:  # pragma: no cover — driver invocation is best-effort
+            import structlog
+
+            structlog.get_logger().exception(
+                "scaffold.router.driver_dispatch_failed", task_id=task_id
+            )
+
+    _asyncio.create_task(_go())  # noqa: RUF006 — fire-and-forget driver kick
+
+
+@router.post(
+    "/tasks/{task_id}/scaffold/intent-grill-answer",
+    response_model=TaskData,
+)
+async def scaffold_intent_grill_answer(
+    task_id: int,
+    req: ScaffoldIntentGrillAnswerRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Record the user's answer to the intent-grill agent's pending question.
+
+    Only valid when the task is a SCAFFOLD parent in
+    AWAITING_INTENT_GRILL. The answer lands at
+    ``.auto-agent/intent_grill_answer.json`` (the contract the
+    intent-grill phase reads when resuming) and the scaffold driver is
+    re-invoked so the agent's session can pick up.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.complexity != TaskComplexity.SCAFFOLD:
+        raise HTTPException(
+            400,
+            f"Task is not a SCAFFOLD parent (complexity={task.complexity!r})",
+        )
+    if task.status != TaskStatus.AWAITING_INTENT_GRILL:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting intent grill",
+        )
+
+    from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH
+
+    workspace = _task_workspace_root(task)
+    answer_abs = os.path.join(workspace, INTENT_GRILL_ANSWER_PATH)
+    os.makedirs(os.path.dirname(answer_abs), exist_ok=True)
+    import json as _json
+
+    with open(answer_abs, "w") as fh:
+        _json.dump(
+            {
+                "schema_version": "1",
+                "answer": req.answer,
+                "source": "user",
+                "written_at": datetime.now(UTC).isoformat(),
+            },
+            fh,
+            indent=2,
+        )
+
+    # Audit publish — same event taxonomy as approve-plan so the
+    # gate-history WS refresh trigger picks this up.
+    _publish_scaffold_decision(
+        task_id=task.id,
+        gate="intent_grill",
+        verdict="answered",
+        comments=req.answer[:500],
+    )
+
+    # Re-invoke the driver so the intent-grill agent can resume.
+    _dispatch_scaffold_driver(task.id)
+
+    return _task_to_response(task)
+
+
+@router.post(
+    "/tasks/{task_id}/scaffold/root-adr-verdict",
+    response_model=TaskData,
+)
+async def scaffold_root_adr_verdict(
+    task_id: int,
+    req: ScaffoldRootAdrVerdictRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Apply the user's verdict on the root ADR — ADR-018 §4.
+
+    Delegates to
+    ``agent.lifecycle.scaffold.root_adr_approval.apply_verdict`` which
+    owns the transition rules (approved → BUILDING_DOMAIN_ADRS, revise →
+    BUILDING_ROOT_ADR bounded at 3 rounds, rejected → BLOCKED). On a
+    state-advancing verdict the scaffold driver is re-invoked so the
+    next phase starts immediately.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.status != TaskStatus.AWAITING_ROOT_ADR_APPROVAL:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting root ADR approval",
+        )
+
+    # Persist a GateDecision audit row matching the approve-plan shape.
+    session.add(
+        GateDecision(
+            task_id=task.id,
+            gate="root_adr_approval",
+            source="user",
+            agent_id=None,
+            verdict=req.verdict,
+            comments=req.comments,
+            cited_context=[],
+            fallback_reasons=[],
+        )
+    )
+    await session.commit()
+
+    # Delegate transition + verdict-file persistence to the lifecycle module.
+    from agent.lifecycle.scaffold.root_adr_approval import (
+        apply_verdict as apply_root_adr_verdict,
+    )
+
+    try:
+        await apply_root_adr_verdict(
+            task.id,
+            {"verdict": req.verdict, "comments": req.comments},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    _publish_scaffold_decision(
+        task_id=task.id,
+        gate="root_adr_approval",
+        verdict=req.verdict,
+        comments=req.comments,
+    )
+
+    # Kick the driver so it picks up the new state.
+    if req.verdict in {"approved", "revise"}:
+        _dispatch_scaffold_driver(task.id)
+
+    # Reload the task — apply_verdict committed in a separate session.
+    refreshed = await _get_task_in_org(session, task_id, org_id)
+    await session.refresh(refreshed) if refreshed is not None else None
+    return _task_to_response(refreshed or task)
+
+
+@router.post(
+    "/tasks/{task_id}/scaffold/domain-adr-verdict",
+    response_model=TaskData,
+)
+async def scaffold_domain_adr_verdict(
+    task_id: int,
+    req: ScaffoldDomainAdrVerdictRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Apply a per-domain ADR verdict — ADR-018 §6.
+
+    Each domain ADR has its own verdict file under
+    ``.auto-agent/domain_adr_approvals/<slug>.json``. The parent
+    transitions to DISPATCHING_DOMAIN_BUILDS only when every domain has
+    a non-``revise`` verdict. ``revise`` is bounded at 3 rounds; the 4th
+    is auto-rejected by ``apply_verdict``.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.status != TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting domain ADR approval",
+        )
+
+    session.add(
+        GateDecision(
+            task_id=task.id,
+            gate="domain_adr_approval",
+            source="user",
+            agent_id=None,
+            verdict=req.verdict,
+            comments=req.comments,
+            cited_context=[req.domain_slug],
+            fallback_reasons=[],
+        )
+    )
+    await session.commit()
+
+    from agent.lifecycle.scaffold.domain_adr_approval import (
+        apply_verdict as apply_domain_adr_verdict,
+    )
+
+    try:
+        new_status = await apply_domain_adr_verdict(
+            task.id,
+            req.domain_slug,
+            {"verdict": req.verdict, "comments": req.comments},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    _publish_scaffold_decision(
+        task_id=task.id,
+        gate="domain_adr_approval",
+        verdict=req.verdict,
+        comments=req.comments,
+        extra={"domain_slug": req.domain_slug},
+    )
+
+    # Re-invoke the driver only when the state advances out of the gate
+    # — partial waits should not start a new phase.
+    if new_status != TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL:
+        _dispatch_scaffold_driver(task.id)
+
+    refreshed = await _get_task_in_org(session, task_id, org_id)
+    await session.refresh(refreshed) if refreshed is not None else None
+    return _task_to_response(refreshed or task)
+
+
+# ---------------------------------------------------------------------------
+# ADR-018 Stage 8 — per-domain grill answer endpoint.
+#
+# The domain-grill agent pauses on a clarifying question (written to
+# ``.auto-agent/domain_grill_questions/<slug>.json`` via the
+# ``submit-domain-grill-question`` skill) and the SCAFFOLD parent parks
+# in AWAITING_DOMAIN_GRILL. This endpoint records the user's answer,
+# transitions the parent back to BUILDING_DOMAIN_ADRS, and re-invokes
+# the scaffold driver so the grill agent's session can resume.
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/tasks/{task_id}/scaffold/domain-grill-answer",
+    response_model=TaskData,
+)
+async def scaffold_domain_grill_answer(
+    task_id: int,
+    req: ScaffoldDomainGrillAnswerRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> TaskData:
+    """Record the user's answer to a domain-grill agent's pending question.
+
+    Only valid when the task is a SCAFFOLD parent parked in
+    ``AWAITING_DOMAIN_GRILL``. The answer lands at
+    ``.auto-agent/domain_grill_answers/<slug>.json`` (the contract the
+    domain-grill phase reads when resuming). The state machine transitions
+    back to ``BUILDING_DOMAIN_ADRS`` and the scaffold driver is re-invoked
+    so the agent's session can pick up.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.complexity != TaskComplexity.SCAFFOLD:
+        raise HTTPException(
+            400,
+            f"Task is not a SCAFFOLD parent (complexity={task.complexity!r})",
+        )
+    if task.status != TaskStatus.AWAITING_DOMAIN_GRILL:
+        raise HTTPException(
+            400,
+            f"Task is in {task.status.value}, not awaiting domain grill",
+        )
+
+    from agent.lifecycle.workspace_paths import domain_grill_answer_path
+
+    workspace = _task_workspace_root(task)
+    answer_rel = domain_grill_answer_path(req.domain_slug)
+    answer_abs = os.path.join(workspace, answer_rel)
+    os.makedirs(os.path.dirname(answer_abs), exist_ok=True)
+    import json as _json
+
+    with open(answer_abs, "w") as fh:
+        _json.dump(
+            {
+                "schema_version": "1",
+                "domain_slug": req.domain_slug,
+                "answer": req.answer,
+                "source": "user",
+                "written_at": datetime.now(UTC).isoformat(),
+            },
+            fh,
+            indent=2,
+        )
+
+    # Audit row matches the existing scaffold gate shape.
+    session.add(
+        GateDecision(
+            task_id=task.id,
+            gate="domain_grill",
+            source="user",
+            agent_id=None,
+            verdict="answered",
+            comments=req.answer[:5000],
+            cited_context=[req.domain_slug],
+            fallback_reasons=[],
+        )
+    )
+
+    # Transition AWAITING_DOMAIN_GRILL → BUILDING_DOMAIN_ADRS so the driver
+    # re-enters the domain loop on the same domain index (persisted on
+    # task.subtasks). The state-machine guard makes sure the only legal
+    # next-status from AWAITING_DOMAIN_GRILL is BUILDING_DOMAIN_ADRS or
+    # BLOCKED, so a misrouted call can't slide the state forward.
+    from orchestrator.state_machine import transition as _transition
+
+    await _transition(
+        session,
+        task,
+        TaskStatus.BUILDING_DOMAIN_ADRS,
+        message=(
+            f"Domain grill answer received for `{req.domain_slug}`; "
+            "resuming domain loop"
+        ),
+    )
+    await session.commit()
+
+    _publish_scaffold_decision(
+        task_id=task.id,
+        gate="domain_grill",
+        verdict="answered",
+        comments=req.answer[:500],
+        extra={"domain_slug": req.domain_slug},
+    )
+
+    # Re-invoke the driver so the grill agent's session resumes.
+    _dispatch_scaffold_driver(task.id)
+
+    return _task_to_response(task)
+
+
+@router.get(
+    "/tasks/{task_id}/scaffold/domain-grill-question",
+    response_model=ScaffoldDomainGrillQuestion,
+)
+async def get_scaffold_domain_grill_question(
+    task_id: int,
+    slug: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> ScaffoldDomainGrillQuestion:
+    """Return the pending domain-grill question for ``slug``, or 404.
+
+    The web-next ``DomainGrillCard`` calls this when the task is in
+    AWAITING_DOMAIN_GRILL to render the question the user must answer.
+    The question file is written by the domain-grill agent via the
+    ``submit-domain-grill-question`` skill and lives at
+    ``.auto-agent/domain_grill_questions/<slug>.json``.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    from agent.lifecycle.workspace_paths import domain_grill_question_path
+
+    abs_path = os.path.join(_task_workspace_root(task), domain_grill_question_path(slug))
+    if not os.path.isfile(abs_path):
+        raise HTTPException(404, "no pending domain-grill question for that slug")
+    import json as _json
+
+    try:
+        with open(abs_path) as fh:
+            payload = _json.load(fh)
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise HTTPException(500, "domain grill question file unreadable") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(500, "domain grill question payload malformed")
+    question = payload.get("question")
+    if not question:
+        raise HTTPException(404, "no pending domain-grill question for that slug")
+    return ScaffoldDomainGrillQuestion(
+        domain_slug=str(payload.get("domain_slug") or slug),
+        question=str(question),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scaffold artefact read endpoints — the web-next gate cards fetch the
+# markdown the user is being asked to review/answer. All three resolve
+# through ``_task_workspace_root`` (the same helper the plan/design
+# gate-artefact endpoint uses) so the path resolution stays consistent.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/tasks/{task_id}/scaffold/intent",
+    response_model=ScaffoldArtefactMarkdown,
+)
+async def get_scaffold_intent(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> ScaffoldArtefactMarkdown:
+    """Return ``.auto-agent/intent.md`` for the task, or 404 if missing."""
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    from agent.lifecycle.workspace_paths import INTENT_PATH
+
+    abs_path = os.path.join(_task_workspace_root(task), INTENT_PATH)
+    if not os.path.isfile(abs_path):
+        raise HTTPException(404, "intent.md not written yet")
+    with open(abs_path) as fh:
+        body = fh.read()
+    return ScaffoldArtefactMarkdown(markdown=body)
+
+
+@router.get(
+    "/tasks/{task_id}/scaffold/root-adr",
+    response_model=ScaffoldArtefactMarkdown,
+)
+async def get_scaffold_root_adr(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> ScaffoldArtefactMarkdown:
+    """Return ``.auto-agent/adrs/000-system.md`` or 404 if not written yet."""
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    from agent.lifecycle.workspace_paths import ROOT_ADR_PATH
+
+    abs_path = os.path.join(_task_workspace_root(task), ROOT_ADR_PATH)
+    if not os.path.isfile(abs_path):
+        raise HTTPException(404, "root ADR not written yet")
+    with open(abs_path) as fh:
+        body = fh.read()
+    return ScaffoldArtefactMarkdown(markdown=body)
+
+
+# Matches ``001-auth.md`` / ``012-billing.md`` — three-digit prefix +
+# kebab slug. The 000 ADR is the root system ADR and is served via a
+# dedicated endpoint above, so we skip it here.
+_DOMAIN_ADR_FILENAME_RE = re.compile(r"^(\d{3})-([a-z0-9][a-z0-9-]*)\.md$")
+
+
+@router.get(
+    "/tasks/{task_id}/scaffold/domain-adrs",
+    response_model=list[ScaffoldDomainAdrEntry],
+)
+async def list_scaffold_domain_adrs(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[ScaffoldDomainAdrEntry]:
+    """List every domain ADR in ``.auto-agent/adrs/`` for the task.
+
+    Returns one entry per filename matching ``NNN-<slug>.md`` excluding
+    the root ``000-system.md``. The per-domain approval verdict (if any
+    has been recorded) is inlined so the UI can render the current
+    state without an extra round-trip.
+    """
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    from agent.lifecycle.workspace_paths import (
+        ADRS_DIR,
+        DOMAIN_ADR_APPROVALS_DIR,
+    )
+
+    workspace = _task_workspace_root(task)
+    adrs_dir = os.path.join(workspace, ADRS_DIR)
+    approvals_dir = os.path.join(workspace, DOMAIN_ADR_APPROVALS_DIR)
+
+    if not os.path.isdir(adrs_dir):
+        return []
+
+    # Pre-load approval verdicts so we can attach them per slug.
+    import json as _json
+
+    approvals: dict[str, dict] = {}
+    if os.path.isdir(approvals_dir):
+        for entry in os.listdir(approvals_dir):
+            if not entry.endswith(".json"):
+                continue
+            slug = entry[: -len(".json")]
+            try:
+                with open(os.path.join(approvals_dir, entry)) as fh:
+                    payload = _json.load(fh)
+            except (OSError, _json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                approvals[slug] = payload
+
+    out: list[ScaffoldDomainAdrEntry] = []
+    for entry in sorted(os.listdir(adrs_dir)):
+        m = _DOMAIN_ADR_FILENAME_RE.match(entry)
+        if not m:
+            continue
+        if entry == "000-system.md":
+            continue
+        index = int(m.group(1))
+        slug = m.group(2)
+        abs_path = os.path.join(adrs_dir, entry)
+        try:
+            with open(abs_path) as fh:
+                body = fh.read()
+        except OSError:
+            body = ""
+
+        # Best-effort name extraction — the first ``# ...`` heading,
+        # stripped of any ADR-style bracket prefix. Falls back to slug.
+        name = slug
+        m_name = _SCAFFOLD_ADR_NAME_RE.search(body)
+        if m_name:
+            heading = m_name.group(1).strip()
+            heading = _SCAFFOLD_ADR_BRACKET_PREFIX_RE.sub("", heading).strip()
+            name = heading or slug
+
+        approval = approvals.get(slug)
+        approval_view: dict | None = None
+        if isinstance(approval, dict):
+            approval_view = {
+                "verdict": approval.get("verdict"),
+                "comments": approval.get("comments", ""),
+                "revise_count": approval.get("revise_count", 0),
+            }
+
+        out.append(
+            ScaffoldDomainAdrEntry(
+                slug=slug,
+                name=name,
+                index=index,
+                markdown=body,
+                approval=approval_view,
+            )
+        )
+
+    return out
+
+
+@router.post("/tasks/{task_id}/pause-trio")
+async def pause_trio(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Pause a running trio by transitioning the parent task to BLOCKED.
+
+    Only valid when the task is in TRIO_EXECUTING status.
+    Clears trio_phase so the trio can be resumed cleanly later.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.status != TaskStatus.TRIO_EXECUTING:
+        raise HTTPException(status_code=400, detail="task is not in TRIO_EXECUTING")
+    task.trio_phase = None
+    await transition(session, task, TaskStatus.BLOCKED)
+    await session.commit()
+    return {"ok": True}
+
+
 # --- Feedback/Learning endpoints ---
 
 
@@ -2481,9 +3397,9 @@ async def approve_suggestion(
     if suggestion.status != SuggestionStatus.PENDING:
         raise HTTPException(400, f"Suggestion is already {suggestion.status.value}")
 
-    # Create task from suggestion. intake_qa_for_suggestion routes
-    # pre-grilled categories (e.g. architecture) to [] to skip the grill
-    # phase; everything else stays None to grill normally.
+    # Create task from suggestion. The grill phase runs on every task
+    # regardless of category — even pre-grilled suggestions get one short
+    # confirmation round so we never silently skip clarification.
     task = Task(
         title=suggestion.title,
         description=suggestion.description,
@@ -2491,7 +3407,6 @@ async def approve_suggestion(
         source_id=f"suggestion:{suggestion.id}",
         repo_id=suggestion.repo_id,
         freeform_mode=True,
-        intake_qa=intake_qa_for_suggestion(suggestion.category),
         organization_id=org_id,
     )
     session.add(task)

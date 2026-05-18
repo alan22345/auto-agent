@@ -30,6 +30,9 @@ class TaskComplexity(str, enum.Enum):
     COMPLEX_LARGE = "complex_large"
     # Query/research tasks — no repo needed, no coding tools, just an LLM answer.
     SIMPLE_NO_CODE = "simple_no_code"
+    # ADR-018 — "build something new" freeform flow. Runs intent grill →
+    # root ADR → per-domain ADRs → per-domain trios → final verification.
+    SCAFFOLD = "scaffold"
 
 
 class TaskStatus(str, enum.Enum):
@@ -49,6 +52,40 @@ class TaskStatus(str, enum.Enum):
     BLOCKED_ON_QUOTA = "blocked_on_quota"
     BLOCKED = "blocked"
     FAILED = "failed"
+    TRIO_EXECUTING = "trio_executing"
+    TRIO_REVIEW    = "trio_review"
+    # ADR-015 §2 / Phase 6 — complex_large design-doc gate + backlog emit.
+    ARCHITECT_DESIGNING       = "architect_designing"
+    AWAITING_DESIGN_APPROVAL  = "awaiting_design_approval"
+    ARCHITECT_BACKLOG_EMIT    = "architect_backlog_emit"
+    # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
+    FINAL_REVIEW              = "final_review"
+    ARCHITECT_GAP_FIX         = "architect_gap_fix"
+    # ADR-015 §9 / Phase 8 — parent architect spawned sub-architects; the
+    # parent's main session is paused while they run serially. Only resumed
+    # briefly for the parent-answers-grill relay (§10).
+    AWAITING_SUB_ARCHITECTS   = "awaiting_sub_architects"
+    ITERATING = "iterating"  # ADR-017: trio is re-iterating a PR on user feedback
+    # ADR-018 — scaffold parent state machine (freeform build-something-new flow).
+    AWAITING_INTENT_GRILL        = "awaiting_intent_grill"
+    BUILDING_ROOT_ADR            = "building_root_adr"
+    AWAITING_ROOT_ADR_APPROVAL   = "awaiting_root_adr_approval"
+    BUILDING_DOMAIN_ADRS         = "building_domain_adrs"
+    # ADR-018 Stage 8 — per-domain grill round between BUILDING_DOMAIN_ADRS
+    # and the domain architect's ADR write. Parked here while waiting for
+    # the user to answer the domain-grill agent's pending question.
+    AWAITING_DOMAIN_GRILL        = "awaiting_domain_grill"
+    AWAITING_DOMAIN_ADR_APPROVAL = "awaiting_domain_adr_approval"
+    DISPATCHING_DOMAIN_BUILDS    = "dispatching_domain_builds"
+    BUILDING_DOMAINS             = "building_domains"
+    AWAITING_FINAL_VERIFICATION  = "awaiting_final_verification"
+
+
+class TrioPhase(str, enum.Enum):
+    ARCHITECTING         = "architecting"
+    AWAITING_BUILDER     = "awaiting_builder"
+    ARCHITECT_CHECKPOINT = "architect_checkpoint"
+    ARCHITECT_ITERATING  = "architect_iterating"  # ADR-017
 
 
 class TaskSource(str, enum.Enum):
