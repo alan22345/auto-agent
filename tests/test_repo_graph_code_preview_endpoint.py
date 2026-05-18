@@ -13,7 +13,7 @@ Covers:
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +21,9 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.models import Repo, RepoGraphConfig
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_repo(*, repo_id: int = 1):
