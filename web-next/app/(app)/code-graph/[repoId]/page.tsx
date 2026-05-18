@@ -110,6 +110,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                 <GraphCanvas
                   blob={latest.blob}
                   highlightedEdgeId={highlightedEdgeId}
+                  repoId={config.repo_id}
                 />
                 <ViolationsPanel
                   blob={latest.blob}

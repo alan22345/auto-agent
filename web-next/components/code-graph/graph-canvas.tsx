@@ -16,9 +16,10 @@
 // and surface their error through the node's tooltip data so users see
 // *why* an area's interior is missing.
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type cytoscape from 'cytoscape';
 import type { RepoGraphBlob, AreaStatus, Edge, Node } from '@/types/api';
+import { AreaRefreshOverlay } from './area-refresh-overlay';
 
 const EDGE_COLOUR: Record<string, string> = {
   calls: '#3b82f6',
@@ -36,11 +37,33 @@ interface Props {
   blob: RepoGraphBlob;
   className?: string;
   highlightedEdgeId?: string | null;
+  /** Optional — when provided, enables the per-area refresh overlay
+   * (ADR-016 Phase 7 §10). Pages without a repo context (e.g.
+   * standalone fixture renders in tests) can omit this. */
+  repoId?: number;
+  /** Phase 7 — node click selects a node for the side panel. */
+  onNodeClick?: (nodeId: string) => void;
+  /** Phase 7 — edge click opens the evidence popover. The position is
+   * the rendered pixel position inside the canvas container, used to
+   * anchor a portal. */
+  onEdgeClick?: (edgeId: string, pos: { x: number; y: number }) => void;
 }
 
-export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
+export function GraphCanvas({
+  blob,
+  className,
+  highlightedEdgeId,
+  repoId,
+  onNodeClick,
+  onEdgeClick,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  // ``cyState`` is the same instance as ``cyRef.current`` but tracked in
+  // React state so child overlays re-render when cytoscape mounts.
+  const [cyState, setCyState] = useState<cytoscape.Core | null>(null);
+  // Bumped after layout/pan/zoom so the overlay reflows positions.
+  const [layoutTick, setLayoutTick] = useState(0);
 
   // Pre-compute the area-error map so the renderer can mark failed
   // areas red without hunting through ``blob.areas`` per-element.
@@ -163,7 +186,30 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
       cy.layout({ name: 'cose', padding: 30 }).run();
       cy.fit(undefined, 30);
 
+      // Tap handlers — drive the side panel + evidence popover. They
+      // forward into refs (captured per render) so handler identity
+      // doesn't churn the cytoscape binding on each re-render.
+      cy.on('tap', 'node', (evt) => {
+        const id = evt.target.id() as string;
+        onNodeClickRef.current?.(id);
+      });
+      cy.on('tap', 'edge', (evt) => {
+        const id = evt.target.id() as string;
+        const pos = evt.renderedPosition ?? { x: 0, y: 0 };
+        onEdgeClickRef.current?.(id, { x: pos.x, y: pos.y });
+      });
+
+      // Bump layoutTick whenever the rendered geometry shifts so the
+      // area-refresh overlay reflows.
+      cy.on('layoutstop pan zoom resize', () => {
+        setLayoutTick((t) => t + 1);
+      });
+
       cyRef.current = cy;
+      setCyState(cy);
+      // Trigger one tick so the overlay computes initial positions
+      // after the first layout completes.
+      setLayoutTick((t) => t + 1);
     }
 
     mount();
@@ -171,15 +217,36 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
       cancelled = true;
       if (cy) cy.destroy();
       cyRef.current = null;
+      setCyState(null);
     };
   }, [blob, areaErrorById, highlightedEdgeId]);
+
+  // Keep latest callback identity in a ref so the cytoscape tap binding
+  // doesn't need to rebind every render.
+  const onNodeClickRef = useRef(onNodeClick);
+  const onEdgeClickRef = useRef(onEdgeClick);
+  useEffect(() => {
+    onNodeClickRef.current = onNodeClick;
+  }, [onNodeClick]);
+  useEffect(() => {
+    onEdgeClickRef.current = onEdgeClick;
+  }, [onEdgeClick]);
 
   return (
     <div
       ref={containerRef}
       data-testid="code-graph-canvas"
       className={`relative h-[calc(100vh-260px)] min-h-[400px] w-full rounded-md border bg-background ${className ?? ''}`}
-    />
+    >
+      {repoId !== undefined && (
+        <AreaRefreshOverlay
+          repoId={repoId}
+          blob={blob}
+          cy={cyState}
+          layoutTick={layoutTick}
+        />
+      )}
+    </div>
   );
 }
 
