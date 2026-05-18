@@ -368,9 +368,10 @@ async def test_handler_event_shape_routes_to_run_refresh(
     """``handle(event)`` extracts repo_id + request_id and delegates."""
     captured = {}
 
-    async def fake_run_refresh(*, repo_id, request_id):
+    async def fake_run_refresh(*, repo_id, request_id, area_scope=None):
         captured["repo_id"] = repo_id
         captured["request_id"] = request_id
+        captured["area_scope"] = area_scope
 
     from shared.events import Event, RepoEventType
 
@@ -385,7 +386,7 @@ async def test_handler_event_shape_routes_to_run_refresh(
 
         await handle(event)
 
-    assert captured == {"repo_id": 42, "request_id": "abc"}
+    assert captured == {"repo_id": 42, "request_id": "abc", "area_scope": None}
 
 
 @pytest.mark.asyncio
@@ -403,6 +404,154 @@ async def test_handler_ignores_invalid_payload(
     )
     await handle(bad)
     assert not publisher.events
+
+
+@pytest.mark.asyncio
+async def test_handler_dispatches_to_partial_pipeline_when_area_scope_set(
+    fake_session,
+    publisher: InMemoryPublisher,
+    tmp_path: Path,
+) -> None:
+    """When the event carries ``area_scope`` AND a previous analysis
+    exists, the handler invokes ``run_partial_pipeline`` (not the full
+    pipeline) with the loaded previous blob + target area."""
+    cfg, _repo, _added, factory = fake_session
+    workspace = tmp_path / "ws-7"
+    (workspace / ".git").mkdir(parents=True)
+    cfg.workspace_path = str(workspace)
+    cfg.last_analysis_id = 99  # a prior row exists
+
+    async def fake_run_git(*, args, cwd):
+        return "abc\n" if args[:1] == ["rev-parse"] else ""
+
+    previous_blob = _make_blob(status_per_area=("ok",), commit_sha="prev")
+    fresh_blob = _make_blob(status_per_area=("ok",), commit_sha="abc")
+
+    # Spy on the partial pipeline so we can assert it was the call site
+    # used (and the full pipeline was NOT).
+    captured_kwargs: dict = {}
+
+    async def fake_partial(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fresh_blob
+
+    full_called = False
+
+    async def fake_full(**kwargs):
+        nonlocal full_called
+        full_called = True
+        return fresh_blob
+
+    # Patch _load_previous_blob so we don't need to mock the DB row.
+    async def fake_load_prev(_session, *, repo_id):
+        return previous_blob
+
+    from agent.lifecycle.graph_refresh import run_refresh
+
+    with (
+        patch("agent.lifecycle.graph_refresh.async_session", new=factory),
+        patch("agent.lifecycle.graph_refresh._run_git", new=fake_run_git),
+        patch(
+            "agent.lifecycle.graph_refresh.run_partial_pipeline",
+            new=fake_partial,
+        ),
+        patch("agent.lifecycle.graph_refresh.run_pipeline", new=fake_full),
+        patch(
+            "agent.lifecycle.graph_refresh._load_previous_blob",
+            new=fake_load_prev,
+        ),
+    ):
+        await run_refresh(repo_id=7, request_id="r-7", area_scope="agent")
+
+    assert not full_called, "full pipeline should not run when area_scope is set"
+    assert captured_kwargs.get("target_area") == "agent"
+    assert captured_kwargs.get("previous_blob") is previous_blob
+    assert captured_kwargs.get("commit_sha") == "abc"
+
+
+@pytest.mark.asyncio
+async def test_handler_partial_without_previous_falls_back_to_full(
+    fake_session,
+    publisher: InMemoryPublisher,
+    tmp_path: Path,
+) -> None:
+    """When area_scope is set but no previous blob exists, the handler
+    falls back to ``run_pipeline`` — partial-refresh needs a baseline
+    to splice into."""
+    cfg, _repo, _added, factory = fake_session
+    workspace = tmp_path / "ws-7"
+    (workspace / ".git").mkdir(parents=True)
+    cfg.workspace_path = str(workspace)
+    cfg.last_analysis_id = None  # no prior row
+
+    async def fake_run_git(*, args, cwd):
+        return "abc\n" if args[:1] == ["rev-parse"] else ""
+
+    fresh_blob = _make_blob(status_per_area=("ok",), commit_sha="abc")
+    partial_called = False
+    full_called = False
+
+    async def fake_partial(**kwargs):
+        nonlocal partial_called
+        partial_called = True
+        return fresh_blob
+
+    async def fake_full(**kwargs):
+        nonlocal full_called
+        full_called = True
+        return fresh_blob
+
+    async def fake_load_prev(_session, *, repo_id):
+        return None
+
+    from agent.lifecycle.graph_refresh import run_refresh
+
+    with (
+        patch("agent.lifecycle.graph_refresh.async_session", new=factory),
+        patch("agent.lifecycle.graph_refresh._run_git", new=fake_run_git),
+        patch(
+            "agent.lifecycle.graph_refresh.run_partial_pipeline",
+            new=fake_partial,
+        ),
+        patch("agent.lifecycle.graph_refresh.run_pipeline", new=fake_full),
+        patch(
+            "agent.lifecycle.graph_refresh._load_previous_blob",
+            new=fake_load_prev,
+        ),
+    ):
+        await run_refresh(repo_id=7, request_id="r-8", area_scope="agent")
+
+    assert full_called, "fall back to full pipeline when no previous blob"
+    assert not partial_called
+
+
+@pytest.mark.asyncio
+async def test_handler_event_carries_area_scope_through_to_run_refresh(
+    publisher: InMemoryPublisher,
+) -> None:
+    """``handle(event)`` extracts ``area_scope`` from payload and
+    forwards it as a kwarg to ``run_refresh``."""
+    captured = {}
+
+    async def fake_run_refresh(*, repo_id, request_id, area_scope=None):
+        captured["repo_id"] = repo_id
+        captured["request_id"] = request_id
+        captured["area_scope"] = area_scope
+
+    from shared.events import Event, RepoEventType
+
+    event = Event(
+        type=RepoEventType.GRAPH_REQUESTED,
+        task_id=0,
+        payload={"repo_id": 42, "request_id": "abc", "area_scope": "agent"},
+    )
+
+    with patch("agent.lifecycle.graph_refresh.run_refresh", new=fake_run_refresh):
+        from agent.lifecycle.graph_refresh import handle
+
+        await handle(event)
+
+    assert captured == {"repo_id": 42, "request_id": "abc", "area_scope": "agent"}
 
 
 # Silence unused-import for json in the test module (used implicitly via blob).

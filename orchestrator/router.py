@@ -147,6 +147,10 @@ def _check_rate_limit() -> None:
 
 
 BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+# Area names are simpler than branch names (no slashes, no '..').
+# Areas correspond to top-level directories or YAML-declared groupings;
+# they must never be a path traversal token.
+AREA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$")
 
 
 class CreateTaskRequest(BaseModel):
@@ -1912,8 +1916,9 @@ async def refresh_repo_graph(
     response: Response,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
+    area: str | None = None,
 ) -> RepoGraphRefreshResponse:
-    """Trigger a graph refresh (ADR-016 §10 — Phase 2).
+    """Trigger a graph refresh (ADR-016 §10).
 
     Publishes a ``REPO_GRAPH_REQUESTED`` event and returns ``202 Accepted``
     with the ``request_id`` the caller can correlate with the eventual
@@ -1921,6 +1926,13 @@ async def refresh_repo_graph(
     analyser runs in the agent process — lock contention is detected
     there and surfaces as a ``REPO_GRAPH_FAILED`` event with
     ``error="analysis already running"``.
+
+    Phase 7: the optional ``area`` query parameter scopes the refresh
+    to a single area. The analyser dispatches to the partial pipeline
+    when ``area`` is set and a previous analysis exists; otherwise it
+    runs the full pipeline. The area name is validated against the
+    same character set used for branch names so it can be safely
+    joined into file paths downstream.
     """
     import uuid
 
@@ -1935,8 +1947,22 @@ async def refresh_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
+    if area is not None and (
+        not AREA_NAME_RE.match(area) or ".." in area
+    ):
+        raise HTTPException(
+            400,
+            "Invalid area name: alphanumeric + '.', '_', '-' (no '..' or '/')",
+        )
+
     request_id = str(uuid.uuid4())
-    await publish(repo_graph_requested(repo_id=repo.id, request_id=request_id))
+    await publish(
+        repo_graph_requested(
+            repo_id=repo.id,
+            request_id=request_id,
+            area_scope=area,
+        )
+    )
     # status_code is set by the decorator; restate explicitly so the
     # response model + status_code both come from this function for
     # downstream openapi clarity.

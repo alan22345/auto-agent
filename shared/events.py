@@ -506,14 +506,29 @@ def repo_deleted(repo_name: str) -> Event:
     return Event(type=RepoEventType.DELETED, task_id=0, payload={"repo_name": repo_name})
 
 
-def repo_graph_requested(*, repo_id: int, request_id: str) -> Event:
+def repo_graph_requested(
+    *,
+    repo_id: int,
+    request_id: str,
+    area_scope: str | None = None,
+) -> Event:
     """ADR-016 §10 — the refresh endpoint publishes this; the analyser
-    handler consumes it. ``request_id`` is a UUID the caller can correlate
-    with the eventual READY/FAILED event."""
+    handler consumes it. ``request_id`` is a UUID the caller can
+    correlate with the eventual READY/FAILED event.
+
+    Phase 7 adds ``area_scope``: when non-``None`` the analyser handler
+    dispatches to :func:`agent.graph_analyzer.run_partial_pipeline` for
+    a per-area refresh; when ``None`` (the default) the full pipeline
+    runs. Always present in the payload — back-compat for handlers
+    that ignore unknown keys is preserved by the default."""
     return Event(
         type=RepoEventType.GRAPH_REQUESTED,
         task_id=0,
-        payload={"repo_id": repo_id, "request_id": request_id},
+        payload={
+            "repo_id": repo_id,
+            "request_id": request_id,
+            "area_scope": area_scope,
+        },
     )
 
 

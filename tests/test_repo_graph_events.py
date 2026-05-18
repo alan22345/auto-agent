@@ -20,14 +20,33 @@ class TestRepoGraphRequested:
     def test_payload_carries_repo_id_and_request_id(self) -> None:
         ev = repo_graph_requested(repo_id=42, request_id="abc-123")
         assert ev.type == RepoEventType.GRAPH_REQUESTED
-        assert ev.payload == {"repo_id": 42, "request_id": "abc-123"}
+        assert ev.payload == {
+            "repo_id": 42,
+            "request_id": "abc-123",
+            "area_scope": None,
+        }
 
     def test_roundtrip_through_redis_serialisation(self) -> None:
         ev = repo_graph_requested(repo_id=7, request_id="r-1")
         wire = ev.to_redis()
         restored = Event.from_redis({"data": wire["data"]})
         assert restored.type == "repo.graph_requested"
-        assert restored.payload == {"repo_id": 7, "request_id": "r-1"}
+        assert restored.payload == {
+            "repo_id": 7,
+            "request_id": "r-1",
+            "area_scope": None,
+        }
+
+    def test_payload_carries_area_scope_when_set(self) -> None:
+        """Phase 7 — the optional ``area_scope`` field rides on the
+        payload so the analyser handler can dispatch to the partial
+        pipeline."""
+        ev = repo_graph_requested(
+            repo_id=42,
+            request_id="abc-123",
+            area_scope="agent",
+        )
+        assert ev.payload["area_scope"] == "agent"
 
 
 class TestRepoGraphReady:
