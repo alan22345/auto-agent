@@ -12,13 +12,21 @@
 // overrides the kind-based colour. The flag + reason are carried on
 // the element data so a future side-panel can surface them.
 //
+// Phase 7 P3 (ADR-016 §11) overlays a dotted-line style on edges with
+// ``source_kind === 'llm'``: the kind colour stays the same so calls
+// remain blue / imports stay grey, but a slimmer dotted stroke reads as
+// "softer / less certain" than a tree-sitter-derived edge. Boundary
+// violations still win when both flags coincide — the dashed red
+// destructive overlay rule comes later in the style array.
+//
 // Failed areas (``AreaStatus.status === 'failed'``) get a red border
 // and surface their error through the node's tooltip data so users see
 // *why* an area's interior is missing.
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type cytoscape from 'cytoscape';
 import type { RepoGraphBlob, AreaStatus, Edge, Node } from '@/types/api';
+import { AreaRefreshOverlay } from './area-refresh-overlay';
 
 const EDGE_COLOUR: Record<string, string> = {
   calls: '#3b82f6',
@@ -36,11 +44,48 @@ interface Props {
   blob: RepoGraphBlob;
   className?: string;
   highlightedEdgeId?: string | null;
+  /** Optional — when provided, enables the per-area refresh overlay
+   * (ADR-016 Phase 7 §10). Pages without a repo context (e.g.
+   * standalone fixture renders in tests) can omit this. */
+  repoId?: number;
+  /** Phase 7 — node click selects a node for the side panel. */
+  onNodeClick?: (nodeId: string) => void;
+  /** Phase 7 — edge click opens the evidence popover. The position is
+   * the rendered pixel position inside the canvas container, used to
+   * anchor a portal. */
+  onEdgeClick?: (edgeId: string, pos: { x: number; y: number }) => void;
+  /** Phase 7 P2 — search query (case-insensitive substring on node
+   * label). Empty / whitespace = no filter applied. */
+  searchQuery?: string;
+  /** Phase 7 P2 — edge kinds to hide. Defaults to no filter. Each
+   * unchecked kind becomes a per-kind class with ``display: none`` so
+   * the user can flip kinds on/off without rebuilding elements. */
+  hiddenEdgeKinds?: Set<Edge['kind']>;
+  /** Phase 7 P2c — reachability subgraph (Set of node ids) the canvas
+   * should highlight. Nodes inside the set get ``.reachability-highlight``;
+   * everything else gets ``.reachability-fade``. ``null`` / undefined =
+   * no overlay. */
+  reachabilityHighlight?: Set<string> | null;
 }
 
-export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
+export function GraphCanvas({
+  blob,
+  className,
+  highlightedEdgeId,
+  repoId,
+  onNodeClick,
+  onEdgeClick,
+  searchQuery,
+  hiddenEdgeKinds,
+  reachabilityHighlight,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  // ``cyState`` is the same instance as ``cyRef.current`` but tracked in
+  // React state so child overlays re-render when cytoscape mounts.
+  const [cyState, setCyState] = useState<cytoscape.Core | null>(null);
+  // Bumped after layout/pan/zoom so the overlay reflows positions.
+  const [layoutTick, setLayoutTick] = useState(0);
 
   // Pre-compute the area-error map so the renderer can mark failed
   // areas red without hunting through ``blob.areas`` per-element.
@@ -122,6 +167,18 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
               'target-arrow-color': 'data(color)',
             },
           },
+          // Phase 7 §11 — AST vs LLM visual distinction. LLM-deduced
+          // edges render dotted + slimmer so they read as "softer /
+          // less certain" than tree-sitter-derived edges. The
+          // boundary-violation rule below comes later and so wins when
+          // both flags coincide (violation is the more urgent signal).
+          {
+            selector: 'edge[?sourceKindLlm]',
+            style: {
+              width: 1,
+              'line-style': 'dotted',
+            },
+          },
           {
             selector: 'edge[?boundaryViolation]',
             style: {
@@ -138,6 +195,45 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
               'line-color': VIOLATION_COLOUR,
               'target-arrow-color': VIOLATION_COLOUR,
             },
+          },
+          // Phase 7 P2 §11 — search controls.
+          {
+            selector: 'node.search-fade',
+            style: { opacity: 0.2 },
+          },
+          {
+            selector: 'node.search-match',
+            style: { 'border-width': 3, 'border-color': '#facc15' },
+          },
+          // Phase 7 P2 §11 — edge-kind filter classes. One rule per
+          // kind so toggling one doesn't reflow the others.
+          {
+            selector: 'edge.edge-kind-hidden-calls',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-imports',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-inherits',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-http',
+            style: { display: 'none' as const },
+          },
+          // Phase 7 P2c §11 — ancestor / descendant reachability
+          // overlay. Fade is stronger than the search fade so the two
+          // overlays compose readably (search inside a reachability
+          // highlight still stands out).
+          {
+            selector: 'node.reachability-fade',
+            style: { opacity: 0.15 },
+          },
+          {
+            selector: 'node.reachability-highlight',
+            style: { 'border-width': 3, 'border-color': '#22d3ee' },
           },
         ],
       });
@@ -163,7 +259,37 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
       cy.layout({ name: 'cose', padding: 30 }).run();
       cy.fit(undefined, 30);
 
+      // Tap handlers — drive the side panel + evidence popover. They
+      // forward into refs (captured per render) so handler identity
+      // doesn't churn the cytoscape binding on each re-render.
+      cy.on('tap', 'node', (evt) => {
+        const id = evt.target.id() as string;
+        onNodeClickRef.current?.(id);
+      });
+      cy.on('tap', 'edge', (evt) => {
+        const id = evt.target.id() as string;
+        const rendered = evt.renderedPosition ?? { x: 0, y: 0 };
+        // Translate the cytoscape-local rendered position into
+        // viewport (clientX/Y) coordinates so the portal-rendered
+        // popover anchors correctly relative to ``document.body``.
+        const rect = containerRef.current?.getBoundingClientRect();
+        const pos = rect
+          ? { x: rect.left + rendered.x, y: rect.top + rendered.y }
+          : { x: rendered.x, y: rendered.y };
+        onEdgeClickRef.current?.(id, pos);
+      });
+
+      // Bump layoutTick whenever the rendered geometry shifts so the
+      // area-refresh overlay reflows.
+      cy.on('layoutstop pan zoom resize', () => {
+        setLayoutTick((t) => t + 1);
+      });
+
       cyRef.current = cy;
+      setCyState(cy);
+      // Trigger one tick so the overlay computes initial positions
+      // after the first layout completes.
+      setLayoutTick((t) => t + 1);
     }
 
     mount();
@@ -171,15 +297,89 @@ export function GraphCanvas({ blob, className, highlightedEdgeId }: Props) {
       cancelled = true;
       if (cy) cy.destroy();
       cyRef.current = null;
+      setCyState(null);
     };
   }, [blob, areaErrorById, highlightedEdgeId]);
+
+  // Keep latest callback identity in a ref so the cytoscape tap binding
+  // doesn't need to rebind every render.
+  const onNodeClickRef = useRef(onNodeClick);
+  const onEdgeClickRef = useRef(onEdgeClick);
+  useEffect(() => {
+    onNodeClickRef.current = onNodeClick;
+  }, [onNodeClick]);
+  useEffect(() => {
+    onEdgeClickRef.current = onEdgeClick;
+  }, [onEdgeClick]);
+
+  // Phase 7 P2 §11 — search class diff. Runs whenever the query or the
+  // cytoscape instance changes. The effect mutates classes in-place
+  // because rebuilding the entire element set on every keystroke would
+  // throw away the layout the user is staring at.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    const { matches, fades } = computeSearchClasses(blob, searchQuery ?? '');
+    cy.batch(() => {
+      cy.nodes().forEach((n) => {
+        const id = n.id();
+        n.toggleClass('search-match', matches.has(id));
+        n.toggleClass('search-fade', fades.has(id));
+      });
+    });
+  }, [cyState, blob, searchQuery]);
+
+  // Phase 7 P2 §11 — edge-kind filter diff. Per-edge ``edge-kind-hidden-<kind>``
+  // class drives the cytoscape ``display: none`` rule registered in
+  // the style array. Re-checking a kind removes the class.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    const hidden = hiddenEdgeKinds ?? new Set<Edge['kind']>();
+    cy.batch(() => {
+      cy.edges().forEach((e) => {
+        const kind = e.data('kind') as Edge['kind'] | undefined;
+        for (const k of ['calls', 'imports', 'inherits', 'http'] as Edge['kind'][]) {
+          e.toggleClass(`edge-kind-hidden-${k}`, kind === k && hidden.has(k));
+        }
+      });
+    });
+  }, [cyState, blob, hiddenEdgeKinds]);
+
+  // Phase 7 P2c §11 — reachability overlay diff. ``null`` (or
+  // undefined) clears both classes; a non-empty Set highlights the
+  // members and fades everything else.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    cy.batch(() => {
+      if (!reachabilityHighlight) {
+        cy.nodes().removeClass('reachability-highlight reachability-fade');
+        return;
+      }
+      cy.nodes().forEach((n) => {
+        const inSet = reachabilityHighlight.has(n.id());
+        n.toggleClass('reachability-highlight', inSet);
+        n.toggleClass('reachability-fade', !inSet);
+      });
+    });
+  }, [cyState, reachabilityHighlight]);
 
   return (
     <div
       ref={containerRef}
       data-testid="code-graph-canvas"
       className={`relative h-[calc(100vh-260px)] min-h-[400px] w-full rounded-md border bg-background ${className ?? ''}`}
-    />
+    >
+      {repoId !== undefined && (
+        <AreaRefreshOverlay
+          repoId={repoId}
+          blob={blob}
+          cy={cyState}
+          layoutTick={layoutTick}
+        />
+      )}
+    </div>
   );
 }
 
@@ -234,6 +434,7 @@ export function blobToCytoscapeElements(
   for (const e of blob.edges as Edge[]) {
     const id = `${e.source}->${e.target}:${e.kind}`;
     const isViolation = e.boundary_violation === true;
+    const isLlmDeduced = e.source_kind === 'llm';
     elements.push({
       data: {
         id,
@@ -247,6 +448,12 @@ export function blobToCytoscapeElements(
         evidenceFile: e.evidence.file,
         evidenceLine: e.evidence.line,
         sourceKind: e.source_kind,
+        // Phase 7 §11 — boolean class fed to the
+        // ``edge[?sourceKindLlm]`` selector so LLM-deduced edges render
+        // dotted + slimmer. Left undefined (not ``false``) for AST
+        // edges so the selector simply doesn't match — same convention
+        // as ``boundaryViolation`` and ``highlighted``.
+        sourceKindLlm: isLlmDeduced ? true : undefined,
         boundaryViolation: isViolation ? 1 : undefined,
         violationReason: e.violation_reason ?? undefined,
         highlighted: highlightedEdgeId === id ? 1 : undefined,
@@ -255,4 +462,44 @@ export function blobToCytoscapeElements(
   }
 
   return elements;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 P2 §11 — search classes.
+// ---------------------------------------------------------------------------
+
+export interface SearchClassPartition {
+  /** Node ids that match the query (case-insensitive substring on label). */
+  matches: Set<string>;
+  /** Node ids that do NOT match and should be faded out. */
+  fades: Set<string>;
+}
+
+/**
+ * Compute the search partition for a given query.
+ *
+ * An empty / whitespace-only query yields empty sets — caller is
+ * expected to clear all search classes in that case. Match logic is
+ * case-insensitive substring against ``node.label``.
+ */
+export function computeSearchClasses(
+  blob: RepoGraphBlob,
+  query: string,
+): SearchClassPartition {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    return { matches: new Set(), fades: new Set() };
+  }
+  const needle = trimmed.toLowerCase();
+  const matches = new Set<string>();
+  const fades = new Set<string>();
+  for (const n of blob.nodes as Node[]) {
+    const haystack = (n.label ?? '').toLowerCase();
+    if (haystack.includes(needle)) {
+      matches.add(n.id);
+    } else {
+      fades.add(n.id);
+    }
+  }
+  return { matches, fades };
 }

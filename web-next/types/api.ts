@@ -123,6 +123,39 @@ export interface FreeformConfigData {
   run_command?: string | null;
   created_at?: string | null;
 }
+/**
+ * ``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
+ *
+ * Returns a clamped window of source from the analyser workspace so
+ * the React side-panel can render the code under a node without
+ * pulling the whole file. The endpoint enforces bounds (``line_end -
+ * line_start <= 500``, body <= 50 KiB) and refuses path-traversal so
+ * it can't be coerced into reading anything outside the workspace.
+ */
+export interface GraphCodePreviewResponse {
+  file: string;
+  line_start: number;
+  line_end: number;
+  content: string;
+}
+/**
+ * ``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
+ *
+ * Surfaces the comparison between the stored graph's ``commit_sha`` and
+ * the current ``HEAD`` of the analyser workspace so the freshness
+ * banner can show an amber "workspace has moved — refresh" hint
+ * without re-fetching the whole graph blob.
+ *
+ * ``workspace_sha`` is ``None`` when the workspace can't be inspected
+ * (missing directory, not a git checkout, permission denied). In that
+ * case ``drifted`` is conservatively ``True`` — the banner shows the
+ * same warning rather than pretending the graph is fresh.
+ */
+export interface GraphStalenessResponse {
+  graph_sha: string;
+  workspace_sha?: string | null;
+  drifted: boolean;
+}
 export interface IntentVerdict {
   ok: boolean;
   reasoning: string;
@@ -148,6 +181,12 @@ export interface LatestRepoGraphData {
 /**
  * Full graph analysis output — the payload stored in
  * ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+ *
+ * ``public_symbols`` (ADR-016 Phase 6 §12) is the union of per-area
+ * public-surface node ids the pipeline computed at analysis time. The
+ * ``query_repo_graph.public_surface`` op reads this directly rather
+ * than re-deriving the convention rules from source bytes. Defaulted
+ * to an empty list so blobs persisted before Phase 6 still deserialise.
  */
 export interface RepoGraphBlob {
   commit_sha: string;
@@ -156,6 +195,7 @@ export interface RepoGraphBlob {
   areas: AreaStatus[];
   nodes: Node[];
   edges: Edge[];
+  public_symbols?: string[];
 }
 /**
  * One node in the hierarchical compound graph (ADR-016 §2).

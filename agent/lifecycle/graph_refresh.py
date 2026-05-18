@@ -35,7 +35,7 @@ import os
 import structlog
 from sqlalchemy import select
 
-from agent.graph_analyzer import run_pipeline
+from agent.graph_analyzer import run_partial_pipeline, run_pipeline
 from agent.graph_analyzer.pipeline import overall_status
 from agent.graph_workspace import (
     GraphWorkspaceLockTimeout,
@@ -50,6 +50,7 @@ from shared.events import (
     repo_graph_ready,
 )
 from shared.models import Repo, RepoGraph, RepoGraphConfig
+from shared.types import RepoGraphBlob
 
 log = structlog.get_logger(__name__)
 
@@ -64,17 +65,39 @@ async def handle(event: Event) -> None:
     payload = event.payload or {}
     repo_id = payload.get("repo_id")
     request_id = payload.get("request_id", "")
+    area_scope = payload.get("area_scope")
     if not isinstance(repo_id, int):
         log.warning("graph_refresh_invalid_payload", payload=payload)
         return
-    await run_refresh(repo_id=repo_id, request_id=request_id)
+    if area_scope is not None and not isinstance(area_scope, str):
+        # Defensive — drop a malformed area_scope rather than crash; the
+        # full pipeline is the safe fallback.
+        area_scope = None
+    await run_refresh(
+        repo_id=repo_id,
+        request_id=request_id,
+        area_scope=area_scope,
+    )
 
 
-async def run_refresh(*, repo_id: int, request_id: str) -> None:
+async def run_refresh(
+    *,
+    repo_id: int,
+    request_id: str,
+    area_scope: str | None = None,
+) -> None:
     """Run the graph refresh end-to-end for ``repo_id``.
 
     Public for tests so they can drive the analyser without faking an
     ``Event`` object.
+
+    When ``area_scope`` is set AND a previous ``RepoGraph`` row exists,
+    the analyser dispatches to ``run_partial_pipeline`` — only the
+    requested area is re-parsed, everything else inherited from the
+    previous blob. When ``area_scope`` is None (the default) the full
+    pipeline runs. When ``area_scope`` is set but no previous blob is
+    available, the handler falls back to the full pipeline (partial
+    refresh needs a baseline).
     """
     async with async_session() as session:
         cfg = await _load_config(session, repo_id=repo_id)
@@ -85,6 +108,11 @@ async def run_refresh(*, repo_id: int, request_id: str) -> None:
         if repo is None:
             log.info("graph_refresh_repo_missing", repo_id=repo_id)
             return
+        previous_blob = (
+            await _load_previous_blob(session, repo_id=repo_id)
+            if area_scope is not None
+            else None
+        )
 
     workspace = cfg.workspace_path
     branch = cfg.analysis_branch
@@ -101,11 +129,20 @@ async def run_refresh(*, repo_id: int, request_id: str) -> None:
                 branch=branch,
             )
             commit_sha = await _resolve_commit_sha(workspace=workspace)
-            blob = await run_pipeline(
-                workspace=workspace,
-                commit_sha=commit_sha,
-                provider=get_provider(),
-            )
+            if area_scope is not None and previous_blob is not None:
+                blob = await run_partial_pipeline(
+                    workspace=workspace,
+                    commit_sha=commit_sha,
+                    target_area=area_scope,
+                    previous_blob=previous_blob,
+                    provider=get_provider(),
+                )
+            else:
+                blob = await run_pipeline(
+                    workspace=workspace,
+                    commit_sha=commit_sha,
+                    provider=get_provider(),
+                )
     except GraphWorkspaceLockTimeout:
         log.warning(
             "graph_refresh_lock_busy",
@@ -200,6 +237,38 @@ async def _load_config(session, *, repo_id: int) -> RepoGraphConfig | None:
 async def _load_repo(session, *, repo_id: int) -> Repo | None:
     result = await session.execute(select(Repo).where(Repo.id == repo_id))
     return result.scalar_one_or_none()
+
+
+async def _load_previous_blob(
+    session,
+    *,
+    repo_id: int,
+) -> RepoGraphBlob | None:
+    """Return the most recent stored ``RepoGraphBlob`` for ``repo_id``.
+
+    Used by the partial-refresh path so we can splice non-target areas
+    into the fresh analysis. Returns ``None`` when no completed
+    analysis exists yet — the caller falls back to the full pipeline.
+    """
+    cfg = await _load_config(session, repo_id=repo_id)
+    if cfg is None or cfg.last_analysis_id is None:
+        return None
+    result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = result.scalar_one_or_none()
+    if row is None or not row.graph_json:
+        return None
+    try:
+        return RepoGraphBlob.model_validate(row.graph_json)
+    except Exception as e:
+        log.warning(
+            "graph_refresh_previous_blob_invalid",
+            repo_id=repo_id,
+            error=str(e),
+            error_type=e.__class__.__name__,
+        )
+        return None
 
 
 # ----------------------------------------------------------------------

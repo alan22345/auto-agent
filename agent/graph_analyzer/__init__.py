@@ -21,7 +21,16 @@ The package is split by concern:
 
 from __future__ import annotations
 
-from agent.graph_analyzer.pipeline import analyser_version, run_pipeline
+from agent.graph_analyzer.pipeline import (
+    analyser_version,
+    run_partial_pipeline,
+    run_pipeline,
+)
 from agent.graph_analyzer.types import UnresolvedSite
 
-__all__ = ["UnresolvedSite", "analyser_version", "run_pipeline"]
+__all__ = [
+    "UnresolvedSite",
+    "analyser_version",
+    "run_partial_pipeline",
+    "run_pipeline",
+]

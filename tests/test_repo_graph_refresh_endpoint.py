@@ -111,6 +111,107 @@ async def test_refresh_returns_404_when_graph_not_enabled(
 
 @pytest.mark.asyncio
 @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
+async def test_refresh_with_area_query_param_propagates_to_event(
+    mock_get_repo,
+    publisher: InMemoryPublisher,
+) -> None:
+    """ADR-016 §10 Phase 7 — the optional ``area`` query parameter is
+    forwarded onto the published event as ``area_scope`` so the
+    analyser handler can dispatch to the partial pipeline."""
+    from orchestrator.router import refresh_repo_graph
+
+    repo = _make_repo()
+    cfg = _make_config()
+    mock_get_repo.return_value = repo
+    session = AsyncMock(spec=AsyncSession)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = cfg
+    session.execute.return_value = mock_result
+
+    resp = Response()
+    out = await refresh_repo_graph(
+        repo_id=repo.id,
+        response=resp,
+        session=session,
+        org_id=1,
+        area="agent",
+    )
+
+    assert out.status == "accepted"
+    events = [e for e in publisher.events if e.type == RepoEventType.GRAPH_REQUESTED]
+    assert len(events) == 1
+    assert events[0].payload["area_scope"] == "agent"
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
+async def test_refresh_without_area_propagates_null_area_scope(
+    mock_get_repo,
+    publisher: InMemoryPublisher,
+) -> None:
+    """When the ``area`` query parameter is omitted the published event
+    carries ``area_scope=None`` so the handler dispatches to the full
+    pipeline (the existing Phase 2 behaviour)."""
+    from orchestrator.router import refresh_repo_graph
+
+    repo = _make_repo()
+    cfg = _make_config()
+    mock_get_repo.return_value = repo
+    session = AsyncMock(spec=AsyncSession)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = cfg
+    session.execute.return_value = mock_result
+
+    resp = Response()
+    await refresh_repo_graph(
+        repo_id=repo.id,
+        response=resp,
+        session=session,
+        org_id=1,
+    )
+
+    events = [e for e in publisher.events if e.type == RepoEventType.GRAPH_REQUESTED]
+    assert len(events) == 1
+    assert events[0].payload["area_scope"] is None
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
+async def test_refresh_rejects_invalid_area_name(
+    mock_get_repo,
+    publisher: InMemoryPublisher,
+) -> None:
+    """The area name is validated against the same character set the
+    branch name uses (alphanumeric, ``.``, ``_``, ``/``, ``-``) to keep
+    shell-injection-style risks out of downstream code paths that might
+    join the name into a path."""
+    from orchestrator.router import refresh_repo_graph
+
+    repo = _make_repo()
+    cfg = _make_config()
+    mock_get_repo.return_value = repo
+    session = AsyncMock(spec=AsyncSession)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = cfg
+    session.execute.return_value = mock_result
+
+    resp = Response()
+    with pytest.raises(HTTPException) as exc:
+        await refresh_repo_graph(
+            repo_id=repo.id,
+            response=resp,
+            session=session,
+            org_id=1,
+            area="../../etc",
+        )
+    assert exc.value.status_code == 400
+    assert not any(
+        e.type == RepoEventType.GRAPH_REQUESTED for e in publisher.events
+    )
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
 async def test_concurrent_refresh_publishes_separate_request_ids(
     mock_get_repo,
     publisher: InMemoryPublisher,

@@ -76,6 +76,8 @@ from shared.types import (
     EnableRepoGraphRequest,
     FeedbackSummary,
     FreeformConfigData,
+    GraphCodePreviewResponse,
+    GraphStalenessResponse,
     LatestRepoGraphData,
     LoginRequest,
     LoginResponse,
@@ -147,6 +149,10 @@ def _check_rate_limit() -> None:
 
 
 BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+# Area names are simpler than branch names (no slashes, no '..').
+# Areas correspond to top-level directories or YAML-declared groupings;
+# they must never be a path traversal token.
+AREA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$")
 
 
 class CreateTaskRequest(BaseModel):
@@ -1749,6 +1755,10 @@ async def get_latest_market_brief(
 
 # --- Code graph (ADR-016 Phase 1) -------------------------------------------
 
+# Module-level so the staleness endpoint can be patched cleanly in
+# unit tests without faking out a subprocess.
+from agent.graph_analyzer.staleness import compute_staleness  # noqa: E402
+
 
 def _config_to_data(cfg: RepoGraphConfig, repo: Repo) -> RepoGraphConfigData:
     """Build the wire-format ``RepoGraphConfigData`` for one config row."""
@@ -1912,8 +1922,9 @@ async def refresh_repo_graph(
     response: Response,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
+    area: str | None = None,
 ) -> RepoGraphRefreshResponse:
-    """Trigger a graph refresh (ADR-016 §10 — Phase 2).
+    """Trigger a graph refresh (ADR-016 §10).
 
     Publishes a ``REPO_GRAPH_REQUESTED`` event and returns ``202 Accepted``
     with the ``request_id`` the caller can correlate with the eventual
@@ -1921,6 +1932,13 @@ async def refresh_repo_graph(
     analyser runs in the agent process — lock contention is detected
     there and surfaces as a ``REPO_GRAPH_FAILED`` event with
     ``error="analysis already running"``.
+
+    Phase 7: the optional ``area`` query parameter scopes the refresh
+    to a single area. The analyser dispatches to the partial pipeline
+    when ``area`` is set and a previous analysis exists; otherwise it
+    runs the full pipeline. The area name is validated against the
+    same character set used for branch names so it can be safely
+    joined into file paths downstream.
     """
     import uuid
 
@@ -1935,8 +1953,22 @@ async def refresh_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
+    if area is not None and (
+        not AREA_NAME_RE.match(area) or ".." in area
+    ):
+        raise HTTPException(
+            400,
+            "Invalid area name: alphanumeric + '.', '_', '-' (no '..' or '/')",
+        )
+
     request_id = str(uuid.uuid4())
-    await publish(repo_graph_requested(repo_id=repo.id, request_id=request_id))
+    await publish(
+        repo_graph_requested(
+            repo_id=repo.id,
+            request_id=request_id,
+            area_scope=area,
+        )
+    )
     # status_code is set by the decorator; restate explicitly so the
     # response model + status_code both come from this function for
     # downstream openapi clarity.
@@ -1997,6 +2029,167 @@ async def get_latest_repo_graph(
     if row.graph_json:
         response.blob = RepoGraphBlob.model_validate(row.graph_json)
     return response
+
+
+@router.get(
+    "/repos/{repo_id}/graph/staleness",
+    response_model=GraphStalenessResponse,
+)
+async def get_repo_graph_staleness(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GraphStalenessResponse:
+    """Compare the stored graph's commit SHA against the analyser
+    workspace HEAD (ADR-016 Phase 7 §11).
+
+    Used by the freshness banner to surface "workspace has moved since
+    this graph was generated" drift without re-fetching the whole blob.
+    The check is a single ``git rev-parse HEAD`` against
+    ``RepoGraphConfig.workspace_path``; failures (missing directory,
+    not a git checkout) resolve to ``workspace_sha=None, drifted=True``
+    rather than 500ing — the banner shows the same amber hint either way.
+
+    Returns 404 when the repo is missing, the graph is not enabled for
+    it, or no analysis row exists yet (nothing to compare against).
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    if cfg.last_analysis_id is None:
+        raise HTTPException(404, "No graph analysis to compare against yet")
+
+    row_result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        # last_analysis_id points to a row that no longer exists (race
+        # against disable, manual DB surgery). Same shape as "no
+        # analysis yet" from the caller's point of view.
+        raise HTTPException(404, "No graph analysis to compare against yet")
+
+    result = compute_staleness(
+        graph_sha=row.commit_sha,
+        workspace_path=cfg.workspace_path,
+    )
+    return GraphStalenessResponse(
+        graph_sha=result.graph_sha,
+        workspace_sha=result.workspace_sha,
+        drifted=result.drifted,
+    )
+
+
+# Hard caps for the side-panel code-preview endpoint. The line-range
+# cap mirrors the analyser's per-node window so the UI can't pull
+# arbitrary slabs of source. The byte cap is a defence-in-depth ceiling
+# for binary blobs or runaway-long lines.
+GRAPH_CODE_PREVIEW_MAX_LINES = 500
+GRAPH_CODE_PREVIEW_MAX_BYTES = 50 * 1024
+
+
+@router.get(
+    "/repos/{repo_id}/graph/code",
+    response_model=GraphCodePreviewResponse,
+)
+async def get_graph_code_preview(
+    repo_id: int,
+    path: str,
+    line_start: int,
+    line_end: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GraphCodePreviewResponse:
+    """Return a clamped window of source from the analyser workspace
+    (ADR-016 §11 — Phase 7 side panel).
+
+    Safety rules — the endpoint must NEVER serve files outside the
+    workspace root:
+
+    * ``path`` is rejected if it contains ``..`` segments, is absolute,
+      or — after joining + resolving — escapes ``cfg.workspace_path``.
+    * ``line_end - line_start <= 500`` (inclusive line count).
+    * Total response body capped at 50 KiB; we truncate the trailing
+      bytes with a clear marker rather than 413 so the side panel can
+      always render *something*.
+
+    Returns 404 if either the repo or the requested file is missing,
+    400 if the line range is invalid or exceeds the window cap, and
+    422 if the path fails traversal validation.
+    """
+    import os
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    # Path validation — refuse anything that looks like traversal before
+    # touching the filesystem. The check intentionally rejects absolute
+    # paths so a caller can never name an arbitrary file by its full
+    # path on the host.
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        raise HTTPException(422, "Path must be repo-relative and contain no '..'")
+
+    if line_start < 1 or line_end < line_start:
+        raise HTTPException(400, "Invalid line range")
+    if line_end - line_start + 1 > GRAPH_CODE_PREVIEW_MAX_LINES:
+        raise HTTPException(
+            400,
+            f"Line range exceeds the {GRAPH_CODE_PREVIEW_MAX_LINES}-line cap",
+        )
+
+    workspace_root = os.path.realpath(cfg.workspace_path)
+    target = os.path.realpath(os.path.join(workspace_root, path))
+    # Belt-and-braces: even if the validation above passed, the resolved
+    # real path must still live inside the workspace root.
+    if not (target == workspace_root or target.startswith(workspace_root + os.sep)):
+        raise HTTPException(422, "Path escapes the workspace root")
+
+    if not os.path.isfile(target):
+        raise HTTPException(404, "File not found in the analyser workspace")
+
+    # Stream-read just the requested window. We read line-by-line and
+    # stop early so a 10MiB minified file doesn't blow up the worker.
+    selected: list[str] = []
+    try:
+        with open(target, encoding="utf-8", errors="replace") as f:
+            for lineno, raw in enumerate(f, start=1):
+                if lineno < line_start:
+                    continue
+                if lineno > line_end:
+                    break
+                selected.append(raw)
+    except OSError as exc:  # pragma: no cover — defensive
+        raise HTTPException(500, f"Failed to read file: {exc}") from exc
+
+    content = "".join(selected)
+    encoded = content.encode("utf-8")
+    if len(encoded) > GRAPH_CODE_PREVIEW_MAX_BYTES:
+        marker = b"\n... [truncated]\n"
+        cap = GRAPH_CODE_PREVIEW_MAX_BYTES - len(marker)
+        content = encoded[:cap].decode("utf-8", errors="replace") + marker.decode()
+
+    return GraphCodePreviewResponse(
+        file=path,
+        line_start=line_start,
+        line_end=line_end,
+        content=content,
+    )
 
 
 @router.delete("/repos/{repo_name}")

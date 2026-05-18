@@ -345,6 +345,41 @@ class LatestRepoGraphData(BaseModel):
     blob: RepoGraphBlob | None = None
 
 
+class GraphCodePreviewResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
+
+    Returns a clamped window of source from the analyser workspace so
+    the React side-panel can render the code under a node without
+    pulling the whole file. The endpoint enforces bounds (``line_end -
+    line_start <= 500``, body <= 50 KiB) and refuses path-traversal so
+    it can't be coerced into reading anything outside the workspace.
+    """
+
+    file: str
+    line_start: int
+    line_end: int
+    content: str
+
+
+class GraphStalenessResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
+
+    Surfaces the comparison between the stored graph's ``commit_sha`` and
+    the current ``HEAD`` of the analyser workspace so the freshness
+    banner can show an amber "workspace has moved — refresh" hint
+    without re-fetching the whole graph blob.
+
+    ``workspace_sha`` is ``None`` when the workspace can't be inspected
+    (missing directory, not a git checkout, permission denied). In that
+    case ``drifted`` is conservatively ``True`` — the banner shows the
+    same warning rather than pretending the graph is fresh.
+    """
+
+    graph_sha: str
+    workspace_sha: str | None = None
+    drifted: bool
+
+
 # --- Linear types ---
 
 
