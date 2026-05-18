@@ -34,15 +34,19 @@ _MAX_RETRIES = 4
 _INITIAL_BACKOFF_S = 2.0
 
 # Map friendly model names to Bedrock inference profile IDs.
-# Use the latest cross-region profiles (us.*) for highest throughput.
+# Use the *global* cross-region profiles (global.*) — they pool traffic
+# across regions and carry the highest daily token quotas, where the
+# `us.*` profiles cap at a single region's allotment and hit
+# "Too many tokens per day" 429s on large jobs (e.g. graph gap-fill
+# across a sizeable repo, 2026-05-18).
 BEDROCK_MODEL_MAP: dict[str, str] = {
     # Latest models (use these)
-    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
-    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
-    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-sonnet-4-6": "global.anthropic.claude-sonnet-4-6",
+    "claude-opus-4-6": "global.anthropic.claude-opus-4-6-v1",
+    "claude-haiku-4-5": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     # Older Sonnet/Opus 4.0 (lower quotas)
-    "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "claude-opus-4-20250514": "us.anthropic.claude-opus-4-20250514-v1:0",
+    "claude-sonnet-4-20250514": "global.anthropic.claude-sonnet-4-20250514-v1:0",
+    "claude-opus-4-20250514": "global.anthropic.claude-opus-4-20250514-v1:0",
 }
 
 
