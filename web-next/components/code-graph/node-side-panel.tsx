@@ -11,10 +11,14 @@
 //     the parent page can highlight it in the canvas.
 
 import { useMemo, useState } from 'react';
-import { X, ChevronRight } from 'lucide-react';
+import { X, ChevronRight, ArrowUp, ArrowDown, Eraser } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useNodeCodePreview } from '@/hooks/useNodeCodePreview';
+import {
+  computeAncestors,
+  computeDescendants,
+} from '@/lib/graph-reachability';
 import type { Edge, Node, RepoGraphBlob } from '@/types/api';
 
 interface Props {
@@ -26,7 +30,13 @@ interface Props {
   onSelectEdge?: (edgeId: string | null) => void;
   /** Called when the user dismisses the panel (X button). */
   onClose?: () => void;
+  /** Phase 7 P2c §11 — emits the reachability subgraph (Set of node
+   * ids) the canvas should highlight, or ``null`` to clear the
+   * highlight. The parent page owns the canvas overlay state. */
+  onHighlightReachability?: (nodes: Set<string> | null) => void;
 }
+
+type ReachabilityMode = 'ancestors' | 'descendants' | null;
 
 export function NodeSidePanel({
   repoId,
@@ -34,7 +44,14 @@ export function NodeSidePanel({
   nodeId,
   onSelectEdge,
   onClose,
+  onHighlightReachability,
 }: Props) {
+  // Local mirror of whether a reachability mode is active so the
+  // "Clear highlight" button can render. The actual Set lives on the
+  // parent (the canvas needs it); this state is just the toggle.
+  const [reachabilityMode, setReachabilityMode] = useState<ReachabilityMode>(
+    null,
+  );
   const node = useMemo(
     () => (blob.nodes as Node[]).find((n) => n.id === nodeId) ?? null,
     [blob.nodes, nodeId],
@@ -112,6 +129,61 @@ export function NodeSidePanel({
       </header>
 
       <div className="flex-1 space-y-3 overflow-auto p-3">
+        {/* ADR-016 Phase 7 P2c §11 — ancestor / descendant highlight
+         * controls. The buttons emit the reachability Set upward; the
+         * "Clear highlight" affordance only renders when a mode is
+         * active so it isn't dead UI when nothing is highlighted. */}
+        <div
+          className="flex flex-wrap items-center gap-2"
+          data-testid="reachability-controls"
+        >
+          <Button
+            type="button"
+            variant={reachabilityMode === 'ancestors' ? 'default' : 'outline'}
+            size="sm"
+            data-testid="reachability-ancestors"
+            onClick={() => {
+              const set = computeAncestors(blob, nodeId);
+              setReachabilityMode('ancestors');
+              onHighlightReachability?.(set);
+            }}
+          >
+            <ArrowUp size={14} className="mr-1" />
+            Highlight ancestors
+          </Button>
+          <Button
+            type="button"
+            variant={
+              reachabilityMode === 'descendants' ? 'default' : 'outline'
+            }
+            size="sm"
+            data-testid="reachability-descendants"
+            onClick={() => {
+              const set = computeDescendants(blob, nodeId);
+              setReachabilityMode('descendants');
+              onHighlightReachability?.(set);
+            }}
+          >
+            <ArrowDown size={14} className="mr-1" />
+            Highlight descendants
+          </Button>
+          {reachabilityMode !== null && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="reachability-clear"
+              onClick={() => {
+                setReachabilityMode(null);
+                onHighlightReachability?.(null);
+              }}
+            >
+              <Eraser size={14} className="mr-1" />
+              Clear highlight
+            </Button>
+          )}
+        </div>
+
         <CodePreview
           loading={preview.isLoading}
           error={preview.error}

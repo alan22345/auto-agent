@@ -51,6 +51,12 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
   const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<Edge['kind']>>(
     () => new Set(),
   );
+  // Phase 7 P2c §11 — ancestor / descendant highlight subgraph. The
+  // side panel computes it; the canvas paints it. Clears whenever the
+  // selected node changes so a stale highlight doesn't sit around.
+  const [reachabilityHighlight, setReachabilityHighlight] = useState<
+    Set<string> | null
+  >(null);
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
@@ -141,12 +147,19 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                       blob={latest.blob}
                       highlightedEdgeId={highlightedEdgeId}
                       repoId={config.repo_id}
-                      onNodeClick={setSelectedNodeId}
+                      onNodeClick={(id) => {
+                        // Reset the reachability overlay whenever the
+                        // user selects a different node — the side
+                        // panel computes a fresh set on demand.
+                        setReachabilityHighlight(null);
+                        setSelectedNodeId(id);
+                      }}
                       onEdgeClick={(id, pos) =>
                         setSelectedEdge({ id, pos })
                       }
                       searchQuery={searchQuery}
                       hiddenEdgeKinds={hiddenEdgeKinds}
+                      reachabilityHighlight={reachabilityHighlight}
                     />
                   </div>
                   {selectedNodeId && (
@@ -155,7 +168,11 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                       blob={latest.blob}
                       nodeId={selectedNodeId}
                       onSelectEdge={setHighlightedEdgeId}
-                      onClose={() => setSelectedNodeId(null)}
+                      onHighlightReachability={setReachabilityHighlight}
+                      onClose={() => {
+                        setReachabilityHighlight(null);
+                        setSelectedNodeId(null);
+                      }}
                     />
                   )}
                 </div>

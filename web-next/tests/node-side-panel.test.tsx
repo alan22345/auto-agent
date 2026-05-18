@@ -293,6 +293,128 @@ describe('NodeSidePanel', () => {
     expect(container.querySelector('[data-testid="node-side-panel"]')).toBeNull();
   });
 
+  // ADR-016 Phase 7 P2 §11 — ancestor / descendant highlight controls.
+  it('renders Highlight ancestors / descendants / clear controls', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={blob}
+        nodeId="agent/dog.py::Dog.bark"
+        onHighlightReachability={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('reachability-ancestors')).toBeTruthy();
+    expect(screen.getByTestId('reachability-descendants')).toBeTruthy();
+    // Clear button only appears once a mode is active.
+    expect(screen.queryByTestId('reachability-clear')).toBeNull();
+  });
+
+  it('emits ancestor set when Highlight ancestors is clicked', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    const handler = vi.fn();
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={blob}
+        nodeId="agent/dog.py::Dog.bark"
+        onHighlightReachability={handler}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('reachability-ancestors'));
+    expect(handler).toHaveBeenCalledTimes(1);
+    const arg = handler.mock.calls[0][0] as Set<string> | null;
+    expect(arg).not.toBeNull();
+    // Cat.meow calls Dog.bark, so it's an upstream caller.
+    expect(arg!.has('agent/dog.py::Dog.bark')).toBe(true);
+    expect(arg!.has('agent/cat.py::Cat.meow')).toBe(true);
+  });
+
+  it('emits descendant set when Highlight descendants is clicked', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    const handler = vi.fn();
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={blob}
+        nodeId="agent/dog.py::Dog.bark"
+        onHighlightReachability={handler}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('reachability-descendants'));
+    const arg = handler.mock.calls[0][0] as Set<string> | null;
+    expect(arg).not.toBeNull();
+    // Dog.bark calls Dog.speak and inherits Animal — both are
+    // downstream from Dog.bark.
+    expect(arg!.has('agent/dog.py::Dog.bark')).toBe(true);
+    expect(arg!.has('agent/dog.py::Dog.speak')).toBe(true);
+    expect(arg!.has('agent/base.py::Animal')).toBe(true);
+  });
+
+  it('shows Clear once a mode is active and emits null on click', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    const handler = vi.fn();
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={blob}
+        nodeId="agent/dog.py::Dog.bark"
+        onHighlightReachability={handler}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('reachability-ancestors'));
+    const clearBtn = screen.getByTestId('reachability-clear');
+    expect(clearBtn).toBeTruthy();
+    fireEvent.click(clearBtn);
+    // Last call should be with null (clear).
+    const last = handler.mock.calls[handler.mock.calls.length - 1][0];
+    expect(last).toBeNull();
+  });
+
   it('skips the code preview fetch for nodes without a file/line span', () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

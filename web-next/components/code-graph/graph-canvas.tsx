@@ -54,6 +54,11 @@ interface Props {
    * unchecked kind becomes a per-kind class with ``display: none`` so
    * the user can flip kinds on/off without rebuilding elements. */
   hiddenEdgeKinds?: Set<Edge['kind']>;
+  /** Phase 7 P2c — reachability subgraph (Set of node ids) the canvas
+   * should highlight. Nodes inside the set get ``.reachability-highlight``;
+   * everything else gets ``.reachability-fade``. ``null`` / undefined =
+   * no overlay. */
+  reachabilityHighlight?: Set<string> | null;
 }
 
 export function GraphCanvas({
@@ -65,6 +70,7 @@ export function GraphCanvas({
   onEdgeClick,
   searchQuery,
   hiddenEdgeKinds,
+  reachabilityHighlight,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
@@ -198,6 +204,18 @@ export function GraphCanvas({
             selector: 'edge.edge-kind-hidden-http',
             style: { display: 'none' as const },
           },
+          // Phase 7 P2c §11 — ancestor / descendant reachability
+          // overlay. Fade is stronger than the search fade so the two
+          // overlays compose readably (search inside a reachability
+          // highlight still stands out).
+          {
+            selector: 'node.reachability-fade',
+            style: { opacity: 0.15 },
+          },
+          {
+            selector: 'node.reachability-highlight',
+            style: { 'border-width': 3, 'border-color': '#22d3ee' },
+          },
         ],
       });
 
@@ -308,6 +326,25 @@ export function GraphCanvas({
       });
     });
   }, [cyState, blob, hiddenEdgeKinds]);
+
+  // Phase 7 P2c §11 — reachability overlay diff. ``null`` (or
+  // undefined) clears both classes; a non-empty Set highlights the
+  // members and fades everything else.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    cy.batch(() => {
+      if (!reachabilityHighlight) {
+        cy.nodes().removeClass('reachability-highlight reachability-fade');
+        return;
+      }
+      cy.nodes().forEach((n) => {
+        const inSet = reachabilityHighlight.has(n.id());
+        n.toggleClass('reachability-highlight', inSet);
+        n.toggleClass('reachability-fade', !inSet);
+      });
+    });
+  }, [cyState, reachabilityHighlight]);
 
   return (
     <div
