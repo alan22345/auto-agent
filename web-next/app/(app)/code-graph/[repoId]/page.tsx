@@ -1,5 +1,5 @@
 'use client';
-import { use, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -25,8 +25,11 @@ import { useRepoGraphStaleness } from '@/hooks/useRepoGraphStaleness';
 // ADR-016 §11 — per-repo settings + graph page. Phase 2 wires the
 // Cytoscape canvas in below the freshness banner; Phase 7 polishes
 // node interactions + side-panel evidence.
-export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: string }> }) {
-  const params = use(props.params);
+export default function CodeGraphRepoPage({
+  params,
+}: {
+  params: { repoId: string };
+}) {
   const repoId = Number(params.repoId);
   const router = useRouter();
   const qc = useQueryClient();
