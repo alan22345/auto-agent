@@ -20,6 +20,7 @@ import { disableRepoGraph } from '@/lib/code-graph';
 import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
 import { useCodeGraphConfig } from '@/hooks/useCodeGraphConfig';
 import { useRepoGraph } from '@/hooks/useRepoGraph';
+import { useRepoGraphStaleness } from '@/hooks/useRepoGraphStaleness';
 
 // ADR-016 §11 — per-repo settings + graph page. Phase 2 wires the
 // Cytoscape canvas in below the freshness banner; Phase 7 polishes
@@ -62,6 +63,14 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
     Number.isFinite(repoId) ? repoId : null,
   );
   const { data: latest } = useRepoGraph(Number.isFinite(repoId) ? repoId : null);
+  // Phase 7 §11 — poll for analyser-workspace drift so the banner can
+  // surface a "refresh to update" hint. Only meaningful once an
+  // analysis row exists; otherwise the endpoint 404s and the hook would
+  // just spin against nothing.
+  const { data: staleness } = useRepoGraphStaleness(
+    Number.isFinite(repoId) ? repoId : null,
+    Boolean(latest?.blob),
+  );
 
   const disableMutation = useMutation({
     mutationFn: () => disableRepoGraph(repoId),
@@ -124,7 +133,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
           </p>
         ) : (
           <>
-            {latest && <FreshnessBanner latest={latest} />}
+            {latest && <FreshnessBanner latest={latest} staleness={staleness} />}
 
             <div className="flex flex-wrap items-center gap-2">
               <RefreshButton repoId={config.repo_id} />

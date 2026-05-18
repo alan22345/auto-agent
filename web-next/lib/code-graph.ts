@@ -8,6 +8,7 @@
 import { api, ApiError } from './api';
 import type {
   EnableRepoGraphRequest,
+  GraphStalenessResponse,
   LatestRepoGraphData,
   RepoData,
   RepoGraphConfigData,
@@ -102,6 +103,23 @@ export async function getGraphCodePreview(
 // when no analysis has finished yet.
 export async function getLatestRepoGraph(repoId: number): Promise<LatestRepoGraphData> {
   return api<LatestRepoGraphData>(`/api/repos/${repoId}/graph/latest`);
+}
+
+// Compare the stored graph SHA against the analyser workspace HEAD
+// (ADR-016 Phase 7 §11). Returns ``null`` when no graph exists to
+// compare against (404) so the caller can treat "nothing to warn about"
+// uniformly. Other errors propagate.
+export async function getRepoGraphStaleness(
+  repoId: number,
+): Promise<GraphStalenessResponse | null> {
+  try {
+    return await api<GraphStalenessResponse>(
+      `/api/repos/${repoId}/graph/staleness`,
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
 }
 
 // The /code-graph onboarding modal needs to pick from existing repos —

@@ -77,6 +77,7 @@ from shared.types import (
     FeedbackSummary,
     FreeformConfigData,
     GraphCodePreviewResponse,
+    GraphStalenessResponse,
     LatestRepoGraphData,
     LoginRequest,
     LoginResponse,
@@ -1754,6 +1755,10 @@ async def get_latest_market_brief(
 
 # --- Code graph (ADR-016 Phase 1) -------------------------------------------
 
+# Module-level so the staleness endpoint can be patched cleanly in
+# unit tests without faking out a subprocess.
+from agent.graph_analyzer.staleness import compute_staleness  # noqa: E402
+
 
 def _config_to_data(cfg: RepoGraphConfig, repo: Repo) -> RepoGraphConfigData:
     """Build the wire-format ``RepoGraphConfigData`` for one config row."""
@@ -2024,6 +2029,63 @@ async def get_latest_repo_graph(
     if row.graph_json:
         response.blob = RepoGraphBlob.model_validate(row.graph_json)
     return response
+
+
+@router.get(
+    "/repos/{repo_id}/graph/staleness",
+    response_model=GraphStalenessResponse,
+)
+async def get_repo_graph_staleness(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GraphStalenessResponse:
+    """Compare the stored graph's commit SHA against the analyser
+    workspace HEAD (ADR-016 Phase 7 §11).
+
+    Used by the freshness banner to surface "workspace has moved since
+    this graph was generated" drift without re-fetching the whole blob.
+    The check is a single ``git rev-parse HEAD`` against
+    ``RepoGraphConfig.workspace_path``; failures (missing directory,
+    not a git checkout) resolve to ``workspace_sha=None, drifted=True``
+    rather than 500ing — the banner shows the same amber hint either way.
+
+    Returns 404 when the repo is missing, the graph is not enabled for
+    it, or no analysis row exists yet (nothing to compare against).
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    if cfg.last_analysis_id is None:
+        raise HTTPException(404, "No graph analysis to compare against yet")
+
+    row_result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        # last_analysis_id points to a row that no longer exists (race
+        # against disable, manual DB surgery). Same shape as "no
+        # analysis yet" from the caller's point of view.
+        raise HTTPException(404, "No graph analysis to compare against yet")
+
+    result = compute_staleness(
+        graph_sha=row.commit_sha,
+        workspace_path=cfg.workspace_path,
+    )
+    return GraphStalenessResponse(
+        graph_sha=result.graph_sha,
+        workspace_sha=result.workspace_sha,
+        drifted=result.drifted,
+    )
 
 
 # Hard caps for the side-panel code-preview endpoint. The line-range

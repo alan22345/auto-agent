@@ -361,6 +361,25 @@ class GraphCodePreviewResponse(BaseModel):
     content: str
 
 
+class GraphStalenessResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
+
+    Surfaces the comparison between the stored graph's ``commit_sha`` and
+    the current ``HEAD`` of the analyser workspace so the freshness
+    banner can show an amber "workspace has moved — refresh" hint
+    without re-fetching the whole graph blob.
+
+    ``workspace_sha`` is ``None`` when the workspace can't be inspected
+    (missing directory, not a git checkout, permission denied). In that
+    case ``drifted`` is conservatively ``True`` — the banner shows the
+    same warning rather than pretending the graph is fresh.
+    """
+
+    graph_sha: str
+    workspace_sha: str | None = None
+    drifted: bool
+
+
 # --- Linear types ---
 
 
