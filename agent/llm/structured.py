@@ -29,6 +29,7 @@ one-shot" (this file). Both are real adapters: see ADR-010.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -61,8 +62,30 @@ def parse_json_response(text: str) -> dict | None:
     if not cleaned:
         return None
 
-    # Strip a leading ```... line (with or without a language tag) and a
-    # trailing ``` line. This handles both ``` and ```json.
+    # Pattern 1 — fenced JSON anywhere in the text, on one line or many.
+    # Catches the case where Haiku replies with
+    #   ```json {"edges": []} ```  Then some prose...
+    # which the line-based fence stripper below would mangle (the JSON sits
+    # on the same line as the opener, and trailing prose adds extra `}`s
+    # that confuse the brace-locator). DOTALL so the body can span lines.
+    fence_match = re.search(
+        r"```(?:json)?\s*(\{.*?\})\s*```",
+        cleaned,
+        re.DOTALL,
+    )
+    if fence_match:
+        try:
+            parsed = json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+
+    # Pattern 2 — strip a leading ```... line and a trailing ``` line.
+    # Handles JSON wrapped in a multi-line fence:
+    #   ```json
+    #   {"edges": []}
+    #   ```
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
         if lines and lines[0].startswith("```"):
