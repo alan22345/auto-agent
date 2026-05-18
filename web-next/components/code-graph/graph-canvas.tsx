@@ -50,6 +50,10 @@ interface Props {
   /** Phase 7 P2 — search query (case-insensitive substring on node
    * label). Empty / whitespace = no filter applied. */
   searchQuery?: string;
+  /** Phase 7 P2 — edge kinds to hide. Defaults to no filter. Each
+   * unchecked kind becomes a per-kind class with ``display: none`` so
+   * the user can flip kinds on/off without rebuilding elements. */
+  hiddenEdgeKinds?: Set<Edge['kind']>;
 }
 
 export function GraphCanvas({
@@ -60,6 +64,7 @@ export function GraphCanvas({
   onNodeClick,
   onEdgeClick,
   searchQuery,
+  hiddenEdgeKinds,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
@@ -175,6 +180,24 @@ export function GraphCanvas({
             selector: 'node.search-match',
             style: { 'border-width': 3, 'border-color': '#facc15' },
           },
+          // Phase 7 P2 §11 — edge-kind filter classes. One rule per
+          // kind so toggling one doesn't reflow the others.
+          {
+            selector: 'edge.edge-kind-hidden-calls',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-imports',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-inherits',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.edge-kind-hidden-http',
+            style: { display: 'none' as const },
+          },
         ],
       });
 
@@ -268,6 +291,23 @@ export function GraphCanvas({
       });
     });
   }, [cyState, blob, searchQuery]);
+
+  // Phase 7 P2 §11 — edge-kind filter diff. Per-edge ``edge-kind-hidden-<kind>``
+  // class drives the cytoscape ``display: none`` rule registered in
+  // the style array. Re-checking a kind removes the class.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    const hidden = hiddenEdgeKinds ?? new Set<Edge['kind']>();
+    cy.batch(() => {
+      cy.edges().forEach((e) => {
+        const kind = e.data('kind') as Edge['kind'] | undefined;
+        for (const k of ['calls', 'imports', 'inherits', 'http'] as Edge['kind'][]) {
+          e.toggleClass(`edge-kind-hidden-${k}`, kind === k && hidden.has(k));
+        }
+      });
+    });
+  }, [cyState, blob, hiddenEdgeKinds]);
 
   return (
     <div

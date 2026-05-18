@@ -9,10 +9,12 @@ import { BranchPicker } from '@/components/code-graph/branch-picker';
 import { RefreshButton } from '@/components/code-graph/refresh-button';
 import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
 import { EdgeEvidencePopover } from '@/components/code-graph/edge-evidence-popover';
+import { EdgeKindFilter } from '@/components/code-graph/edge-kind-filter';
 import { GraphCanvas } from '@/components/code-graph/graph-canvas';
 import { NodeSidePanel } from '@/components/code-graph/node-side-panel';
 import { SearchInput } from '@/components/code-graph/search-input';
 import { ViolationsPanel } from '@/components/code-graph/violations-panel';
+import type { Edge } from '@/types/api';
 import { ApiError } from '@/lib/api';
 import { disableRepoGraph } from '@/lib/code-graph';
 import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
@@ -43,8 +45,12 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
     id: string;
     pos: { x: number; y: number };
   } | null>(null);
-  // Phase 7 P2 §11 — toolbar state: debounced search query.
+  // Phase 7 P2 §11 — toolbar state: debounced search query +
+  // edge-kind filter (set of kinds the user has unchecked).
   const [searchQuery, setSearchQuery] = useState('');
+  const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<Edge['kind']>>(
+    () => new Set(),
+  );
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
@@ -127,6 +133,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                   data-testid="graph-toolbar"
                 >
                   <SearchInput onChange={setSearchQuery} />
+                  <EdgeKindFilter onChange={setHiddenEdgeKinds} />
                 </div>
                 <div className="flex min-h-0 flex-1 gap-4">
                   <div className="min-w-0 flex-1">
@@ -139,6 +146,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                         setSelectedEdge({ id, pos })
                       }
                       searchQuery={searchQuery}
+                      hiddenEdgeKinds={hiddenEdgeKinds}
                     />
                   </div>
                   {selectedNodeId && (
