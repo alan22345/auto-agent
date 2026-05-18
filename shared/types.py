@@ -345,6 +345,22 @@ class LatestRepoGraphData(BaseModel):
     blob: RepoGraphBlob | None = None
 
 
+class GraphCodePreviewResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
+
+    Returns a clamped window of source from the analyser workspace so
+    the React side-panel can render the code under a node without
+    pulling the whole file. The endpoint enforces bounds (``line_end -
+    line_start <= 500``, body <= 50 KiB) and refuses path-traversal so
+    it can't be coerced into reading anything outside the workspace.
+    """
+
+    file: str
+    line_start: int
+    line_end: int
+    content: str
+
+
 # --- Linear types ---
 
 
