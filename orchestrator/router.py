@@ -49,6 +49,7 @@ from shared.events import (
 )
 from shared.models import (
     FreeformConfig,
+    GateDecision,
     MarketBrief,
     Organization,
     OrganizationMembership,
@@ -76,6 +77,8 @@ from shared.types import (
     EnableRepoGraphRequest,
     FeedbackSummary,
     FreeformConfigData,
+    GateArtefact,
+    GateDecisionOut,
     GraphCodePreviewResponse,
     GraphStalenessResponse,
     LatestRepoGraphData,
@@ -83,6 +86,7 @@ from shared.types import (
     LoginResponse,
     MarketBriefResponse,
     OutcomeResponse,
+    PlanApprovalRequest,
     PlanRead,
     RepoData,
     RepoGraphConfigData,

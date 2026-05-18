@@ -41,10 +41,13 @@ class TaskStatus(str, enum.Enum):
     QUEUED = "queued"
     PLANNING = "planning"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"  # ADR-015 §5 Phase 5 — complex-flow plan gate
     AWAITING_CLARIFICATION = "awaiting_clarification"
     CODING = "coding"
     VERIFYING = "verifying"          # freeform self-verification — runs after CODING, before PR_CREATED
     PR_CREATED = "pr_created"
+    PR_REVIEW = "pr_review"          # ADR-015 §5 — self-PR-review gate (Phase 4: simple flow)
+    ADDRESSING_COMMENTS = "addressing_comments"  # ADR-015 §5 Phase 5 — one round of self-fixups
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
     DONE = "done"
@@ -207,6 +210,15 @@ class Task(Base):
     created_by_user = relationship("User", foreign_keys=[created_by_user_id])
     subtasks = Column(JSONB, nullable=True)  # [{title, status, output_preview}]
     current_subtask = Column(Integer, nullable=True)  # 0-indexed, null = not started
+    # ADR-018 — link from child SCAFFOLD-spawned tasks back to their parent.
+    parent_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    # ADR-015 / §9 — current architect/builder phase for trio tasks. ``None``
+    # for non-trio tasks. Kept as a nullable column so router.pause_trio
+    # can null it without a migration on origin yet.
+    trio_phase = Column(Enum(TrioPhase), nullable=True)
+    # ADR-015 — backlog the trio architect emits / drains. JSONB list of
+    # ``WorkItem`` dicts. None on non-trio tasks.
+    trio_backlog = Column(JSONB, nullable=True)
     # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips before the agent
     # writes a plan. NULL = not yet started; [] = grilling complete or skipped.
@@ -239,6 +251,31 @@ class TaskHistory(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     task = relationship("Task", back_populates="history")
+
+
+class GateDecision(Base):
+    """One row per gate decision — ADR-015 §6 / ADR-018 §6 audit log.
+
+    Persists the audit trail that the web-next gate-history panel reads.
+    Both human-driven approvals (``source="user"``) and freeform standin
+    decisions (``source="po_standin" | "improvement_standin"``) write
+    rows here.
+    """
+
+    __tablename__ = "gate_decisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    gate = Column(String(64), nullable=False)
+    source = Column(String(64), nullable=False)
+    agent_id = Column(String(128), nullable=True)
+    verdict = Column(Text, nullable=False, default="")
+    comments = Column(Text, nullable=False, default="")
+    cited_context = Column(JSONB, nullable=False, server_default="[]")
+    fallback_reasons = Column(JSONB, nullable=False, server_default="[]")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class TaskMessage(Base):

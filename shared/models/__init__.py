@@ -3,6 +3,7 @@
 
 from .core import (
     Base,
+    GateDecision,
     GitHubInstallation,
     MessengerConversation,
     Organization,
@@ -40,6 +41,7 @@ from .freeform import (
 __all__ = [
     "Base",
     "FreeformConfig",
+    "GateDecision",
     "GitHubInstallation",
     "MarketBrief",
     "MessengerConversation",

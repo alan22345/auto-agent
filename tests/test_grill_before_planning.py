@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 from agent.lifecycle.planning import (
     _MAX_GRILL_ROUNDS,
-    _SKIP_GRILL_COMPLEXITIES,
     _extract_grill_done,
     _grill_round_count,
     _should_run_grill,
@@ -64,15 +63,17 @@ def test_should_run_grill_for_complex_task_with_no_intake_qa():
     assert _should_run_grill(_task("complex")) is True
 
 
-def test_should_skip_grill_for_simple_task():
-    assert _should_run_grill(_task("simple")) is False
-    assert _should_run_grill(_task("simple_no_code")) is False
+def test_should_run_grill_for_simple_task():
+    """Always-grill policy: even simple/simple_no_code tasks grill on entry."""
+    assert _should_run_grill(_task("simple")) is True
+    assert _should_run_grill(_task("simple_no_code")) is True
 
 
 def test_should_skip_grill_when_explicitly_complete():
-    """[] = explicitly skipped; sentinel last entry = grilling done."""
-    # Empty list = explicit skip (e.g. simple task, architecture suggestion).
-    assert _should_run_grill(_task("complex", intake_qa=[])) is False
+    """[] no longer means skip — only the GRILL_DONE sentinel ends grilling."""
+    # Empty list = grilling hasn't started (or stale skip flag from old code).
+    # Either way: grill.
+    assert _should_run_grill(_task("complex", intake_qa=[])) is True
     # Sentinel last entry = grilling complete via GRILL_DONE.
     completed = [
         {"question": "q1", "answer": "a1"},
@@ -101,10 +102,16 @@ def test_should_skip_grill_when_complexity_missing():
     assert _should_run_grill(_task(None)) is False
 
 
-def test_skip_grill_complexities_constants():
-    """Sanity — grill skips simple AND query/no-code paths."""
-    assert "simple" in _SKIP_GRILL_COMPLEXITIES
-    assert "simple_no_code" in _SKIP_GRILL_COMPLEXITIES
+def test_always_grill_policy():
+    """Always-grill policy: no complexity opts out of grilling.
+
+    The constant ``_SKIP_GRILL_COMPLEXITIES`` was removed when the
+    always-grill policy landed (2026-05-18). The only exit is the agent
+    emitting ``GRILL_DONE`` which appends the sentinel to ``intake_qa``.
+    """
+    import agent.lifecycle.planning as planning
+
+    assert not hasattr(planning, "_SKIP_GRILL_COMPLEXITIES")
 
 
 # ---------------------------------------------------------------------------
@@ -277,11 +284,13 @@ def test_grill_round_trip_state_evolution():
 
 
 # ---------------------------------------------------------------------------
-# Architecture-suggestion path: empty intake_qa skips grilling
+# Architecture-suggestion path — always-grill applies to these too
 # ---------------------------------------------------------------------------
 
-def test_architecture_derived_task_skips_grilling():
-    """Tasks created from architecture-mode suggestions arrive with intake_qa=[]
-    (empty list = 'grilling complete'). They go straight to planning."""
+def test_architecture_derived_task_still_grills():
+    """Always-grill policy: architecture-suggestion tasks (intake_qa=[])
+    no longer bypass grilling. They still get one grill round; the agent
+    is expected to emit GRILL_DONE on the first turn for trivial cases.
+    """
     task = _task("complex", intake_qa=[])
-    assert _should_run_grill(task) is False
+    assert _should_run_grill(task) is True

@@ -21,7 +21,7 @@ from agent.llm.structured import parse_json_response
 from agent.workspace import clone_repo
 from shared.database import async_session
 from shared.events import Event, TaskEventType, publish
-from shared.models import ArchitectAttempt, Repo, Task
+from shared.models import Repo, Task
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,11 @@ async def answer_architect_question(parent_task_id: int) -> None:
     ARCHITECT_CLARIFICATION_RESOLVED so the dispatcher can resume the
     architect.
     """
+    # ADR-018 PR-B note: ``ArchitectAttempt`` lives in the ADR-015 trio
+    # model module that isn't on origin/main yet. Import deferred so this
+    # function being unused (scaffold flow) doesn't break module import.
+    from shared.models import ArchitectAttempt  # noqa: PLC0415
+
     async with async_session() as s:
         parent = (
             await s.execute(select(Task).where(Task.id == parent_task_id))
@@ -168,6 +173,8 @@ async def answer_architect_question(parent_task_id: int) -> None:
 
 
 async def _write_answer(attempt_id: int, answer: str) -> None:
+    from shared.models import ArchitectAttempt  # noqa: PLC0415
+
     async with async_session() as s:
         row = (
             await s.execute(select(ArchitectAttempt).where(ArchitectAttempt.id == attempt_id))
