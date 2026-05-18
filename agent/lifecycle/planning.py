@@ -51,11 +51,10 @@ log = setup_logging("agent.lifecycle.planning")
 
 SUMMARY_MAX_AGE = timedelta(days=7)
 
-# ADR-015 §1: grill skip is driven by the classifier's needs_grill answer,
-# translated to intake_qa=[] at task creation. There is no per-complexity
-# skip list any more — a `simple` task with needs_grill=True grills, and a
-# `complex` task with needs_grill=False (mechanical rename, architecture-
-# mode suggestion, etc.) skips.
+# Policy (2026-05-18): grill ALWAYS runs, regardless of complexity or
+# any classifier signal. The only way out of grilling is the agent
+# emitting ``GRILL_DONE`` (which appends ``GRILL_DONE_QUESTION_SENTINEL``
+# to ``intake_qa``). See ``_should_run_grill`` below.
 
 # Hard cap on grill rounds to bound user fatigue. The grill prompt asks the
 # agent to aim for 3–7 questions and emit GRILL_DONE; this is a fail-safe in
@@ -112,9 +111,8 @@ def _extract_grill_done(output: str) -> str | None:
 def _should_run_grill(task) -> bool:
     """Decide whether the grill phase runs before planning for this task.
 
-    Policy (2026-05-16): grill ALWAYS runs, regardless of complexity or
-    the classifier's ``needs_grill`` signal. The only way out is the
-    agent emitting ``GRILL_DONE`` — which appends
+    Policy (2026-05-18): grill ALWAYS runs, regardless of complexity.
+    The only way out is the agent emitting ``GRILL_DONE`` — which appends
     ``GRILL_DONE_QUESTION_SENTINEL`` to ``intake_qa``. For trivial tasks
     the agent typically emits GRILL_DONE on the first turn with no
     questions; the cost is one extra turn, but skipping clarification

@@ -79,23 +79,6 @@ class Suggestion(Base):
     brief = relationship("MarketBrief")
 
 
-# Categories whose tasks arrive pre-grilled — the analyzer that produced the
-# suggestion has already applied the grill-with-docs lens, so the resulting
-# task should skip the grill phase. Encoded as intake_qa = [] on the Task.
-PRE_GRILLED_SUGGESTION_CATEGORIES: frozenset[str] = frozenset({"architecture"})
-
-
-def intake_qa_for_suggestion(category: str | None) -> list | None:
-    """Return the initial intake_qa for a Task created from a Suggestion.
-
-    [] = grilling complete (skip the grill phase entirely).
-    None = grill normally.
-    """
-    if category and category in PRE_GRILLED_SUGGESTION_CATEGORIES:
-        return []
-    return None
-
-
 class FreeformConfig(Base):
     """Per-repo freeform mode configuration."""
     __tablename__ = "freeform_configs"

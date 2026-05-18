@@ -1,9 +1,8 @@
 """Simple-flow integration — ADR-015 §5 Phase 4.
 
-Verifies the end-to-end ordering for a simple-classified task with
-``needs_grill=False``:
+Verifies the end-to-end ordering for a simple-classified task:
 
-    grill (conditional, skipped) → coding (one-shot) → PR → PR-review
+    grill (always runs) → coding (one-shot) → PR → PR-review
       (correctness scope) → DONE
 
 We don't boot the LLM, don't run the dev server, and don't push to
@@ -22,22 +21,23 @@ from agent.lifecycle.planning import _should_run_grill
 from agent.prompts import GRILL_DONE_QUESTION_SENTINEL
 
 # ---------------------------------------------------------------------------
-# Phase-2 carryover: needs_grill=False ⇒ intake_qa=[] ⇒ planning skips grill.
+# Grill gate: under the always-grill policy, even simple tasks with the
+# legacy intake_qa=[] sentinel must still grill.
 # ---------------------------------------------------------------------------
 
 
-def test_simple_task_with_needs_grill_false_skips_grill() -> None:
-    """If the classifier wrote intake_qa=[] (needs_grill=False translation),
-    the planner's grill gate must answer 'don't run grill'."""
+def test_simple_task_with_empty_intake_qa_still_grills() -> None:
+    """Legacy code paths used ``intake_qa=[]`` as a skip flag. The new
+    policy is grill-always; the only exit is the GRILL_DONE sentinel."""
 
     task = MagicMock()
     task.complexity = "simple"
-    task.intake_qa = []  # ← classifier's needs_grill=False sentinel
-    assert _should_run_grill(task) is False
+    task.intake_qa = []  # legacy skip sentinel — ignored under always-grill
+    assert _should_run_grill(task) is True
 
 
 def test_simple_task_post_grill_done_skips_grill() -> None:
-    """Same gate, the post-grill case — also must skip."""
+    """The GRILL_DONE sentinel is the ONLY way out of grilling."""
 
     task = MagicMock()
     task.complexity = "simple"
