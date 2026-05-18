@@ -1,8 +1,14 @@
 """repo_graph
 
-Revision ID: 033_repo_graph
-Revises: 032_verify_review_attempts
+Revision ID: 047_repo_graph
+Revises: 046_scaffold_complexity_and_states
 Create Date: 2026-05-15
+
+Renumbered from 033 → 047 during the local-main ↔ origin-main reconciliation
+(2026-05-18). Two migrations collided on revision 033 (this one from ADR-016
+and 033_trio from ADR-013); the trio chain had already been applied on the
+deployed VM but this one had not, so repositioning at the end of the chain
+is safe and lets `alembic upgrade head` apply it on top of the existing state.
 
 Adds the Phase 1 scaffolding tables for ADR-016 (the code-graph feature):
 
@@ -23,8 +29,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "033"
-down_revision = "032"
+revision = "047"
+down_revision = "046"
 
 
 def upgrade() -> None:
