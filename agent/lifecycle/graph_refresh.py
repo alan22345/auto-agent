@@ -42,7 +42,7 @@ from agent.graph_workspace import (
     GraphWorkspaceLockTimeout,
     graph_workspace_lock,
 )
-from agent.llm import get_provider
+from agent.llm import get_structured_extractor_provider
 from shared.database import async_session
 from shared.events import (
     Event,
@@ -150,13 +150,13 @@ async def run_refresh(
                     commit_sha=commit_sha,
                     target_area=area_scope,
                     previous_blob=previous_blob,
-                    provider=get_provider(),
+                    provider=get_structured_extractor_provider(),
                 )
             else:
                 blob = await run_pipeline(
                     workspace=workspace,
                     commit_sha=commit_sha,
-                    provider=get_provider(),
+                    provider=get_structured_extractor_provider(),
                 )
     except GraphWorkspaceLockTimeout:
         log.warning(
