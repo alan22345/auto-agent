@@ -53,8 +53,16 @@ class ContextManager:
         include_methodology: bool = False,
         task_description: str | None = None,
         repo_name: str | None = None,
+        repo_id: int | None = None,
     ) -> str:
-        """Build the full system prompt for this workspace."""
+        """Build the full system prompt for this workspace.
+
+        ``repo_id`` enables the ADR-016 Phase 6 code-graph nudge — the
+        builder consults the DB to check whether the repo has an active
+        graph and, if so, appends a paragraph pointing at
+        ``query_repo_graph``. None of the existing callers are required
+        to pass it; the parameter is additive.
+        """
         memory_context = None
         if task_description:
             try:
@@ -69,6 +77,7 @@ class ContextManager:
             include_methodology=include_methodology,
             memory_context=memory_context,
             repo_name=repo_name,
+            repo_id=repo_id,
         )
 
     async def prepare(

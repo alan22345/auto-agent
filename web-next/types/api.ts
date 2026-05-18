@@ -45,6 +45,15 @@ export interface ArchitectDecision {
   question?: string | null;
 }
 /**
+ * Per-area outcome (ADR-016 §10 — failures isolated per area).
+ */
+export interface AreaStatus {
+  name: string;
+  status: "ok" | "partial" | "failed";
+  error?: string | null;
+  unresolved_dynamic_sites?: number;
+}
+/**
  * CI status for a commit.
  */
 export interface CIStatus {
@@ -77,6 +86,54 @@ export interface DecisionOut {
   filename: string;
   title: string;
   url: string;
+}
+/**
+ * One edge in the graph.
+ *
+ * Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 added
+ * ``source_kind="llm"`` edges using the same fields.
+ *
+ * Phase 5 (ADR-016 §7) starts populating ``boundary_violation`` and adds
+ * the companion ``violation_reason`` field. ``violation_reason`` is one
+ * of:
+ *
+ * * ``"internal_access"`` — a cross-area edge whose target is private to
+ *   its area (convention-based public-surface inference); flagged by the
+ *   pipeline's boundary stage.
+ * * ``"explicit_rule:<index>"`` — the edge matches an explicit
+ *   ``boundaries.forbid`` rule from ``.auto-agent/graph.yml``; the
+ *   ``<index>`` is the 0-based position of the rule in the file. Takes
+ *   precedence over an internal-access reason.
+ * * ``None`` — the edge does not violate any boundary.
+ *
+ * HTTP edges (``kind="http"``) are NEVER flagged — they are an
+ * intentional cross-language pattern, not a layering breach.
+ */
+export interface Edge {
+  source: string;
+  target: string;
+  kind: "calls" | "imports" | "inherits" | "http";
+  evidence: EdgeEvidence;
+  source_kind: "ast" | "llm";
+  boundary_violation?: boolean;
+  violation_reason?: string | null;
+}
+/**
+ * Cited proof of an edge's existence — see ADR-016 §3.
+ */
+export interface EdgeEvidence {
+  file: string;
+  line: number;
+  snippet: string;
+}
+/**
+ * Optional body for ``POST /api/repos/{repo_id}/graph``.
+ *
+ * All fields optional — the endpoint defaults the analysis branch to the
+ * repo's ``default_branch`` if the caller omits it.
+ */
+export interface EnableRepoGraphRequest {
+  analysis_branch?: string | null;
 }
 export interface FeedbackSummary {
   total_outcomes?: number;
@@ -137,12 +194,98 @@ export interface GateDecisionOut {
   fallback_reasons?: string[];
   created_at: string;
 }
+/**
+ * ``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
+ *
+ * Returns a clamped window of source from the analyser workspace so
+ * the React side-panel can render the code under a node without
+ * pulling the whole file. The endpoint enforces bounds (``line_end -
+ * line_start <= 500``, body <= 50 KiB) and refuses path-traversal so
+ * it can't be coerced into reading anything outside the workspace.
+ */
+export interface GraphCodePreviewResponse {
+  file: string;
+  line_start: number;
+  line_end: number;
+  content: string;
+}
+/**
+ * ``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
+ *
+ * Surfaces the comparison between the stored graph's ``commit_sha`` and
+ * the current ``HEAD`` of the analyser workspace so the freshness
+ * banner can show an amber "workspace has moved — refresh" hint
+ * without re-fetching the whole graph blob.
+ *
+ * ``workspace_sha`` is ``None`` when the workspace can't be inspected
+ * (missing directory, not a git checkout, permission denied). In that
+ * case ``drifted`` is conservatively ``True`` — the banner shows the
+ * same warning rather than pretending the graph is fresh.
+ */
+export interface GraphStalenessResponse {
+  graph_sha: string;
+  workspace_sha?: string | null;
+  drifted: boolean;
+}
 export interface IntentVerdict {
   ok: boolean;
   reasoning: string;
   tool_calls?: {
     [k: string]: unknown;
   }[];
+}
+/**
+ * ``GET /api/repos/{id}/graph/latest`` payload — the freshness banner
+ * + Cytoscape renderer consume this directly. ``blob`` is ``None`` when
+ * no analysis has completed yet.
+ */
+export interface LatestRepoGraphData {
+  repo_id: number;
+  analysis_branch: string;
+  repo_graph_id?: number | null;
+  commit_sha?: string | null;
+  generated_at?: string | null;
+  analyser_version?: string | null;
+  status?: ("ok" | "partial" | "failed") | null;
+  blob?: RepoGraphBlob | null;
+}
+/**
+ * Full graph analysis output — the payload stored in
+ * ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+ *
+ * ``public_symbols`` (ADR-016 Phase 6 §12) is the union of per-area
+ * public-surface node ids the pipeline computed at analysis time. The
+ * ``query_repo_graph.public_surface`` op reads this directly rather
+ * than re-deriving the convention rules from source bytes. Defaulted
+ * to an empty list so blobs persisted before Phase 6 still deserialise.
+ */
+export interface RepoGraphBlob {
+  commit_sha: string;
+  generated_at: string;
+  analyser_version: string;
+  areas: AreaStatus[];
+  nodes: Node[];
+  edges: Edge[];
+  public_symbols?: string[];
+}
+/**
+ * One node in the hierarchical compound graph (ADR-016 §2).
+ *
+ * ``id`` is the canonical Cytoscape id. ``parent`` points to the parent
+ * compound node (area → file → class → function nesting). ``area`` is
+ * duplicated on every node so query callers can filter without walking
+ * the parent chain.
+ */
+export interface Node {
+  id: string;
+  kind: "area" | "file" | "class" | "function";
+  label: string;
+  file?: string | null;
+  line_start?: number | null;
+  line_end?: number | null;
+  area: string;
+  parent?: string | null;
+  decorators?: string[];
 }
 /**
  * A Linear issue returned from the GraphQL API.
@@ -327,6 +470,30 @@ export interface RepoData {
   harness_pr_url?: string | null;
   product_brief?: string | null;
   mode?: "freeform" | "human_in_loop";
+}
+/**
+ * Per-repo code-graph settings (ADR-016 §8).
+ *
+ * Phase 1: ``last_analysis_id`` is always ``None`` and ``analyser_version``
+ * is the empty string — both are populated by the Phase 2 analyser.
+ */
+export interface RepoGraphConfigData {
+  repo_id: number;
+  repo_name: string;
+  repo_url: string;
+  analysis_branch: string;
+  analyser_version?: string;
+  workspace_path: string;
+  last_analysis_id?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+/**
+ * ``POST /api/repos/{id}/graph/refresh`` response body.
+ */
+export interface RepoGraphRefreshResponse {
+  request_id: string;
+  status?: "accepted";
 }
 export interface RepoResponse {
   id: number;
@@ -591,6 +758,12 @@ export interface TrioReviewAttemptOut {
     [k: string]: unknown;
   }[];
   created_at: string;
+}
+/**
+ * Body for ``PATCH /api/repos/{repo_id}/graph``.
+ */
+export interface UpdateRepoGraphRequest {
+  analysis_branch: string;
 }
 export interface UsageSummary {
   plan: PlanRead;

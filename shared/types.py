@@ -203,6 +203,202 @@ class RepoResponse(BaseModel):
     url: str
 
 
+# --- Code graph (ADR-016) ---
+
+
+class RepoGraphConfigData(BaseModel):
+    """Per-repo code-graph settings (ADR-016 §8).
+
+    Phase 1: ``last_analysis_id`` is always ``None`` and ``analyser_version``
+    is the empty string — both are populated by the Phase 2 analyser.
+    """
+
+    repo_id: int
+    repo_name: str
+    repo_url: str
+    analysis_branch: str
+    analyser_version: str = ""
+    workspace_path: str
+    last_analysis_id: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class EnableRepoGraphRequest(BaseModel):
+    """Optional body for ``POST /api/repos/{repo_id}/graph``.
+
+    All fields optional — the endpoint defaults the analysis branch to the
+    repo's ``default_branch`` if the caller omits it.
+    """
+
+    analysis_branch: str | None = Field(default=None, max_length=255)
+
+
+class UpdateRepoGraphRequest(BaseModel):
+    """Body for ``PATCH /api/repos/{repo_id}/graph``."""
+
+    analysis_branch: str = Field(min_length=1, max_length=255)
+
+
+# --- Code graph blob schema (ADR-016 Phase 2) --------------------------------
+#
+# This is the **locked** wire schema for a single graph analysis result.
+# Phase 2 ships AST-derived nodes and edges; Phase 3 will add ``source_kind:
+# "llm"`` edges to the same shape without changing the schema. Adding fields
+# is allowed; removing or renaming requires a coordinated UI + analyser bump.
+
+
+class Node(BaseModel):
+    """One node in the hierarchical compound graph (ADR-016 §2).
+
+    ``id`` is the canonical Cytoscape id. ``parent`` points to the parent
+    compound node (area → file → class → function nesting). ``area`` is
+    duplicated on every node so query callers can filter without walking
+    the parent chain.
+    """
+
+    id: str
+    kind: Literal["area", "file", "class", "function"]
+    label: str
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    area: str
+    parent: str | None = None
+    decorators: list[str] = Field(default_factory=list)
+    """Raw decorator source for decorated Python defs/classes (e.g.
+    ``["@router.get(\"/api/repos\")"]``). Captured by the parser; consumed
+    by the Phase 4 HTTP-matching stage to find FastAPI/Flask route handlers.
+    Always ``[]`` for non-Python nodes and for undecorated defs."""
+
+
+class EdgeEvidence(BaseModel):
+    """Cited proof of an edge's existence — see ADR-016 §3."""
+
+    file: str
+    line: int
+    snippet: str
+
+
+class Edge(BaseModel):
+    """One edge in the graph.
+
+    Phase 2 only emits edges with ``source_kind="ast"``. Phase 3 added
+    ``source_kind="llm"`` edges using the same fields.
+
+    Phase 5 (ADR-016 §7) starts populating ``boundary_violation`` and adds
+    the companion ``violation_reason`` field. ``violation_reason`` is one
+    of:
+
+    * ``"internal_access"`` — a cross-area edge whose target is private to
+      its area (convention-based public-surface inference); flagged by the
+      pipeline's boundary stage.
+    * ``"explicit_rule:<index>"`` — the edge matches an explicit
+      ``boundaries.forbid`` rule from ``.auto-agent/graph.yml``; the
+      ``<index>`` is the 0-based position of the rule in the file. Takes
+      precedence over an internal-access reason.
+    * ``None`` — the edge does not violate any boundary.
+
+    HTTP edges (``kind="http"``) are NEVER flagged — they are an
+    intentional cross-language pattern, not a layering breach.
+    """
+
+    source: str
+    target: str
+    kind: Literal["calls", "imports", "inherits", "http"]
+    evidence: EdgeEvidence
+    source_kind: Literal["ast", "llm"]
+    boundary_violation: bool = False
+    violation_reason: str | None = None
+
+
+class AreaStatus(BaseModel):
+    """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
+
+    name: str
+    status: Literal["ok", "partial", "failed"]
+    error: str | None = None
+    unresolved_dynamic_sites: int = 0
+
+
+class RepoGraphBlob(BaseModel):
+    """Full graph analysis output — the payload stored in
+    ``RepoGraph.graph_json`` and surfaced to the UI / agent tool.
+
+    ``public_symbols`` (ADR-016 Phase 6 §12) is the union of per-area
+    public-surface node ids the pipeline computed at analysis time. The
+    ``query_repo_graph.public_surface`` op reads this directly rather
+    than re-deriving the convention rules from source bytes. Defaulted
+    to an empty list so blobs persisted before Phase 6 still deserialise.
+    """
+
+    commit_sha: str
+    generated_at: datetime
+    analyser_version: str
+    areas: list[AreaStatus]
+    nodes: list[Node]
+    edges: list[Edge]
+    public_symbols: list[str] = Field(default_factory=list)
+
+
+class RepoGraphRefreshResponse(BaseModel):
+    """``POST /api/repos/{id}/graph/refresh`` response body."""
+
+    request_id: str
+    status: Literal["accepted"] = "accepted"
+
+
+class LatestRepoGraphData(BaseModel):
+    """``GET /api/repos/{id}/graph/latest`` payload — the freshness banner
+    + Cytoscape renderer consume this directly. ``blob`` is ``None`` when
+    no analysis has completed yet.
+    """
+
+    repo_id: int
+    analysis_branch: str
+    repo_graph_id: int | None = None
+    commit_sha: str | None = None
+    generated_at: str | None = None
+    analyser_version: str | None = None
+    status: Literal["ok", "partial", "failed"] | None = None
+    blob: RepoGraphBlob | None = None
+
+
+class GraphCodePreviewResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
+
+    Returns a clamped window of source from the analyser workspace so
+    the React side-panel can render the code under a node without
+    pulling the whole file. The endpoint enforces bounds (``line_end -
+    line_start <= 500``, body <= 50 KiB) and refuses path-traversal so
+    it can't be coerced into reading anything outside the workspace.
+    """
+
+    file: str
+    line_start: int
+    line_end: int
+    content: str
+
+
+class GraphStalenessResponse(BaseModel):
+    """``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
+
+    Surfaces the comparison between the stored graph's ``commit_sha`` and
+    the current ``HEAD`` of the analyser workspace so the freshness
+    banner can show an amber "workspace has moved — refresh" hint
+    without re-fetching the whole graph blob.
+
+    ``workspace_sha`` is ``None`` when the workspace can't be inspected
+    (missing directory, not a git checkout, permission denied). In that
+    case ``drifted`` is conservatively ``True`` — the banner shows the
+    same warning rather than pretending the graph is fresh.
+    """
+
+    graph_sha: str
+    workspace_sha: str | None = None
+    drifted: bool
+
+
 # --- Linear types ---
 
 

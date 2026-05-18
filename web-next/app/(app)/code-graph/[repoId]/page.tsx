@@ -1,0 +1,236 @@
+'use client';
+import { use, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, Trash2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { BranchPicker } from '@/components/code-graph/branch-picker';
+import { RefreshButton } from '@/components/code-graph/refresh-button';
+import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
+import { EdgeEvidencePopover } from '@/components/code-graph/edge-evidence-popover';
+import { EdgeKindFilter } from '@/components/code-graph/edge-kind-filter';
+import { GraphCanvas } from '@/components/code-graph/graph-canvas';
+import { NodeSidePanel } from '@/components/code-graph/node-side-panel';
+import { SearchInput } from '@/components/code-graph/search-input';
+import { ViolationsPanel } from '@/components/code-graph/violations-panel';
+import type { Edge } from '@/types/api';
+import { ApiError } from '@/lib/api';
+import { disableRepoGraph } from '@/lib/code-graph';
+import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
+import { useCodeGraphConfig } from '@/hooks/useCodeGraphConfig';
+import { useRepoGraph } from '@/hooks/useRepoGraph';
+import { useRepoGraphStaleness } from '@/hooks/useRepoGraphStaleness';
+
+// ADR-016 §11 — per-repo settings + graph page. Phase 2 wires the
+// Cytoscape canvas in below the freshness banner; Phase 7 polishes
+// node interactions + side-panel evidence.
+export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: string }> }) {
+  const params = use(props.params);
+  const repoId = Number(params.repoId);
+  const router = useRouter();
+  const qc = useQueryClient();
+  const [disableError, setDisableError] = useState<string | null>(null);
+  // Lifted highlight state so clicks in the violations panel can drive
+  // an overlay style on the graph canvas (ADR-016 §7).
+  const [highlightedEdgeId, setHighlightedEdgeId] = useState<string | null>(
+    null,
+  );
+  // Phase 7 — selected node id drives the side panel. Lifted here so
+  // canvas tap events + edge-row clicks in the panel can share state.
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Phase 7 — selected edge id + its anchor position drive the
+  // evidence popover. The popover renders through a portal so it
+  // escapes the canvas container's overflow.
+  const [selectedEdge, setSelectedEdge] = useState<{
+    id: string;
+    pos: { x: number; y: number };
+  } | null>(null);
+  // Phase 7 P2 §11 — toolbar state: debounced search query +
+  // edge-kind filter (set of kinds the user has unchecked).
+  const [searchQuery, setSearchQuery] = useState('');
+  const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<Edge['kind']>>(
+    () => new Set(),
+  );
+  // Phase 7 P2c §11 — ancestor / descendant highlight subgraph. The
+  // side panel computes it; the canvas paints it. Clears whenever the
+  // selected node changes so a stale highlight doesn't sit around.
+  const [reachabilityHighlight, setReachabilityHighlight] = useState<
+    Set<string> | null
+  >(null);
+
+  const { data: config, isLoading, isError, error } = useCodeGraphConfig(
+    Number.isFinite(repoId) ? repoId : null,
+  );
+  const { data: latest } = useRepoGraph(Number.isFinite(repoId) ? repoId : null);
+  // Phase 7 §11 — poll for analyser-workspace drift so the banner can
+  // surface a "refresh to update" hint. Only meaningful once an
+  // analysis row exists; otherwise the endpoint 404s and the hook would
+  // just spin against nothing.
+  const { data: staleness } = useRepoGraphStaleness(
+    Number.isFinite(repoId) ? repoId : null,
+    Boolean(latest?.blob),
+  );
+
+  const disableMutation = useMutation({
+    mutationFn: () => disableRepoGraph(repoId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: codeGraphKeys.configs });
+      router.push('/code-graph');
+    },
+    onError: (err: unknown) => {
+      if (err instanceof ApiError) setDisableError(err.detail);
+      else if (err instanceof Error) setDisableError(err.message);
+      else setDisableError('Failed to disable graph.');
+    },
+  });
+
+  if (!Number.isFinite(repoId)) {
+    return (
+      <div className="p-6">
+        <p role="alert" className="text-sm text-destructive">
+          Invalid repo id.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden p-6">
+      <header className="mb-6 flex items-center justify-between gap-4">
+        <div>
+          <Link
+            href="/code-graph"
+            className="mb-2 inline-flex items-center text-xs text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft size={14} className="mr-1" /> Back to graphs
+          </Link>
+          <h1 className="text-xl font-semibold">
+            {config?.repo_name ?? `Repo ${repoId}`}
+          </h1>
+          {config && (
+            <p className="text-xs text-muted-foreground">
+              <span className="font-mono">{config.repo_url}</span>
+            </p>
+          )}
+        </div>
+      </header>
+
+      <section className="min-h-0 flex-1 space-y-6 overflow-auto">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : isError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error instanceof Error ? error.message : 'Failed to load config.'}
+          </p>
+        ) : !config ? (
+          <p className="text-sm text-muted-foreground">
+            Graph analysis is not enabled for this repo.{' '}
+            <Link href="/code-graph" className="underline">
+              Pick another repo
+            </Link>{' '}
+            or enable it from the list page.
+          </p>
+        ) : (
+          <>
+            {latest && <FreshnessBanner latest={latest} staleness={staleness} />}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <RefreshButton repoId={config.repo_id} />
+              <span className="ml-auto" />
+              <BranchPicker config={config} />
+            </div>
+
+            {latest?.blob ? (
+              <>
+                <div
+                  className="flex flex-wrap items-center gap-3 border-y bg-card/40 px-2 py-2"
+                  data-testid="graph-toolbar"
+                >
+                  <SearchInput onChange={setSearchQuery} />
+                  <EdgeKindFilter onChange={setHiddenEdgeKinds} />
+                </div>
+                <div className="flex min-h-0 flex-1 gap-4">
+                  <div className="min-w-0 flex-1">
+                    <GraphCanvas
+                      blob={latest.blob}
+                      highlightedEdgeId={highlightedEdgeId}
+                      repoId={config.repo_id}
+                      onNodeClick={(id) => {
+                        // Reset the reachability overlay whenever the
+                        // user selects a different node — the side
+                        // panel computes a fresh set on demand.
+                        setReachabilityHighlight(null);
+                        setSelectedNodeId(id);
+                      }}
+                      onEdgeClick={(id, pos) =>
+                        setSelectedEdge({ id, pos })
+                      }
+                      searchQuery={searchQuery}
+                      hiddenEdgeKinds={hiddenEdgeKinds}
+                      reachabilityHighlight={reachabilityHighlight}
+                    />
+                  </div>
+                  {selectedNodeId && (
+                    <NodeSidePanel
+                      repoId={config.repo_id}
+                      blob={latest.blob}
+                      nodeId={selectedNodeId}
+                      onSelectEdge={setHighlightedEdgeId}
+                      onHighlightReachability={setReachabilityHighlight}
+                      onClose={() => {
+                        setReachabilityHighlight(null);
+                        setSelectedNodeId(null);
+                      }}
+                    />
+                  )}
+                </div>
+                {selectedEdge && (
+                  <EdgeEvidencePopover
+                    blob={latest.blob}
+                    edgeId={selectedEdge.id}
+                    position={selectedEdge.pos}
+                    onClose={() => setSelectedEdge(null)}
+                  />
+                )}
+                <ViolationsPanel
+                  blob={latest.blob}
+                  highlightedEdgeId={highlightedEdgeId}
+                  onSelectEdge={setHighlightedEdgeId}
+                />
+              </>
+            ) : (
+              <div
+                role="status"
+                className="flex h-[400px] items-center justify-center rounded-md border bg-card/40 text-sm text-muted-foreground"
+              >
+                Analysis in progress — first analysis can take a few minutes.
+              </div>
+            )}
+
+            <div className="space-y-2 border-t pt-4">
+              <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
+              <p className="text-xs text-muted-foreground max-w-md">
+                Disabling graph analysis removes the config row. The on-disk workspace
+                is left as-is and re-cloned the next time you enable the graph.
+              </p>
+              <Button
+                variant="destructive"
+                onClick={() => disableMutation.mutate()}
+                disabled={disableMutation.isPending}
+              >
+                <Trash2 size={14} className="mr-2" />
+                {disableMutation.isPending ? 'Disabling…' : 'Disable graph analysis'}
+              </Button>
+              {disableError && (
+                <p role="alert" className="text-xs text-destructive">
+                  {disableError}
+                </p>
+              )}
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}

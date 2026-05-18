@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 import structlog
+from sqlalchemy import select
 from team_memory.graph import GraphEngine
 
 from agent import sh
@@ -15,7 +16,8 @@ from agent.context.repo_map import (
     parse_stored_map,
     patch_map,
 )
-from shared.database import team_memory_session
+from shared.database import async_session, team_memory_session
+from shared.models import RepoGraphConfig
 
 logger = structlog.get_logger()
 
@@ -187,6 +189,34 @@ SUPERPOWERS_DIR = os.path.join(
 )
 
 
+# ADR-016 Phase 6 §12 — system-prompt nudge pointing the agent at the
+# pre-built code graph. Only injected when the repo has both a
+# ``RepoGraphConfig`` row (the opt-in marker) AND a completed analysis
+# (``last_analysis_id`` non-null). Wording matches the brief verbatim
+# so the tests can search for the marker without coupling to layout.
+CODE_GRAPH_NUDGE = """\
+## Code graph (pre-indexed)
+This repo has a code graph available. Before grepping or reading widely,
+consider calling `query_repo_graph` to find callers/callees/dependencies —
+it's exact and pre-indexed.
+
+Ops:
+- callers_of(node_id) / callees_of(node_id)
+- outgoing_edges(node_id) / incoming_edges(node_id)
+- public_surface(area_name)
+- path_between(source_id, target_id, max_depth=5)
+- violates_boundaries(source_id, target_id)
+
+Node IDs are typically of the form `path/to/file.py::ClassName.method_name`
+or `path/to/file.ts::functionName`. When in doubt, use grep to find candidate
+symbols, then ask the graph for their relationships.
+
+Every response includes `staleness.drifted` (true if the graph is stale
+relative to your task workspace) and `exists_in_workspace` per result.
+Trust accordingly.
+"""
+
+
 class SystemPromptBuilder:
     """Builds the system prompt from workspace context."""
 
@@ -201,6 +231,7 @@ class SystemPromptBuilder:
         include_methodology: bool = False,
         memory_context: str | None = None,
         repo_name: str | None = None,
+        repo_id: int | None = None,
     ) -> str:
         """Build the full system prompt.
 
@@ -209,11 +240,23 @@ class SystemPromptBuilder:
         Args:
             include_methodology: If True, include the full Superpowers methodology section.
                                  Use for planning and complex tasks. Skip for simple coding tasks.
+            repo_id: When set, the builder checks whether the repo has
+                an active code graph (RepoGraphConfig row + completed
+                analysis); if so it appends the ``query_repo_graph``
+                nudge (ADR-016 Phase 6 §12). Failures are logged and
+                skipped — the prompt is built regardless.
         """
         base = BASE_AGENT_INSTRUCTIONS
         if include_methodology:
             base += METHODOLOGY_INSTRUCTIONS
         parts: list[str] = [base]
+
+        # Code-graph nudge — added as early as possible (right after the
+        # base instructions) so the agent reads it before considering
+        # exploration strategy. Suppressed when the repo isn't opted in
+        # OR no analysis has completed yet.
+        if repo_id is not None and await self._has_active_code_graph(repo_id):
+            parts.append(CODE_GRAPH_NUDGE)
 
         # CLAUDE.md
         claude_md = await self._read_claude_md(workspace)
@@ -254,6 +297,36 @@ class SystemPromptBuilder:
     def invalidate_cache(self) -> None:
         """Clear cached values (call at the start of each new agent run)."""
         self._cache.clear()
+
+    async def _has_active_code_graph(self, repo_id: int) -> bool:
+        """True iff the repo has a ``RepoGraphConfig`` row AND a stored
+        analysis (``last_analysis_id`` non-null).
+
+        Both conditions are required: the row existing means the repo is
+        opted-in; ``last_analysis_id`` being non-null means the analyser
+        actually wrote a row the tool can read. Without both, the
+        ``query_repo_graph`` tool would either fail or return useless
+        results — so we don't nudge.
+
+        Any exception (DB down, model mismatch) is logged and treated as
+        "no graph" so the prompt still builds.
+        """
+        try:
+            async with async_session() as session:
+                result = await session.execute(
+                    select(RepoGraphConfig).where(
+                        RepoGraphConfig.repo_id == repo_id,
+                    ),
+                )
+                cfg = result.scalar_one_or_none()
+        except Exception as e:
+            logger.warning(
+                "system_prompt_graph_lookup_failed",
+                repo_id=repo_id,
+                error=str(e),
+            )
+            return False
+        return cfg is not None and cfg.last_analysis_id is not None
 
     async def _build_repo_map(self, workspace: str, repo_name: str | None = None) -> str | None:
         """Build or load an AST-based repo map, persisted in graph memory.

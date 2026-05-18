@@ -1,0 +1,1019 @@
+"""Tree-sitter Python parser (ADR-016 Phase 2).
+
+Emits:
+
+* **Nodes** — one per file / class / top-level + nested function.
+* **Edges (all ``source_kind="ast"`` with real evidence)**:
+    * ``imports`` — module → module from ``import`` / ``from .. import``.
+    * ``inherits`` — class → parent class when the parent is bound in
+      module scope (top-level def/class/import).
+    * ``calls`` — function → function when the callee is statically
+      resolvable in scope (direct name bound to a known function/class,
+      or a same-class ``self.method`` reference).
+
+Statically-unresolvable call sites (``getattr``, registry dicts,
+attribute access on imported modules, dynamic ``__import__``, etc.) are
+detected and counted in :attr:`ParseResult.unresolved_dynamic_sites`. Phase
+3's LLM gap-fill will turn these into edges; Phase 2 does not.
+
+The parser is **best-effort** under tree-sitter's error-recovery: a file
+with a syntax error parses to a tree containing ``ERROR`` nodes. We do
+not raise on that — the pipeline owns whether a file's failure marks the
+whole area failed. Catastrophic parser errors (grammar exceptions) do
+propagate; the pipeline catches them per area.
+
+ID convention (locked across phases): ``"{file}::{symbol}"`` for classes
+and functions, ``"file:{file}"`` for files, ``"area:{name}"`` for areas.
+Nested function ids use ``::`` separation top-to-bottom (e.g.
+``"a/b.py::OuterClass.method.inner"``). The id is also what a future
+``query_repo_graph`` tool will hand callers — keep it stable.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from agent.graph_analyzer.parsers import Parser, ParseResult
+from agent.graph_analyzer.types import PatternHint, UnresolvedSite
+from shared.types import Edge, EdgeEvidence, Node
+
+# Roughly how many source lines to capture around an unresolved site so the
+# LLM gap-fill prompt has enough context to disambiguate. The parser writes
+# this once per site rather than re-reading the file later.
+_SURROUNDING_LINES_BEFORE = 15
+_SURROUNDING_LINES_AFTER = 15
+
+# ----------------------------------------------------------------------
+# Lazy tree-sitter import — keep the dependency out of the import graph
+# of agent modules that don't need it.
+# ----------------------------------------------------------------------
+
+_PY_LANGUAGE = None  # populated on first parse
+
+
+def _get_language():
+    global _PY_LANGUAGE
+    if _PY_LANGUAGE is None:
+        import tree_sitter_python
+        from tree_sitter import Language
+
+        _PY_LANGUAGE = Language(tree_sitter_python.language())
+    return _PY_LANGUAGE
+
+
+# Tree-sitter node types we read.
+_FUNC_NODE = "function_definition"
+_CLASS_NODE = "class_definition"
+_IMPORT_NODE = "import_statement"
+_IMPORT_FROM_NODE = "import_from_statement"
+_CALL_NODE = "call"
+# Real-world Python heavily uses decorators (FastAPI routes, Click commands,
+# dataclasses, pytest fixtures, …). Tree-sitter wraps a decorated def or
+# class in a ``decorated_definition`` node whose children are the decorators
+# plus the wrapped ``function_definition`` / ``class_definition``. Phase 4
+# descends through the wrapper so decorated defs become first-class graph
+# nodes and their decorator source is captured for the HTTP-matching stage.
+_DECORATED_NODE = "decorated_definition"
+_DECORATOR_NODE = "decorator"
+
+
+@dataclass
+class _Scope:
+    """Names bound at file-scope (functions / classes / imports) and
+    same-class methods bound inside the enclosing class body."""
+
+    # name -> file-relative id of the resolvable function/class
+    module_bindings: dict[str, str]
+    # class id -> set of method names bound on that class
+    class_methods: dict[str, set[str]]
+
+
+class PythonParser(Parser):
+    """Tree-sitter Python parser. See module docstring for behaviour."""
+
+    extensions = (".py",)
+
+    def parse_file(
+        self,
+        *,
+        rel_path: str,
+        area: str,
+        source: bytes,
+    ) -> ParseResult:
+        from tree_sitter import Parser as TSParser  # local import
+
+        ts_parser = TSParser(_get_language())
+        tree = ts_parser.parse(source)
+
+        result = ParseResult()
+        file_id = f"file:{rel_path}"
+
+        # File node — every file gets one, even if empty.
+        result.nodes.append(
+            Node(
+                id=file_id,
+                kind="file",
+                label=rel_path.rsplit("/", 1)[-1],
+                file=rel_path,
+                line_start=1,
+                line_end=tree.root_node.end_point[0] + 1,
+                area=area,
+                parent=f"area:{area}",
+            ),
+        )
+
+        # ---- Pass 1: collect nodes + build module/class scope. ----
+        scope = _Scope(module_bindings={}, class_methods={})
+        self._collect_top_level(tree.root_node, rel_path, area, source, result, scope)
+
+        # ---- Pass 2: edges (imports / inherits / calls). ----
+        # Imports are emitted in pass 1 because they live at module top
+        # level only. Inherits + calls walk the tree again with the full
+        # scope available.
+        self._collect_inherits_and_calls(
+            tree.root_node,
+            rel_path,
+            area,
+            source,
+            result,
+            scope,
+            current_class=None,
+            current_func=None,
+        )
+
+        # ---- Pass 3 (Phase 5): public-surface inference. ----
+        # Skipped entirely for implicitly-private files so the symbol set
+        # stays empty (matches the test contract).
+        if not _file_is_implicitly_private(rel_path):
+            dunder_all = _parse_dunder_all(tree.root_node, source)
+            result.public_symbols = _compute_public_symbols(
+                root=tree.root_node,
+                source=source,
+                rel_path=rel_path,
+                dunder_all=dunder_all,
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Pass 1 — nodes and imports
+    # ------------------------------------------------------------------
+
+    def _collect_top_level(
+        self,
+        root,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        scope: _Scope,
+    ) -> None:
+        """Walk module-level children and emit class/function nodes plus
+        ``imports`` edges. Nested functions / methods are discovered by
+        :meth:`_collect_nested`.
+        """
+        file_id = f"file:{rel_path}"
+
+        for raw_child in root.children:
+            child, decorators = _unwrap_decorated(raw_child, source)
+            t = child.type
+            if t == _IMPORT_NODE:
+                self._emit_import_edges(child, rel_path, area, source, result, scope)
+            elif t == _IMPORT_FROM_NODE:
+                self._emit_import_from_edges(child, rel_path, area, source, result, scope)
+            elif t == _CLASS_NODE:
+                cls_name = self._first_identifier(child, source)
+                if cls_name is None:
+                    continue
+                cls_id = f"{rel_path}::{cls_name}"
+                result.nodes.append(
+                    Node(
+                        id=cls_id,
+                        kind="class",
+                        label=cls_name,
+                        file=rel_path,
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        area=area,
+                        parent=file_id,
+                        decorators=decorators,
+                    ),
+                )
+                scope.module_bindings[cls_name] = cls_id
+                scope.class_methods[cls_id] = set()
+                # Walk methods inside the class body.
+                body = _named_child(child, "block")
+                if body is not None:
+                    for raw_member in body.children:
+                        member, member_decorators = _unwrap_decorated(raw_member, source)
+                        if member.type == _FUNC_NODE:
+                            self._emit_function_node(
+                                member,
+                                rel_path,
+                                area,
+                                source,
+                                result,
+                                parent_id=cls_id,
+                                qualifier=cls_name + ".",
+                                decorators=member_decorators,
+                            )
+                            fname = self._first_identifier(member, source)
+                            if fname is not None:
+                                scope.class_methods[cls_id].add(fname)
+                                self._collect_nested(
+                                    member,
+                                    rel_path,
+                                    area,
+                                    source,
+                                    result,
+                                    qualifier=f"{cls_name}.{fname}.",
+                                )
+            elif t == _FUNC_NODE:
+                self._emit_function_node(
+                    child,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    parent_id=file_id,
+                    qualifier="",
+                    decorators=decorators,
+                )
+                fname = self._first_identifier(child, source)
+                if fname is not None:
+                    scope.module_bindings[fname] = f"{rel_path}::{fname}"
+                    self._collect_nested(
+                        child,
+                        rel_path,
+                        area,
+                        source,
+                        result,
+                        qualifier=f"{fname}.",
+                    )
+
+    def _collect_nested(
+        self,
+        func_node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        qualifier: str,
+    ) -> None:
+        """Recurse into a function/method body and emit nested function
+        nodes. Nested functions inherit their parent's qualifier prefix
+        (e.g. ``OuterClass.method.inner``)."""
+        body = _named_child(func_node, "block")
+        if body is None:
+            return
+        for raw_child in body.children:
+            child, decorators = _unwrap_decorated(raw_child, source)
+            if child.type == _FUNC_NODE:
+                name = self._first_identifier(child, source)
+                if name is None:
+                    continue
+                parent_qual = qualifier.rstrip(".")
+                parent_id = f"{rel_path}::{parent_qual}"
+                self._emit_function_node(
+                    child,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    parent_id=parent_id,
+                    qualifier=qualifier,
+                    decorators=decorators,
+                )
+                self._collect_nested(
+                    child,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    qualifier=f"{qualifier}{name}.",
+                )
+
+    def _emit_function_node(
+        self,
+        node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        *,
+        parent_id: str,
+        qualifier: str,
+        decorators: list[str] | None = None,
+    ) -> None:
+        name = self._first_identifier(node, source)
+        if name is None:
+            return
+        node_id = f"{rel_path}::{qualifier}{name}"
+        result.nodes.append(
+            Node(
+                id=node_id,
+                kind="function",
+                label=f"{qualifier}{name}" if qualifier else name,
+                file=rel_path,
+                line_start=node.start_point[0] + 1,
+                line_end=node.end_point[0] + 1,
+                area=area,
+                parent=parent_id,
+                decorators=list(decorators) if decorators else [],
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Imports
+    # ------------------------------------------------------------------
+
+    def _emit_import_edges(
+        self,
+        node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        scope: _Scope,
+    ) -> None:
+        # ``import x`` / ``import x.y`` / ``import x as y, z as w``
+        line = _line_text(source, node)
+        line_no = node.start_point[0] + 1
+        for child in node.named_children:
+            module = None
+            alias = None
+            if child.type == "dotted_name":
+                module = _node_text(child, source)
+                alias = module.split(".")[0]
+            elif child.type == "aliased_import":
+                # ``x as y``
+                inner = _named_child(child, "dotted_name")
+                aliased = _named_child(child, "identifier")
+                if inner is not None:
+                    module = _node_text(inner, source)
+                if aliased is not None:
+                    alias = _node_text(aliased, source)
+                elif module is not None:
+                    alias = module.split(".")[0]
+            if module is None:
+                continue
+            scope.module_bindings[alias or module.split(".")[0]] = f"module:{module}"
+            result.edges.append(
+                Edge(
+                    source=f"module:{_module_from_path(rel_path)}",
+                    target=f"module:{module}",
+                    kind="imports",
+                    evidence=EdgeEvidence(file=rel_path, line=line_no, snippet=line),
+                    source_kind="ast",
+                ),
+            )
+
+    def _emit_import_from_edges(
+        self,
+        node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        scope: _Scope,
+    ) -> None:
+        line = _line_text(source, node)
+        line_no = node.start_point[0] + 1
+
+        # Module ref — either an absolute ``dotted_name`` or a
+        # ``relative_import`` of form ``.[.]*<name>``.
+        module_target = None
+        rel_dots = 0
+        rel_base = ""
+        for child in node.named_children:
+            if child.type == "dotted_name" and module_target is None:
+                module_target = _node_text(child, source)
+                break
+            if child.type == "relative_import" and module_target is None:
+                # Count dots, then maybe a dotted_name beneath.
+                prefix_node = _named_child(child, "import_prefix")
+                if prefix_node is not None:
+                    rel_dots = sum(1 for c in prefix_node.children if c.type == ".")
+                inner_name = _named_child(child, "dotted_name")
+                rel_base = _node_text(inner_name, source) if inner_name else ""
+                module_target = _resolve_relative(rel_path, rel_dots, rel_base)
+                break
+
+        if module_target is None:
+            return
+
+        # Names imported from the module — bind each to module:<target>.<name>
+        # so a later ``Cat(Animal)`` resolves Animal -> the imported binding.
+        for child in node.named_children[1:]:  # skip the module ref itself
+            if child.type == "dotted_name":
+                name = _node_text(child, source).split(".")[-1]
+                scope.module_bindings[name] = f"module:{module_target}.{name}"
+            elif child.type == "aliased_import":
+                inner = _named_child(child, "dotted_name")
+                aliased = _named_child(child, "identifier")
+                if inner is not None and aliased is not None:
+                    name = _node_text(inner, source).split(".")[-1]
+                    scope.module_bindings[_node_text(aliased, source)] = (
+                        f"module:{module_target}.{name}"
+                    )
+
+        result.edges.append(
+            Edge(
+                source=f"module:{_module_from_path(rel_path)}",
+                target=f"module:{module_target}",
+                kind="imports",
+                evidence=EdgeEvidence(file=rel_path, line=line_no, snippet=line),
+                source_kind="ast",
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Pass 2 — inherits + calls
+    # ------------------------------------------------------------------
+
+    def _collect_inherits_and_calls(
+        self,
+        node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        scope: _Scope,
+        *,
+        current_class: str | None,
+        current_func: str | None,
+    ) -> None:
+        # Decorated wrappers are transparent for inherit/call discovery —
+        # recurse into the wrapped def/class.
+        if node.type == _DECORATED_NODE:
+            inner = _wrapped_definition(node)
+            if inner is not None:
+                self._collect_inherits_and_calls(
+                    inner,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    scope,
+                    current_class=current_class,
+                    current_func=current_func,
+                )
+            return
+
+        t = node.type
+
+        if t == _CLASS_NODE:
+            cls_name = self._first_identifier(node, source)
+            if cls_name is not None:
+                cls_id = f"{rel_path}::{cls_name}"
+                # ``inherits`` — argument_list children.
+                arglist = _named_child(node, "argument_list")
+                line_no = node.start_point[0] + 1
+                line = _line_text(source, node)
+                if arglist is not None:
+                    for arg in arglist.named_children:
+                        if arg.type == "identifier":
+                            parent_name = _node_text(arg, source)
+                            target = scope.module_bindings.get(parent_name)
+                            if target is not None:
+                                result.edges.append(
+                                    Edge(
+                                        source=cls_id,
+                                        target=target,
+                                        kind="inherits",
+                                        evidence=EdgeEvidence(
+                                            file=rel_path,
+                                            line=line_no,
+                                            snippet=line,
+                                        ),
+                                        source_kind="ast",
+                                    ),
+                                )
+                            else:
+                                _record_unresolved_site(
+                                    result,
+                                    rel_path=rel_path,
+                                    line_no=line_no,
+                                    snippet=line,
+                                    containing_node_id=cls_id,
+                                    source=source,
+                                    pattern_hint="unknown",
+                                )
+                        elif arg.type == "attribute":
+                            # ``class X(mod.Base)`` — unresolved in Phase 2.
+                            _record_unresolved_site(
+                                result,
+                                rel_path=rel_path,
+                                line_no=line_no,
+                                snippet=line,
+                                containing_node_id=cls_id,
+                                source=source,
+                                pattern_hint="dict_call",
+                            )
+                # Recurse into class body with current_class set.
+                body = _named_child(node, "block")
+                if body is not None:
+                    for child in body.children:
+                        self._collect_inherits_and_calls(
+                            child,
+                            rel_path,
+                            area,
+                            source,
+                            result,
+                            scope,
+                            current_class=cls_id,
+                            current_func=current_func,
+                        )
+            return
+
+        if t == _FUNC_NODE:
+            fname = self._first_identifier(node, source)
+            if fname is None:
+                return
+            if current_class is not None:
+                func_id = f"{current_class}.{fname}"
+            elif current_func is not None:
+                func_id = f"{current_func}.{fname}"
+            else:
+                func_id = f"{rel_path}::{fname}"
+            body = _named_child(node, "block")
+            if body is not None:
+                for child in body.children:
+                    self._collect_inherits_and_calls(
+                        child,
+                        rel_path,
+                        area,
+                        source,
+                        result,
+                        scope,
+                        current_class=current_class,
+                        current_func=func_id,
+                    )
+            return
+
+        if t == _CALL_NODE:
+            self._handle_call(
+                node,
+                rel_path,
+                source,
+                result,
+                scope,
+                current_class=current_class,
+                current_func=current_func,
+            )
+            # Calls can contain nested calls in their arguments — descend.
+            for child in node.children:
+                self._collect_inherits_and_calls(
+                    child,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    scope,
+                    current_class=current_class,
+                    current_func=current_func,
+                )
+            return
+
+        # Default — recurse.
+        for child in node.children:
+            self._collect_inherits_and_calls(
+                child,
+                rel_path,
+                area,
+                source,
+                result,
+                scope,
+                current_class=current_class,
+                current_func=current_func,
+            )
+
+    def _handle_call(
+        self,
+        node,
+        rel_path: str,
+        source: bytes,
+        result: ParseResult,
+        scope: _Scope,
+        *,
+        current_class: str | None,
+        current_func: str | None,
+    ) -> None:
+        # A call's first child is its callee (identifier / attribute / etc.).
+        callee = node.children[0] if node.children else None
+        if callee is None:
+            return
+        line_no = node.start_point[0] + 1
+        line = _line_text(source, node)
+
+        # ``foo(...)`` — identifier in module scope.
+        if callee.type == "identifier":
+            name = _node_text(callee, source)
+            target = scope.module_bindings.get(name)
+            if target is not None and current_func is not None:
+                result.edges.append(
+                    Edge(
+                        source=current_func,
+                        target=target,
+                        kind="calls",
+                        evidence=EdgeEvidence(file=rel_path, line=line_no, snippet=line),
+                        source_kind="ast",
+                    ),
+                )
+                return
+            # Unbound identifier — count as dynamic only if inside a function.
+            if current_func is not None:
+                _record_unresolved_site(
+                    result,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    snippet=line,
+                    containing_node_id=current_func,
+                    source=source,
+                    pattern_hint=_classify_call_pattern(callee, node, source),
+                )
+            return
+
+        # ``self.method(...)`` — resolved when inside the class that defines
+        # ``method``.
+        if callee.type == "attribute" and current_class is not None and current_func is not None:
+            obj, attr = _split_attribute(callee, source)
+            if obj == "self" and attr is not None:
+                methods = scope.class_methods.get(current_class, set())
+                if attr in methods:
+                    result.edges.append(
+                        Edge(
+                            source=current_func,
+                            target=f"{current_class}.{attr}",
+                            kind="calls",
+                            evidence=EdgeEvidence(
+                                file=rel_path,
+                                line=line_no,
+                                snippet=line,
+                            ),
+                            source_kind="ast",
+                        ),
+                    )
+                    return
+                # ``self.unknown_method`` — unresolved (may be inherited).
+                _record_unresolved_site(
+                    result,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    snippet=line,
+                    containing_node_id=current_func,
+                    source=source,
+                    pattern_hint="unknown",
+                )
+                return
+            # ``mod.something()`` or ``obj.method()`` — unresolved in Phase 2.
+            _record_unresolved_site(
+                result,
+                rel_path=rel_path,
+                line_no=line_no,
+                snippet=line,
+                containing_node_id=current_func,
+                source=source,
+                pattern_hint=_classify_call_pattern(callee, node, source),
+            )
+            return
+
+        # ``obj.method()`` / ``HANDLERS[name](...)`` outside the simple
+        # forms above — unresolved.
+        if current_func is not None:
+            _record_unresolved_site(
+                result,
+                rel_path=rel_path,
+                line_no=line_no,
+                snippet=line,
+                containing_node_id=current_func,
+                source=source,
+                pattern_hint=_classify_call_pattern(callee, node, source),
+            )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _first_identifier(node, source: bytes) -> str | None:
+        for c in node.children:
+            if c.type == "identifier":
+                return _node_text(c, source)
+        return None
+
+
+# ----------------------------------------------------------------------
+# Module-level utility helpers (kept out of the class so they can be
+# trivially reused if a TS parser lands and needs similar handling).
+# ----------------------------------------------------------------------
+
+
+def _record_unresolved_site(
+    result: ParseResult,
+    *,
+    rel_path: str,
+    line_no: int,
+    snippet: str,
+    containing_node_id: str,
+    source: bytes,
+    pattern_hint: PatternHint,
+) -> None:
+    """Append an :class:`UnresolvedSite` to ``result.unresolved_sites``.
+
+    The surrounding-code window is captured here so the gap-fill stage
+    doesn't need to re-read the file. ~30 lines centred on ``line_no``
+    is sufficient for any registry-style pattern; we clamp at file
+    boundaries.
+    """
+    surrounding = _surrounding_lines(
+        source,
+        line_no,
+        before=_SURROUNDING_LINES_BEFORE,
+        after=_SURROUNDING_LINES_AFTER,
+    )
+    result.unresolved_sites.append(
+        UnresolvedSite(
+            file=rel_path,
+            line=line_no,
+            snippet=snippet,
+            containing_node_id=containing_node_id,
+            surrounding_code=surrounding,
+            pattern_hint=pattern_hint,
+        ),
+    )
+
+
+def _surrounding_lines(source: bytes, line_no: int, *, before: int, after: int) -> str:
+    """Return a window of source lines centred on (1-indexed) ``line_no``.
+
+    Result is plain UTF-8 text — line terminators normalised to ``\\n``.
+    Clamps to file boundaries; never raises on out-of-range input.
+    """
+    if line_no < 1:
+        line_no = 1
+    lines = source.split(b"\n")
+    start = max(0, line_no - 1 - before)
+    end = min(len(lines), line_no - 1 + after + 1)
+    return b"\n".join(lines[start:end]).decode("utf-8", errors="replace")
+
+
+def _classify_call_pattern(callee, call_node, source: bytes) -> PatternHint:
+    """Best-effort heuristic for the :attr:`UnresolvedSite.pattern_hint`.
+
+    Looks at the callee node and (where relevant) the call's arguments
+    to guess whether this site is a registry-dict lookup, a ``getattr``
+    dispatch, an attribute call, or just an unknown bare identifier.
+    The hint is consumed by the gap-fill prompt only — the validator
+    does not use it, so a wrong hint never produces a wrong edge.
+    """
+    callee_type = callee.type
+
+    # ``HANDLERS[name](payload)`` — callee is a subscript expression.
+    if callee_type == "subscript":
+        return "registry"
+
+    # ``getattr(obj, name)(...)`` — callee is itself a call to a name
+    # identifier "getattr".
+    if callee_type == "call":
+        inner_callee = callee.children[0] if callee.children else None
+        if (
+            inner_callee is not None
+            and inner_callee.type == "identifier"
+            and _node_text(inner_callee, source) == "getattr"
+        ):
+            return "getattr"
+
+    # ``mod.something()`` / ``obj.method()`` — attribute call. Routed
+    # via decorators (FastAPI ``app.get(...)``, click groups, etc.) is
+    # a subset of this; we tag the broad case as ``"dict_call"`` (a
+    # historical name for "attribute-style call we can't resolve").
+    if callee_type == "attribute":
+        return "dict_call"
+
+    return "unknown"
+
+
+def _node_text(node, source: bytes) -> str:
+    return source[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _line_text(source: bytes, node) -> str:
+    """The (single) source line of ``node``'s start position, stripped.
+
+    Tree-sitter exposes start_point/end_point as (row, col). We slice the
+    raw source bytes for the row to produce a short, readable evidence
+    snippet. Multi-line statements still report only the start line —
+    matches what a human grepping the codebase sees first.
+    """
+    row = node.start_point[0]
+    lines = source.split(b"\n")
+    if row >= len(lines):
+        return ""
+    return lines[row].decode("utf-8", errors="replace").strip()
+
+
+def _named_child(node, type_name: str):
+    """Return the first direct child of ``node`` whose ``type`` matches."""
+    for c in node.children:
+        if c.type == type_name:
+            return c
+    return None
+
+
+def _unwrap_decorated(node, source: bytes) -> tuple[object, list[str]]:
+    """Given a tree-sitter child, return the underlying definition node
+    and the decorator source list.
+
+    Tree-sitter wraps a decorated def/class in a ``decorated_definition``
+    whose children are ``decorator`` nodes (in source order) followed by
+    one ``function_definition`` / ``class_definition``. For undecorated
+    nodes we return ``(node, [])`` so callers can use one code path.
+
+    Decorator source is captured verbatim (with the leading ``@`` and the
+    full argument list, e.g. ``@router.get("/api/repos")``) — the HTTP
+    matching stage parses these strings; we deliberately do not pre-parse
+    them here.
+    """
+    if node.type != _DECORATED_NODE:
+        return node, []
+    decorators: list[str] = []
+    inner = None
+    for child in node.children:
+        if child.type == _DECORATOR_NODE:
+            decorators.append(_node_text(child, source).strip())
+        elif child.type in (_FUNC_NODE, _CLASS_NODE):
+            inner = child
+    if inner is None:
+        # Defensive: tree-sitter error recovery could leave us without
+        # a definition. Treat the wrapper itself as the "node" so the
+        # caller bails out on the type check.
+        return node, decorators
+    return inner, decorators
+
+
+def _wrapped_definition(node):
+    """Return the wrapped ``function_definition`` / ``class_definition`` of a
+    ``decorated_definition``, or ``None`` if absent (tree-sitter error
+    recovery edge case)."""
+    for child in node.children:
+        if child.type in (_FUNC_NODE, _CLASS_NODE):
+            return child
+    return None
+
+
+def _split_attribute(node, source: bytes) -> tuple[str | None, str | None]:
+    """Split an ``a.b`` attribute access into its parts.
+
+    Tree-sitter exposes the receiver and the attribute as the first and
+    last named children of the ``attribute`` node; everything in between
+    is punctuation.
+    """
+    named = [c for c in node.children if c.type in ("identifier", "attribute")]
+    if not named:
+        return (None, None)
+    obj = _node_text(named[0], source) if named[0].type == "identifier" else None
+    attr_node = None
+    for c in node.children:
+        if c.type == "identifier":
+            attr_node = c
+    attr = _node_text(attr_node, source) if attr_node is not None else None
+    return (obj, attr)
+
+
+def _module_from_path(rel_path: str) -> str:
+    """Convert ``a/b/c.py`` → ``a.b.c``; ``__init__.py`` collapses to its
+    package."""
+    no_ext = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+    parts = no_ext.split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+# ----------------------------------------------------------------------
+# Public-surface inference (ADR-016 Phase 5 §7)
+# ----------------------------------------------------------------------
+
+
+def _file_is_implicitly_private(rel_path: str) -> bool:
+    """True iff ``rel_path`` is structurally private to its own file.
+
+    Files under ``tests/`` (anywhere in the path), files whose basename
+    starts with ``test_``, and files whose basename starts with ``_``
+    are implicitly private — their symbols never appear in any area's
+    public surface, even if ``__all__`` tries to expose them.
+    """
+    parts = rel_path.split("/")
+    if "tests" in parts:
+        return True
+    basename = parts[-1] if parts else rel_path
+    if basename.startswith("_"):
+        return True
+    return basename.startswith("test_")
+
+
+def _parse_dunder_all(root, source: bytes) -> set[str] | None:
+    """Return the set of names listed in a module-level ``__all__``.
+
+    The convention is a top-level assignment whose RHS is a list / tuple
+    / set of string literals. We walk the AST best-effort: any
+    expression we can't read as a literal collection of strings causes
+    us to return ``None`` (the convention-based path applies). The
+    parser never raises — malformed ``__all__`` quietly degrades.
+    """
+    for child in root.children:
+        if child.type != "expression_statement":
+            continue
+        # Inside an expression_statement we expect a single assignment.
+        for inner in child.children:
+            if inner.type != "assignment":
+                continue
+            # tree-sitter exposes left/right as named children — we walk
+            # the top-level children and pick the first identifier as
+            # the target name.
+            target = None
+            value = None
+            for k in inner.children:
+                if k.type == "identifier" and target is None:
+                    target = _node_text(k, source)
+                elif k.type in ("list", "tuple", "set") and value is None:
+                    value = k
+            if target != "__all__" or value is None:
+                continue
+            names: set[str] = set()
+            for el in value.children:
+                if el.type == "string":
+                    for frag in el.children:
+                        if frag.type == "string_content":
+                            names.add(_node_text(frag, source))
+            return names
+    return None
+
+
+def _compute_public_symbols(
+    *,
+    root,
+    source: bytes,
+    rel_path: str,
+    dunder_all: set[str] | None,
+) -> set[str]:
+    """Compute the file's public surface.
+
+    Rules (precedence top → bottom):
+
+    1. When ``dunder_all`` is non-``None``, only names appearing in
+       it are public — overrides the no-underscore-prefix rule.
+    2. Otherwise, a top-level function or class is public iff its name
+       does not start with a single underscore.
+
+    The output is a set of node ids (``"<file>::<name>"``). Methods and
+    inner functions are not included — only top-level symbols matter
+    for cross-area visibility.
+    """
+    out: set[str] = set()
+    for raw_child in root.children:
+        child, _decorators = _unwrap_decorated(raw_child, source)
+        if child.type not in (_FUNC_NODE, _CLASS_NODE):
+            continue
+        # First identifier child is the symbol's name.
+        name = None
+        for c in child.children:
+            if c.type == "identifier":
+                name = _node_text(c, source)
+                break
+        if name is None:
+            continue
+        if dunder_all is not None:
+            if name in dunder_all:
+                out.add(f"{rel_path}::{name}")
+            continue
+        if name.startswith("_"):
+            continue
+        out.add(f"{rel_path}::{name}")
+    return out
+
+
+# ----------------------------------------------------------------------
+# Relative-import resolution
+# ----------------------------------------------------------------------
+
+
+def _resolve_relative(rel_path: str, dots: int, name: str) -> str:
+    """Resolve a relative import (``from ..x import y``) to its absolute
+    module path, given the importing file's relative path.
+
+    ``rel_path`` is workspace-relative (``a/b/c.py``). ``dots`` counts the
+    leading ``.``s in the import. With 1 dot we stay in the package;
+    each extra dot pops one package level.
+    """
+    parts = rel_path.split("/")
+    # File belongs to its parent package.
+    pkg_parts = parts[:-1]
+    pops = max(dots - 1, 0)
+    if pops:
+        pkg_parts = pkg_parts[:-pops] if pops <= len(pkg_parts) else []
+    target = ".".join(pkg_parts)
+    if name:
+        target = f"{target}.{name}" if target else name
+    return target
