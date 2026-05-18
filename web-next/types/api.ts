@@ -56,11 +56,10 @@ export interface ChangeEmailRequest {
   email: string;
 }
 export interface ClassificationResult {
-  classification: "simple" | "complex" | "complex_large" | "simple_no_code";
+  classification: "simple" | "complex" | "complex_large" | "simple_no_code" | "scaffold";
   reasoning?: string;
   estimated_files?: number;
   risk?: RiskLevel;
-  needs_grill?: boolean;
 }
 export interface ConflictInfo {
   fact_id: string;
@@ -361,6 +360,91 @@ export interface ReviewCombinedVerdict {
 export interface ReviewDimensionVerdict {
   verdict: "OK" | "NOT-OK" | "SKIPPED";
   reasoning: string;
+}
+/**
+ * Markdown body of a scaffold artefact (intent.md or root ADR).
+ *
+ * Symmetric with :class:`GateArtefact` but kept distinct because
+ * scaffold artefacts don't carry a ``kind`` discriminator — the
+ * endpoint URL fixes the file.
+ */
+export interface ScaffoldArtefactMarkdown {
+  markdown: string;
+}
+/**
+ * One domain ADR entry returned by
+ * GET /api/tasks/{id}/scaffold/domain-adrs.
+ *
+ * ``approval`` is omitted when no verdict file exists yet for the slug;
+ * when present it carries the latest persisted verdict so the UI can
+ * render the current state without a second round-trip.
+ */
+export interface ScaffoldDomainAdrEntry {
+  slug: string;
+  name?: string;
+  index: number;
+  markdown?: string;
+  approval?: {
+    [k: string]: unknown;
+  } | null;
+}
+/**
+ * Inbound body for POST /api/tasks/{id}/scaffold/domain-adr-verdict.
+ *
+ * The endpoint records a per-domain verdict; the parent advances to
+ * DISPATCHING_DOMAIN_BUILDS only when every domain ADR has a
+ * non-``revise`` verdict (ADR-018 §6).
+ */
+export interface ScaffoldDomainAdrVerdictRequest {
+  domain_slug: string;
+  verdict: "approved" | "revise" | "rejected";
+  comments?: string;
+}
+/**
+ * Inbound body for POST /api/tasks/{id}/scaffold/domain-grill-answer.
+ *
+ * Writes ``.auto-agent/domain_grill_answers/<slug>.json`` so the
+ * domain-grill agent's session can resume with the user's answer to
+ * its pending question (ADR-018 §5, Stage 8). The ``domain_slug``
+ * identifies which domain's grill is being answered.
+ */
+export interface ScaffoldDomainGrillAnswerRequest {
+  domain_slug: string;
+  answer: string;
+}
+/**
+ * The pending domain-grill question for one domain.
+ *
+ * Returned by GET /api/tasks/{id}/scaffold/domain-grill-question?slug=...
+ * when the SCAFFOLD parent is parked in ``AWAITING_DOMAIN_GRILL`` and
+ * a question file has been written under
+ * ``.auto-agent/domain_grill_questions/<slug>.json``.
+ */
+export interface ScaffoldDomainGrillQuestion {
+  domain_slug: string;
+  question: string;
+}
+/**
+ * Inbound body for POST /api/tasks/{id}/scaffold/intent-grill-answer.
+ *
+ * Writes ``.auto-agent/intent_grill_answer.json`` so the intent-grill
+ * agent's session can resume with the user's answer to its pending
+ * question (ADR-018 §2).
+ */
+export interface ScaffoldIntentGrillAnswerRequest {
+  answer: string;
+}
+/**
+ * Inbound body for POST /api/tasks/{id}/scaffold/root-adr-verdict.
+ *
+ * The verdict is applied via
+ * ``agent.lifecycle.scaffold.root_adr_approval.apply_verdict`` which
+ * persists the verdict to ``.auto-agent/root_adr_approval.json`` and
+ * transitions the state machine (ADR-018 §4).
+ */
+export interface ScaffoldRootAdrVerdictRequest {
+  verdict: "approved" | "revise" | "rejected";
+  comments?: string;
 }
 export interface ScheduleResponse {
   id: number;

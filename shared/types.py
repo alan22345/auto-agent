@@ -22,18 +22,10 @@ class RiskLevel(str, Enum):
 
 
 class ClassificationResult(BaseModel):
-    classification: Literal["simple", "complex", "complex_large", "simple_no_code"]
+    classification: Literal["simple", "complex", "complex_large", "simple_no_code", "scaffold"]
     reasoning: str = ""
     estimated_files: int = 0
     risk: RiskLevel = RiskLevel.LOW
-    # ADR-015 §1: returned alongside ``classification`` by the LLM-driven
-    # classifier in ``agent/classifier.py``. ``True`` ⇒ the flow runs the
-    # grill phase before any plan; ``False`` ⇒ the task is unambiguous and
-    # grill is skipped. Defaults to ``True`` for backwards-compat with
-    # existing callers that don't yet construct the field explicitly — the
-    # classifier itself always emits an explicit value (defaulting to
-    # ``True`` on LLM failure / missing-field, the safe-to-grill path).
-    needs_grill: bool = True
 
 
 # --- Task API types (used by all services that talk to the orchestrator) ---
@@ -603,3 +595,96 @@ class GateArtefact(BaseModel):
     kind: Literal["plan", "design"]
     path: str
     body: str
+
+
+# --- Scaffold (ADR-018) gate types ---
+
+
+class ScaffoldIntentGrillAnswerRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/intent-grill-answer.
+
+    Writes ``.auto-agent/intent_grill_answer.json`` so the intent-grill
+    agent's session can resume with the user's answer to its pending
+    question (ADR-018 §2).
+    """
+
+    answer: str = Field(min_length=1, max_length=20_000)
+
+
+class ScaffoldRootAdrVerdictRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/root-adr-verdict.
+
+    The verdict is applied via
+    ``agent.lifecycle.scaffold.root_adr_approval.apply_verdict`` which
+    persists the verdict to ``.auto-agent/root_adr_approval.json`` and
+    transitions the state machine (ADR-018 §4).
+    """
+
+    verdict: Literal["approved", "revise", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class ScaffoldDomainAdrVerdictRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/domain-adr-verdict.
+
+    The endpoint records a per-domain verdict; the parent advances to
+    DISPATCHING_DOMAIN_BUILDS only when every domain ADR has a
+    non-``revise`` verdict (ADR-018 §6).
+    """
+
+    domain_slug: str = Field(min_length=1, max_length=128)
+    verdict: Literal["approved", "revise", "rejected"]
+    comments: str = Field(default="", max_length=5000)
+
+
+class ScaffoldDomainAdrEntry(BaseModel):
+    """One domain ADR entry returned by
+    GET /api/tasks/{id}/scaffold/domain-adrs.
+
+    ``approval`` is omitted when no verdict file exists yet for the slug;
+    when present it carries the latest persisted verdict so the UI can
+    render the current state without a second round-trip.
+    """
+
+    slug: str
+    name: str = ""
+    index: int
+    markdown: str = ""
+    approval: dict | None = None
+
+
+class ScaffoldArtefactMarkdown(BaseModel):
+    """Markdown body of a scaffold artefact (intent.md or root ADR).
+
+    Symmetric with :class:`GateArtefact` but kept distinct because
+    scaffold artefacts don't carry a ``kind`` discriminator — the
+    endpoint URL fixes the file.
+    """
+
+    markdown: str
+
+
+class ScaffoldDomainGrillAnswerRequest(BaseModel):
+    """Inbound body for POST /api/tasks/{id}/scaffold/domain-grill-answer.
+
+    Writes ``.auto-agent/domain_grill_answers/<slug>.json`` so the
+    domain-grill agent's session can resume with the user's answer to
+    its pending question (ADR-018 §5, Stage 8). The ``domain_slug``
+    identifies which domain's grill is being answered.
+    """
+
+    domain_slug: str = Field(min_length=1, max_length=128)
+    answer: str = Field(min_length=1, max_length=20_000)
+
+
+class ScaffoldDomainGrillQuestion(BaseModel):
+    """The pending domain-grill question for one domain.
+
+    Returned by GET /api/tasks/{id}/scaffold/domain-grill-question?slug=...
+    when the SCAFFOLD parent is parked in ``AWAITING_DOMAIN_GRILL`` and
+    a question file has been written under
+    ``.auto-agent/domain_grill_questions/<slug>.json``.
+    """
+
+    domain_slug: str
+    question: str

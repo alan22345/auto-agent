@@ -1,5 +1,12 @@
 import { api } from './api';
-import type { GateArtefact, GateDecisionOut, TaskData } from '@/types/api';
+import type {
+  GateArtefact,
+  GateDecisionOut,
+  ScaffoldArtefactMarkdown,
+  ScaffoldDomainAdrEntry,
+  ScaffoldDomainGrillQuestion,
+  TaskData,
+} from '@/types/api';
 
 export type ModeOverride = 'freeform' | 'human_in_loop' | null;
 
@@ -51,4 +58,93 @@ export async function approvePlan(
 
 export async function getGateHistory(taskId: number): Promise<GateDecisionOut[]> {
   return api<GateDecisionOut[]>(`/api/tasks/${taskId}/gate-history`);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-018 Stage 5 — scaffold gate endpoints. The three POSTs drive the
+// SCAFFOLD parent's state machine (intent grill answer / root ADR verdict
+// / per-domain verdict); the three GETs surface the markdown artefacts
+// the user is being asked to review.
+// ---------------------------------------------------------------------------
+
+export type ScaffoldVerdict = 'approved' | 'revise' | 'rejected';
+
+export async function getScaffoldIntent(
+  taskId: number,
+): Promise<ScaffoldArtefactMarkdown> {
+  return api<ScaffoldArtefactMarkdown>(`/api/tasks/${taskId}/scaffold/intent`);
+}
+
+export async function getScaffoldRootAdr(
+  taskId: number,
+): Promise<ScaffoldArtefactMarkdown> {
+  return api<ScaffoldArtefactMarkdown>(
+    `/api/tasks/${taskId}/scaffold/root-adr`,
+  );
+}
+
+export async function listScaffoldDomainAdrs(
+  taskId: number,
+): Promise<ScaffoldDomainAdrEntry[]> {
+  return api<ScaffoldDomainAdrEntry[]>(
+    `/api/tasks/${taskId}/scaffold/domain-adrs`,
+  );
+}
+
+export async function submitIntentGrillAnswer(
+  taskId: number,
+  answer: string,
+): Promise<TaskData> {
+  return api<TaskData>(`/api/tasks/${taskId}/scaffold/intent-grill-answer`, {
+    method: 'POST',
+    body: JSON.stringify({ answer }),
+  });
+}
+
+export async function submitRootAdrVerdict(
+  taskId: number,
+  verdict: ScaffoldVerdict,
+  comments = '',
+): Promise<TaskData> {
+  return api<TaskData>(`/api/tasks/${taskId}/scaffold/root-adr-verdict`, {
+    method: 'POST',
+    body: JSON.stringify({ verdict, comments }),
+  });
+}
+
+export async function submitDomainAdrVerdict(
+  taskId: number,
+  domainSlug: string,
+  verdict: ScaffoldVerdict,
+  comments = '',
+): Promise<TaskData> {
+  return api<TaskData>(`/api/tasks/${taskId}/scaffold/domain-adr-verdict`, {
+    method: 'POST',
+    body: JSON.stringify({ domain_slug: domainSlug, verdict, comments }),
+  });
+}
+
+// ADR-018 Stage 8 — per-domain grill round. The domain-grill agent pauses
+// on a question; the user answers via this endpoint; the parent's state
+// machine transitions back to BUILDING_DOMAIN_ADRS and the driver resumes.
+
+export async function getScaffoldDomainGrillQuestion(
+  taskId: number,
+  slug: string,
+): Promise<ScaffoldDomainGrillQuestion> {
+  const params = new URLSearchParams({ slug });
+  return api<ScaffoldDomainGrillQuestion>(
+    `/api/tasks/${taskId}/scaffold/domain-grill-question?${params.toString()}`,
+  );
+}
+
+export async function submitDomainGrillAnswer(
+  taskId: number,
+  domainSlug: string,
+  answer: string,
+): Promise<TaskData> {
+  return api<TaskData>(`/api/tasks/${taskId}/scaffold/domain-grill-answer`, {
+    method: 'POST',
+    body: JSON.stringify({ domain_slug: domainSlug, answer }),
+  });
 }

@@ -9,8 +9,20 @@ from shared.models import Task, TaskHistory, TaskStatus
 
 # Valid state transitions
 TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.INTAKE: {TaskStatus.CLASSIFYING},
-    TaskStatus.CLASSIFYING: {TaskStatus.QUEUED, TaskStatus.FAILED},
+    TaskStatus.INTAKE: {
+        TaskStatus.CLASSIFYING,
+        # ADR-018 — SCAFFOLD parent flow skips QUEUED and enters the intent
+        # grill directly after classification (or directly from intake when
+        # the complexity is set inline). Complexity gating happens at the
+        # caller, not in the transition dict.
+        TaskStatus.AWAITING_INTENT_GRILL,
+    },
+    TaskStatus.CLASSIFYING: {
+        TaskStatus.QUEUED,
+        TaskStatus.FAILED,
+        # ADR-018 — SCAFFOLD task classified → straight into intent grill.
+        TaskStatus.AWAITING_INTENT_GRILL,
+    },
     TaskStatus.QUEUED: {
         TaskStatus.PLANNING,
         TaskStatus.CODING,
@@ -153,6 +165,48 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.ARCHITECT_GAP_FIX: {
         TaskStatus.TRIO_EXECUTING,  # architect dispatched new items
         TaskStatus.BLOCKED,  # architect escalated or out of rounds
+    },
+    # ADR-018 — SCAFFOLD parent state machine. Intent grill → root ADR
+    # gate → per-domain ADR gate → dispatch per-domain trios → final
+    # verification. Complexity gating is enforced at the caller; the
+    # transition dict only models the legal moves.
+    TaskStatus.AWAITING_INTENT_GRILL: {
+        TaskStatus.BUILDING_ROOT_ADR,
+    },
+    TaskStatus.BUILDING_ROOT_ADR: {
+        TaskStatus.AWAITING_ROOT_ADR_APPROVAL,
+    },
+    TaskStatus.AWAITING_ROOT_ADR_APPROVAL: {
+        TaskStatus.BUILDING_DOMAIN_ADRS,  # verdict=approved
+        TaskStatus.BUILDING_ROOT_ADR,  # verdict=revise — resume architect session
+        TaskStatus.BLOCKED,  # rejected OR 3 revise rounds exhausted
+    },
+    TaskStatus.BUILDING_DOMAIN_ADRS: {
+        # ADR-018 Stage 8 — per-domain grill round pauses the parent here
+        # while the user (or PO standin) answers the grill agent's
+        # pending question. Re-entry transitions back into
+        # BUILDING_DOMAIN_ADRS once the answer lands.
+        TaskStatus.AWAITING_DOMAIN_GRILL,
+        TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL,
+    },
+    TaskStatus.AWAITING_DOMAIN_GRILL: {
+        TaskStatus.BUILDING_DOMAIN_ADRS,  # user answered — resume grill
+        TaskStatus.BLOCKED,  # rare — escalation / unanswerable question
+    },
+    TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL: {
+        TaskStatus.BUILDING_DOMAIN_ADRS,  # any domain marked revise
+        TaskStatus.DISPATCHING_DOMAIN_BUILDS,  # all approved/rejected — no revise left
+    },
+    TaskStatus.DISPATCHING_DOMAIN_BUILDS: {
+        TaskStatus.BUILDING_DOMAINS,
+    },
+    TaskStatus.BUILDING_DOMAINS: {
+        TaskStatus.AWAITING_FINAL_VERIFICATION,  # all children terminal
+    },
+    TaskStatus.AWAITING_FINAL_VERIFICATION: {
+        TaskStatus.DONE,  # verify passed
+        TaskStatus.DISPATCHING_DOMAIN_BUILDS,  # gaps_found — spawn fix children
+        TaskStatus.BLOCKED,  # 3 verify rounds exhausted
     },
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: {TaskStatus.DONE},

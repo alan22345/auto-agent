@@ -126,3 +126,64 @@ def slice_review_path(name: str, item_id: str) -> str:
     """Path to one item's heavy-review verdict under a slice."""
 
     return f"{slice_reviews_dir(name)}/{item_id}.json"
+
+
+# ---------------------------------------------------------------------------
+# ADR-018 — scaffold flow paths. The scaffold parent task orchestrates a
+# 5-phase flow (intent grill → root ADR → domain ADRs → per-domain trios
+# → final verification) and each phase writes its artefact to a known
+# path under ``.auto-agent/`` so the orchestrator can read it back after
+# the agent run returns.
+# ---------------------------------------------------------------------------
+
+INTENT_PATH = f"{AUTO_AGENT_DIR}/intent.md"
+INTENT_GRILL_ANSWER_PATH = f"{AUTO_AGENT_DIR}/intent_grill_answer.json"
+ROOT_ADR_PATH = f"{AUTO_AGENT_DIR}/adrs/000-system.md"
+ROOT_ADR_APPROVAL_PATH = f"{AUTO_AGENT_DIR}/root_adr_approval.json"
+ADRS_DIR = f"{AUTO_AGENT_DIR}/adrs"
+DOMAIN_ADR_APPROVALS_DIR = f"{AUTO_AGENT_DIR}/domain_adr_approvals"
+SCAFFOLD_FINAL_VERIFICATION_PATH = f"{AUTO_AGENT_DIR}/scaffold_final_verification.json"
+
+
+def domain_adr_path(index: int, slug: str) -> str:
+    """Path to one domain ADR — ``001-auth.md``, ``002-billing.md``, …"""
+
+    return f"{ADRS_DIR}/{index:03d}-{slug}.md"
+
+
+def domain_adr_approval_path(slug: str) -> str:
+    """Path to one domain ADR's verdict file."""
+
+    return f"{DOMAIN_ADR_APPROVALS_DIR}/{slug}.json"
+
+
+# ---------------------------------------------------------------------------
+# ADR-018 Stage 8 — per-domain grill round. A grill agent runs for each
+# domain before the matching domain architect writes its ADR. The grill
+# agent writes its summary to ``adrs/<idx>-<slug>.grill.md`` (markdown,
+# mirrors ``intent.md`` style). When the agent has a pending question
+# for the user it writes ``domain_grill_questions/<slug>.json``; the
+# user's answer lands at ``domain_grill_answers/<slug>.json``.
+# ---------------------------------------------------------------------------
+
+
+DOMAIN_GRILL_QUESTIONS_DIR = f"{AUTO_AGENT_DIR}/domain_grill_questions"
+DOMAIN_GRILL_ANSWERS_DIR = f"{AUTO_AGENT_DIR}/domain_grill_answers"
+
+
+def domain_grill_path(index: int, slug: str) -> str:
+    """Path to the per-domain grill summary written by the grill agent."""
+
+    return f"{ADRS_DIR}/{index:03d}-{slug}.grill.md"
+
+
+def domain_grill_question_path(slug: str) -> str:
+    """Grill agent → user pending-question relay (one file per domain)."""
+
+    return f"{DOMAIN_GRILL_QUESTIONS_DIR}/{slug}.json"
+
+
+def domain_grill_answer_path(slug: str) -> str:
+    """User → grill agent answer relay (one file per domain)."""
+
+    return f"{DOMAIN_GRILL_ANSWERS_DIR}/{slug}.json"

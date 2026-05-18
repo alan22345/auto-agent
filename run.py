@@ -85,7 +85,6 @@ from shared.models import (
     TaskSource,
     TaskStatus,
     User,
-    intake_qa_for_suggestion,
 )
 from shared.notifier import send_telegram
 from shared.redis_client import (
@@ -256,14 +255,6 @@ async def on_task_created(event: Event) -> None:
         if task.complexity is None:
             complexity, classification = await classify_task(task.title, task.description)
             task.complexity = complexity
-            # ADR-015 §1: translate the classifier's needs_grill answer into
-            # the grill-gate sentinel (intake_qa=[]). False means the task
-            # is unambiguous → skip grill regardless of complexity bucket.
-            # We don't overwrite an already-populated intake_qa (e.g. a
-            # pre-grilled suggestion that came in with intake_qa=[] from
-            # intake_qa_for_suggestion).
-            if not classification.needs_grill and task.intake_qa is None:
-                task.intake_qa = []
             await session.commit()
             payload = {"complexity": complexity.value, **classification.model_dump()}
         else:
@@ -362,6 +353,21 @@ async def on_task_classified(event: Event) -> None:
                 await session.commit()
                 await publish(Event(type="claude_auth_required", task_id=task.id))
                 return
+
+        # ADR-018 — SCAFFOLD tasks skip the trio entirely; they orchestrate
+        # child trios instead. Route to ``run_scaffold_parent`` before the
+        # legacy trio branch so they don't fall through.
+        if task.complexity == TaskComplexity.SCAFFOLD:
+            task = await transition(
+                session,
+                task,
+                TaskStatus.AWAITING_INTENT_GRILL,
+                "Starting scaffold flow (ADR-018) — intent grill",
+            )
+            await session.commit()
+            from agent.lifecycle.scaffold import run_scaffold_parent
+            asyncio.create_task(run_scaffold_parent(task))  # noqa: RUF006
+            return
 
         # Trio routing — tasks that are complex_large OR freeform_mode go to
         # the parent/architect orchestration loop instead of the legacy
@@ -1111,7 +1117,6 @@ async def on_po_suggestions_ready(event: Event) -> None:
                 complexity=TaskComplexity.COMPLEX,
                 repo_id=suggestion.repo_id,
                 freeform_mode=True,
-                intake_qa=intake_qa_for_suggestion(suggestion.category),
             )
             session.add(task)
             await session.flush()
@@ -1134,10 +1139,76 @@ async def on_task_finished(event: Event) -> None:
     if event.task_id:
         await publish(task_cleanup(event.task_id))
 
+    # ADR-018 — if this task is a child of a SCAFFOLD parent and every
+    # sibling is now terminal, transition the parent to
+    # AWAITING_FINAL_VERIFICATION and re-invoke run_scaffold_parent so
+    # Phase E fires.
+    if event.task_id:
+        await _maybe_advance_scaffold_parent_on_child_finish(event.task_id)
+
     async with async_session() as session:
         await unblock_quota_paused(session)
         await session.commit()
         await _try_start_queued(session)
+
+
+# Terminal statuses for the SCAFFOLD child fan-in check (ADR-018 §7).
+_SCAFFOLD_CHILD_TERMINAL_STATUSES = (
+    TaskStatus.DONE,
+    TaskStatus.FAILED,
+    TaskStatus.BLOCKED,
+)
+
+
+async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> None:
+    """When a child of a SCAFFOLD parent reaches a terminal state and all
+    siblings are also terminal, transition the parent to
+    AWAITING_FINAL_VERIFICATION and re-invoke ``run_scaffold_parent``.
+
+    Idempotent: re-invocation is safe because the driver returns early if
+    the parent is not in BUILDING_DOMAINS.
+    """
+
+    async with async_session() as session:
+        child = await get_task(session, child_task_id)
+        if child is None or child.parent_task_id is None:
+            return
+        parent = await get_task(session, child.parent_task_id)
+        if parent is None:
+            return
+        if parent.complexity != TaskComplexity.SCAFFOLD:
+            return
+        if parent.status != TaskStatus.BUILDING_DOMAINS:
+            # Parent isn't waiting on children right now — either we've
+            # already advanced, or the child finished during a different
+            # phase (shouldn't happen, but be defensive).
+            return
+
+        siblings_q = await session.execute(
+            sa_select(Task).where(Task.parent_task_id == parent.id)
+        )
+        siblings = siblings_q.scalars().all()
+        if not siblings:
+            return
+        if not all(s.status in _SCAFFOLD_CHILD_TERMINAL_STATUSES for s in siblings):
+            return
+
+        await transition(
+            session,
+            parent,
+            TaskStatus.AWAITING_FINAL_VERIFICATION,
+            "All scaffold children terminal; running final verification",
+        )
+        await session.commit()
+        parent_id = parent.id
+
+    # Reload outside the session so the driver gets a fresh row.
+    async with async_session() as session:
+        parent = await get_task(session, parent_id)
+    if parent is None:
+        return
+    from agent.lifecycle.scaffold import run_scaffold_parent
+    asyncio.create_task(run_scaffold_parent(parent))  # noqa: RUF006
 
 
 async def _try_start_queued(session) -> None:

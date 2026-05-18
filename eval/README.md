@@ -131,6 +131,25 @@ All fixtures are small (1–5 files) self-contained projects with a working test
 - **Transient Bedrock 503s** during eval runs are retried up to 4× by the agent provider; severe throttling can still cause failures.
 - **CLI provider** depends on Claude Max subscription and Claude CLI being authenticated on the host (`./scripts/auth.sh`).
 
+## Notes for Scaffold tasks in eval
+
+ADR-018's SCAFFOLD parent flow (e.g. "build a CLI tool that converts CSV to JSON" run from scratch through the full intent-grill → root-ADR → domain-ADRs → child-trios → final-verification pipeline) cannot currently be exercised by this eval suite. The reason is structural:
+
+- `providers/agent_provider.py` constructs a single `AgentLoop` and invokes `agent.run(task)` exactly once against a fixture workspace, then captures the resulting diff. There is no orchestrator, no `Task` row, no state machine, and no event bus.
+- A SCAFFOLD task is driven by `agent.lifecycle.scaffold.run_scaffold_parent`, which:
+  1. Spawns multiple separate agent sessions (intent, root architect, one per domain architect).
+  2. Returns to the orchestrator between every external gate (root-ADR approval, per-domain ADR approvals).
+  3. Creates child `COMPLEX_LARGE` Task rows via `dispatch_children` that run their own trios in separate workspaces.
+  4. Re-enters via `_maybe_advance_scaffold_parent_on_child_finish` (in `run.py`) once every child reaches a terminal state.
+
+None of those re-entries can be triggered by promptfoo's "one prompt, one output, one diff" contract.
+
+A SCAFFOLD-shaped eval would require either:
+- a new provider (e.g. `providers/scaffold_provider.py`) that boots a full orchestrator + Postgres + Redis stack, POSTs to `/freeform/create-repo`, polls for the parent's terminal status, then collects the union of every child's diff and the final ADR set as the "output" graded by the rubric — significantly more infrastructure than the current eval setup, and
+- a synthetic-only fallback (à la Phase-13 tests 11–14) for CI runs that can't bring up the orchestrator.
+
+End-to-end orchestration is instead covered by `tests/test_scaffold_e2e.py`, which walks the parent through every phase with mocked LLM responses and verifies the state machine, artefact paths, and child fan-out shape. Until the eval grows orchestrator-aware providers, that test is the regression net for the SCAFFOLD flow.
+
 ## Previous results
 
 Run on `feature/model-agnostic-agent` branch, 2026-04-16:

@@ -1,6 +1,11 @@
-"""Tests for Task-22: create_repo forces complexity=COMPLEX_LARGE on scaffold
-tasks, and the classifier (on_task_created) short-circuits without an LLM call
-when complexity is already set.
+"""Tests for create_repo's task-construction shape.
+
+History:
+- Originally (Task-22) the scaffold task was pre-classified as COMPLEX_LARGE so
+  it always routed through the single-trio pipeline.
+- ADR-018 Stage 4 replaced that with complexity=SCAFFOLD so the task routes to
+  ``run_scaffold_parent``, which orchestrates an intent-grill phase + child
+  trios instead of a single architect→builder→reviewer run.
 """
 from __future__ import annotations
 
@@ -28,22 +33,22 @@ from shared.models import (
 # ---------------------------------------------------------------------------
 
 
-def test_create_repo_scaffold_task_uses_complex_large():
-    """The Task() constructor call in create_repo.py must set
-    complexity=TaskComplexity.COMPLEX_LARGE so that scaffold tasks always route
-    through the trio pipeline without relying on the keyword classifier."""
+def test_create_repo_scaffold_task_uses_scaffold_complexity():
+    """ADR-018 Stage 4: the Task() constructor in create_repo.py must set
+    complexity=TaskComplexity.SCAFFOLD so the scaffold parent loop
+    (``run_scaffold_parent``) owns the lifecycle, not the legacy trio."""
     import inspect
 
     import orchestrator.create_repo as cr_module
 
     src = inspect.getsource(cr_module)
-    # Ensure complexity is forced to COMPLEX_LARGE (not COMPLEX)
-    assert "TaskComplexity.COMPLEX_LARGE" in src, (
-        "create_repo.py must set complexity=TaskComplexity.COMPLEX_LARGE "
-        "on the scaffold Task"
+    assert "complexity=TaskComplexity.SCAFFOLD" in src, (
+        "Expected `complexity=TaskComplexity.SCAFFOLD` in create_repo.py"
     )
-    assert "complexity=TaskComplexity.COMPLEX_LARGE" in src, (
-        "Expected `complexity=TaskComplexity.COMPLEX_LARGE` in create_repo.py"
+    # And the old COMPLEX_LARGE pre-classification must be gone — it would
+    # short-circuit the SCAFFOLD branch in on_task_classified.
+    assert "complexity=TaskComplexity.COMPLEX_LARGE" not in src, (
+        "Legacy COMPLEX_LARGE pre-classification should be removed (ADR-018 Stage 4)"
     )
 
 
@@ -56,6 +61,137 @@ def test_create_repo_scaffold_task_has_freeform_mode():
     src = inspect.getsource(cr_module)
     assert "freeform_mode=True" in src, (
         "create_repo.py must set freeform_mode=True on the scaffold Task"
+    )
+
+
+def test_create_repo_scaffold_drops_templated_description():
+    """ADR-018 Stage 4: the long templated scaffold instructions
+    ("This is a brand-new empty repository...") used to live in the task
+    description so the single-trio architect would read them. The new flow
+    derives the architect's brief from the intent-grill phase's intent.md,
+    so the user's raw description goes through verbatim and the templated
+    blob must be removed."""
+    import inspect
+
+    import orchestrator.create_repo as cr_module
+
+    src = inspect.getsource(cr_module)
+    assert "scaffold_description" not in src, (
+        "Local `scaffold_description` should be removed — the templated "
+        "instructions are no longer used."
+    )
+    assert "This is a brand-new empty repository" not in src, (
+        "Templated scaffold prose should be gone (ADR-018 Stage 4)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration test — exercise create_repo_and_scaffold_task end-to-end with
+# GitHub HTTP calls + LLM mocked. Verifies the SCAFFOLD task shape AND that
+# the GitHub-side effects (Repo + FreeformConfig rows, task_created publish)
+# still happen.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_repo_and_scaffold_task_produces_scaffold_shape(
+    session, monkeypatch, publisher,
+):
+    """End-to-end shape check with GitHub + LLM mocked.
+
+    Verifies:
+      * Task has complexity=SCAFFOLD, status=INTAKE, freeform_mode=True
+      * description is the user's raw input (not the old templated blob)
+      * a Repo row and FreeformConfig row are created
+      * task_created is published so the pipeline picks it up
+    """
+    await _skip_if_schema_not_ready(session)
+
+    from orchestrator import create_repo as cr_module
+
+    org = await _seed_org(session)
+    await session.flush()
+
+    raw_description = "Build a tiny CLI that prints today's date."
+
+    # --- Stub the LLM-driven name generator
+    monkeypatch.setattr(
+        cr_module, "_generate_name_via_claude", AsyncMock(return_value="date-cli")
+    )
+
+    # --- Stub the GitHub HTTP layer (avoid the network entirely)
+    monkeypatch.setattr(
+        cr_module,
+        "_resolve_owner",
+        AsyncMock(return_value=("test-owner", False)),
+    )
+    monkeypatch.setattr(
+        cr_module,
+        "_create_github_repo",
+        AsyncMock(
+            return_value={
+                "full_name": "test-owner/date-cli",
+                "clone_url": "https://github.com/test-owner/date-cli.git",
+                "default_branch": "main",
+            }
+        ),
+    )
+
+    # --- Stub get_github_token (called by the auth guard at the top of
+    # create_repo_and_scaffold_task)
+    monkeypatch.setattr(
+        "shared.github_auth.get_github_token",
+        AsyncMock(return_value="ghp_fake_token"),
+    )
+
+    # --- Compress the 2-second post-create sleep
+    monkeypatch.setattr(cr_module.asyncio, "sleep", AsyncMock(return_value=None))
+
+    # --- Forward session.commit() → flush so writes stay inside the test txn
+    real_commit = session.commit
+    real_refresh = session.refresh
+    session.commit = AsyncMock(side_effect=lambda: session.flush())
+    session.refresh = AsyncMock()
+
+    try:
+        repo, task = await cr_module.create_repo_and_scaffold_task(
+            session,
+            raw_description,
+            organization_id=org.id,
+            user_id=None,
+        )
+    finally:
+        session.commit = real_commit
+        session.refresh = real_refresh
+
+    # Task shape — ADR-018 Stage 4
+    assert task.complexity == TaskComplexity.SCAFFOLD
+    assert task.status == TaskStatus.INTAKE
+    assert task.freeform_mode is True
+    assert task.organization_id == org.id
+
+    # Description is the raw user input, NOT the templated scaffold blob
+    assert task.description == raw_description
+    assert "brand-new empty repository" not in task.description
+    assert "## Instructions" not in task.description
+
+    # Title is derived from the description with the Scaffold: prefix
+    assert task.title.startswith("Scaffold:")
+
+    # Repo + FreeformConfig rows were inserted
+    assert repo is not None
+    from shared.models import FreeformConfig as _FreeformConfig
+    cfg_q = await session.execute(
+        select(_FreeformConfig).where(_FreeformConfig.repo_id == repo.id)
+    )
+    assert cfg_q.scalar_one_or_none() is not None, (
+        "FreeformConfig row must be created for the new repo"
+    )
+
+    # task_created event must have been published
+    published_types = [e.type for e in publisher.events]
+    assert any("task_created" in t or t == "task.created" for t in published_types), (
+        f"Expected a task_created event, got: {published_types}"
     )
 
 

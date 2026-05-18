@@ -33,6 +33,9 @@ class TaskComplexity(str, enum.Enum):
     COMPLEX_LARGE = "complex_large"
     # Query/research tasks — no repo needed, no coding tools, just an LLM answer.
     SIMPLE_NO_CODE = "simple_no_code"
+    # ADR-018 — "build something new" freeform flow. Runs intent grill →
+    # root ADR → per-domain ADRs → per-domain trios → final verification.
+    SCAFFOLD = "scaffold"
 
 
 class TaskStatus(str, enum.Enum):
@@ -69,6 +72,19 @@ class TaskStatus(str, enum.Enum):
     # briefly for the parent-answers-grill relay (§10).
     AWAITING_SUB_ARCHITECTS   = "awaiting_sub_architects"
     ITERATING = "iterating"  # ADR-017: trio is re-iterating a PR on user feedback
+    # ADR-018 — scaffold parent state machine (freeform build-something-new flow).
+    AWAITING_INTENT_GRILL        = "awaiting_intent_grill"
+    BUILDING_ROOT_ADR            = "building_root_adr"
+    AWAITING_ROOT_ADR_APPROVAL   = "awaiting_root_adr_approval"
+    BUILDING_DOMAIN_ADRS         = "building_domain_adrs"
+    # ADR-018 Stage 8 — per-domain grill round between BUILDING_DOMAIN_ADRS
+    # and the domain architect's ADR write. Parked here while waiting for
+    # the user to answer the domain-grill agent's pending question.
+    AWAITING_DOMAIN_GRILL        = "awaiting_domain_grill"
+    AWAITING_DOMAIN_ADR_APPROVAL = "awaiting_domain_adr_approval"
+    DISPATCHING_DOMAIN_BUILDS    = "dispatching_domain_builds"
+    BUILDING_DOMAINS             = "building_domains"
+    AWAITING_FINAL_VERIFICATION  = "awaiting_final_verification"
 
 
 class TrioPhase(str, enum.Enum):
