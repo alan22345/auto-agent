@@ -11,6 +11,7 @@ import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
 import { EdgeEvidencePopover } from '@/components/code-graph/edge-evidence-popover';
 import { GraphCanvas } from '@/components/code-graph/graph-canvas';
 import { NodeSidePanel } from '@/components/code-graph/node-side-panel';
+import { SearchInput } from '@/components/code-graph/search-input';
 import { ViolationsPanel } from '@/components/code-graph/violations-panel';
 import { ApiError } from '@/lib/api';
 import { disableRepoGraph } from '@/lib/code-graph';
@@ -42,6 +43,8 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
     id: string;
     pos: { x: number; y: number };
   } | null>(null);
+  // Phase 7 P2 §11 — toolbar state: debounced search query.
+  const [searchQuery, setSearchQuery] = useState('');
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
@@ -119,6 +122,12 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
 
             {latest?.blob ? (
               <>
+                <div
+                  className="flex flex-wrap items-center gap-3 border-y bg-card/40 px-2 py-2"
+                  data-testid="graph-toolbar"
+                >
+                  <SearchInput onChange={setSearchQuery} />
+                </div>
                 <div className="flex min-h-0 flex-1 gap-4">
                   <div className="min-w-0 flex-1">
                     <GraphCanvas
@@ -129,6 +138,7 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                       onEdgeClick={(id, pos) =>
                         setSelectedEdge({ id, pos })
                       }
+                      searchQuery={searchQuery}
                     />
                   </div>
                   {selectedNodeId && (

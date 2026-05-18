@@ -47,6 +47,9 @@ interface Props {
    * the rendered pixel position inside the canvas container, used to
    * anchor a portal. */
   onEdgeClick?: (edgeId: string, pos: { x: number; y: number }) => void;
+  /** Phase 7 P2 — search query (case-insensitive substring on node
+   * label). Empty / whitespace = no filter applied. */
+  searchQuery?: string;
 }
 
 export function GraphCanvas({
@@ -56,6 +59,7 @@ export function GraphCanvas({
   repoId,
   onNodeClick,
   onEdgeClick,
+  searchQuery,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
@@ -162,6 +166,15 @@ export function GraphCanvas({
               'target-arrow-color': VIOLATION_COLOUR,
             },
           },
+          // Phase 7 P2 §11 — search controls.
+          {
+            selector: 'node.search-fade',
+            style: { opacity: 0.2 },
+          },
+          {
+            selector: 'node.search-match',
+            style: { 'border-width': 3, 'border-color': '#facc15' },
+          },
         ],
       });
 
@@ -238,6 +251,23 @@ export function GraphCanvas({
   useEffect(() => {
     onEdgeClickRef.current = onEdgeClick;
   }, [onEdgeClick]);
+
+  // Phase 7 P2 §11 — search class diff. Runs whenever the query or the
+  // cytoscape instance changes. The effect mutates classes in-place
+  // because rebuilding the entire element set on every keystroke would
+  // throw away the layout the user is staring at.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    const { matches, fades } = computeSearchClasses(blob, searchQuery ?? '');
+    cy.batch(() => {
+      cy.nodes().forEach((n) => {
+        const id = n.id();
+        n.toggleClass('search-match', matches.has(id));
+        n.toggleClass('search-fade', fades.has(id));
+      });
+    });
+  }, [cyState, blob, searchQuery]);
 
   return (
     <div
@@ -329,4 +359,44 @@ export function blobToCytoscapeElements(
   }
 
   return elements;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 P2 §11 — search classes.
+// ---------------------------------------------------------------------------
+
+export interface SearchClassPartition {
+  /** Node ids that match the query (case-insensitive substring on label). */
+  matches: Set<string>;
+  /** Node ids that do NOT match and should be faded out. */
+  fades: Set<string>;
+}
+
+/**
+ * Compute the search partition for a given query.
+ *
+ * An empty / whitespace-only query yields empty sets — caller is
+ * expected to clear all search classes in that case. Match logic is
+ * case-insensitive substring against ``node.label``.
+ */
+export function computeSearchClasses(
+  blob: RepoGraphBlob,
+  query: string,
+): SearchClassPartition {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    return { matches: new Set(), fades: new Set() };
+  }
+  const needle = trimmed.toLowerCase();
+  const matches = new Set<string>();
+  const fades = new Set<string>();
+  for (const n of blob.nodes as Node[]) {
+    const haystack = (n.label ?? '').toLowerCase();
+    if (haystack.includes(needle)) {
+      matches.add(n.id);
+    } else {
+      fades.add(n.id);
+    }
+  }
+  return { matches, fades };
 }

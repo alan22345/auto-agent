@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { blobToCytoscapeElements } from '@/components/code-graph/graph-canvas';
+import {
+  blobToCytoscapeElements,
+  computeSearchClasses,
+} from '@/components/code-graph/graph-canvas';
 import type { RepoGraphBlob } from '@/types/api';
 
 const blob: RepoGraphBlob = {
@@ -136,5 +139,40 @@ describe('blobToCytoscapeElements', () => {
     expect(calls!.data.highlighted).toBe(1);
     const imports = els.find((e) => e.data.kind === 'imports');
     expect(imports!.data.highlighted).toBeUndefined();
+  });
+});
+
+// ADR-016 Phase 7 §11 — search controls.
+describe('computeSearchClasses', () => {
+  it('returns empty matches and empty fades for an empty query', () => {
+    const result = computeSearchClasses(blob, '');
+    expect(result.matches.size).toBe(0);
+    expect(result.fades.size).toBe(0);
+  });
+
+  it('treats a whitespace-only query as empty', () => {
+    const result = computeSearchClasses(blob, '   ');
+    expect(result.matches.size).toBe(0);
+    expect(result.fades.size).toBe(0);
+  });
+
+  it('case-insensitively matches substring on node.label', () => {
+    // Two nodes have label "agent"/"orchestrator"; only "dog.py"
+    // matches "DOG".
+    const result = computeSearchClasses(blob, 'DOG');
+    expect(result.matches.has('file:agent/dog.py')).toBe(true);
+    expect(result.matches.has('area:agent')).toBe(false);
+    // Non-matching nodes are faded.
+    expect(result.fades.has('area:agent')).toBe(true);
+    expect(result.fades.has('area:orchestrator')).toBe(true);
+  });
+
+  it('matches are not in fades and vice versa', () => {
+    const result = computeSearchClasses(blob, 'agent');
+    // Both "area:agent" (label "agent") and "file:agent/dog.py" (label
+    // "dog.py") — only the first matches by label.
+    for (const id of result.matches) {
+      expect(result.fades.has(id)).toBe(false);
+    }
   });
 });
