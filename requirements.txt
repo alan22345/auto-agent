@@ -48,5 +48,12 @@ lxml>=5.2
 # install to fetch the Chromium binary + OS deps.
 playwright>=1.49
 
+# Code-graph analyser (ADR-016). The pipeline parses source files via
+# tree-sitter to produce the structural graph; the per-language grammar
+# packages ship pre-built wheels and pin the same major as tree-sitter.
+tree-sitter>=0.23
+tree-sitter-python>=0.23
+tree-sitter-typescript>=0.23
+
 # Dev tools
 pydantic-to-typescript==2.0.0
