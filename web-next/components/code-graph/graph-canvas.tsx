@@ -12,6 +12,13 @@
 // overrides the kind-based colour. The flag + reason are carried on
 // the element data so a future side-panel can surface them.
 //
+// Phase 7 P3 (ADR-016 §11) overlays a dotted-line style on edges with
+// ``source_kind === 'llm'``: the kind colour stays the same so calls
+// remain blue / imports stay grey, but a slimmer dotted stroke reads as
+// "softer / less certain" than a tree-sitter-derived edge. Boundary
+// violations still win when both flags coincide — the dashed red
+// destructive overlay rule comes later in the style array.
+//
 // Failed areas (``AreaStatus.status === 'failed'``) get a red border
 // and surface their error through the node's tooltip data so users see
 // *why* an area's interior is missing.
@@ -158,6 +165,18 @@ export function GraphCanvas({
               'target-arrow-shape': 'triangle',
               'line-color': 'data(color)',
               'target-arrow-color': 'data(color)',
+            },
+          },
+          // Phase 7 §11 — AST vs LLM visual distinction. LLM-deduced
+          // edges render dotted + slimmer so they read as "softer /
+          // less certain" than tree-sitter-derived edges. The
+          // boundary-violation rule below comes later and so wins when
+          // both flags coincide (violation is the more urgent signal).
+          {
+            selector: 'edge[?sourceKindLlm]',
+            style: {
+              width: 1,
+              'line-style': 'dotted',
             },
           },
           {
@@ -415,6 +434,7 @@ export function blobToCytoscapeElements(
   for (const e of blob.edges as Edge[]) {
     const id = `${e.source}->${e.target}:${e.kind}`;
     const isViolation = e.boundary_violation === true;
+    const isLlmDeduced = e.source_kind === 'llm';
     elements.push({
       data: {
         id,
@@ -428,6 +448,12 @@ export function blobToCytoscapeElements(
         evidenceFile: e.evidence.file,
         evidenceLine: e.evidence.line,
         sourceKind: e.source_kind,
+        // Phase 7 §11 — boolean class fed to the
+        // ``edge[?sourceKindLlm]`` selector so LLM-deduced edges render
+        // dotted + slimmer. Left undefined (not ``false``) for AST
+        // edges so the selector simply doesn't match — same convention
+        // as ``boundaryViolation`` and ``highlighted``.
+        sourceKindLlm: isLlmDeduced ? true : undefined,
         boundaryViolation: isViolation ? 1 : undefined,
         violationReason: e.violation_reason ?? undefined,
         highlighted: highlightedEdgeId === id ? 1 : undefined,
