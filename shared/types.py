@@ -48,6 +48,8 @@ class TaskData(BaseModel):
     priority: int = 100
     subtasks: list[dict] | None = None
     current_subtask: int | None = None
+    # ADR-018 — link from a child task to its SCAFFOLD parent.
+    parent_task_id: int | None = None
     # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips. None = grilling
     # not started; [] = grilling complete or skipped.
