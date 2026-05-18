@@ -16,13 +16,17 @@ import time
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-# Load .env so shared.config picks up LLM settings
 from dotenv import load_dotenv
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 
 def call_api(prompt, options, context):
     """Promptfoo entry point. Returns the agent's output + workspace diff."""
+    # Load .env so shared.config picks up LLM settings. Done at call time, not
+    # import time, so unit tests that import helpers from this module
+    # (e.g. tests/test_eval_gitignore.py) don't accidentally inject
+    # DATABASE_URL into the pytest process env, which made skipif-on-DB tests
+    # un-skip mid-suite and produced ~50 flaky "DB pollution" failures.
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
     return asyncio.run(_run_agent(prompt, options, context))
 
 
