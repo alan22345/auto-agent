@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { BranchPicker } from '@/components/code-graph/branch-picker';
 import { RefreshButton } from '@/components/code-graph/refresh-button';
 import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
+import { EdgeEvidencePopover } from '@/components/code-graph/edge-evidence-popover';
 import { GraphCanvas } from '@/components/code-graph/graph-canvas';
 import { NodeSidePanel } from '@/components/code-graph/node-side-panel';
 import { ViolationsPanel } from '@/components/code-graph/violations-panel';
@@ -34,6 +35,13 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
   // Phase 7 — selected node id drives the side panel. Lifted here so
   // canvas tap events + edge-row clicks in the panel can share state.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Phase 7 — selected edge id + its anchor position drive the
+  // evidence popover. The popover renders through a portal so it
+  // escapes the canvas container's overflow.
+  const [selectedEdge, setSelectedEdge] = useState<{
+    id: string;
+    pos: { x: number; y: number };
+  } | null>(null);
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
@@ -118,6 +126,9 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                       highlightedEdgeId={highlightedEdgeId}
                       repoId={config.repo_id}
                       onNodeClick={setSelectedNodeId}
+                      onEdgeClick={(id, pos) =>
+                        setSelectedEdge({ id, pos })
+                      }
                     />
                   </div>
                   {selectedNodeId && (
@@ -130,6 +141,14 @@ export default function CodeGraphRepoPage(props: { params: Promise<{ repoId: str
                     />
                   )}
                 </div>
+                {selectedEdge && (
+                  <EdgeEvidencePopover
+                    blob={latest.blob}
+                    edgeId={selectedEdge.id}
+                    position={selectedEdge.pos}
+                    onClose={() => setSelectedEdge(null)}
+                  />
+                )}
                 <ViolationsPanel
                   blob={latest.blob}
                   highlightedEdgeId={highlightedEdgeId}

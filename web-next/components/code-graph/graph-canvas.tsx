@@ -195,8 +195,15 @@ export function GraphCanvas({
       });
       cy.on('tap', 'edge', (evt) => {
         const id = evt.target.id() as string;
-        const pos = evt.renderedPosition ?? { x: 0, y: 0 };
-        onEdgeClickRef.current?.(id, { x: pos.x, y: pos.y });
+        const rendered = evt.renderedPosition ?? { x: 0, y: 0 };
+        // Translate the cytoscape-local rendered position into
+        // viewport (clientX/Y) coordinates so the portal-rendered
+        // popover anchors correctly relative to ``document.body``.
+        const rect = containerRef.current?.getBoundingClientRect();
+        const pos = rect
+          ? { x: rect.left + rendered.x, y: rect.top + rendered.y }
+          : { x: rendered.x, y: rendered.y };
+        onEdgeClickRef.current?.(id, pos);
       });
 
       // Bump layoutTick whenever the rendered geometry shifts so the
