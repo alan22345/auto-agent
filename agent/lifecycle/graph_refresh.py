@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 
 import structlog
 from sqlalchemy import select
@@ -117,6 +118,20 @@ async def run_refresh(
     workspace = cfg.workspace_path
     branch = cfg.analysis_branch
     repo_url = repo.url
+
+    # Private GitHub repos require auth on clone/fetch — inject the
+    # ``x-access-token:<token>@github.com`` form so the subprocess never
+    # has to prompt for credentials (no TTY → "could not read Username").
+    # Mirror agent/workspace.py:91-103, scoped to the repo's organization
+    # so org-level installation tokens get used when present.
+    from shared.github_auth import get_github_token
+
+    gh_token = await get_github_token(organization_id=repo.organization_id)
+    if gh_token and "https://github.com" in repo_url:
+        repo_url = repo_url.replace(
+            "https://github.com",
+            f"https://x-access-token:{gh_token}@github.com",
+        )
 
     try:
         async with graph_workspace_lock(
@@ -308,6 +323,15 @@ async def _resolve_commit_sha(*, workspace: str) -> str:
     return (await _run_git(args=["rev-parse", "HEAD"], cwd=workspace)).strip()
 
 
+_TOKEN_URL_RE = re.compile(r"https://x-access-token:[^@]+@")
+
+
+def _redact(text: str) -> str:
+    """Strip GitHub install-token credentials out of a string before it
+    reaches a log or an exception message."""
+    return _TOKEN_URL_RE.sub("https://x-access-token:REDACTED@", text)
+
+
 async def _run_git(*, args: list[str], cwd: str | None) -> str:
     """Run ``git <args>``; raise on non-zero exit.
 
@@ -324,7 +348,7 @@ async def _run_git(*, args: list[str], cwd: str | None) -> str:
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"git {' '.join(args)} failed: {err}")
+        raise RuntimeError(_redact(f"git {' '.join(args)} failed: {err}"))
     return stdout.decode("utf-8", errors="replace")
 
 
