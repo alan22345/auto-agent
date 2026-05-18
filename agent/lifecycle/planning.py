@@ -51,11 +51,10 @@ log = setup_logging("agent.lifecycle.planning")
 
 SUMMARY_MAX_AGE = timedelta(days=7)
 
-# Tasks where grilling is skipped — the agent goes straight to planning.
-# Simple tasks don't need design alignment; query/no-code tasks aren't planned;
-# tasks created from architecture-mode suggestions arrive pre-grilled
-# (intake_qa = []).
-_SKIP_GRILL_COMPLEXITIES = {"simple", "simple_no_code"}
+# Policy (2026-05-18): grill ALWAYS runs, regardless of complexity or
+# any classifier signal. The only way out of grilling is the agent
+# emitting ``GRILL_DONE`` (which appends ``GRILL_DONE_QUESTION_SENTINEL``
+# to ``intake_qa``). See ``_should_run_grill`` below.
 
 # Hard cap on grill rounds to bound user fatigue. The grill prompt asks the
 # agent to aim for 3–7 questions and emit GRILL_DONE; this is a fail-safe in
@@ -112,25 +111,35 @@ def _extract_grill_done(output: str) -> str | None:
 def _should_run_grill(task) -> bool:
     """Decide whether the grill phase runs before planning for this task.
 
-    Four signals on ``task.intake_qa`` drive the gate:
-      - ``None`` → grilling never started. Run grill (initial turn).
-      - ``[]`` → grilling explicitly skipped (simple tasks, architecture-
-        derived tasks). Skip.
+    Policy (2026-05-18): grill ALWAYS runs, regardless of complexity.
+    The only way out is the agent emitting ``GRILL_DONE`` — which appends
+    ``GRILL_DONE_QUESTION_SENTINEL`` to ``intake_qa``. For trivial tasks
+    the agent typically emits GRILL_DONE on the first turn with no
+    questions; the cost is one extra turn, but skipping clarification
+    has been a recurring source of misalignment on tasks the classifier
+    thought were trivial.
+
+    Signals on ``task.intake_qa``:
+      - ``None`` or ``[]`` → grilling hasn't started OR was previously
+        marked "skip" by an old code path. Either way: grill.
       - ``[…, {"question": GRILL_DONE_QUESTION_SENTINEL, …}]`` → grilling
         completed (sentinel appended after agent emitted GRILL_DONE). Skip.
       - ``[…, {"question": q, "answer": …}]`` (no sentinel) → grilling in
         progress. Run grill again so the agent can ask the next question
         OR emit GRILL_DONE.
 
+    Defensive guard: if the task has no complexity (classifier hasn't run
+    yet), don't grill — wait for classification first.
+
     The ``_MAX_GRILL_ROUNDS`` cap is enforced inside ``handle_planning``
     (it forces a synthetic GRILL_DONE rather than mutating gate semantics).
     """
-    if not task.complexity or task.complexity in _SKIP_GRILL_COMPLEXITIES:
+    if not task.complexity:
         return False
-    if task.intake_qa is None:
-        return True
     if not task.intake_qa:
-        return False  # Empty list = explicitly complete/skipped.
+        # None or [] — grilling hasn't started OR an old code path set
+        # the "skip" flag. Either way, grill.
+        return True
     return not any(qa.get("question") == GRILL_DONE_QUESTION_SENTINEL for qa in task.intake_qa)
 
 

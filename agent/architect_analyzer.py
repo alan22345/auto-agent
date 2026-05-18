@@ -7,9 +7,10 @@ deepening lens, and produce up to 5 ``Suggestion`` rows with
 ``category='architecture'``.
 
 If the repo also has ``auto_approve_suggestions = True``, the existing
-suggestion → task auto-approval path turns these into Tasks. Architecture
-tasks arrive with ``intake_qa = []`` so the planning agent skips the grill
-phase (the analyzer has already grilled itself).
+suggestion → task auto-approval path turns these into Tasks. Even when
+the analyzer has already applied the grill-with-docs lens, every task
+still goes through one grill round before planning — there is no skip
+sentinel any more.
 """
 
 from __future__ import annotations

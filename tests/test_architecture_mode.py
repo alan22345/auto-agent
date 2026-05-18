@@ -1,9 +1,11 @@
-"""Tests for architecture-mode (continuous deepening loop).
+"""Tests for the improvement agent (continuous deepening loop).
 
-Architecture Mode is parallel to Freeform/PO mode: per-repo opt-in, runs on
-a cron, invokes the improve-codebase-architecture skill, produces
-``Suggestion`` rows with ``category="architecture"``. Auto-approved
-architecture tasks arrive with ``intake_qa=[]`` to skip the grill phase.
+The improvement agent (formerly "architecture mode") is parallel to
+Freeform/PO mode: per-repo opt-in, runs on a cron, invokes the
+``improve-codebase-architecture`` skill, produces ``Suggestion`` rows
+with ``category="architecture"`` (the DB value stays for backwards
+compatibility per ADR-015 §14). Auto-approved improvement tasks still
+go through the grill phase before planning — no category opts out.
 """
 
 from __future__ import annotations
@@ -130,23 +132,16 @@ def test_arch_prompt_uses_repo_adr_path():
 
 
 # ---------------------------------------------------------------------------
-# Suggestion → Task path: architecture suggestions skip grilling
+# Suggestion → Task path: no category opts out of grilling any more
 # ---------------------------------------------------------------------------
 
 
-def test_intake_qa_default_for_architecture_category():
-    """intake_qa_for_suggestion is the single source of truth for the
-    suggestion → task pre-grilled contract: architecture → [] (skip grill);
-    other → None (grill). Both run.py and orchestrator/router.py use it."""
-    from shared.models import (
-        PRE_GRILLED_SUGGESTION_CATEGORIES,
-        intake_qa_for_suggestion,
-    )
+def test_no_pre_grilled_suggestion_helper_exists():
+    """``intake_qa_for_suggestion`` and ``PRE_GRILLED_SUGGESTION_CATEGORIES``
+    were the levers that let architecture suggestions skip grilling. The
+    always-grill policy removed them — they must NOT be importable any
+    more (re-introducing them would resurrect a silent skip path)."""
+    import shared.models as models
 
-    assert "architecture" in PRE_GRILLED_SUGGESTION_CATEGORIES
-    assert intake_qa_for_suggestion("architecture") == []
-    assert intake_qa_for_suggestion("ux_gap") is None
-    assert intake_qa_for_suggestion("feature") is None
-    assert intake_qa_for_suggestion("improvement") is None
-    assert intake_qa_for_suggestion(None) is None
-    assert intake_qa_for_suggestion("") is None
+    assert not hasattr(models, "intake_qa_for_suggestion")
+    assert not hasattr(models, "PRE_GRILLED_SUGGESTION_CATEGORIES")

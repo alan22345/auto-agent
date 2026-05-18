@@ -13,6 +13,38 @@ export interface AffectedRoute {
   label: string;
 }
 /**
+ * API shape for an architect_attempts row.
+ */
+export interface ArchitectAttemptOut {
+  id: number;
+  task_id: number;
+  phase: "initial" | "consult" | "checkpoint" | "revision";
+  cycle: number;
+  reasoning: string;
+  decision?: {
+    [k: string]: unknown;
+  } | null;
+  consult_question?: string | null;
+  consult_why?: string | null;
+  architecture_md_after?: string | null;
+  commit_sha?: string | null;
+  tool_calls: {
+    [k: string]: unknown;
+  }[];
+  clarification_question?: string | null;
+  clarification_answer?: string | null;
+  clarification_source?: ("user" | "po") | null;
+  created_at: string;
+}
+/**
+ * The decision field on an ArchitectAttempt row when phase=checkpoint.
+ */
+export interface ArchitectDecision {
+  action: "continue" | "revise" | "done" | "awaiting_clarification" | "blocked";
+  reason?: string | null;
+  question?: string | null;
+}
+/**
  * Per-area outcome (ADR-016 §10 — failures isolated per area).
  */
 export interface AreaStatus {
@@ -46,6 +78,14 @@ export interface CreateUserRequest {
   username: string;
   password: string;
   display_name: string;
+}
+/**
+ * API shape for one ADR file under ``docs/decisions/``.
+ */
+export interface DecisionOut {
+  filename: string;
+  title: string;
+  url: string;
 }
 /**
  * One edge in the graph.
@@ -122,6 +162,37 @@ export interface FreeformConfigData {
   architecture_knowledge?: string | null;
   run_command?: string | null;
   created_at?: string | null;
+}
+/**
+ * Markdown content the human or standin is being asked to approve.
+ *
+ * Returned by GET /api/tasks/{id}/gate-artefact so the web-next UI can
+ * render ``.auto-agent/plan.md`` (complex flow) or ``.auto-agent/design.md``
+ * (complex_large flow) without the orchestrator hard-coding which file
+ * is "the artefact" — the resolution is driven by task status.
+ */
+export interface GateArtefact {
+  kind: "plan" | "design";
+  path: string;
+  body: string;
+}
+/**
+ * One row in the gate-history audit panel — ADR-015 §6.
+ *
+ * Stable wire shape across user and standin sources so the panel
+ * doesn't have to branch on origin to render an entry.
+ */
+export interface GateDecisionOut {
+  id: number;
+  task_id: number;
+  gate: string;
+  source: string;
+  agent_id?: string | null;
+  verdict: string;
+  comments?: string;
+  cited_context?: string[];
+  fallback_reasons?: string[];
+  created_at: string;
 }
 /**
  * ``GET /api/repos/{id}/graph/code`` payload — Phase 7 side panel.
@@ -347,6 +418,17 @@ export interface PRReviewComment {
   path?: string;
   line?: number | null;
 }
+/**
+ * Inbound body for POST /api/tasks/{id}/approve-plan.
+ *
+ * Writes ``.auto-agent/plan_approval.json`` and persists a
+ * :class:`shared.models.GateDecision` row so the gate-history audit
+ * panel can render the human's verdict alongside any standin ones.
+ */
+export interface PlanApprovalRequest {
+  verdict: "approved" | "rejected";
+  comments?: string;
+}
 export interface PlanRead {
   id: number;
   name: string;
@@ -365,6 +447,13 @@ export interface ProposedFact {
   content: string;
   conflicts?: ConflictInfo[];
   resolution?: ("keep_existing" | "replace" | "keep_both") | null;
+}
+/**
+ * Passed to architect.checkpoint on parent re-entry after integration PR CI failure.
+ */
+export interface RepairContext {
+  ci_log: string;
+  failed_pr_url: string;
 }
 /**
  * Typed representation of a repo from the orchestrator API.
@@ -646,6 +735,20 @@ export interface TimelineEntry {
   timestamp?: string | null;
 }
 /**
+ * API shape for a trio_review_attempts row.
+ */
+export interface TrioReviewAttemptOut {
+  id: number;
+  task_id: number;
+  cycle: number;
+  ok: boolean;
+  feedback: string;
+  tool_calls: {
+    [k: string]: unknown;
+  }[];
+  created_at: string;
+}
+/**
  * Body for ``PATCH /api/repos/{repo_id}/graph``.
  */
 export interface UpdateRepoGraphRequest {
@@ -677,4 +780,15 @@ export interface VerifyAttemptOut {
   log_tail?: string | null;
   started_at: string;
   finished_at?: string | null;
+}
+/**
+ * One backlog item the architect dispatches to a builder child task.
+ */
+export interface WorkItem {
+  id: string;
+  title: string;
+  description: string;
+  status?: "pending" | "in_progress" | "done" | "skipped";
+  assigned_task_id?: number | null;
+  discovered_in_attempt_id?: number | null;
 }
