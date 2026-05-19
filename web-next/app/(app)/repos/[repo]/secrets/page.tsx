@@ -114,10 +114,11 @@ function SecretRow({
           {entry.purpose && (
             <span className="text-xs text-muted-foreground">{entry.purpose}</span>
           )}
+          {entry.is_set && !isRevealed && (
+            <span className="mt-1 font-mono text-xs text-muted-foreground">••••••••</span>
+          )}
           {entry.is_set && isRevealed && revealedValue !== null && (
-            <span className="mt-1 break-all font-mono text-xs text-muted-foreground">
-              {revealedValue}
-            </span>
+            <span className="mt-1 break-all font-mono text-xs">{revealedValue}</span>
           )}
           {entry.is_set && isRevealed && revealedValue === null && (
             <span className="mt-1 text-xs text-muted-foreground italic">(empty value)</span>
@@ -487,7 +488,7 @@ export default function RepoSecretsPage({
   const architectRequired = keys.filter((k) => k.source === 'architect_required');
   const userSecrets = keys.filter((k) => k.source === 'user');
 
-  const displayArchitect = filterArchitect ? architectRequired : architectRequired;
+  const displayArchitect = architectRequired;
   const displayUser = filterArchitect ? [] : userSecrets;
 
   if (!Number.isFinite(repoId)) {
@@ -511,7 +512,7 @@ export default function RepoSecretsPage({
             <ArrowLeft size={14} className="mr-1" /> Back to repos
           </Link>
           <h1 className="text-xl font-semibold">
-            Project secrets{repo ? ` for ${repo.name}` : ''}
+            Project secrets for {repo?.name ?? decodeURIComponent(params.repo)}
           </h1>
           <p className="text-sm text-muted-foreground">
             Encrypted at rest. Values are never shown in the agent chat or logs.

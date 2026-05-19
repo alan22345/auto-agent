@@ -179,6 +179,36 @@ describe('Reveal confirmation flow', () => {
   });
 });
 
+describe('RepoSecretsPage — filter=architect_required', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hides Other secrets section when ?filter=architect_required is set', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('/secrets')) {
+          return {
+            ok: true,
+            json: async () => ({ keys: [ARCHITECT_SECRET, USER_SECRET] }),
+          };
+        }
+        return { ok: true, json: async () => MOCK_REPOS };
+      }),
+    );
+
+    wrap(
+      <RepoSecretsPage params={{ repo: '42' }} searchParams={{ filter: 'architect_required' }} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Required by architects')).toBeTruthy();
+    });
+    expect(screen.queryByText('Other secrets')).toBeNull();
+  });
+});
+
 describe('AwaitingSecretsCard — scaffold banner', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
