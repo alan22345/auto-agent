@@ -651,3 +651,50 @@ class RepoGraph(Base):
     # 'ok' / 'partial' — surface failures-isolated-per-area state in the UI.
     status = Column(String(16), nullable=False, default="ok", server_default="ok")
     graph_json = Column(JSONB, nullable=False)
+
+
+# --- Per-repo project secrets vault (ADR-019) ---------------------------------
+#
+# `RepoSecret` stores project credentials per repo. Unlike `UserSecret` (which
+# is per-user and has a closed key allowlist), this table accepts any uppercase
+# env-var-style key and supports two sources: 'user' (typed by the user) and
+# 'architect_required' (declared by the domain architect as a project need).
+# value_enc is nullable so architect-declared rows can exist as placeholders
+# before the user populates them.
+#
+# Read/written via shared/repo_secrets.py — never instantiate directly.
+
+
+class RepoSecret(Base):
+    """Per-repo, per-org encrypted project secret. Read/written via
+    shared/repo_secrets.py — never instantiate directly. ``value_enc`` is
+    pgcrypto-encrypted ciphertext; nullable so architect-required rows can
+    exist before the user populates them.
+
+    source = 'user' | 'architect_required'
+    purpose is populated when source = 'architect_required' to explain to the
+    user why the key is needed.
+    """
+
+    __tablename__ = "repo_secrets"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "key", name="uq_repo_secrets_repo_key"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(
+        Integer, ForeignKey("repos.id"), nullable=False, index=True,
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+    )
+    key = Column(String(255), nullable=False)
+    value_enc = Column(LargeBinary, nullable=True)
+    source = Column(String(32), nullable=False, default="user")
+    purpose = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=_utcnow, nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+    )
