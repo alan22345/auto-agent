@@ -367,7 +367,6 @@ async def test_upsert_architect_required_flips_existing_user_row():
     all_calls = sess.execute.await_args_list
     sqls = [str(c[0][0]) for c in all_calls]
     params_list = [c[0][1] if len(c[0]) > 1 else {} for c in all_calls]
-    combined_sql = " ".join(sqls)
 
     # There must be an UPDATE/UPSERT that sets source to architect_required
     assert any(
