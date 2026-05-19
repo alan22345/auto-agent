@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
+
+import structlog
 
 from agent import sh
+
+_log = structlog.get_logger()
 
 WORKSPACES_DIR = os.environ.get(
     "WORKSPACES_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".workspaces")
@@ -56,6 +61,23 @@ async def _remote_branch_exists(repo_url: str, branch: str) -> bool:
     return rc == 0 and bool(out.strip())
 
 
+async def _safe_write_dotenv(workspace: str, repo_id: int) -> None:
+    """Best-effort wrapper around ``write_repo_dotenv``.
+
+    Called from ``clone_repo`` after every workspace setup.  Any failure is
+    logged and swallowed — a .env write error must never kill the clone path.
+    """
+    try:
+        await write_repo_dotenv(workspace, repo_id)
+    except Exception as exc:
+        _log.warning(
+            "write_repo_dotenv_failed",
+            workspace=workspace,
+            repo_id=repo_id,
+            error=str(exc),
+        )
+
+
 async def clone_repo(
     repo_url: str,
     task_id: int,
@@ -65,6 +87,7 @@ async def clone_repo(
     *,
     user_id: int | None = None,
     organization_id: int | None = None,
+    repo_id: int | None = None,
 ) -> str:
     """Clone a repo into an isolated workspace directory. Returns the workspace path.
 
@@ -77,11 +100,16 @@ async def clone_repo(
     If the workspace already exists (from a previous phase of the same task),
     it is reused and pulled to get latest changes instead of re-cloning.
 
+    If `repo_id` is provided, ``write_repo_dotenv`` is called after the clone
+    (or workspace reuse) to write ``.env`` from ``RepoSecret`` rows. ADR-019 §7.
+
     Args:
         workspace_name: Override the workspace directory name. If not provided,
             defaults to "task-{task_id}".
         fallback_branch: If `default_branch` doesn't exist on the remote, clone
             this one and create `default_branch` from it.
+        repo_id: DB id of the ``Repo`` row. When set, ``.env`` is written from
+            ``RepoSecret`` rows after clone completes.
     """
     if workspace_name:
         workspace = os.path.join(WORKSPACES_DIR, workspace_name)
@@ -110,6 +138,8 @@ async def clone_repo(
         # Re-assert git identity (local config could have been blown away)
         await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
+        if repo_id is not None:
+            await _safe_write_dotenv(workspace, repo_id)
         return workspace
 
     # Dir exists but is not a git checkout (e.g. cleanup_workspace left an
@@ -122,10 +152,7 @@ async def clone_repo(
     # Check if the requested branch actually exists on the remote.
     # If not and we have a fallback, clone that then create the missing branch.
     if fallback_branch and not await _remote_branch_exists(authed_url, default_branch):
-        import structlog
-
-        log = structlog.get_logger()
-        log.info(
+        _log.info(
             "dev_branch_missing_creating_from_fallback",
             missing_branch=default_branch,
             fallback=fallback_branch,
@@ -137,15 +164,15 @@ async def clone_repo(
             try:
                 await install_coauthor_hook(workspace, user_id)
             except Exception as e:
-                import structlog
-
-                structlog.get_logger().warning(
+                _log.warning(
                     "coauthor_hook_install_failed",
                     user_id=user_id,
                     error=str(e),
                 )
         await _run_git("checkout", "-b", default_branch, cwd=workspace, check=True)
         await _run_git("push", "-u", "origin", default_branch, cwd=workspace, check=True)
+        if repo_id is not None:
+            await _safe_write_dotenv(workspace, repo_id)
         return workspace
 
     await _run_git("clone", "-b", default_branch, authed_url, workspace, check=True)
@@ -163,14 +190,14 @@ async def clone_repo(
         try:
             await install_coauthor_hook(workspace, user_id)
         except Exception as e:
-            import structlog
-
-            structlog.get_logger().warning(
+            _log.warning(
                 "coauthor_hook_install_failed",
                 user_id=user_id,
                 error=str(e),
             )
 
+    if repo_id is not None:
+        await _safe_write_dotenv(workspace, repo_id)
     return workspace
 
 
@@ -360,6 +387,75 @@ def cleanup_workspace(task_id: int, organization_id: int | None = None) -> None:
     workspace = _workspace_path(task_id=task_id, organization_id=organization_id)
     if os.path.exists(workspace):
         shutil.rmtree(workspace)
+
+
+def _dotenv_escape(value: str) -> str:
+    """Return a dotenv-safe representation of ``value``.
+
+    If the value contains a newline, double-quote, or backslash, wrap it in
+    double quotes and escape inner double-quotes (``"`` → ``\\"``) and
+    backslashes (``\\`` → ``\\\\``).  Otherwise return as-is so the common
+    case stays readable.
+    """
+    if any(ch in value for ch in ('\n', '"', '\\')):
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+async def write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
+    """Write ``<workspace>/.env`` from ``RepoSecret`` rows + ensure ``.env`` is
+    in ``.gitignore``.
+
+    Overwrites wholesale (no merge) so cleared secrets disappear.  Calling
+    this multiple times per session is safe and idempotent.  ADR-019 §7.
+
+    The function is deliberately graceful:
+    - If the ``Repo`` row doesn't exist, logs a warning and returns without
+      raising.  Matches the pattern from the T3 ``boot_dev_server`` path.
+    - File permissions on ``.env`` are set to ``0o600`` (owner-read/write only).
+    """
+    from sqlalchemy import select
+
+    import shared.repo_secrets as repo_secrets
+    from shared.database import async_session
+    from shared.models import Repo
+
+    workspace = Path(workspace)
+
+    async with async_session() as session:
+        result = await session.execute(select(Repo).where(Repo.id == repo_id))
+        repo = result.scalar_one_or_none()
+
+    if repo is None:
+        _log.warning(
+            "write_repo_dotenv.repo_not_found",
+            repo_id=repo_id,
+            note="skipping .env write",
+        )
+        return
+
+    secrets = await repo_secrets.get_all_for_boot(
+        repo_id, organization_id=repo.organization_id
+    )
+
+    env_path = workspace / ".env"
+    with env_path.open("w", encoding="utf-8") as fh:
+        for key, value in secrets.items():
+            fh.write(f"{key}={_dotenv_escape(value)}\n")
+    os.chmod(env_path, 0o600)
+
+    # Ensure .env appears in .gitignore — idempotent append.
+    gitignore_path = workspace / ".gitignore"
+    if gitignore_path.exists():
+        existing = gitignore_path.read_text(encoding="utf-8")
+        lines = [line.strip() for line in existing.splitlines()]
+        if ".env" not in lines:
+            # Append with a trailing newline for clean diffs.
+            sep = "" if existing.endswith("\n") else "\n"
+            gitignore_path.write_text(existing + sep + ".env\n", encoding="utf-8")
+    else:
+        gitignore_path.write_text(".env\n", encoding="utf-8")
 
 
 def migrate_trio_workspace(workspace: str) -> None:
