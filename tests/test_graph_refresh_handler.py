@@ -81,6 +81,13 @@ class _SessionStub:
     async def refresh(self, obj):
         return None
 
+    async def get(self, model, obj_id):
+        """Lookup by primary key — finds the previously-added row."""
+        for added in self._added:
+            if isinstance(added, model) and getattr(added, "id", None) == obj_id:
+                return added
+        return None
+
     async def __aenter__(self):
         return self
 
