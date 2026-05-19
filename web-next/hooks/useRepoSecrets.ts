@@ -70,7 +70,16 @@ export function useTestRepoSecret(repoId: number) {
 }
 
 export function useRecheckScaffoldSecrets(taskId: number) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: () => recheckScaffoldSecrets(taskId),
+    onSuccess: () => {
+      // Invalidate the task list and the specific task detail so the scaffold-
+      // secrets banner disappears immediately when the gate unblocks.
+      // NOTE: ['tasks'] is the root list key used by useTasks; tighten to a
+      // tasksKeys helper if one is introduced in future.
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['task', taskId] });
+    },
   });
 }

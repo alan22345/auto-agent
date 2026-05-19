@@ -32,7 +32,7 @@ const REVEAL_TIMEOUT_MS = 10_000;
 
 interface RevealState {
   key: string;
-  value: string;
+  value: string | null;
   expiresAt: number;
 }
 
@@ -151,6 +151,7 @@ function SecretRow({
                 variant="outline"
                 onClick={() => onRevealRequest(entry.key)}
                 title={isRevealed ? 'Re-mask' : 'Reveal value'}
+                aria-label={isRevealed ? `Re-mask value for ${entry.key}` : `Reveal value for ${entry.key}`}
               >
                 {isRevealed ? <EyeOff size={14} /> : <Eye size={14} />}
               </Button>
@@ -185,6 +186,7 @@ function SecretRow({
               onClick={() => onDelete(entry.key)}
               className="text-destructive hover:text-destructive"
               title="Delete secret"
+              aria-label={`Delete ${entry.key}`}
             >
               <Trash2 size={14} />
             </Button>
@@ -366,12 +368,14 @@ function ConfirmDeleteDialog({
   onConfirm,
   onCancel,
   isPending,
+  error,
 }: {
   secretKey: string;
   open: boolean;
   onConfirm: () => void;
   onCancel: () => void;
   isPending: boolean;
+  error?: string;
 }) {
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
@@ -382,6 +386,11 @@ function ConfirmDeleteDialog({
             This permanently removes <strong>{secretKey}</strong>. This cannot be undone.
           </DialogDescription>
         </DialogHeader>
+        {error && (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
+        )}
         <DialogFooter>
           <Button variant="secondary" onClick={onCancel} disabled={isPending}>
             Cancel
@@ -417,7 +426,7 @@ export default function RepoSecretsPage({
     key: '',
     open: false,
   });
-  const [confirmDelete, setConfirmDelete] = useState<{ key: string; open: boolean }>({
+  const [confirmDelete, setConfirmDelete] = useState<{ key: string; open: boolean; error?: string }>({
     key: '',
     open: false,
   });
@@ -455,7 +464,7 @@ export default function RepoSecretsPage({
       onSuccess: (res) => {
         setRevealState({
           key,
-          value: res.value ?? '',
+          value: res.value,
           expiresAt: Date.now() + REVEAL_TIMEOUT_MS,
         });
         setConfirmReveal({ key: '', open: false });
@@ -481,6 +490,12 @@ export default function RepoSecretsPage({
     const key = confirmDelete.key;
     deleteMutation.mutate(key, {
       onSuccess: () => setConfirmDelete({ key: '', open: false }),
+      onError: (e) =>
+        setConfirmDelete({
+          key,
+          open: true,
+          error: e instanceof Error ? e.message : 'Delete failed',
+        }),
     });
   }
 
@@ -588,6 +603,7 @@ export default function RepoSecretsPage({
         onConfirm={handleDeleteConfirm}
         onCancel={() => setConfirmDelete({ key: '', open: false })}
         isPending={deleteMutation.isPending}
+        error={confirmDelete.error}
       />
     </div>
   );
