@@ -32,11 +32,19 @@ import asyncio
 import json
 import os
 import re
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select
 
+from agent.graph_analyzer import analyser_version as _analyser_version_fn
 from agent.graph_analyzer import run_partial_pipeline, run_pipeline
+from agent.graph_analyzer.diff import (
+    ChangedFilesPlan,
+    CheckpointCommitUnreachable,
+    apply_plan,
+    changed_files,
+)
 from agent.graph_analyzer.pipeline import overall_status
 from agent.graph_workspace import (
     GraphWorkspaceLockTimeout,
@@ -53,12 +61,58 @@ from shared.events import (
 from shared.models import Repo, RepoGraph, RepoGraphConfig
 from shared.types import RepoGraphBlob
 
+
+def _now_dt() -> datetime:
+    return datetime.now(UTC)
+
+
+def _analyser_version() -> str:
+    return _analyser_version_fn()
+
 log = structlog.get_logger(__name__)
 
 # Lock timeout used here is shorter than the analyser's worst-case
 # runtime — if another analyser already holds the lock, we fail fast
 # with "already running" rather than queueing behind it.
 _LOCK_TIMEOUT_SECONDS = 5.0
+
+
+async def _load_or_create_row(session, repo_id: int, commit_sha: str):
+    """Load the latest repo_graphs row for this repo, or create a fresh
+    in-progress row when none exists.
+
+    Returns (row, action) where action is one of:
+      "noop"            — row is complete at this exact commit_sha
+      "fresh"           — new row created
+      "resume_same"     — row is incomplete at this commit_sha
+      "resume_diff"     — row's commit_sha differs from HEAD, diff needed
+    """
+    result = await session.execute(
+        select(RepoGraph).where(RepoGraph.repo_id == repo_id)
+        .order_by(RepoGraph.id.desc()).limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = RepoGraph(
+            repo_id=repo_id,
+            commit_sha=commit_sha,
+            generated_at=_now_dt(),
+            analyser_version=_analyser_version(),
+            status="ok",
+            graph_json={"nodes": [], "edges": [], "areas": [],
+                        "public_symbols": [], "commit_sha": commit_sha},
+            is_complete=False,
+            processed_files={},
+            failed_sites=[],
+        )
+        session.add(row)
+        await session.flush()
+        return row, "fresh"
+    if row.is_complete and row.commit_sha == commit_sha:
+        return row, "noop"
+    if row.commit_sha == commit_sha:
+        return row, "resume_same"
+    return row, "resume_diff"
 
 
 async def handle(event: Event) -> None:
@@ -144,6 +198,75 @@ async def run_refresh(
                 branch=branch,
             )
             commit_sha = await _resolve_commit_sha(workspace=workspace)
+
+            async with async_session() as session:
+                row, action = await _load_or_create_row(session, repo_id, commit_sha)
+
+                if action == "noop":
+                    await session.commit()
+                    log.info("graph_refresh_noop", repo_id=repo_id, commit_sha=commit_sha)
+                    await publish(repo_graph_ready(
+                        repo_id=repo_id, repo_graph_id=row.id, commit_sha=commit_sha,
+                    ))
+                    return
+
+                # Apply commit-diff plan if commit changed.
+                if action == "resume_diff":
+                    from_sha = row.commit_sha
+                    try:
+                        plan = await changed_files(workspace, from_sha, commit_sha)
+                    except CheckpointCommitUnreachable as e:
+                        log.warning(
+                            "graph_refresh_checkpoint_unreachable",
+                            repo_id=repo_id,
+                            from_sha=from_sha,
+                            error=str(e),
+                        )
+                        row.processed_files = {}
+                        row.failed_sites = []
+                        row.graph_json = {"nodes": [], "edges": [], "areas": [],
+                                          "public_symbols": [], "commit_sha": commit_sha}
+                    else:
+                        from agent.graph_analyzer.parsers import parse_file_for_nodes
+                        blob_dict = dict(row.graph_json or {})
+                        processed = dict(row.processed_files or {})
+
+                        def _re_walk_nodes_only(rel_path: str) -> dict:
+                            try:
+                                nodes = parse_file_for_nodes(workspace, rel_path)
+                            except Exception as e:
+                                log.warning(
+                                    "graph_refresh_cascade_parse_failed",
+                                    repo_id=repo_id, file=rel_path, error=str(e),
+                                )
+                                return {"nodes_in_path": []}
+                            return {"nodes_in_path": nodes}
+
+                        apply_plan(blob_dict, processed, plan, re_walk=_re_walk_nodes_only)
+                        row.graph_json = blob_dict
+                        row.processed_files = processed
+                    row.commit_sha = commit_sha
+                    row.is_complete = False
+
+                if action == "resume_same":
+                    row.is_complete = False
+
+                row_id = row.id
+                # Capture state OUTSIDE the session block so we can reuse it after commit.
+                initial_processed = dict(row.processed_files or {})
+                initial_failed = list(row.failed_sites or [])
+                initial_blob = dict(row.graph_json or {})
+                await session.commit()
+
+            # Run the pipeline with a checkpoint-flushing callback.
+            async def flush_checkpoint(blob_dict, processed_files, failed_sites):
+                async with async_session() as s:
+                    r = await s.get(RepoGraph, row_id)
+                    r.graph_json = blob_dict
+                    r.processed_files = processed_files
+                    r.failed_sites = failed_sites
+                    await s.commit()
+
             if area_scope is not None and previous_blob is not None:
                 blob = await run_partial_pipeline(
                     workspace=workspace,
@@ -157,7 +280,27 @@ async def run_refresh(
                     workspace=workspace,
                     commit_sha=commit_sha,
                     provider=get_structured_extractor_provider(),
+                    on_file_checkpoint=flush_checkpoint,
+                    initial_processed_files=initial_processed,
+                    initial_failed_sites=initial_failed,
+                    initial_blob=initial_blob,
                 )
+
+            # Finalize.
+            async with async_session() as session:
+                r = await session.get(RepoGraph, row_id)
+                r.graph_json = json.loads(blob.model_dump_json())
+                r.is_complete = True
+                if hasattr(blob, "areas"):
+                    r.status = overall_status(blob.areas)
+                r.generated_at = _now_dt()
+
+                cfg_row = await _load_config(session, repo_id=repo_id)
+                if cfg_row is not None:
+                    cfg_row.last_analysis_id = row_id
+                    cfg_row.analyser_version = blob.analyser_version
+                await session.commit()
+
     except GraphWorkspaceLockTimeout:
         log.warning(
             "graph_refresh_lock_busy",
@@ -186,53 +329,11 @@ async def run_refresh(
         )
         return
 
-    # Persist the row + update the config. Wrapping the DB writes in
-    # their own try/except so a transient DB error still surfaces a
-    # FAILED event to the user.
-    try:
-        async with async_session() as session:
-            status = overall_status(blob.areas)
-            row = RepoGraph(
-                repo_id=repo_id,
-                commit_sha=blob.commit_sha,
-                generated_at=blob.generated_at,
-                analyser_version=blob.analyser_version,
-                status=status,
-                # SQLAlchemy + JSONB happily accept a dict; we go via
-                # ``model_dump(mode="json")`` so datetime is serialised
-                # to ISO-8601 strings the way the wire expects.
-                graph_json=json.loads(blob.model_dump_json()),
-            )
-            session.add(row)
-            await session.flush()
-
-            cfg_row = await _load_config(session, repo_id=repo_id)
-            if cfg_row is not None:
-                cfg_row.last_analysis_id = row.id
-                cfg_row.analyser_version = blob.analyser_version
-            await session.commit()
-            await session.refresh(row)
-            repo_graph_id = row.id
-    except Exception as e:
-        log.exception(
-            "graph_refresh_db_write_failed",
-            repo_id=repo_id,
-            error=str(e),
-        )
-        await publish(
-            repo_graph_failed(
-                repo_id=repo_id,
-                error=f"database write failed: {e}",
-            )
-        )
-        return
-
     await publish(
         repo_graph_ready(
             repo_id=repo_id,
-            repo_graph_id=repo_graph_id,
-            commit_sha=blob.commit_sha,
-            status=status,
+            repo_graph_id=row_id,
+            commit_sha=commit_sha,
         )
     )
 
