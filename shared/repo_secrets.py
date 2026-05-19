@@ -235,6 +235,37 @@ async def get_all_for_boot(
             await sess.close()
 
 
+async def list_missing_architect_required(
+    repo_id: int,
+    *,
+    organization_id: int,
+    session: AsyncSession | None = None,
+) -> list[str]:
+    """Return keys where source='architect_required' AND value_enc IS NULL.
+
+    Used by the scaffold gate (ADR-019 T7) to determine whether Phase D
+    (child trio dispatch) can proceed. An empty list means the gate is
+    satisfied — every declared requirement has been fulfilled.
+    """
+    sess, owns = await _with_session(session)
+    try:
+        result = await sess.execute(
+            text(
+                "SELECT key "
+                "FROM repo_secrets "
+                "WHERE repo_id = :rid AND organization_id = :oid "
+                "  AND source = 'architect_required' "
+                "  AND value_enc IS NULL "
+                "ORDER BY key"
+            ),
+            {"rid": repo_id, "oid": organization_id},
+        )
+        return [row[0] for row in result.all()]
+    finally:
+        if owns:
+            await sess.close()
+
+
 async def upsert_architect_required(
     repo_id: int,
     key: str,

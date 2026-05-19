@@ -382,6 +382,16 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
             tasks[task.id].status = to_status
         return task
 
+    # ADR-019 T7 — mock the secrets gate check to simulate zero missing
+    # secrets. In the e2e flow we don't want to stand up a real DB for
+    # pgcrypto; we just need to verify the driver routes through the new
+    # AWAITING_REQUIRED_SECRETS status correctly before proceeding to
+    # DISPATCHING_DOMAIN_BUILDS.
+    async def fake_check_secrets_gate(task):
+        """Simulate a green secrets gate: no missing secrets → transition + True."""
+        tasks[task.id].status = TaskStatus.DISPATCHING_DOMAIN_BUILDS
+        return True
+
     # --- Run the test under the full patch suite. --------------------------
 
     with (
@@ -393,6 +403,10 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
         patch(
             "agent.lifecycle.scaffold.dispatch_children.run",
             AsyncMock(side_effect=fake_dispatch_children_run),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.dispatch_children.check_secrets_gate",
+            AsyncMock(side_effect=fake_check_secrets_gate),
         ),
         patch(
             "agent.lifecycle.scaffold.final_verification.run",
@@ -454,10 +468,8 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
 
         # ===== Simulate PO approving each domain ADR. ===========================
         # The first verdict transitions back to BUILDING_DOMAIN_ADRS while
-        # the other slug is still unresolved, then to
-        # DISPATCHING_DOMAIN_BUILDS once everyone is settled. We don't
-        # need the intermediate-status semantics here — what we care
-        # about is the final state after both verdicts.
+        # the other slug is still unresolved; the second verdict advances to
+        # AWAITING_REQUIRED_SECRETS (ADR-019 T7 gate).
         for slug in ("core", "cli"):
             await domain_adr_approval.apply_verdict(
                 parent_task.id,
@@ -465,10 +477,12 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
                 {"verdict": "approved", "comments": "lgtm"},
             )
         # After both verdicts the helper should have stamped
-        # DISPATCHING_DOMAIN_BUILDS on the parent.
-        assert tasks[parent_task.id].status == TaskStatus.DISPATCHING_DOMAIN_BUILDS
+        # AWAITING_REQUIRED_SECRETS (ADR-019 T7 — gate before Phase D).
+        assert tasks[parent_task.id].status == TaskStatus.AWAITING_REQUIRED_SECRETS
 
-        # ===== Driver invocation #3: DISPATCHING_DOMAIN_BUILDS → BUILDING_DOMAINS
+        # ===== Driver invocation #3: AWAITING_REQUIRED_SECRETS → DISPATCHING_DOMAIN_BUILDS
+        # The fake_check_secrets_gate stub simulates zero missing secrets so
+        # the gate passes immediately and the driver loops into Phase D.
         reloaded = _clone_task(tasks[parent_task.id])
         await parent_mod.run_scaffold_parent(reloaded)
 

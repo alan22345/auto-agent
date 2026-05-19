@@ -155,15 +155,21 @@ async def apply_verdict(
             return TaskStatus.BUILDING_DOMAIN_ADRS
 
         if all_resolved:
+            # ADR-019 T7 — insert AWAITING_REQUIRED_SECRETS gate between
+            # Phase C (domain ADR approval) and Phase D (child dispatch).
+            # The scaffold driver picks this up and runs check_secrets_gate.
             await transition(
                 s,
                 task,
-                TaskStatus.DISPATCHING_DOMAIN_BUILDS,
-                message="All domain ADRs resolved — dispatching child trios",
+                TaskStatus.AWAITING_REQUIRED_SECRETS,
+                message=(
+                    "All domain ADRs resolved — checking required secrets "
+                    "before dispatching child trios"
+                ),
             )
             await s.commit()
             log.info("scaffold.domain_adr.all_resolved", task_id=task_id)
-            return TaskStatus.DISPATCHING_DOMAIN_BUILDS
+            return TaskStatus.AWAITING_REQUIRED_SECRETS
 
         # Still waiting on at least one more domain verdict — no transition.
         await s.commit()

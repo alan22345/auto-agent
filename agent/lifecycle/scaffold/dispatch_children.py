@@ -29,8 +29,76 @@ from agent.lifecycle.workspace_paths import (
 from shared.database import async_session
 from shared.events import publish, task_created
 from shared.models import Task, TaskSource, TaskStatus
+from shared.repo_secrets import list_missing_architect_required
 
 log = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# ADR-019 T7 — Phase C-to-D secrets gate helpers
+# ---------------------------------------------------------------------------
+
+
+async def _transition_parent(task_id: int, to_status: TaskStatus) -> None:
+    """Transition the scaffold parent to a new status using a fresh session."""
+    from orchestrator.state_machine import transition
+
+    async with async_session() as s:
+        task = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        await transition(
+            s,
+            task,
+            to_status,
+            message=(
+                "All required secrets populated — proceeding to Phase D"
+                if to_status == TaskStatus.DISPATCHING_DOMAIN_BUILDS
+                else f"Transitioning to {to_status.value}"
+            ),
+        )
+        await s.commit()
+
+
+async def _persist_missing_secrets(task_id: int, missing: list[str]) -> None:
+    """Persist the list of missing secrets onto task.subtasks for UI display."""
+    async with async_session() as s:
+        task = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        bucket = task.subtasks if isinstance(task.subtasks, dict) else {}
+        new_bucket = dict(bucket)
+        scaffold = new_bucket.get("scaffold") or {}
+        if not isinstance(scaffold, dict):
+            scaffold = {}
+        new_scaffold = dict(scaffold)
+        new_scaffold["missing_secrets"] = missing
+        new_bucket["scaffold"] = new_scaffold
+        task.subtasks = new_bucket
+        await s.commit()
+
+
+async def check_secrets_gate(task: Task) -> bool:
+    """Check whether all architect-required secrets are populated.
+
+    ADR-019 T7 — called when a SCAFFOLD parent enters
+    ``AWAITING_REQUIRED_SECRETS``. Returns True if the gate is green
+    (all secrets set, transition fired to DISPATCHING_DOMAIN_BUILDS),
+    False if the parent is parked and still waiting.
+    """
+    missing = await list_missing_architect_required(
+        task.repo_id,
+        organization_id=task.organization_id,
+    )
+
+    if missing:
+        log.info(
+            "scaffold.secrets_gate.parked",
+            task_id=task.id,
+            missing=missing,
+        )
+        await _persist_missing_secrets(task.id, missing)
+        return False
+
+    log.info("scaffold.secrets_gate.green", task_id=task.id)
+    await _transition_parent(task.id, TaskStatus.DISPATCHING_DOMAIN_BUILDS)
+    return True
 
 
 def _read_all_verdicts(workspace: str) -> dict[str, dict[str, Any]]:

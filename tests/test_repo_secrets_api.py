@@ -156,6 +156,12 @@ async def test_put_repo_secret_happy_path():
     with (
         patch("orchestrator.router._get_repo_in_org", AsyncMock(return_value=repo)),
         patch("shared.repo_secrets.set", AsyncMock()) as mock_set,
+        # ADR-019 T7 — the PUT endpoint now checks for parked scaffold
+        # parents. Stub it out so the test doesn't need a real DB.
+        patch(
+            "orchestrator.router._find_parked_scaffold_parents",
+            AsyncMock(return_value=[]),
+        ),
     ):
         result = await put_repo_secret(
             repo_id=1,

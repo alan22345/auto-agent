@@ -196,6 +196,17 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL: {
         TaskStatus.BUILDING_DOMAIN_ADRS,  # any domain marked revise
         TaskStatus.DISPATCHING_DOMAIN_BUILDS,  # all approved/rejected — no revise left
+        # ADR-019 T7 — after all ADRs resolved, park here until required
+        # secrets are populated. Direct → DISPATCHING_DOMAIN_BUILDS still
+        # allowed when there are no architect-required secrets at all.
+        TaskStatus.AWAITING_REQUIRED_SECRETS,
+    },
+    # ADR-019 T7 — intermediate gate status: every architect-required row
+    # must have a non-null value_enc before Phase D can run. Auto-unblocked
+    # by PUT /repos/{id}/secrets/{k} when the last missing secret is set.
+    TaskStatus.AWAITING_REQUIRED_SECRETS: {
+        TaskStatus.DISPATCHING_DOMAIN_BUILDS,  # all secrets now populated
+        TaskStatus.BLOCKED,                    # manual cancel path
     },
     TaskStatus.DISPATCHING_DOMAIN_BUILDS: {
         TaskStatus.BUILDING_DOMAINS,

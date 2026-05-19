@@ -902,6 +902,15 @@ async def put_repo_secret(
         session=session,
     )
     await session.commit()
+
+    # ADR-019 T7 — re-evaluate the secrets gate for any SCAFFOLD parent
+    # of this repo currently parked at AWAITING_REQUIRED_SECRETS.
+    parked = await _find_parked_scaffold_parents(session, repo.id)
+    for parked_task in parked:
+        gate_passed = await _recheck_secrets_gate_for_task(parked_task, session)
+        if gate_passed:
+            _dispatch_scaffold_driver(parked_task.id)
+
     return {"ok": True, "cleared": False}
 
 
@@ -4306,6 +4315,85 @@ async def claude_pair_status(
         claude_auth_status=user.claude_auth_status,
         claude_paired_at=user.claude_paired_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR-019 T7 — Scaffold secrets gate helpers + recheck endpoint
+# ---------------------------------------------------------------------------
+
+
+async def _find_parked_scaffold_parents(
+    session: AsyncSession,
+    repo_id: int,
+) -> list[Task]:
+    """Return SCAFFOLD parent tasks parked at AWAITING_REQUIRED_SECRETS for ``repo_id``."""
+    result = await session.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            Task.status == TaskStatus.AWAITING_REQUIRED_SECRETS,
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def _recheck_secrets_gate_for_task(task: Task, session: AsyncSession) -> bool:
+    """Re-run the gate check for a parked scaffold parent.
+
+    Transitions to DISPATCHING_DOMAIN_BUILDS via
+    ``dispatch_children.check_secrets_gate`` if all required secrets are
+    now populated. Returns True if the gate passed (transition fired),
+    False if still waiting.
+    """
+    from agent.lifecycle.scaffold import dispatch_children as _dc
+
+    return await _dc.check_secrets_gate(task)
+
+
+async def _find_missing_for_task(task: Task, session: AsyncSession) -> list[str]:
+    """Return the list of missing architect-required keys for a parked task."""
+    from shared import repo_secrets as _rs
+
+    return await _rs.list_missing_architect_required(
+        task.repo_id,
+        organization_id=task.organization_id,
+        session=session,
+    )
+
+
+@router.post("/scaffold/{task_id}/recheck-secrets")
+async def scaffold_recheck_secrets(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Manually re-evaluate the secrets gate for a parked scaffold parent.
+
+    ADR-019 T7 — the common unblock path is the PUT-secret trigger; this
+    endpoint is a manual re-poke for cases where the auto-trigger was
+    missed or the user wants to force a re-check.
+
+    - 404 if task not found (or cross-org — scoped query returns None).
+    - 409 if the task is not at AWAITING_REQUIRED_SECRETS.
+    - 200 {unblocked: true, missing: []} if gate passed and driver re-invoked.
+    - 200 {unblocked: false, missing: [...]} if still waiting.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status != TaskStatus.AWAITING_REQUIRED_SECRETS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Not parked on secrets; current status: {task.status.value}",
+        )
+
+    gate_passed = await _recheck_secrets_gate_for_task(task, session)
+    if gate_passed:
+        missing: list[str] = []
+        _dispatch_scaffold_driver(task.id)
+        return {"unblocked": True, "missing": missing}
+
+    missing = await _find_missing_for_task(task, session)
+    return {"unblocked": False, "missing": missing}
 
 
 @router.post("/claude/pair/disconnect")

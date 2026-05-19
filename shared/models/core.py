@@ -82,6 +82,10 @@ class TaskStatus(str, enum.Enum):
     # the user to answer the domain-grill agent's pending question.
     AWAITING_DOMAIN_GRILL        = "awaiting_domain_grill"
     AWAITING_DOMAIN_ADR_APPROVAL = "awaiting_domain_adr_approval"
+    # ADR-019 T7 — gate between Phase C (domain ADR approval) and Phase D
+    # (child trio dispatch). Parent parks here until every architect-required
+    # secret has a populated value_enc in repo_secrets.
+    AWAITING_REQUIRED_SECRETS    = "awaiting_required_secrets"
     DISPATCHING_DOMAIN_BUILDS    = "dispatching_domain_builds"
     BUILDING_DOMAINS             = "building_domains"
     AWAITING_FINAL_VERIFICATION  = "awaiting_final_verification"

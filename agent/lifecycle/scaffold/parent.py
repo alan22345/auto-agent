@@ -198,6 +198,19 @@ async def run_scaffold_parent(task: Task) -> None:
             )
             return
 
+        if status == TaskStatus.AWAITING_REQUIRED_SECRETS:
+            # ADR-019 T7 — secrets gate between Phase C and Phase D.
+            # check_secrets_gate handles its own transition; if it returns
+            # True, the task is now DISPATCHING_DOMAIN_BUILDS and we reload
+            # to continue the loop. If False, the parent parks here until
+            # PUT /repos/{id}/secrets/{k} or the recheck endpoint unblocks it.
+            log.info("scaffold.parent.awaiting_required_secrets", task_id=task.id)
+            gate_passed = await dispatch_children.check_secrets_gate(task)
+            if gate_passed:
+                task = await _reload(task.id)
+                continue
+            return  # Parked — re-invoked by PUT hook or recheck endpoint.
+
         if status == TaskStatus.DISPATCHING_DOMAIN_BUILDS:
             log.info("scaffold.parent.phase_d_dispatch", task_id=task.id)
             await dispatch_children.run(task)
