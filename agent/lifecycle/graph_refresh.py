@@ -203,10 +203,15 @@ async def run_refresh(
                 row, action = await _load_or_create_row(session, repo_id, commit_sha)
 
                 if action == "noop":
+                    noop_status = row.status or "ok"
+                    noop_row_id = row.id
                     await session.commit()
                     log.info("graph_refresh_noop", repo_id=repo_id, commit_sha=commit_sha)
                     await publish(repo_graph_ready(
-                        repo_id=repo_id, repo_graph_id=row.id, commit_sha=commit_sha,
+                        repo_id=repo_id,
+                        repo_graph_id=noop_row_id,
+                        commit_sha=commit_sha,
+                        status=noop_status,
                     ))
                     return
 
@@ -299,6 +304,7 @@ async def run_refresh(
                 if cfg_row is not None:
                     cfg_row.last_analysis_id = row_id
                     cfg_row.analyser_version = blob.analyser_version
+                final_status = r.status
                 await session.commit()
 
     except GraphWorkspaceLockTimeout:
@@ -334,6 +340,7 @@ async def run_refresh(
             repo_id=repo_id,
             repo_graph_id=row_id,
             commit_sha=commit_sha,
+            status=final_status,
         )
     )
 
