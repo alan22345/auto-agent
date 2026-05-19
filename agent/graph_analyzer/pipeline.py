@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
+from agent.graph_analyzer.test_filter import is_test_file
 from agent.graph_analyzer.validator import validate_citation, validate_target
 from shared.types import AreaStatus, Edge, Node, RepoGraphBlob
 
@@ -48,6 +50,14 @@ if TYPE_CHECKING:
     from agent.llm.base import LLMProvider
 
 log = structlog.get_logger(__name__)
+
+CheckpointFlush = Callable[[dict, dict, list], Awaitable[None]]
+# (blob_dict, processed_files_dict, failed_sites_list) -> None
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
 
 # Bumped per phase as new capability lands. Phase 7 adds partial-mode
 # (per-area) refresh on top of Phase 5/6. Even when ``provider=None``
@@ -136,13 +146,21 @@ def _discover_areas(workspace: str) -> list[tuple[str, list[str]]]:
     return discovered
 
 
-def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
-    """Yield workspace-relative file paths matching ``patterns``.
+def walk_files(workspace: str) -> list[str]:
+    """Return all workspace-relative source file paths eligible for analysis.
 
-    Uses :mod:`fnmatch` semantics — patterns are matched against the
-    workspace-relative path with forward slashes. The default-excluded
-    directories are filtered at walk time so we never recurse into a
-    100 MB ``node_modules``.
+    Applies the standard exclusions:
+
+    * Default-excluded directories (``node_modules``, ``.git``, etc.) are
+      never recursed into.
+    * Files matching :data:`_FILE_SKIP_PATH_FRAGMENTS` (e.g. Alembic
+      migration revisions) are skipped.
+    * Test / spec / fixture files are skipped via
+      :func:`~agent.graph_analyzer.test_filter.is_test_file`.
+
+    The returned list is sorted for determinism. Only files with extensions
+    in :func:`~agent.graph_analyzer.parsers.supported_extensions` are
+    included.
     """
     out: list[str] = []
     ws_abs = os.path.abspath(workspace)
@@ -159,10 +177,22 @@ def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
             rel = rel.replace(os.sep, "/")
             if any(frag in rel for frag in _FILE_SKIP_PATH_FRAGMENTS):
                 continue
-            if _matches_any(rel, patterns):
-                out.append(rel)
+            if is_test_file(rel):
+                continue
+            out.append(rel)
     out.sort()
     return out
+
+
+def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
+    """Return workspace-relative file paths matching ``patterns``.
+
+    Uses :mod:`fnmatch` semantics — patterns are matched against the
+    workspace-relative path with forward slashes. Delegates the file walk
+    to :func:`walk_files` so that exclusion logic is centralised.
+    """
+    all_files = walk_files(workspace)
+    return sorted(rel for rel in all_files if _matches_any(rel, patterns))
 
 
 def _matches_any(rel: str, patterns: list[str]) -> bool:
@@ -187,11 +217,15 @@ def _matches_any(rel: str, patterns: list[str]) -> bool:
 # ----------------------------------------------------------------------
 
 
-def _analyse_area(
+async def _analyse_area(
     *,
     workspace: str,
     area_name: str,
     patterns: list[str],
+    blob_dict: dict | None = None,
+    processed_files: dict | None = None,
+    failed_sites: list | None = None,
+    on_file_checkpoint: CheckpointFlush | None = None,
 ) -> tuple[list[Node], list[Edge], list[UnresolvedSite], set[str], AreaStatus]:
     """Run the parser dispatch over one area.
 
@@ -205,6 +239,11 @@ def _analyse_area(
     Unresolved sites are returned to the pipeline so the gap-fill
     stage can run against them. ``AreaStatus.unresolved_dynamic_sites``
     is the count of those sites.
+
+    When ``on_file_checkpoint`` is provided, it is called after each file
+    completes. ``blob_dict``, ``processed_files``, and ``failed_sites`` are
+    mutated in-place and passed to the callback so the caller can persist
+    incremental progress.
     """
     nodes: list[Node] = []
     edges: list[Edge] = []
@@ -228,6 +267,13 @@ def _analyse_area(
     files = _iter_area_files(workspace, patterns)
     try:
         for rel in files:
+            # Skip-if-already-processed gate (checkpoint/resume support).
+            # A file is retried if it previously appeared in failed_sites.
+            if processed_files is not None and failed_sites is not None:
+                retry_due = any(s.get("file") == rel for s in failed_sites)
+                if rel in processed_files and not retry_due:
+                    continue
+
             parser = parser_for(rel)
             if parser is None:
                 continue
@@ -241,7 +287,14 @@ def _analyse_area(
                     file=rel,
                     error=str(e),
                 )
+                if processed_files is not None and failed_sites is not None:
+                    # Record as a failed site so the caller can retry later.
+                    failed_sites[:] = [s for s in failed_sites if s.get("file") != rel]
+                    failed_sites.append({"file": rel, "reason": "read_error", "error": str(e)})
+                    if on_file_checkpoint is not None and blob_dict is not None:
+                        await on_file_checkpoint(blob_dict, processed_files, failed_sites)
                 continue
+            file_failed_sites: list = []
             try:
                 pr: ParseResult = parser.parse_file(
                     rel_path=rel,
@@ -257,11 +310,38 @@ def _analyse_area(
                 # A *single* file's parser exception doesn't fail the
                 # area — only an exception that escapes the per-file
                 # try/except (i.e. our own logic broke) does.
+                if processed_files is not None and failed_sites is not None:
+                    failed_sites[:] = [s for s in failed_sites if s.get("file") != rel]
+                    failed_sites.append({"file": rel, "reason": "parse_error", "error": str(e)})
+                    if on_file_checkpoint is not None and blob_dict is not None:
+                        await on_file_checkpoint(blob_dict, processed_files, failed_sites)
                 continue
             nodes.extend(pr.nodes)
             edges.extend(pr.edges)
             unresolved_sites.extend(pr.unresolved_sites)
             public_symbols.update(pr.public_symbols)
+
+            # Update checkpoint state for this file.
+            if processed_files is not None and failed_sites is not None:
+                if blob_dict is not None:
+                    blob_dict["nodes"].extend(
+                        [n.model_dump() if hasattr(n, "model_dump") else n for n in pr.nodes]
+                    )
+                    blob_dict["edges"].extend(
+                        [e.model_dump() if hasattr(e, "model_dump") else e for e in pr.edges]
+                    )
+                # Clear any previous failure record for this file.
+                failed_sites[:] = [
+                    s for s in failed_sites if s.get("file") != rel
+                ] + file_failed_sites
+                processed_files[rel] = {
+                    "sites_attempted": len(pr.unresolved_sites),
+                    "sites_succeeded": len(pr.unresolved_sites),
+                    "edges_added": len(pr.edges),
+                    "processed_at": _now_iso(),
+                }
+                if on_file_checkpoint is not None and blob_dict is not None:
+                    await on_file_checkpoint(blob_dict, processed_files, failed_sites)
     except Exception as e:
         log.exception("graph_area_failed", area=area_name, error=str(e))
         return (
@@ -301,6 +381,10 @@ async def run_pipeline(
     workspace: str,
     commit_sha: str,
     provider: LLMProvider | None = None,
+    on_file_checkpoint: CheckpointFlush | None = None,
+    initial_processed_files: dict | None = None,
+    initial_failed_sites: list | None = None,
+    initial_blob: dict | None = None,
 ) -> RepoGraphBlob:
     """Run the full Phase 2 + Phase 3 pipeline against ``workspace``.
 
@@ -314,8 +398,41 @@ async def run_pipeline(
             and (on empty/invalid result) the bounded agent-escape;
             validated LLM edges land in the blob with
             ``source_kind="llm"``.
+        on_file_checkpoint: Optional async callback invoked after each
+            file completes. Receives ``(blob_dict, processed_files,
+            failed_sites)`` so the caller can persist incremental
+            progress (e.g. for crash recovery). When ``None``, the
+            pipeline behaves exactly as before.
+        initial_processed_files: Resume state — dict of already-processed
+            file paths to their metadata. Files present here are skipped
+            unless they also appear in ``initial_failed_sites``.
+        initial_failed_sites: Resume state — list of dicts describing
+            files that failed in a previous run and should be retried.
+        initial_blob: Resume state — partial blob dict to extend. When
+            provided, its ``nodes`` and ``edges`` are preserved.
     """
     areas = _discover_areas(workspace)
+
+    # Initialise resume/checkpoint state.
+    processed_files: dict | None = None
+    failed_sites: list | None = None
+    blob_dict: dict | None = None
+
+    if on_file_checkpoint is not None:
+        processed_files = dict(initial_processed_files or {})
+        failed_sites = list(initial_failed_sites or [])
+        if initial_blob is not None:
+            blob_dict = dict(initial_blob)
+            blob_dict.setdefault("nodes", [])
+            blob_dict.setdefault("edges", [])
+        else:
+            blob_dict = {
+                "nodes": [],
+                "edges": [],
+                "commit_sha": commit_sha,
+                "areas": [],
+                "public_symbols": [],
+            }
 
     all_nodes: list[Node] = []
     all_edges: list[Edge] = []
@@ -330,10 +447,14 @@ async def run_pipeline(
     all_public_symbols: set[str] = set()
 
     for name, patterns in areas:
-        nodes, edges, sites, public_symbols, status = _analyse_area(
+        nodes, edges, sites, public_symbols, status = await _analyse_area(
             workspace=workspace,
             area_name=name,
             patterns=patterns,
+            blob_dict=blob_dict,
+            processed_files=processed_files,
+            failed_sites=failed_sites,
+            on_file_checkpoint=on_file_checkpoint,
         )
         all_nodes.extend(nodes)
         all_edges.extend(edges)
@@ -480,7 +601,7 @@ async def run_partial_pipeline(
             target_sites,
             target_public_symbols,
             target_status,
-        ) = _analyse_area(
+        ) = await _analyse_area(
             workspace=workspace,
             area_name=target_area,
             patterns=discovered_by_name[target_area],

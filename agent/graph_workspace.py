@@ -158,3 +158,27 @@ async def graph_workspace_lock(
                 )
     finally:
         os.close(fd)
+
+
+def lock_is_held(repo_id: int) -> bool:
+    """Best-effort: does another process hold the per-repo graph lock?
+
+    We don't try to acquire the lock; we just check whether the lock file
+    has a writer. On POSIX, ``fcntl.flock`` with ``LOCK_SH | LOCK_NB``
+    tells us — if shared acquisition fails, an exclusive lock is held.
+    """
+    lock_path = _lock_file_path(repo_id=repo_id)
+    if not os.path.exists(lock_path):
+        return False
+    try:
+        fd = os.open(lock_path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except (BlockingIOError, OSError):
+            return True
+        finally:
+            os.close(fd)
+    except OSError:
+        return False

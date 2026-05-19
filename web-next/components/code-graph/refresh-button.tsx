@@ -9,6 +9,7 @@ import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
 
 interface Props {
   repoId: number;
+  isComplete?: boolean;
 }
 
 // Renders the "Refresh whole graph" control from ADR-016 §11.
@@ -18,7 +19,7 @@ interface Props {
 // writes a ``RepoGraph`` row, then publishes ``REPO_GRAPH_READY``. We
 // invalidate the cached "latest" query so the page picks up the new
 // row when the user-visible polling-or-WS arrival fires the next fetch.
-export function RefreshButton({ repoId }: Props) {
+export function RefreshButton({ repoId, isComplete }: Props) {
   const [feedback, setFeedback] = useState<string | null>(null);
   const qc = useQueryClient();
 
@@ -42,11 +43,13 @@ export function RefreshButton({ repoId }: Props) {
     },
   });
 
+  const buttonLabel = (isComplete ?? true) ? 'Refresh whole graph' : 'Resume / Re-analyze';
+
   return (
     <div className="flex flex-col gap-2">
-      <Button onClick={() => mutation.mutate()} disabled={mutation.isPending} variant="secondary">
+      <Button onClick={() => mutation.mutate()} disabled={mutation.isPending} variant="secondary" title={buttonLabel}>
         <RefreshCw size={14} className="mr-2" />
-        {mutation.isPending ? 'Refreshing…' : 'Refresh whole graph'}
+        {mutation.isPending ? 'Refreshing…' : buttonLabel}
       </Button>
       {feedback && (
         <p

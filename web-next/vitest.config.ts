@@ -6,7 +6,7 @@ import path from 'node:path';
 // Mirrors what Next.js does at build time so component tests behave
 // the same as they would in the app.
 export default defineConfig({
-  test: { environment: 'jsdom', globals: true, setupFiles: [] },
+  test: { environment: 'jsdom', globals: true, setupFiles: ['./vitest.setup.ts'] },
   esbuild: { jsx: 'automatic', jsxImportSource: 'react' },
   resolve: { alias: { '@': path.resolve(__dirname, './') } },
 });

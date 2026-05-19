@@ -362,6 +362,19 @@ class LatestRepoGraphData(BaseModel):
     analyser_version: str | None = None
     status: Literal["ok", "partial", "failed"] | None = None
     blob: RepoGraphBlob | None = None
+    is_complete: bool
+    processed_files_count: int
+    total_files_estimate: int
+
+
+class RepoGraphProgressData(BaseModel):
+    """Lightweight progress snapshot for /repos/{id}/graph/progress."""
+
+    is_complete: bool
+    processed: int
+    total: int
+    last_file: str | None = None
+    status: Literal["running", "idle", "unchanged"]
 
 
 class GraphCodePreviewResponse(BaseModel):
