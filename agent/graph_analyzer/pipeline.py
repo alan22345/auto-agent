@@ -39,6 +39,7 @@ from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
+from agent.graph_analyzer.test_filter import is_test_file
 from agent.graph_analyzer.validator import validate_citation, validate_target
 from shared.types import AreaStatus, Edge, Node, RepoGraphBlob
 
@@ -136,13 +137,21 @@ def _discover_areas(workspace: str) -> list[tuple[str, list[str]]]:
     return discovered
 
 
-def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
-    """Yield workspace-relative file paths matching ``patterns``.
+def walk_files(workspace: str) -> list[str]:
+    """Return all workspace-relative source file paths eligible for analysis.
 
-    Uses :mod:`fnmatch` semantics — patterns are matched against the
-    workspace-relative path with forward slashes. The default-excluded
-    directories are filtered at walk time so we never recurse into a
-    100 MB ``node_modules``.
+    Applies the standard exclusions:
+
+    * Default-excluded directories (``node_modules``, ``.git``, etc.) are
+      never recursed into.
+    * Files matching :data:`_FILE_SKIP_PATH_FRAGMENTS` (e.g. Alembic
+      migration revisions) are skipped.
+    * Test / spec / fixture files are skipped via
+      :func:`~agent.graph_analyzer.test_filter.is_test_file`.
+
+    The returned list is sorted for determinism. Only files with extensions
+    in :func:`~agent.graph_analyzer.parsers.supported_extensions` are
+    included.
     """
     out: list[str] = []
     ws_abs = os.path.abspath(workspace)
@@ -159,10 +168,22 @@ def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
             rel = rel.replace(os.sep, "/")
             if any(frag in rel for frag in _FILE_SKIP_PATH_FRAGMENTS):
                 continue
-            if _matches_any(rel, patterns):
-                out.append(rel)
+            if is_test_file(rel):
+                continue
+            out.append(rel)
     out.sort()
     return out
+
+
+def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
+    """Return workspace-relative file paths matching ``patterns``.
+
+    Uses :mod:`fnmatch` semantics — patterns are matched against the
+    workspace-relative path with forward slashes. Delegates the file walk
+    to :func:`walk_files` so that exclusion logic is centralised.
+    """
+    all_files = walk_files(workspace)
+    return sorted(rel for rel in all_files if _matches_any(rel, patterns))
 
 
 def _matches_any(rel: str, patterns: list[str]) -> bool:

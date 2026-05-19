@@ -1,7 +1,11 @@
 """Verifies the test-file exclusion patterns for the ADR-016 graph walk."""
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from agent.graph_analyzer import pipeline as pipeline_mod
 from agent.graph_analyzer.test_filter import is_test_file
 
 
@@ -41,3 +45,22 @@ def test_paths_that_look_like_tests(path: str) -> None:
 )
 def test_paths_that_are_not_tests(path: str) -> None:
     assert is_test_file(path) is False
+
+
+def test_walk_skips_test_files():
+    """run_pipeline's file walk must yield non-test files only."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "__tests__").mkdir()
+        (root / "src" / "foo.py").write_text("def f(): pass\n")
+        (root / "src" / "foo.test.ts").write_text("test('x', () => {})\n")
+        (root / "__tests__" / "x.py").write_text("def t(): pass\n")
+
+        walk_files = getattr(pipeline_mod, "walk_files", None)
+        if walk_files is None:
+            pytest.skip("pipeline does not expose walk_files for direct testing")
+        yielded = list(walk_files(str(root)))
+        assert "src/foo.py" in yielded
+        assert "src/foo.test.ts" not in yielded
+        assert "__tests__/x.py" not in yielded
