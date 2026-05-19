@@ -223,3 +223,34 @@ async def test_write_repo_dotenv_empty_secrets_writes_empty_file(tmp_path: Path)
     env_path = tmp_path / ".env"
     assert env_path.exists(), ".env should be created even when secrets dict is empty"
     assert env_path.read_text().strip() == "", "Empty secrets should produce an empty .env"
+
+
+@pytest.mark.asyncio
+async def test_write_repo_dotenv_preserves_literal_dollar_brace(tmp_path: Path):
+    """Values containing ${...} must round-trip literally, not be interpolated.
+
+    python-dotenv resolves ${VAR} references when interpolate=True (default).
+    Callers that need literal ${...} in secrets must use interpolate=False.
+    This test verifies the file encoding is correct (values survive unmodified)
+    by reading back with interpolate=False.
+    """
+    secrets = {
+        "MULTILINE_WITH_TEMPLATE": "line1\n${DB_HOST} not interpolated",
+        "JUST_TEMPLATE": "${SHOULD_STAY_LITERAL}",
+    }
+    p1, p2 = _patch_db(_make_repo_mock(), secrets)
+    with p1, p2:
+        from agent.workspace import write_repo_dotenv
+
+        await write_repo_dotenv(tmp_path, repo_id=1)
+
+    try:
+        import dotenv
+    except ImportError:
+        pytest.skip("python-dotenv not installed; can't verify roundtrip")
+
+    # Use interpolate=False so ${...} references are not expanded — we are
+    # verifying the *encoding* of the file, not variable expansion behaviour.
+    parsed = dotenv.dotenv_values(tmp_path / ".env", interpolate=False)
+    assert parsed["MULTILINE_WITH_TEMPLATE"] == "line1\n${DB_HOST} not interpolated"
+    assert parsed["JUST_TEMPLATE"] == "${SHOULD_STAY_LITERAL}"

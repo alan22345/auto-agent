@@ -392,15 +392,24 @@ def cleanup_workspace(task_id: int, organization_id: int | None = None) -> None:
 def _dotenv_escape(value: str) -> str:
     """Return a dotenv-safe representation of ``value``.
 
-    If the value contains a newline, double-quote, or backslash, wrap it in
-    double quotes and escape inner double-quotes (``"`` → ``\\"``) and
-    backslashes (``\\`` → ``\\\\``).  Otherwise return as-is so the common
-    case stays readable.
+    If the value contains a newline, double-quote, backslash, or a ``${``
+    interpolation marker, wrap it in double quotes and escape inner
+    double-quotes (``"`` → ``\\"``) and backslashes (``\\`` → ``\\\\``).
+    Otherwise return as-is so the common case stays readable.
+
+    Note on ``${...}`` interpolation: python-dotenv resolves ``${VAR}``
+    references inside double-quoted values when ``interpolate=True`` (the
+    default).  Callers that need literal ``${...}`` in secret values **must**
+    read the file with ``interpolate=False``.  We still add ``${`` to the
+    quoting trigger set so that plain values like ``${TOKEN}`` (no newline,
+    no backslash, no quote) are also quoted, making it visually obvious to
+    a human reader that the value contains a template placeholder.
     """
-    if any(ch in value for ch in ('\n', '"', '\\')):
-        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
-        return f'"{escaped}"'
-    return value
+    needs_quote = any(ch in value for ch in ('\n', '"', '\\')) or '${' in value
+    if not needs_quote:
+        return value
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 async def write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
