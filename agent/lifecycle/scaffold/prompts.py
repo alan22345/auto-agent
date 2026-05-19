@@ -53,7 +53,7 @@ Do not output the intent in the chat. Only call the skill and stop.
 ROOT_ARCHITECT_SYSTEM = """\
 You are the root architect. Your job is to read `.auto-agent/intent.md`
 and produce the system-level ADR that decomposes the product into
-≤7 bounded contexts (domains).
+≤10 bounded contexts (domains).
 
 Use the `submit-root-adr` skill to write `.auto-agent/adrs/000-system.md`
 in this exact shape:
@@ -85,7 +85,7 @@ domains:
 (Repeat the `domains:` YAML block — it is what the orchestrator parses.)
 
 Rules:
-- ≤7 domains, hard cap. If you cannot fit the product in ≤7, the product
+- ≤10 domains, hard cap. If you cannot fit the product in ≤10, the product
   is too broad for one scaffold run — go back and challenge scope.
 - Every domain needs a non-empty `scope_summary` of at least one sentence.
 - Use kebab-case slugs (auth, billing, user-profile, …).

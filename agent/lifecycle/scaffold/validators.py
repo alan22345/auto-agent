@@ -6,7 +6,7 @@ every run, so we validate the shape and feed any errors back into the
 same session for a retry.
 
 Two validators:
-- :func:`validate_root_adr` — Vision section, ≤7 domains, each with a
+- :func:`validate_root_adr` — Vision section, ≤10 domains, each with a
   name + scope_summary, parseable YAML domains block.
 - :func:`validate_domain_adr` — scope/aggregates/public-surface/
   integration-points/affected-routes sections, ≥80-word description.
@@ -40,7 +40,7 @@ _YAML_BLOCK_RE = re.compile(r"```yaml\s*\n([\s\S]*?)\n```", re.MULTILINE)
 # Hard cap on domains — ADR-018 §3. The validator surfaces this as an
 # error so the architect can re-slice in the next turn instead of the
 # orchestrator silently dropping domains.
-MAX_DOMAINS = 7
+MAX_DOMAINS = 10
 
 
 def parse_domains(root_adr_md: str) -> list[dict]:
@@ -108,7 +108,7 @@ def validate_root_adr(adr_md: str) -> ValidationResult:
 
     - ``## Vision`` section is present and non-empty.
     - A ```yaml`` block with a ``domains:`` list parses cleanly.
-    - The list has 1..7 entries (``MAX_DOMAINS``).
+    - The list has 1..10 entries (``MAX_DOMAINS``).
     - Every entry has a non-empty name AND a non-empty scope_summary.
     - Slugs (after fallback) are unique.
     """

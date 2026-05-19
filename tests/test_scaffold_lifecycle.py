@@ -563,7 +563,7 @@ def test_validate_root_adr_passes_on_good_input():
 def test_validate_root_adr_rejects_missing_vision_and_too_many_domains():
     from agent.lifecycle.scaffold.validators import validate_root_adr
 
-    too_many = "\n".join(f"  - name: D{i}\n    slug: d{i}\n    scope_summary: x" for i in range(8))
+    too_many = "\n".join(f"  - name: D{i}\n    slug: d{i}\n    scope_summary: x" for i in range(11))
     bad = f"""\
 # Root ADR
 

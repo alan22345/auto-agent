@@ -4,7 +4,7 @@ A SCAFFOLD parent task orchestrates a 5-phase flow:
 
   A. Intent grill — agent grills the user; writes ``.auto-agent/intent.md``.
   B. Root architect — writes ``.auto-agent/adrs/000-system.md`` listing
-     ≤7 domains. Then the user (or PO standin) gates.
+     ≤10 domains. Then the user (or PO standin) gates.
   C. Domain architects (serial) — one agent per domain, each writes
      ``.auto-agent/adrs/<n>-<slug>.md``. Then per-ADR gates.
   D. Per-domain trios — for each approved domain ADR, spawn a child
