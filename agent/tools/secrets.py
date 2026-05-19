@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any  # used by execute() signatures
+from typing import Any, ClassVar  # used by execute() signatures
 
 from agent.tools.base import Tool, ToolContext, ToolResult
 
@@ -35,7 +35,7 @@ class ListRepoSecretsTool(Tool):
         "(e.g. STRIPE_API_KEY). Returns names + whether each is set + source + purpose. "
         "Never returns values."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {},
         "required": [],
@@ -80,7 +80,7 @@ class GetSecretTool(Tool):
         "Returns null if the key isn't set. "
         "Note: the value enters this conversation's context and will appear in API logs."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "key": {

@@ -220,7 +220,16 @@ async def get_all_for_boot(
             ),
             {"rid": repo_id, "oid": organization_id, "p": passphrase},
         )
-        return {row[0]: row[1] for row in result.all()}
+        result_dict = {row[0]: row[1] for row in result.all()}
+        # Register every plaintext value with the structlog redactor so any
+        # accidental log of these strings (or strings containing them) is
+        # automatically scrubbed.
+        from shared.logging import register_secret
+
+        for v in result_dict.values():
+            if v:  # skip null/empty
+                register_secret(v)
+        return result_dict
     finally:
         if owns:
             await sess.close()

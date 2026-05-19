@@ -21,6 +21,22 @@ import pytest
 
 from agent.tools.base import ToolContext
 from agent.tools.secrets import GetSecretTool, ListRepoSecretsTool
+from shared.logging import _known_secrets, _secret_lock
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_known_secrets():
+    """Wipe the process-global redactor set before and after each test."""
+    with _secret_lock:
+        _known_secrets.clear()
+    yield
+    with _secret_lock:
+        _known_secrets.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

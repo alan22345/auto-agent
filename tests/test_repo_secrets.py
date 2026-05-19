@@ -481,3 +481,30 @@ async def test_key_length_limit_rejected():
     long_key = "A" + ("_" * 200)
     with pytest.raises(ValueError, match="128"):
         repo_secrets._check_key(long_key)
+
+
+# ---------------------------------------------------------------------------
+# get_all_for_boot() registers all plaintext values with the redactor
+# ---------------------------------------------------------------------------
+
+
+async def test_get_all_for_boot_registers_all_values():
+    """Every plaintext value returned by get_all_for_boot is registered with the redactor."""
+    from unittest.mock import MagicMock, patch
+
+    sess = _stub_session()
+    # mock the SELECT to return two rows
+    rows = [("STRIPE_KEY", "sk_live_xxx_xxx_xxx"), ("DB_URL", "postgresql://x")]
+    sess.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+
+    with (
+        patch.object(repo_secrets.settings, "secrets_passphrase", "p"),
+        patch("shared.logging.register_secret") as mock_register,
+    ):
+        result = await repo_secrets.get_all_for_boot(1, organization_id=7, session=sess)
+
+    assert result == {"STRIPE_KEY": "sk_live_xxx_xxx_xxx", "DB_URL": "postgresql://x"}
+    # Both values registered with the redactor
+    registered = [call.args[0] for call in mock_register.call_args_list]
+    assert "sk_live_xxx_xxx_xxx" in registered
+    assert "postgresql://x" in registered
