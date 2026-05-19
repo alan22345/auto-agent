@@ -17,6 +17,7 @@ import { IntentGrillCard } from './scaffold/intent-grill-card';
 import { DomainGrillCard } from './scaffold/domain-grill-card';
 import { RootAdrReviewCard } from './scaffold/root-adr-review-card';
 import { DomainAdrReviewList } from './scaffold/domain-adr-review-list';
+import { AwaitingSecretsCard } from './scaffold/awaiting-secrets-card';
 import { useScaffoldInvalidationOnWS } from '@/hooks/useScaffoldArtefacts';
 import { useTasks } from '@/hooks/useTasks';
 
@@ -117,6 +118,8 @@ const SCAFFOLD_STATUSES = new Set([
   'building_domain_adrs',
   'awaiting_domain_grill',
   'awaiting_domain_adr_approval',
+  // ADR-019 §4 — hard gate between Phase C and Phase D.
+  'awaiting_required_secrets',
   'dispatching_domain_builds',
   'building_domains',
   'awaiting_final_verification',
@@ -184,6 +187,9 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
           )}
           {task.status === 'awaiting_domain_adr_approval' && (
             <DomainAdrReviewList taskId={task.id} />
+          )}
+          {task.status === 'awaiting_required_secrets' && (
+            <AwaitingSecretsCard taskId={task.id} repoName={task.repo_name} />
           )}
           {(task.status === 'building_domains' ||
             task.status === 'dispatching_domain_builds' ||
