@@ -35,6 +35,11 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
+from sqlalchemy import select
+
+from shared import repo_secrets
+from shared.database import async_session
+from shared.env_filter import filtered_host_env
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -233,6 +238,7 @@ async def boot_dev_server(
     *,
     workspace: str,
     default_timeout: int | None = None,
+    repo_id: int | None = None,
 ) -> ServerHandle:
     """Boot the project's dev server and return a handle.
 
@@ -273,8 +279,24 @@ async def boot_dev_server(
         port = _port_from_url(health_check_url or "")
         env_port = port
 
-    env = os.environ.copy()
-    env["PORT"] = str(env_port)
+    env = filtered_host_env()
+    # ADR-019 §6: inject the repo's project secrets if this workspace is tied to a repo.
+    project_secrets: dict[str, str] = {}
+    if repo_id is not None:
+        # Look up the repo's org so repo_secrets.get_all_for_boot can apply its org filter.
+        from shared.models import Repo  # late import avoids circular dependency
+
+        async with async_session() as session:
+            result = await session.execute(select(Repo).where(Repo.id == repo_id))
+            repo = result.scalar_one_or_none()
+            if repo is not None:
+                project_secrets = await repo_secrets.get_all_for_boot(
+                    repo_id,
+                    organization_id=repo.organization_id,
+                    session=session,
+                )
+    env.update(project_secrets)  # project secrets win on collision
+    env["PORT"] = str(env_port)  # PORT is set last; non-negotiable
 
     process = await asyncio.create_subprocess_shell(
         boot_command,
