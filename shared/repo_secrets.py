@@ -38,6 +38,8 @@ def _check_key(key: str) -> None:
             f"invalid secret key {key!r}: must match ^[A-Z][A-Z0-9_]*$ "
             "(uppercase letters, digits, underscores; must start with a letter)"
         )
+    if len(key) > 128:
+        raise ValueError(f"invalid secret key {key!r}: exceeds 128 characters")
 
 
 def _passphrase() -> str:
@@ -51,7 +53,7 @@ def _passphrase() -> str:
     return p
 
 
-async def _with_session(session: AsyncSession | None):
+async def _with_session(session: AsyncSession | None) -> tuple[AsyncSession, bool]:
     if session is not None:
         return session, False
     return async_session(), True
@@ -70,8 +72,8 @@ async def set(
     """Upsert ``(repo_id, key)`` with the given plaintext value.
 
     If the row already exists, updates ``value_enc`` and ``updated_at``.
-    ``source`` and ``purpose`` are only written on INSERT; pass them
-    explicitly if you need to change them on update.
+    ``source`` and ``purpose`` are only written on INSERT; to change them
+    on an existing row, call ``upsert_architect_required`` or ``demote_to_user``.
     """
     _check_key(key)
     passphrase = _passphrase()

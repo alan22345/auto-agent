@@ -683,14 +683,14 @@ class RepoSecret(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     repo_id = Column(
-        Integer, ForeignKey("repos.id"), nullable=False, index=True,
+        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     key = Column(String(255), nullable=False)
     value_enc = Column(LargeBinary, nullable=True)
-    source = Column(String(32), nullable=False, default="user")
+    source = Column(String(32), nullable=False, default="user", server_default="user")
     purpose = Column(Text, nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=_utcnow, nullable=False,

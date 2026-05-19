@@ -30,13 +30,13 @@ def upgrade() -> None:
         sa.Column(
             "repo_id",
             sa.Integer(),
-            sa.ForeignKey("repos.id"),
+            sa.ForeignKey("repos.id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column(
             "organization_id",
             sa.Integer(),
-            sa.ForeignKey("organizations.id"),
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column("key", sa.String(255), nullable=False),

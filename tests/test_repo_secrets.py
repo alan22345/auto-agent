@@ -132,6 +132,12 @@ async def test_invalid_key_upsert_architect_required():
         )
 
 
+async def test_invalid_key_demote_to_user_rejected():
+    """demote_to_user rejects keys that don't match ^[A-Z][A-Z0-9_]*$."""
+    with pytest.raises(ValueError, match="key"):
+        await repo_secrets.demote_to_user(1, "bad-key", organization_id=1, session=_stub_session())
+
+
 # ---------------------------------------------------------------------------
 # Free-form keys accepted
 # ---------------------------------------------------------------------------
@@ -469,3 +475,10 @@ async def test_get_caller_session_not_closed():
     with patch.object(repo_secrets.settings, "secrets_passphrase", "p"):
         await repo_secrets.get(1, "MY_KEY", organization_id=1, session=sess)
     sess.close.assert_not_awaited()
+
+
+async def test_key_length_limit_rejected():
+    """Keys longer than 128 characters are rejected."""
+    long_key = "A" + ("_" * 200)
+    with pytest.raises(ValueError, match="128"):
+        repo_secrets._check_key(long_key)
