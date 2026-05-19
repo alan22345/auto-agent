@@ -175,7 +175,7 @@ async def test_gate_no_missing_secrets_transitions_to_dispatching(tmp_path, monk
         ),
         patch(
             "agent.lifecycle.scaffold.dispatch_children._transition_parent",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=True),
         ) as mock_transition,
         patch(
             "agent.lifecycle.scaffold.dispatch_children._persist_missing_secrets",
@@ -450,6 +450,70 @@ async def test_recheck_secrets_task_not_found_returns_404() -> None:
         )
 
     assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# _transition_parent concurrency safety
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_hook_concurrent_transition_does_not_500() -> None:
+    """Two concurrent PUTs that both pass the gate must not raise — the
+    second one finds the task already transitioned and silently no-ops.
+
+    Simulates by calling _transition_parent twice in sequence: the first
+    call succeeds (returns True); the second call raises InvalidTransition
+    internally but _transition_parent catches it and returns False instead
+    of propagating the exception.
+    """
+    from agent.lifecycle.scaffold import dispatch_children
+    from orchestrator.state_machine import InvalidTransition
+
+    call_count = 0
+
+    async def _fake_transition(s, task, to_status, message=""):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise InvalidTransition(
+                f"Cannot transition from {to_status.value} to {to_status.value}."
+            )
+        # First call succeeds — just return the task (matching real signature).
+        return task
+
+    task = _make_task()
+
+    with (
+        patch(
+            "agent.lifecycle.scaffold.dispatch_children.async_session"
+        ) as mock_session_cm,
+        patch(
+            "orchestrator.state_machine.transition",
+            new=AsyncMock(side_effect=_fake_transition),
+        ),
+    ):
+        # Set up async context manager for async_session().
+        mock_session = AsyncMock()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one = MagicMock(return_value=task)
+        mock_session.execute = AsyncMock(return_value=scalar_result)
+        mock_session.commit = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session_cm.return_value = mock_session
+
+        # First call — transition fires, returns True.
+        first = await dispatch_children._transition_parent(
+            task.id, TaskStatus.DISPATCHING_DOMAIN_BUILDS
+        )
+        # Second call — InvalidTransition raised internally, caught, returns False.
+        second = await dispatch_children._transition_parent(
+            task.id, TaskStatus.DISPATCHING_DOMAIN_BUILDS
+        )
+
+    assert first is True, "first transition should fire"
+    assert second is False, "second concurrent call should return False, not raise"
 
 
 @pytest.mark.asyncio

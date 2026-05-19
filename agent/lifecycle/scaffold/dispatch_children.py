@@ -39,23 +39,41 @@ log = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 
-async def _transition_parent(task_id: int, to_status: TaskStatus) -> None:
-    """Transition the scaffold parent to a new status using a fresh session."""
-    from orchestrator.state_machine import transition
+async def _transition_parent(task_id: int, to_status: TaskStatus) -> bool:
+    """Transition the scaffold parent to a new status using a fresh session.
+
+    Returns True if the transition fired, False if it was skipped because the
+    task was already at or past ``to_status`` (concurrent PUT-hook call).
+
+    Catches InvalidTransition to make concurrent PUT-hook calls safe — if
+    another request already advanced the task past this status, the second
+    caller silently returns False instead of bubbling a 500.
+    """
+    from orchestrator.state_machine import InvalidTransition, transition
 
     async with async_session() as s:
         task = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
-        await transition(
-            s,
-            task,
-            to_status,
-            message=(
-                "All required secrets populated — proceeding to Phase D"
-                if to_status == TaskStatus.DISPATCHING_DOMAIN_BUILDS
-                else f"Transitioning to {to_status.value}"
-            ),
-        )
-        await s.commit()
+        try:
+            await transition(
+                s,
+                task,
+                to_status,
+                message=(
+                    "All required secrets populated — proceeding to Phase D"
+                    if to_status == TaskStatus.DISPATCHING_DOMAIN_BUILDS
+                    else f"Transitioning to {to_status.value}"
+                ),
+            )
+            await s.commit()
+            return True
+        except InvalidTransition as e:
+            log.warning(
+                "scaffold.transition_skipped",
+                task_id=task_id,
+                target=to_status.value,
+                reason=str(e),
+            )
+            return False
 
 
 async def _persist_missing_secrets(task_id: int, missing: list[str]) -> None:
@@ -97,8 +115,12 @@ async def check_secrets_gate(task: Task) -> bool:
         return False
 
     log.info("scaffold.secrets_gate.green", task_id=task.id)
-    await _transition_parent(task.id, TaskStatus.DISPATCHING_DOMAIN_BUILDS)
-    return True
+    fired = await _transition_parent(task.id, TaskStatus.DISPATCHING_DOMAIN_BUILDS)
+    # Return True only when the transition actually fired so the caller
+    # (PUT hook / recheck endpoint) knows whether to invoke run_scaffold_parent.
+    # If fired=False a concurrent request already advanced the task; the
+    # other caller owns the dispatch.
+    return fired
 
 
 def _read_all_verdicts(workspace: str) -> dict[str, dict[str, Any]]:
