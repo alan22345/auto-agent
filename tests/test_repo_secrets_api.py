@@ -260,7 +260,7 @@ async def test_put_repo_secret_403_cross_org():
 
 @pytest.mark.asyncio
 async def test_delete_repo_secret_happy_path():
-    """204 — calls repo_secrets.delete."""
+    """204 — calls repo_secrets.delete; follow-up GET shows key is gone."""
     session = _mock_session()
     repo = _mock_repo()
 
@@ -277,6 +277,15 @@ async def test_delete_repo_secret_happy_path():
 
     assert result.status_code == 204
     mock_delete.assert_awaited_once()
+
+    # Follow-up GET — key must no longer appear in the list
+    with (
+        patch("orchestrator.router._get_repo_in_org", AsyncMock(return_value=repo)),
+        patch("shared.repo_secrets.list_keys", AsyncMock(return_value=[])),
+    ):
+        list_result = await get_repo_secrets(repo_id=1, session=session, org_id=10)
+
+    assert all(entry.key != "OLD_KEY" for entry in list_result.keys)
 
 
 @pytest.mark.asyncio
@@ -568,3 +577,32 @@ async def test_test_repo_secret_stripe_bad_key():
 
     assert result.ok is False
     assert result.kind == "stripe"
+
+
+@pytest.mark.asyncio
+async def test_probe_repo_secret_404_missing_repo():
+    """404 when repo_id doesn't exist."""
+    session = _mock_session()
+
+    with (
+        patch("orchestrator.router._get_repo_in_org", AsyncMock(return_value=None)),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await probe_repo_secret(repo_id=9999, key="STRIPE_API_KEY", session=session, org_id=10)
+
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_probe_repo_secret_403_cross_org():
+    """403 when repo belongs to a different org than the caller."""
+    session = _mock_session()
+    repo = _mock_repo(org_id=99)
+
+    with (
+        patch("orchestrator.router._get_repo_in_org", AsyncMock(return_value=repo)),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await probe_repo_secret(repo_id=1, key="STRIPE_API_KEY", session=session, org_id=10)
+
+    assert exc.value.status_code == 403
