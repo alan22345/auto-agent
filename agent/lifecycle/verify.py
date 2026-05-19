@@ -522,7 +522,7 @@ async def run_verify_primitives_for_task(
     handle: ServerHandle | None = None
     try:
         if routes:
-            handle = await boot_dev_server(workspace=workspace_root)
+            handle = await boot_dev_server(workspace=workspace_root, repo_id=getattr(task, "repo_id", None))
             if handle.state == "running":
                 route_results = await exercise_routes(routes, handle=handle)
             elif handle.state == "failed":

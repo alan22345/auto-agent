@@ -216,7 +216,7 @@ async def _smoke_and_ui(
 
     handle: ServerHandle | None = None
     try:
-        handle = await boot_dev_server(workspace=workspace_root)
+        handle = await boot_dev_server(workspace=workspace_root, repo_id=None)  # no repo_id in scope here; propagate via run_final_review if needed
         if handle.state != "running":
             # UI inspection is best-effort once smoke has already passed
             # — don't synthesise a gap just because we couldn't boot

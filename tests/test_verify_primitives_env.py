@@ -285,3 +285,125 @@ async def test_boot_dev_server_port_set_last(tmp_path):
     assert captured_env.get("PORT") == "54321", (
         f"PORT should be the allocated port (54321), got: {captured_env.get('PORT')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR-019 T3 — callers wire repo_id through to boot_dev_server
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_correctness_passes_repo_id_to_boot_dev_server(tmp_path):
+    """_run_correctness_review forwards task.repo_id to boot_dev_server (ADR-019 T3)."""
+    from types import SimpleNamespace
+
+    from agent.lifecycle import pr_reviewer
+
+    task = SimpleNamespace(
+        id=1,
+        pr_url="http://gh/pr/1",
+        base_branch="main",
+        branch_name="feat/x",
+        title="t",
+        description="d",
+        repo_id=42,
+    )
+
+    handle = MagicMock()
+    handle.state = "disabled"
+    handle.teardown = AsyncMock()
+
+    boot_mock = AsyncMock(return_value=handle)
+
+    diff = (
+        "diff --git a/api/routes.py b/api/routes.py\n"
+        "--- a/api/routes.py\n"
+        "+++ b/api/routes.py\n"
+        "@@ -1,3 +1,5 @@\n"
+        " from fastapi import APIRouter\n"
+        "+@router.get('/widgets')\n"
+        "+async def w(): return []\n"
+    )
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=diff)),
+        patch.object(pr_reviewer, "boot_dev_server", boot_mock),
+    ):
+        await pr_reviewer._run_correctness_review(task=task, workspace_root=str(tmp_path))
+
+    boot_mock.assert_called_once()
+    _, kwargs = boot_mock.call_args
+    assert kwargs.get("repo_id") == 42, f"expected repo_id=42, got {kwargs.get('repo_id')!r}"
+
+
+@pytest.mark.asyncio
+async def test_run_verify_primitives_passes_repo_id_to_boot_dev_server(tmp_path):
+    """run_verify_primitives_for_task forwards task.repo_id to boot_dev_server (ADR-019 T3)."""
+    from types import SimpleNamespace
+
+    from agent.lifecycle import verify
+
+    task = SimpleNamespace(
+        id=2,
+        base_branch="main",
+        repo_id=99,
+    )
+
+    handle = MagicMock()
+    handle.state = "disabled"
+    handle.teardown = AsyncMock()
+
+    boot_mock = AsyncMock(return_value=handle)
+
+    diff = (
+        "diff --git a/api/routes.py b/api/routes.py\n"
+        "--- a/api/routes.py\n"
+        "+++ b/api/routes.py\n"
+        "@@ -1,2 +1,4 @@\n"
+        " from fastapi import APIRouter\n"
+        "+@router.get('/items')\n"
+        "+async def items(): return []\n"
+    )
+
+    with (
+        patch.object(verify, "_load_diff", AsyncMock(return_value=diff)),
+        patch.object(verify, "boot_dev_server", boot_mock),
+        patch.object(verify, "_route_primitives_failure", AsyncMock()),
+        patch.object(verify, "_write_smoke_result", MagicMock()),
+    ):
+        await verify.run_verify_primitives_for_task(task=task, workspace_root=str(tmp_path))
+
+    boot_mock.assert_called_once()
+    _, kwargs = boot_mock.call_args
+    assert kwargs.get("repo_id") == 99, f"expected repo_id=99, got {kwargs.get('repo_id')!r}"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_final_verification_passes_repo_id_to_boot_dev_server(tmp_path):
+    """scaffold/final_verification.run forwards task.repo_id to boot_dev_server (ADR-019 T3)."""
+    from types import SimpleNamespace
+
+    from agent.lifecycle.scaffold import final_verification as fv_mod
+
+    task = SimpleNamespace(
+        id=3,
+        repo_id=77,
+        status="awaiting_final_verification",
+    )
+
+    handle = MagicMock()
+    handle.state = "disabled"
+    handle.teardown = AsyncMock()
+
+    boot_mock = AsyncMock(return_value=handle)
+
+    with (
+        patch.object(fv_mod, "prepare_scaffold_workspace", AsyncMock(return_value=str(tmp_path))),
+        patch.object(fv_mod, "_collect_union_routes", AsyncMock(return_value=[])),
+        patch.object(fv_mod.verify_primitives, "boot_dev_server", boot_mock),
+    ):
+        await fv_mod.run(task)
+
+    boot_mock.assert_called_once()
+    _, kwargs = boot_mock.call_args
+    assert kwargs.get("repo_id") == 77, f"expected repo_id=77, got {kwargs.get('repo_id')!r}"
