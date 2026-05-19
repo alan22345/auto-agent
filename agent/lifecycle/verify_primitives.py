@@ -40,6 +40,9 @@ from sqlalchemy import select
 from shared import repo_secrets
 from shared.database import async_session
 from shared.env_filter import filtered_host_env
+from shared.logging import setup_logging
+
+log = setup_logging("agent.lifecycle.verify_primitives")
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -289,12 +292,22 @@ async def boot_dev_server(
         async with async_session() as session:
             result = await session.execute(select(Repo).where(Repo.id == repo_id))
             repo = result.scalar_one_or_none()
-            if repo is not None:
-                project_secrets = await repo_secrets.get_all_for_boot(
-                    repo_id,
-                    organization_id=repo.organization_id,
-                    session=session,
-                )
+            if repo is None:
+                log.warning("boot_dev_server.repo_not_found", repo_id=repo_id)
+            else:
+                try:
+                    project_secrets = await repo_secrets.get_all_for_boot(
+                        repo_id,
+                        organization_id=repo.organization_id,
+                        session=session,
+                    )
+                except Exception:
+                    log.exception(
+                        "boot_dev_server.secrets_fetch_failed",
+                        repo_id=repo_id,
+                    )
+                    # Proceed with no project secrets; the health check
+                    # will surface any resulting boot failure.
     env.update(project_secrets)  # project secrets win on collision
     env["PORT"] = str(env_port)  # PORT is set last; non-negotiable
 

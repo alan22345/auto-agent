@@ -378,6 +378,142 @@ async def test_run_verify_primitives_passes_repo_id_to_boot_dev_server(tmp_path)
     assert kwargs.get("repo_id") == 99, f"expected repo_id=99, got {kwargs.get('repo_id')!r}"
 
 
+# ---------------------------------------------------------------------------
+# ADR-019 T3 code-review fixes: graceful secrets-fetch failures
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boot_dev_server_repo_not_found_warns_and_continues(tmp_path):
+    """When the DB returns None for the repo, boot_dev_server warns and continues without secrets."""
+    _make_smoke_yml(tmp_path)
+
+    captured_env: dict = {}
+
+    async def capture_proc(cmd, *, cwd, env, stdout, stderr, preexec_fn):
+        captured_env.update(env)
+        proc = MagicMock()
+        proc.pid = 12345
+        return proc
+
+    mock_log = MagicMock()
+
+    with (
+        patch(
+            "agent.lifecycle.verify_primitives.asyncio.create_subprocess_shell",
+            side_effect=capture_proc,
+        ),
+        patch(
+            "agent.lifecycle.verify_primitives._wait_for_health",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.lifecycle.verify_primitives.async_session",
+        ) as mock_session_cm,
+        patch(
+            "agent.lifecycle.verify_primitives.repo_secrets.get_all_for_boot",
+            new=AsyncMock(),
+        ) as mock_secrets,
+        patch("agent.lifecycle.verify_primitives.log", mock_log),
+    ):
+        # Repo lookup returns None
+        mock_session = AsyncMock()
+        mock_session_cm.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_session.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        )
+
+        with patch("os.getpgid", return_value=12345):
+            from agent.lifecycle.verify_primitives import boot_dev_server
+
+            handle = await boot_dev_server(workspace=str(tmp_path), repo_id=7)
+
+    # Must return a ServerHandle without raising
+    from agent.lifecycle.verify_primitives import ServerHandle
+
+    assert isinstance(handle, ServerHandle)
+
+    # No project secrets injected
+    assert "STRIPE_API_KEY" not in captured_env
+    assert "MY_PROJECT_KEY" not in captured_env
+
+    # get_all_for_boot was never called (repo was not found)
+    mock_secrets.assert_not_called()
+
+    # log.warning called with the right event and repo_id
+    mock_log.warning.assert_called_once()
+    warn_call = mock_log.warning.call_args
+    assert warn_call.args[0] == "boot_dev_server.repo_not_found"
+    assert warn_call.kwargs.get("repo_id") == 7
+
+
+@pytest.mark.asyncio
+async def test_boot_dev_server_secrets_fetch_failure_logs_and_continues(tmp_path):
+    """When get_all_for_boot raises, boot_dev_server logs and proceeds with empty secrets."""
+    _make_smoke_yml(tmp_path)
+
+    fake_repo = MagicMock()
+    fake_repo.organization_id = 5
+
+    captured_env: dict = {}
+
+    async def capture_proc(cmd, *, cwd, env, stdout, stderr, preexec_fn):
+        captured_env.update(env)
+        proc = MagicMock()
+        proc.pid = 12345
+        return proc
+
+    mock_log = MagicMock()
+
+    with (
+        patch(
+            "agent.lifecycle.verify_primitives.asyncio.create_subprocess_shell",
+            side_effect=capture_proc,
+        ),
+        patch(
+            "agent.lifecycle.verify_primitives._wait_for_health",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.lifecycle.verify_primitives.async_session",
+        ) as mock_session_cm,
+        patch(
+            "agent.lifecycle.verify_primitives.repo_secrets.get_all_for_boot",
+            new=AsyncMock(side_effect=RuntimeError("SECRETS_PASSPHRASE missing")),
+        ),
+        patch("agent.lifecycle.verify_primitives.log", mock_log),
+    ):
+        mock_session = AsyncMock()
+        mock_session_cm.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_session.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=fake_repo))
+        )
+
+        with patch("os.getpgid", return_value=12345):
+            from agent.lifecycle.verify_primitives import boot_dev_server
+
+            # Must not raise
+            handle = await boot_dev_server(workspace=str(tmp_path), repo_id=7)
+
+    # Returns a ServerHandle
+    from agent.lifecycle.verify_primitives import ServerHandle
+
+    assert isinstance(handle, ServerHandle)
+
+    # Subprocess env has PORT but no project secrets
+    assert "PORT" in captured_env
+    assert "SECRETS_PASSPHRASE" not in captured_env
+    assert "MY_PROJECT_KEY" not in captured_env
+
+    # log.exception called with the right event and repo_id
+    mock_log.exception.assert_called_once()
+    exc_call = mock_log.exception.call_args
+    assert exc_call.args[0] == "boot_dev_server.secrets_fetch_failed"
+    assert exc_call.kwargs.get("repo_id") == 7
+
+
 @pytest.mark.asyncio
 async def test_scaffold_final_verification_passes_repo_id_to_boot_dev_server(tmp_path):
     """scaffold/final_verification.run forwards task.repo_id to boot_dev_server (ADR-019 T3)."""
