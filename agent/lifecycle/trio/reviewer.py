@@ -110,6 +110,7 @@ async def _prepare_review_workspace(
     parent_branch: str,
     user_id: int | None,
     organization_id: int | None,
+    repo_id: int | None = None,
 ) -> str:
     """Clone (or reuse) the child's workspace at the integration branch.
 
@@ -133,6 +134,7 @@ async def _prepare_review_workspace(
         parent_branch,
         user_id=user_id,
         organization_id=organization_id,
+        repo_id=repo_id,
     )
 
 
@@ -189,6 +191,7 @@ async def handle_trio_review(
         child_description = child.description or child.title
         repo_name = child.repo.name if child.repo else None
         repo_url = child.repo.url if child.repo else None
+        repo_id = child.repo_id
         user_id = child.created_by_user_id
         org_id = child.organization_id
         home_dir = await home_dir_for_task(child)
@@ -211,6 +214,7 @@ async def handle_trio_review(
             parent_branch=effective_parent_branch,
             user_id=user_id,
             organization_id=org_id,
+            repo_id=repo_id,
         )
 
     prompt = (

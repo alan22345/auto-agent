@@ -294,6 +294,7 @@ async def _prepare_workspace(task) -> tuple[str, str]:
         repo.url, task.id, base_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        repo_id=task.repo_id,
     )
     return workspace, base_branch
 

@@ -251,6 +251,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        repo_id=task.repo_id,
     )
 
     # Reuse existing branch or generate new one

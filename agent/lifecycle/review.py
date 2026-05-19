@@ -264,6 +264,7 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        repo_id=task.repo_id,
     )
 
     server_cm = None
@@ -592,6 +593,7 @@ async def handle_pr_review_comments(task_id: int, comments: str) -> None:
         repo.url, task_id, base_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        repo_id=task.repo_id,
     )
 
     try:
