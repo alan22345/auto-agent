@@ -207,7 +207,96 @@ Rules:
 - Every section header above MUST be present. Empty content under a
   header is OK (e.g. no events yet) but the header must appear.
 - Do not output the ADR in the chat. Only call the skill and stop.
+
+## Project secrets context
+
+{_secrets_context_placeholder}
+
+## Required secrets for this domain
+
+If your domain needs third-party credentials or project-level environment
+variables to function (e.g. `STRIPE_API_KEY`, `POSTGRES_URL`, `JWT_SECRET`),
+use the `submit-required-secrets` skill to write
+`.auto-agent/required_secrets/{domain_slug}.json` in this exact shape:
+
+```json
+{{
+  "domain": "{domain_slug}",
+  "secrets": [
+    {{"key": "STRIPE_API_KEY", "purpose": "Charge cards via Stripe", "test_kind": "stripe"}},
+    {{"key": "STRIPE_WEBHOOK_SECRET", "purpose": "Verify Stripe webhook signatures"}}
+  ]
+}}
+```
+
+Rules for `submit-required-secrets`:
+- `key` must match `^[A-Z][A-Z0-9_]*$` (uppercase env-var convention).
+- `purpose` is required, non-empty, ≤120 characters.
+- `test_kind` is optional; if present, must be `"postgres_url"` or `"stripe"`.
+- Do NOT declare keys that another domain has already declared (see "Already
+  declared by other domains" above) — the build will reuse the existing entry.
+- Do NOT declare keys the user has already set (see "Currently set secrets"
+  above) unless you know the user's value is for a different credential.
+- If your domain needs NO secrets, skip the `submit-required-secrets` call —
+  the absence of the file means "no requirements for this domain".
+- Call `submit-domain-adr` FIRST, then `submit-required-secrets` if needed.
+- Do not output the secrets manifest in chat. Only call the skill and stop.
 """
+
+
+_SECRETS_CONTEXT_TEMPLATE = """\
+Currently set secrets: {currently_set_display}
+
+Already declared by other domains: {already_declared_display}
+
+Before declaring a new required key, check the lists above. If the user has
+already set a key under a different name, prefer that name. If another domain
+already declared a key you need, do NOT re-declare it — the build will reuse
+the existing manifest entry."""
+
+
+def domain_architect_system(
+    *,
+    domain_name: str,
+    domain_slug: str,
+    index: int,
+    currently_set: list[str],
+    already_declared: list[tuple[str, str]],
+) -> str:
+    """Return the domain-architect system prompt, parameterised by repo state.
+
+    Args:
+        domain_name: Human-readable domain name (e.g. "Billing").
+        domain_slug: kebab-case slug (e.g. "billing").
+        index: 1-based domain index.
+        currently_set: Keys the user has already set (names only, no values).
+        already_declared: [(key, declaring_domain_slug), …] for keys already
+            declared by other domain manifests on disk.
+    """
+    currently_set_display = (
+        ", ".join(currently_set) if currently_set else "(none set)"
+    )
+    if already_declared:
+        already_declared_display = ", ".join(
+            f"{key} ({domain})" for key, domain in already_declared
+        )
+    else:
+        already_declared_display = "(none)"
+
+    secrets_context = _SECRETS_CONTEXT_TEMPLATE.format(
+        currently_set_display=currently_set_display,
+        already_declared_display=already_declared_display,
+    )
+
+    base = DOMAIN_ARCHITECT_SYSTEM.replace(
+        "{_secrets_context_placeholder}", secrets_context
+    )
+
+    return base.format(
+        domain_name=domain_name,
+        domain_slug=domain_slug,
+        index=index,
+    )
 
 
 FINAL_VERIFICATION_SYSTEM = """\
