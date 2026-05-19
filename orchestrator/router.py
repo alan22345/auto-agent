@@ -88,6 +88,7 @@ from shared.types import (
     GraphCodePreviewResponse,
     GraphStalenessResponse,
     LatestRepoGraphData,
+    RepoGraphProgressData,
     LoginRequest,
     LoginResponse,
     MarketBriefResponse,
@@ -3201,6 +3202,45 @@ async def refresh_repo_graph(
     return RepoGraphRefreshResponse(request_id=request_id, status="accepted")
 
 
+import time as _time
+
+_TOTAL_FILES_CACHE: dict[int, tuple[float, int]] = {}
+_TOTAL_FILES_TTL = 30.0
+
+
+async def _estimate_total_files(repo_id: int) -> int:
+    """Count non-test source files in the graph workspace.
+
+    Memoized 30 s per repo so repeated /graph/latest hits don't re-walk."""
+    from agent.graph_analyzer.test_filter import is_test_file
+    from agent.graph_workspace import graph_workspace_path
+    import os as _os
+
+    now = _time.time()
+    cached = _TOTAL_FILES_CACHE.get(repo_id)
+    if cached and now - cached[0] < _TOTAL_FILES_TTL:
+        return cached[1]
+
+    workspace = graph_workspace_path(repo_id=repo_id)
+    if not _os.path.isdir(workspace):
+        _TOTAL_FILES_CACHE[repo_id] = (now, 0)
+        return 0
+
+    exts = (".py", ".ts", ".tsx", ".js", ".jsx")
+    count = 0
+    for root, dirs, files in _os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".next")]
+        for fname in files:
+            if not fname.endswith(exts):
+                continue
+            rel_path = _os.path.relpath(_os.path.join(root, fname), workspace)
+            if is_test_file(rel_path):
+                continue
+            count += 1
+    _TOTAL_FILES_CACHE[repo_id] = (now, count)
+    return count
+
+
 @router.get(
     "/repos/{repo_id}/graph/latest",
     response_model=LatestRepoGraphData,
@@ -3227,33 +3267,103 @@ async def get_latest_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
-    response = LatestRepoGraphData(
-        repo_id=repo.id,
-        analysis_branch=cfg.analysis_branch,
-    )
+    total_est = await _estimate_total_files(repo_id=repo.id)
 
     if cfg.last_analysis_id is None:
-        return response
+        return LatestRepoGraphData(
+            repo_id=repo.id,
+            analysis_branch=cfg.analysis_branch,
+            is_complete=False,
+            processed_files_count=0,
+            total_files_estimate=total_est,
+        )
 
     row_result = await session.execute(
         select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
     )
     row = row_result.scalar_one_or_none()
     if row is None:
-        return response
+        return LatestRepoGraphData(
+            repo_id=repo.id,
+            analysis_branch=cfg.analysis_branch,
+            is_complete=False,
+            processed_files_count=0,
+            total_files_estimate=total_est,
+        )
 
-    response.repo_graph_id = row.id
-    response.commit_sha = row.commit_sha
-    response.generated_at = row.generated_at.isoformat() if row.generated_at else None
-    response.analyser_version = row.analyser_version
-    response.status = row.status  # type: ignore[assignment]
     # ``graph_json`` is the dict form of RepoGraphBlob — let Pydantic
     # validate before returning.
     from shared.types import RepoGraphBlob
 
-    if row.graph_json:
-        response.blob = RepoGraphBlob.model_validate(row.graph_json)
-    return response
+    blob = RepoGraphBlob.model_validate(row.graph_json) if row.graph_json else None
+    return LatestRepoGraphData(
+        repo_id=repo.id,
+        analysis_branch=cfg.analysis_branch,
+        repo_graph_id=row.id,
+        commit_sha=row.commit_sha,
+        generated_at=row.generated_at.isoformat() if row.generated_at else None,
+        analyser_version=row.analyser_version,
+        status=row.status,  # type: ignore[arg-type]
+        blob=blob,
+        is_complete=row.is_complete,
+        processed_files_count=len(row.processed_files or {}),
+        total_files_estimate=total_est,
+    )
+
+
+@router.get(
+    "/repos/{repo_id}/graph/progress",
+    response_model=RepoGraphProgressData,
+)
+async def get_repo_graph_progress(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoGraphProgressData:
+    """Lightweight progress snapshot for the running/last graph analysis.
+
+    Used by the UI progress bar to show how many files have been processed
+    without fetching the full blob.
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraph)
+        .where(RepoGraph.repo_id == repo.id)
+        .order_by(RepoGraph.id.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return RepoGraphProgressData(
+            is_complete=False, processed=0, total=0, last_file=None, status="idle"
+        )
+
+    processed = row.processed_files or {}
+    total = await _estimate_total_files(repo_id=repo.id)
+    last_file = None
+    if processed:
+        last_file = max(
+            processed.items(),
+            key=lambda kv: kv[1].get("processed_at", "") if isinstance(kv[1], dict) else "",
+        )[0]
+
+    from agent.graph_workspace import lock_is_held
+
+    status: str = (
+        "unchanged"
+        if row.is_complete
+        else ("running" if lock_is_held(repo_id) else "idle")
+    )
+    return RepoGraphProgressData(
+        is_complete=row.is_complete,
+        processed=len(processed),
+        total=total,
+        last_file=last_file,
+        status=status,  # type: ignore[arg-type]
+    )
 
 
 @router.get(
