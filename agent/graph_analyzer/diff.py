@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 
 @dataclass
@@ -95,3 +96,103 @@ async def changed_files(
             raise CheckpointCommitUnreachable(err.strip())
         raise RuntimeError(f"git diff failed: {err.strip()}")
     return parse_git_name_status(stdout)
+
+
+def apply_plan(
+    blob: dict,
+    processed: dict,
+    plan: ChangedFilesPlan,
+    re_walk: Optional[Callable[[str], dict]] = None,
+) -> set[str]:
+    """Mutate ``blob`` and ``processed`` per ``plan``. Return the set of
+    additional files that need to be re-walked (the cascade set).
+
+    ``re_walk`` is a callback used for the smart-cascade-on-M check: given
+    a modified file, return ``{"nodes_in_path": [...]}`` describing the
+    fresh-walk node set. apply_plan compares that to the old node ids to
+    detect which previously-referenced nodes were lost.
+
+    Files in the cascade set have their ``processed`` entry dropped so the
+    pipeline's main walk picks them up again in the same run.
+    """
+    cascade: set[str] = set()
+
+    # --- D ---
+    for path in plan.deleted:
+        cross_file_callers = {
+            e["source"]["file"]
+            for e in blob.get("edges", [])
+            if e["target"]["file"] == path and e["source"]["file"] != path
+        }
+        cascade.update(cross_file_callers)
+        blob["nodes"] = [n for n in blob.get("nodes", []) if n["file"] != path]
+        blob["edges"] = [
+            e
+            for e in blob.get("edges", [])
+            if e["source"]["file"] != path and e["target"]["file"] != path
+        ]
+        processed.pop(path, None)
+    # Drop processed entries for all cascade files collected during D
+    for caller_file in cascade:
+        processed.pop(caller_file, None)
+
+    # --- M / T (with smart cascade) ---
+    for path in plan.modified:
+        cross_file_targets = {
+            e["target"]["id"]
+            for e in blob.get("edges", [])
+            if e["target"]["file"] == path and e["source"]["file"] != path
+        }
+        callers_by_target: dict[str, set[str]] = {}
+        for e in blob.get("edges", []):
+            if e["target"]["file"] == path and e["source"]["file"] != path:
+                callers_by_target.setdefault(e["target"]["id"], set()).add(
+                    e["source"]["file"]
+                )
+
+        blob["nodes"] = [n for n in blob.get("nodes", []) if n["file"] != path]
+        blob["edges"] = [
+            e
+            for e in blob.get("edges", [])
+            if e["source"]["file"] != path and e["target"]["file"] != path
+        ]
+        processed.pop(path, None)
+
+        if re_walk is not None and cross_file_targets:
+            walk_result = re_walk(path)
+            new_ids = {n["id"] for n in walk_result.get("nodes_in_path", [])}
+            still_lost = cross_file_targets - new_ids
+            for lost_id in still_lost:
+                for caller_file in callers_by_target.get(lost_id, set()):
+                    cascade.add(caller_file)
+                    processed.pop(caller_file, None)
+
+    # --- R100: pure rename, rewrite paths ---
+    for old, new in plan.renamed_pure:
+        for n in blob.get("nodes", []):
+            if n["file"] == old:
+                n["file"] = new
+                if n.get("id", "").startswith(f"{old}::"):
+                    n["id"] = n["id"].replace(f"{old}::", f"{new}::", 1)
+        for e in blob.get("edges", []):
+            if e["source"]["file"] == old:
+                e["source"]["file"] = new
+                if e["source"].get("id", "").startswith(f"{old}::"):
+                    e["source"]["id"] = e["source"]["id"].replace(
+                        f"{old}::", f"{new}::", 1
+                    )
+            if e["target"]["file"] == old:
+                e["target"]["file"] = new
+                if e["target"].get("id", "").startswith(f"{old}::"):
+                    e["target"]["id"] = e["target"]["id"].replace(
+                        f"{old}::", f"{new}::", 1
+                    )
+        if old in processed:
+            processed[new] = processed.pop(old)
+
+    # --- R<low>: rename + modify (treat as D old + A new) ---
+    if plan.renamed_modified:
+        synth = ChangedFilesPlan(deleted=[o for o, _ in plan.renamed_modified])
+        cascade.update(apply_plan(blob, processed, synth, re_walk=None))
+
+    return cascade
