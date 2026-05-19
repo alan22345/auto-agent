@@ -21,6 +21,8 @@ import { codeGraphKeys } from '@/hooks/useCodeGraphConfigs';
 import { useCodeGraphConfig } from '@/hooks/useCodeGraphConfig';
 import { useRepoGraph } from '@/hooks/useRepoGraph';
 import { useRepoGraphStaleness } from '@/hooks/useRepoGraphStaleness';
+import { useRepoGraphProgress } from '@/hooks/useRepoGraphProgress';
+import { GraphCompletionBadge } from '@/components/code-graph/graph-completion-badge';
 
 // ADR-016 §11 — per-repo settings + graph page. Phase 2 wires the
 // Cytoscape canvas in below the freshness banner; Phase 7 polishes
@@ -74,6 +76,8 @@ export default function CodeGraphRepoPage({
     Number.isFinite(repoId) ? repoId : null,
     Boolean(latest?.blob),
   );
+  const progressQuery = useRepoGraphProgress(Number.isFinite(repoId) ? repoId : null);
+  const progress = progressQuery.data;
 
   const disableMutation = useMutation({
     mutationFn: () => disableRepoGraph(repoId),
@@ -136,10 +140,13 @@ export default function CodeGraphRepoPage({
           </p>
         ) : (
           <>
-            {latest && <FreshnessBanner latest={latest} staleness={staleness} />}
+            <div className="flex items-center gap-4">
+              {latest && <FreshnessBanner latest={latest} staleness={staleness} />}
+              {progress ? <GraphCompletionBadge progress={progress} /> : null}
+            </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <RefreshButton repoId={config.repo_id} />
+              <RefreshButton repoId={config.repo_id} isComplete={progress?.is_complete ?? true} />
               <span className="ml-auto" />
               <BranchPicker config={config} />
             </div>

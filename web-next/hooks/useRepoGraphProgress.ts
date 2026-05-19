@@ -14,10 +14,16 @@ const LONG_INTERVAL = 60_000;
  * Returns the TanStack query result plus the chosen `refetchInterval`
  * (exposed for testability — assertion in the unit test).
  */
-export function useRepoGraphProgress(repoId: number) {
+export function useRepoGraphProgress(repoId: number | null) {
   const query = useQuery<RepoGraphProgressData>({
     queryKey: ['repo-graph-progress', repoId],
-    queryFn: () => getRepoGraphProgress(repoId),
+    queryFn: () => {
+      if (repoId === null) {
+        return Promise.reject(new Error('repoId is null'));
+      }
+      return getRepoGraphProgress(repoId);
+    },
+    enabled: repoId !== null,
     refetchInterval: (q) => {
       const data = q.state.data as RepoGraphProgressData | undefined;
       return data?.is_complete ? LONG_INTERVAL : SHORT_INTERVAL;
