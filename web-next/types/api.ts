@@ -248,6 +248,9 @@ export interface LatestRepoGraphData {
   analyser_version?: string | null;
   status?: ("ok" | "partial" | "failed") | null;
   blob?: RepoGraphBlob | null;
+  is_complete: boolean;
+  processed_files_count: number;
+  total_files_estimate: number;
 }
 /**
  * Full graph analysis output — the payload stored in
@@ -487,6 +490,16 @@ export interface RepoGraphConfigData {
   last_analysis_id?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+/**
+ * Lightweight progress snapshot for /repos/{id}/graph/progress.
+ */
+export interface RepoGraphProgressData {
+  is_complete: boolean;
+  processed: number;
+  total: number;
+  last_file?: string | null;
+  status: "running" | "idle" | "unchanged";
 }
 /**
  * ``POST /api/repos/{id}/graph/refresh`` response body.
