@@ -4380,6 +4380,10 @@ async def scaffold_recheck_secrets(
     task = await _get_task_in_org(session, task_id, org_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
+    # Belt-and-suspenders cross-org check: the scoped query should have caught
+    # this, but explicitly check anyway so cross-org access returns 403 not 404.
+    if task.organization_id != org_id:
+        raise HTTPException(status_code=403, detail="Task belongs to a different organization")
     if task.status != TaskStatus.AWAITING_REQUIRED_SECRETS:
         raise HTTPException(
             status_code=409,

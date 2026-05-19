@@ -454,14 +454,17 @@ async def test_recheck_secrets_task_not_found_returns_404() -> None:
 
 @pytest.mark.asyncio
 async def test_recheck_secrets_cross_org_returns_403() -> None:
-    """Cross-org access → 403 (task not found in org scoped query)."""
+    """Cross-org access → 403 (belt-and-suspenders check fires on org mismatch)."""
     from orchestrator.router import scaffold_recheck_secrets
 
-    # _get_task_in_org returns None when org doesn't match (scoped filter)
+    # Simulate the scoped helper returning a task whose org doesn't match the
+    # caller's org — the same pattern T2's test_list_repo_secrets_403_cross_org
+    # uses for per-repo endpoints.
+    wrong_org_task = _make_task(organization_id=42)  # org 42, not caller's org 999
     session = AsyncMock(spec=AsyncSession)
 
     with (
-        patch("orchestrator.router._get_task_in_org", new=AsyncMock(return_value=None)),
+        patch("orchestrator.router._get_task_in_org", new=AsyncMock(return_value=wrong_org_task)),
         pytest.raises(HTTPException) as exc_info,
     ):
         await scaffold_recheck_secrets(
@@ -470,4 +473,4 @@ async def test_recheck_secrets_cross_org_returns_403() -> None:
             org_id=999,  # wrong org
         )
 
-    assert exc_info.value.status_code == 404  # scoped query returns None → 404 (same as cross-org)
+    assert exc_info.value.status_code == 403
