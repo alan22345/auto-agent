@@ -367,7 +367,7 @@ async def test_reveal_repo_secret_emits_structlog_audit():
             user_id=42,
         )
 
-    # structlog.get_logger().info("secret_reveal", user_id=..., repo_id=..., key=...)
+    # structlog.get_logger().info("secret_reveal", user_id=..., repo_id=..., key=..., org_id=...)
     mock_logger.info.assert_called_once()
     call = mock_logger.info.call_args
     # First positional arg is the event string.
@@ -375,6 +375,7 @@ async def test_reveal_repo_secret_emits_structlog_audit():
     assert call.kwargs.get("user_id") == 42
     assert call.kwargs.get("repo_id") == 1
     assert call.kwargs.get("key") == "STRIPE_API_KEY"
+    assert call.kwargs.get("org_id") == 10
 
 
 @pytest.mark.asyncio
@@ -577,6 +578,39 @@ async def test_test_repo_secret_stripe_bad_key():
 
     assert result.ok is False
     assert result.kind == "stripe"
+
+
+@pytest.mark.asyncio
+async def test_probe_repo_secret_stripe_connection_error():
+    """Stripe network errors return graceful {ok: false}, not 500."""
+    import httpx
+
+    session = _mock_session()
+    repo = _mock_repo()
+    rows = [{"key": "STRIPE_API_KEY", "set": True, "source": "user", "purpose": None, "updated_at": _NOW}]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.head = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
+
+    with (
+        patch("orchestrator.router._get_repo_in_org", AsyncMock(return_value=repo)),
+        patch("shared.repo_secrets.get", AsyncMock(return_value="sk_test_xxx")),
+        patch("shared.repo_secrets.list_keys", AsyncMock(return_value=rows)),
+        patch("httpx.AsyncClient", return_value=mock_client),
+    ):
+        result = await probe_repo_secret(
+            repo_id=1,
+            key="STRIPE_API_KEY",
+            session=session,
+            org_id=10,
+        )
+
+    assert result.ok is False
+    assert result.kind == "stripe"
+    assert "Connection error" in result.message
+    assert "sk_test_xxx" not in (result.message or "")  # no secret leak
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from croniter import croniter
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Path, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
@@ -874,8 +874,8 @@ async def get_repo_secrets(
 @router.put("/repos/{repo_id}/secrets/{key}")
 async def put_repo_secret(
     repo_id: int,
-    key: str,
-    body: RepoSecretPutRequest,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+    body: RepoSecretPutRequest = ...,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> dict:
@@ -908,7 +908,7 @@ async def put_repo_secret(
 @router.delete("/repos/{repo_id}/secrets/{key}", status_code=204)
 async def delete_repo_secret(
     repo_id: int,
-    key: str,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> Response:
@@ -930,7 +930,7 @@ async def delete_repo_secret(
 @router.post("/repos/{repo_id}/secrets/{key}/reveal")
 async def reveal_repo_secret(
     repo_id: int,
-    key: str,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
     user_id: int = Depends(current_user_id_dep),
@@ -958,6 +958,7 @@ async def reveal_repo_secret(
         user_id=user_id,
         repo_id=repo_id,
         key=key,
+        org_id=org_id,
     )
 
     return RepoSecretRevealResponse(value=value)
@@ -966,7 +967,7 @@ async def reveal_repo_secret(
 @router.post("/repos/{repo_id}/secrets/{key}/test")
 async def probe_repo_secret(
     repo_id: int,
-    key: str,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> RepoSecretTestResponse:
@@ -1021,18 +1022,22 @@ async def probe_repo_secret(
             )
 
     if kind == "stripe":
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.head(
-                "https://api.stripe.com/v1/balance",
-                headers={"Authorization": f"Bearer {value}"},
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.head(
+                    "https://api.stripe.com/v1/balance",
+                    headers={"Authorization": f"Bearer {value}"},
+                )
+            ok = r.status_code == 200
+            return RepoSecretTestResponse(
+                ok=ok,
+                kind=kind,
+                message=None if ok else f"Stripe returned {r.status_code}",
             )
-        if r.status_code == 200:
-            return RepoSecretTestResponse(ok=True, kind=kind, message=None)
-        return RepoSecretTestResponse(
-            ok=False, kind=kind, message=f"Stripe returned {r.status_code}"
-        )
-
-    return RepoSecretTestResponse(ok=False, kind=kind, message="no test kind configured")
+        except httpx.HTTPError as e:
+            return RepoSecretTestResponse(
+                ok=False, kind=kind, message=f"Connection error: {type(e).__name__}"
+            )
 
 
 @router.post("/auth/users")
