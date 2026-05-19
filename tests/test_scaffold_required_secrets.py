@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -381,6 +382,58 @@ def test_read_all_manifests_reads_multiple_manifest_files(tmp_path):
     assert len(result) == 3
     slugs = {m.domain for m in result}
     assert slugs == {"billing", "auth", "payments"}
+
+
+def test_validate_manifest_rejects_non_kebab_case_domain():
+    """validate_manifest rejects PascalCase or other non-kebab-case domain values."""
+    from agent.lifecycle.scaffold import required_secrets
+
+    result = required_secrets.validate_manifest({"domain": "Billing", "secrets": []})
+    assert not result.ok
+    assert any("kebab-case" in e for e in result.errors)
+
+
+def test_validate_manifest_rejects_domain_with_underscores():
+    """validate_manifest rejects domain slugs containing underscores."""
+    from agent.lifecycle.scaffold import required_secrets
+
+    result = required_secrets.validate_manifest({"domain": "billing_service", "secrets": []})
+    assert not result.ok
+    assert any("kebab-case" in e for e in result.errors)
+
+
+def test_validate_manifest_accepts_valid_kebab_case_domain():
+    """validate_manifest accepts valid kebab-case domain slugs."""
+    from agent.lifecycle.scaffold import required_secrets
+
+    result = required_secrets.validate_manifest({"domain": "billing-service", "secrets": []})
+    assert result.ok
+
+
+def test_read_all_manifests_skips_unreadable_file(tmp_path: Path):
+    """A file that raises OSError on read is skipped, not propagated."""
+    from agent.lifecycle.scaffold import required_secrets
+
+    req_dir = tmp_path / ".auto-agent" / "required_secrets"
+    req_dir.mkdir(parents=True)
+    good_file = req_dir / "good.json"
+    good_file.write_text('{"domain": "good", "secrets": []}')
+    bad_file = req_dir / "bad.json"
+    bad_file.write_text('{"domain": "bad", "secrets": []}')
+
+    original_read_text = Path.read_text
+
+    def selective_read_text(self, *args, **kwargs):
+        if self.name == "bad.json":
+            raise PermissionError("denied")
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", selective_read_text):
+        manifests = required_secrets.read_all_manifests(tmp_path)
+
+    # Only good.json should be loaded; bad.json is skipped
+    assert len(manifests) == 1
+    assert manifests[0].domain == "good"
 
 
 def test_read_all_manifests_ignores_non_json_files(tmp_path):

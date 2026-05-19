@@ -40,6 +40,7 @@ log = structlog.get_logger()
 KNOWN_TEST_KINDS: frozenset[str] = frozenset({"postgres_url", "stripe"})
 
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 _REQUIRED_SECRETS_DIR = ".auto-agent/required_secrets"
 
@@ -78,7 +79,7 @@ def validate_manifest(payload: dict) -> ValidationResult:
     """Validate a parsed-JSON manifest.
 
     Rules:
-    - ``domain`` is a non-empty string.
+    - ``domain`` is a non-empty kebab-case slug (``^[a-z][a-z0-9-]*$``).
     - ``secrets`` is a list (possibly empty).
     - Every entry has ``key`` matching ``^[A-Z][A-Z0-9_]*$`` and ≤128 chars.
     - Every entry has ``purpose`` non-empty and ≤120 chars.
@@ -86,6 +87,8 @@ def validate_manifest(payload: dict) -> ValidationResult:
       ``KNOWN_TEST_KINDS = {"postgres_url", "stripe"}``.
     - No duplicate keys within the manifest (cross-domain duplicates are
       fine — handled at reconcile).
+
+    Unknown fields at any level are silently ignored for forward-compatibility.
     """
     errors: list[str] = []
 
@@ -93,6 +96,11 @@ def validate_manifest(payload: dict) -> ValidationResult:
     domain = payload.get("domain")
     if not isinstance(domain, str) or not domain.strip():
         errors.append("manifest 'domain' must be a non-empty string")
+    elif not _SLUG_RE.match(domain.strip()):
+        errors.append(
+            "manifest 'domain' must be a kebab-case slug "
+            "(lowercase letters, digits, hyphens; must start with a letter)"
+        )
 
     # --- secrets list ---
     secrets = payload.get("secrets")
@@ -202,7 +210,7 @@ def read_all_manifests(workspace: Path) -> list[RequiredSecretsManifest]:
     for json_file in sorted(secrets_dir.glob("*.json")):
         try:
             manifests.append(parse_manifest_file(json_file))
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, json.JSONDecodeError, OSError) as exc:
             log.warning(
                 "scaffold.required_secrets.invalid_manifest",
                 path=str(json_file),
@@ -245,6 +253,7 @@ async def reconcile(
     # Build the declared set: {key → purpose} from the union of all manifests.
     # The first manifest that declares a key wins the purpose if two domains
     # both declare the same key (cross-domain dedup).
+    # Files are read in alphabetical order (sorted()), so e.g. auth.json beats billing.json for the same key.
     declared: dict[str, str] = {}
     manifests = read_all_manifests(workspace)
     for manifest in manifests:
@@ -252,60 +261,14 @@ async def reconcile(
             if entry.key not in declared:
                 declared[entry.key] = entry.purpose
 
-    # Open or reuse a session for the whole reconcile pass.
-    _owns_session = session is None
-    if _owns_session:
-        ctx = async_session()
-        session = await ctx.__aenter__()  # type: ignore[assignment]
+    if session is None:
+        async with async_session() as owned_session:
+            report = await _reconcile_body(workspace, repo_id, organization_id, declared, owned_session, report)
+            await owned_session.commit()
     else:
-        ctx = None  # type: ignore[assignment]
+        report = await _reconcile_body(workspace, repo_id, organization_id, declared, session, report)
 
-    try:
-        # Fetch all current rows for this repo.
-        existing_rows: list[dict] = await repo_secrets.list_keys(
-            repo_id, organization_id=organization_id, session=session
-        )
-        existing_by_key: dict[str, dict] = {row["key"]: row for row in existing_rows}
-
-        # --- Process declared keys ---
-        for key, purpose in declared.items():
-            existing = existing_by_key.get(key)
-            if existing is None:
-                # No row → create placeholder.
-                await repo_secrets.upsert_architect_required(
-                    repo_id, key, purpose, organization_id=organization_id, session=session
-                )
-                report.created.append(key)
-            elif existing["source"] == "user":
-                # User row → promote.
-                await repo_secrets.upsert_architect_required(
-                    repo_id, key, purpose, organization_id=organization_id, session=session
-                )
-                report.promoted.append(key)
-            else:
-                # Already architect_required — update purpose if changed.
-                # Either way this is still `unchanged` (source did not flip).
-                if existing.get("purpose") != purpose:
-                    await repo_secrets.upsert_architect_required(
-                        repo_id, key, purpose, organization_id=organization_id, session=session
-                    )
-                report.unchanged.append(key)
-
-        # --- Process architect_required rows that are no longer declared ---
-        for key, existing in existing_by_key.items():
-            if existing["source"] == "architect_required" and key not in declared:
-                await repo_secrets.demote_to_user(
-                    repo_id, key, organization_id=organization_id, session=session
-                )
-                report.demoted.append(key)
-
-        # Single commit for the whole reconcile pass.
-        await session.commit()  # type: ignore[union-attr]
-
-    finally:
-        if _owns_session and ctx is not None:
-            await ctx.__aexit__(None, None, None)
-
+    # Log only on success — exception before this line propagates to the caller.
     log.info(
         "scaffold.required_secrets.reconcile_complete",
         repo_id=repo_id,
@@ -314,6 +277,56 @@ async def reconcile(
         created=report.created,
         unchanged=report.unchanged,
     )
+
+    return report
+
+
+async def _reconcile_body(
+    workspace: Path,
+    repo_id: int,
+    organization_id: int,
+    declared: dict,
+    session: AsyncSession,
+    report: ReconcileReport,
+) -> ReconcileReport:
+    """Inner reconcile logic — runs within a caller-managed session."""
+    # Fetch all current rows for this repo.
+    existing_rows: list[dict] = await repo_secrets.list_keys(
+        repo_id, organization_id=organization_id, session=session
+    )
+    existing_by_key: dict[str, dict] = {row["key"]: row for row in existing_rows}
+
+    # --- Process declared keys ---
+    for key, purpose in declared.items():
+        existing = existing_by_key.get(key)
+        if existing is None:
+            # No row → create placeholder.
+            await repo_secrets.upsert_architect_required(
+                repo_id, key, purpose, organization_id=organization_id, session=session
+            )
+            report.created.append(key)
+        elif existing["source"] == "user":
+            # User row → promote.
+            await repo_secrets.upsert_architect_required(
+                repo_id, key, purpose, organization_id=organization_id, session=session
+            )
+            report.promoted.append(key)
+        else:
+            # Already architect_required — update purpose if changed.
+            # Either way this is still `unchanged` (source did not flip).
+            if existing.get("purpose") != purpose:
+                await repo_secrets.upsert_architect_required(
+                    repo_id, key, purpose, organization_id=organization_id, session=session
+                )
+            report.unchanged.append(key)
+
+    # --- Process architect_required rows that are no longer declared ---
+    for key, existing in existing_by_key.items():
+        if existing["source"] == "architect_required" and key not in declared:
+            await repo_secrets.demote_to_user(
+                repo_id, key, organization_id=organization_id, session=session
+            )
+            report.demoted.append(key)
 
     return report
 
