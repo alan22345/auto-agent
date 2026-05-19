@@ -126,7 +126,16 @@ async def get(
             ),
             {"rid": repo_id, "oid": organization_id, "k": key, "p": passphrase},
         )
-        return row.scalar_one_or_none()
+        value = row.scalar_one_or_none()
+        if value is not None:
+            # Register the plaintext so structlog redacts it from log events.
+            # Imported lazily to avoid a circular import (shared.logging imports
+            # shared.config, which is a peer module — no cycle — but lazy import
+            # makes the dependency direction explicit).
+            from shared.logging import register_secret
+
+            register_secret(value)
+        return value
     finally:
         if owns:
             await sess.close()
