@@ -163,6 +163,8 @@ class AgentLoop:
         home_dir: str | None = None,
         usage_sink: UsageSink | None = None,
         dev_server_log_path: str | None = None,
+        repo_id: int | None = None,
+        organization_id: int | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -188,6 +190,8 @@ class AgentLoop:
         self._home_dir = home_dir           # per-user HOME for the CLI provider's credential vault
         self._usage_sink = usage_sink       # per-task quota gate + usage emission
         self._dev_server_log_path = dev_server_log_path  # path to dev-server log when server is active
+        self._repo_id = repo_id             # repo this agent is operating inside (ADR-019)
+        self._organization_id = organization_id  # org for repo_secrets calls (ADR-019)
 
     @property
     def tools(self) -> ToolRegistry:
@@ -299,6 +303,8 @@ class AgentLoop:
             event_sink=self._event_sink,
             usage_sink=self._usage_sink,
             dev_server_log_path=self._dev_server_log_path,
+            repo_id=self._repo_id,
+            organization_id=self._organization_id,
         )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
