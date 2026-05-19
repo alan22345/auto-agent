@@ -356,6 +356,7 @@ async def dispatch_item(
     home_dir: str | None,
     org_id: int | None,
     slice_name: str | None = None,
+    repo_id: int | None = None,
 ) -> ItemResult:
     """Run one backlog item through up-to-``MAX_ROUNDS`` coder↔reviewer rounds.
 
@@ -430,6 +431,7 @@ async def dispatch_item(
             home_dir=home_dir,
             org_id=org_id,
             slice_name=slice_name,
+            repo_id=repo_id,
         )
         reviewer_entry = TranscriptEntry(
             role="reviewer",

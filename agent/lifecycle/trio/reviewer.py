@@ -474,6 +474,7 @@ async def run_heavy_review(
     home_dir: str | None = None,
     org_id: int | None = None,
     slice_name: str | None = None,
+    repo_id: int | None = None,
 ) -> HeavyReviewResult:
     """Run alignment + grep + smoke + UI for one backlog item.
 
@@ -600,7 +601,7 @@ async def run_heavy_review(
     handle: ServerHandle | None = None
     try:
         if ui_routes:
-            handle = await boot_dev_server(workspace=workspace_root, repo_id=None)  # no repo_id in scope here; propagate via run_heavy_review if needed
+            handle = await boot_dev_server(workspace=workspace_root, repo_id=repo_id)
             if handle.state == "running":
                 ui_failures: list[tuple[str, str]] = []
                 for route in ui_routes:

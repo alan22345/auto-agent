@@ -89,96 +89,125 @@ async def test_coding_clone_repo_passes_repo_id():
 # ---------------------------------------------------------------------------
 
 
+def test_run_heavy_review_accepts_repo_id_param():
+    """run_heavy_review signature has repo_id keyword parameter (ADR-019 T3-followup)."""
+    import inspect
+    from agent.lifecycle.trio.reviewer import run_heavy_review
+
+    sig = inspect.signature(run_heavy_review)
+    assert "repo_id" in sig.parameters, (
+        "run_heavy_review must accept repo_id= keyword argument"
+    )
+    assert sig.parameters["repo_id"].default is None
+
+
 @pytest.mark.asyncio
 async def test_run_heavy_review_passes_repo_id_to_boot_dev_server(tmp_path):
-    """run_heavy_review(repo_id=42) passes repo_id=42 to boot_dev_server."""
+    """run_heavy_review(repo_id=42) passes repo_id=42 to boot_dev_server when UI routes present."""
     from agent.lifecycle.trio import reviewer as heavy_reviewer
 
     # Minimal workspace with required dirs
     (tmp_path / ".auto-agent").mkdir()
 
+    # Item with a UI route so boot_dev_server is invoked
     work_item = {
         "id": "item-1",
-        "title": "Add login",
-        "description": "implement login",
+        "title": "Add login page",
+        "description": "implement login UI",
         "affected_routes": ["/login"],
         "status": "pending",
     }
 
-    boot_mock = AsyncMock()
-    boot_mock.return_value = MagicMock(state="not_running", base_url="http://localhost:3000")
+    boot_mock = AsyncMock(return_value=MagicMock(state="not_running", base_url="http://localhost:3000"))
 
-    fake_alignment = MagicMock()
-    fake_alignment.verdict = "pass"
-    fake_alignment.reason = "ok"
+    # Smoke result: pass (so we proceed to UI inspection)
+    fake_smoke = MagicMock()
+    fake_smoke.verdict = "pass"
+    fake_smoke.summary = "ok"
+    fake_smoke.failures = []
 
     with (
         patch.object(heavy_reviewer, "boot_dev_server", boot_mock),
-        patch.object(heavy_reviewer, "_run_alignment_agent", AsyncMock(return_value=fake_alignment)),
-        patch.object(heavy_reviewer, "grep_diff_for_stubs", return_value=[]),
-        patch.object(heavy_reviewer, "get_diff", AsyncMock(return_value="")),
-        patch.object(heavy_reviewer, "_write_verdict", MagicMock()),
-    ):
-        result = await heavy_reviewer.run_heavy_review(
-            item=work_item,
-            workspace_root=str(tmp_path),
-            base_sha="abc123",
-            grill_output="",
-            repo_id=42,
-        )
-
-    # boot_dev_server is only called when there are ui_routes; verify repo_id
-    # is threaded correctly regardless of whether it was called.
-    # If it was called, repo_id must be 42.
-    if boot_mock.called:
-        _, kwargs = boot_mock.call_args
-        assert kwargs.get("repo_id") == 42, (
-            f"Expected boot_dev_server(repo_id=42), got {kwargs}"
-        )
-
-
-@pytest.mark.asyncio
-async def test_run_final_review_passes_repo_id_to_boot_dev_server(tmp_path):
-    """run_final_review(repo_id=42) threads repo_id into _smoke_and_ui → boot_dev_server."""
-    from agent.lifecycle.trio import final_reviewer
-
-    # Minimal workspace layout
-    (tmp_path / ".auto-agent").mkdir()
-
-    boot_mock = AsyncMock()
-    boot_mock.return_value = MagicMock(state="not_running", base_url="http://localhost:3000")
-
-    fake_review_result = MagicMock()
-    fake_review_result.verdict = "passed"
-    fake_review_result.gaps = []
-    fake_review_result.summary = "all good"
-
-    with (
-        patch.object(final_reviewer, "boot_dev_server", boot_mock),
-        patch.object(
-            final_reviewer, "_run_final_review_agent",
-            AsyncMock(return_value=""),
-        ),
-        patch.object(
-            final_reviewer, "_read_final_review_json",
-            MagicMock(return_value={"verdict": "passed", "gaps": [], "summary": "ok"}),
-        ),
+        patch.object(heavy_reviewer, "_load_item_diff", AsyncMock(return_value="diff content")),
+        patch.object(heavy_reviewer, "_run_alignment_agent", AsyncMock(return_value="PASS")),
+        patch.object(heavy_reviewer, "grep_diff_for_stubs", return_value=MagicMock(violations=[])),
+        patch.object(heavy_reviewer, "run_smoke_agent", AsyncMock(return_value=fake_smoke)),
+        patch.object(heavy_reviewer, "read_gate_file", MagicMock(return_value="")),
+        patch.object(heavy_reviewer, "_write_review_json", MagicMock()),
+        patch.object(heavy_reviewer, "is_ui_route", return_value=True),
+        patch.object(heavy_reviewer, "infer_routes_from_diff", return_value=[]),
     ):
         try:
-            result = await final_reviewer.run_final_review(
+            await heavy_reviewer.run_heavy_review(
+                item=work_item,
                 workspace_root=str(tmp_path),
-                parent_task_id=99,
+                base_sha="abc123",
+                grill_output="",
                 repo_id=42,
             )
         except Exception:
             pass  # we only care that boot_dev_server got the right args
 
-    # If boot_dev_server was called, repo_id must be 42.
-    if boot_mock.called:
-        _, kwargs = boot_mock.call_args
-        assert kwargs.get("repo_id") == 42, (
-            f"Expected boot_dev_server(repo_id=42), got {kwargs}"
-        )
+    # boot_dev_server must have been called (item has /login which is_ui_route=True)
+    assert boot_mock.called, "boot_dev_server should have been called for UI route /login"
+    _, kwargs = boot_mock.call_args
+    assert kwargs.get("repo_id") == 42, (
+        f"Expected boot_dev_server(repo_id=42), got {kwargs}"
+    )
+
+
+def test_run_final_review_accepts_repo_id_param():
+    """run_final_review signature has repo_id keyword parameter (ADR-019 T3-followup)."""
+    import inspect
+    from agent.lifecycle.trio.final_reviewer import run_final_review
+
+    sig = inspect.signature(run_final_review)
+    assert "repo_id" in sig.parameters, (
+        "run_final_review must accept repo_id= keyword argument"
+    )
+    assert sig.parameters["repo_id"].default is None
+
+
+@pytest.mark.asyncio
+async def test_run_final_review_passes_repo_id_to_smoke_and_ui(tmp_path):
+    """run_final_review(repo_id=42) threads repo_id into _smoke_and_ui."""
+    from agent.lifecycle.trio import final_reviewer
+
+    # Minimal workspace layout
+    (tmp_path / ".auto-agent").mkdir()
+
+    captured_smoke_and_ui_kwargs: list[dict] = []
+
+    async def fake_smoke_and_ui(**kwargs):
+        captured_smoke_and_ui_kwargs.append(kwargs)
+        return [], "smoke: pass"
+
+    with (
+        patch.object(final_reviewer, "_smoke_and_ui", fake_smoke_and_ui),
+        patch.object(final_reviewer, "_load_integrated_diff", AsyncMock(return_value="diff")),
+        patch.object(final_reviewer, "_read_design", MagicMock(return_value="design")),
+        patch.object(final_reviewer, "_read_backlog_items", MagicMock(return_value=[])),
+        patch.object(final_reviewer, "_read_reviews", MagicMock(return_value=[])),
+        patch.object(final_reviewer, "_union_affected_routes", MagicMock(return_value=[])),
+        patch.object(final_reviewer, "_run_final_review_agent", AsyncMock(return_value="")),
+        patch.object(final_reviewer, "read_gate_file", MagicMock(
+            return_value={"verdict": "passed", "gaps": [], "summary": "ok"}
+        )),
+        patch.object(final_reviewer, "_write_final_review_json", MagicMock()),
+    ):
+        try:
+            await final_reviewer.run_final_review(
+                workspace_root=str(tmp_path),
+                parent_task_id=99,
+                repo_id=42,
+            )
+        except Exception:
+            pass  # we only care that _smoke_and_ui got the right args
+
+    assert len(captured_smoke_and_ui_kwargs) >= 1, "_smoke_and_ui was never called"
+    assert captured_smoke_and_ui_kwargs[0].get("repo_id") == 42, (
+        f"Expected _smoke_and_ui(repo_id=42), got {captured_smoke_and_ui_kwargs[0]}"
+    )
 
 
 # ---------------------------------------------------------------------------

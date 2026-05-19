@@ -642,6 +642,7 @@ async def run_trio_parent(
     repo_name: str | None = None
     home_dir: str | None = None
     org_id: int | None = None
+    parent_repo_id: int | None = None
 
     while True:
         # Re-read the backlog each iteration in case the architect or a
@@ -668,6 +669,7 @@ async def run_trio_parent(
                 repo_name = p.repo.name if p.repo else None
                 home_dir = await home_dir_for_task(p)
                 org_id = p.organization_id
+                parent_repo_id = p.repo_id
 
         _, item = pending[0]
         item_id = item.get("id", "(unknown)")
@@ -682,6 +684,7 @@ async def run_trio_parent(
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
+            repo_id=parent_repo_id,
         )
 
         if result.ok:
@@ -906,6 +909,7 @@ async def _drive_final_review_and_pr(
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
+            repo_id=parent.repo_id,
         )
 
         if review.verdict == "passed":
