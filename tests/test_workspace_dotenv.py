@@ -163,7 +163,8 @@ async def test_write_repo_dotenv_escapes_special_values(tmp_path: Path):
     content = (tmp_path / ".env").read_text()
 
     # Values with special chars must be double-quoted in the output.
-    assert '"line1\\nline2"' in content or '"line1\nline2"' in content or 'WITH_NEWLINE="' in content
+    # The newline can appear either escaped as \n or as a literal newline inside the quoted value.
+    assert '"line1\\nline2"' in content or '"line1\nline2"' in content
     assert 'WITH_QUOTES="' in content
     assert 'WITH_BACKSLASH="' in content
 
