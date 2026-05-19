@@ -12,6 +12,7 @@ import type {
   LatestRepoGraphData,
   RepoData,
   RepoGraphConfigData,
+  RepoGraphProgressData,
   RepoGraphRefreshResponse,
   UpdateRepoGraphRequest,
 } from '@/types/api';
@@ -126,4 +127,11 @@ export async function getRepoGraphStaleness(
 // reuses the existing /api/repos endpoint.
 export async function listRepos(): Promise<RepoData[]> {
   return api<RepoData[]>('/api/repos');
+}
+
+// Fetch the current progress of a code graph analysis.
+export async function getRepoGraphProgress(
+  repoId: number,
+): Promise<RepoGraphProgressData> {
+  return api<RepoGraphProgressData>(`/api/repos/${repoId}/graph/progress`);
 }
