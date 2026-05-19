@@ -346,33 +346,50 @@ async def test_upsert_architect_required_creates_null_row_when_none_exists():
 
 
 async def test_upsert_architect_required_flips_existing_user_row():
-    """On existing user row: flips source to architect_required, sets purpose."""
-    # First call: execute returns the existing row (for SELECT check)
-    # Second call: execute for the UPDATE
-    existing_row = _StubResult(scalar=1)  # row exists
-    update_result = _StubResult()
-
-    call_count = 0
-
-    async def side_effect(query, params=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return existing_row
-        return update_result
-
-    sess = AsyncMock()
-    sess.execute = AsyncMock(side_effect=side_effect)
-    sess.commit = AsyncMock()
-    sess.close = AsyncMock()
+    """On existing user row: flips source to architect_required, sets purpose, preserves value_enc."""
+    sess = _stub_session()
 
     with patch.object(repo_secrets.settings, "secrets_passphrase", "p"):
         await repo_secrets.upsert_architect_required(
             1, "STRIPE_API_KEY", "Charge cards via Stripe",
             organization_id=7, session=sess,
         )
-    # Should have executed at least 2 SQL statements (SELECT + UPDATE or single UPSERT)
+
     assert sess.execute.await_count >= 1
+
+    # Collect all SQL strings issued during the call
+    all_calls = sess.execute.await_args_list
+    sqls = [str(c[0][0]) for c in all_calls]
+    params_list = [c[0][1] if len(c[0]) > 1 else {} for c in all_calls]
+    combined_sql = " ".join(sqls)
+
+    # There must be an UPDATE/UPSERT that sets source to architect_required
+    assert any(
+        "architect_required" in s for s in sqls
+    ), f"'architect_required' not found in any SQL: {sqls}"
+
+    # The purpose bind-parameter must appear in the SET clause (either literal or :pur)
+    assert any(
+        "purpose" in s for s in sqls
+    ), f"'purpose' not found in any SQL: {sqls}"
+
+    # The purpose value must be passed as the :pur param (not hardcoded)
+    assert any(
+        p.get("pur") == "Charge cards via Stripe" for p in params_list if isinstance(p, dict)
+    ), f"':pur' param not bound to expected value in params: {params_list}"
+
+    # value_enc must NOT be updated — it must not appear in any SET clause
+    for sql in sqls:
+        upper = sql.upper()
+        # If this is an UPDATE statement, value_enc must not be in the SET portion
+        if "UPDATE" in upper or "ON CONFLICT" in upper:
+            # Extract the SET clause (after SET keyword)
+            set_idx = upper.find("SET ")
+            if set_idx != -1:
+                set_clause = upper[set_idx:]
+                assert "VALUE_ENC" not in set_clause, (
+                    f"value_enc unexpectedly appears in SET clause: {sql}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -385,12 +402,35 @@ async def test_demote_to_user_flips_source_clears_purpose():
     await repo_secrets.demote_to_user(1, "STRIPE_API_KEY", organization_id=7, session=sess)
     assert sess.execute.await_count == 1
     args, _ = sess.execute.await_args
-    sql = str(args[0]).lower()
-    assert "update" in sql
+    sql = str(args[0])
+    sql_upper = sql.upper()
     params = args[1]
+
+    # Basic routing params
     assert params["rid"] == 1
     assert params["k"] == "STRIPE_API_KEY"
     assert params["oid"] == 7
+
+    # Must be an UPDATE statement
+    assert "UPDATE" in sql_upper, f"Expected UPDATE statement, got: {sql}"
+
+    # source must be flipped to 'user' in the SET clause
+    assert "'user'" in sql or (
+        ":src" in sql and params.get("src") == "user"
+    ), f"source = 'user' not found in SQL or params: sql={sql!r}, params={params}"
+
+    # purpose must be set to NULL — either literally or via :pur bound to None
+    assert "purpose = NULL" in sql_upper or "PURPOSE = NULL" in sql_upper or (
+        ":pur" in sql and params.get("pur") is None
+    ), f"purpose = NULL not found in SQL or params: sql={sql!r}, params={params}"
+
+    # value_enc must NOT appear in the SET clause (existing encrypted value preserved)
+    set_idx = sql_upper.find("SET ")
+    assert set_idx != -1, f"No SET clause found in UPDATE: {sql}"
+    set_clause = sql_upper[set_idx:]
+    assert "VALUE_ENC" not in set_clause, (
+        f"value_enc unexpectedly appears in SET clause: {sql}"
+    )
 
 
 # ---------------------------------------------------------------------------
