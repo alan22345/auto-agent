@@ -542,6 +542,48 @@ class SecretTestResponse(BaseModel):
     detail: str = ""
 
 
+# --- Per-repo secrets API (ADR-019) ---
+
+
+class RepoSecretListEntry(BaseModel):
+    """One entry in the per-repo secrets list.  Values are never included."""
+
+    key: str
+    is_set: bool
+    source: str
+    purpose: str | None = None
+    updated_at: datetime | None = None
+
+
+class RepoSecretListResponse(BaseModel):
+    """Response body for GET /repos/{id}/secrets."""
+
+    keys: list[RepoSecretListEntry]
+
+
+class RepoSecretPutRequest(BaseModel):
+    """Body for PUT /repos/{id}/secrets/{key}.
+
+    ``value=None`` or ``value=""`` clears the row (equivalent to DELETE).
+    """
+
+    value: str | None = None
+
+
+class RepoSecretTestResponse(BaseModel):
+    """Response body for POST /repos/{id}/secrets/{key}/test."""
+
+    ok: bool
+    kind: str | None = None
+    message: str | None = None
+
+
+class RepoSecretRevealResponse(BaseModel):
+    """Response body for POST /repos/{id}/secrets/{key}/reveal."""
+
+    value: str | None = None
+
+
 # --- Usage / quota types ---
 
 

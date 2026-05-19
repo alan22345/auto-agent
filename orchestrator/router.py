@@ -25,6 +25,9 @@ from orchestrator.auth import (
 from orchestrator.auth import (
     current_org_id as current_org_id_dep,
 )
+from orchestrator.auth import (
+    current_user_id as current_user_id_dep,
+)
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
 from orchestrator.freeform import promote_task_to_main, revert_task_from_dev
@@ -98,6 +101,10 @@ from shared.types import (
     RepoGraphConfigData,
     RepoGraphRefreshResponse,
     RepoResponse,
+    RepoSecretListResponse,
+    RepoSecretPutRequest,
+    RepoSecretRevealResponse,
+    RepoSecretTestResponse,
     ReviewAttemptOut,
     ScaffoldArtefactMarkdown,
     ScaffoldDomainAdrEntry,
@@ -785,6 +792,247 @@ async def test_my_secret(
         return SecretTestResponse(ok=False, detail=f"Anthropic returned {r.status_code}")
 
     return SecretTestResponse(ok=False, detail="No test handler for this key")
+
+
+# --- Per-repo secrets API (ADR-019) ---
+
+
+def _infer_test_kind(key: str, purpose: str | None) -> str | None:
+    """Infer the test probe kind from the key name or its purpose field.
+
+    Returns one of the known prober identifiers or ``None`` if no match.
+    """
+    if purpose:
+        lower = purpose.lower()
+        if "postgres_url" in lower or "postgresql" in lower:
+            return "postgres_url"
+        if "stripe" in lower:
+            return "stripe"
+
+    ku = key.upper()
+    if ku in ("POSTGRES_URL", "DATABASE_URL", "POSTGRESQL_URL"):
+        return "postgres_url"
+    if ku.startswith("STRIPE"):
+        return "stripe"
+    return None
+
+
+async def _check_repo_access(
+    session: AsyncSession,
+    repo_id: int,
+    org_id: int,
+) -> Repo:
+    """Look up the repo and enforce org membership.
+
+    Raises 404 if no repo with ``repo_id`` exists (or it belongs to a
+    different org — we don't distinguish to avoid cross-org oracle attacks).
+    Raises 403 if the returned repo's ``organization_id`` doesn't match the
+    caller's org (belt-and-suspenders guard; the scoped helper already filters,
+    but we check explicitly so unit tests that pass a wrong-org mock get a 403).
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    # Explicit org check — belt-and-suspenders against bypassed scoped filter.
+    if repo.organization_id != org_id:
+        raise HTTPException(status_code=403, detail="Repo belongs to a different organisation")
+    return repo
+
+
+@router.get("/repos/{repo_id}/secrets")
+async def get_repo_secrets(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoSecretListResponse:
+    """List secret keys for a repo.  Values are never included."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    rows = await _rs.list_keys(
+        repo.id,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    # list_keys returns dicts with key "set"; remap to is_set (avoids shadowing builtin).
+    from shared.types import RepoSecretListEntry
+
+    entries = [
+        RepoSecretListEntry(
+            key=row["key"],
+            is_set=row["set"],
+            source=row["source"],
+            purpose=row.get("purpose"),
+            updated_at=row.get("updated_at"),
+        )
+        for row in rows
+    ]
+    return RepoSecretListResponse(keys=entries)
+
+
+@router.put("/repos/{repo_id}/secrets/{key}")
+async def put_repo_secret(
+    repo_id: int,
+    key: str,
+    body: RepoSecretPutRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Upsert a repo secret.  Empty/null value clears the row."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    if body.value is None or body.value == "":
+        await _rs.delete(
+            repo.id,
+            key,
+            organization_id=repo.organization_id,
+            session=session,
+        )
+        await session.commit()
+        return {"ok": True, "cleared": True}
+
+    await _rs.set(
+        repo.id,
+        key,
+        body.value,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    await session.commit()
+    return {"ok": True, "cleared": False}
+
+
+@router.delete("/repos/{repo_id}/secrets/{key}", status_code=204)
+async def delete_repo_secret(
+    repo_id: int,
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> Response:
+    """Delete a repo secret.  Returns 204."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    await _rs.delete(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/repos/{repo_id}/secrets/{key}/reveal")
+async def reveal_repo_secret(
+    repo_id: int,
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+    user_id: int = Depends(current_user_id_dep),
+) -> RepoSecretRevealResponse:
+    """Return the plaintext value for a repo secret.
+
+    Audit-logged via structlog with event=secret_reveal.
+    **No** event is published on the WebSocket bus (ADR-019 §9).
+    """
+    import structlog
+
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    value = await _rs.get(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+
+    structlog.get_logger().info(
+        "secret_reveal",
+        user_id=user_id,
+        repo_id=repo_id,
+        key=key,
+    )
+
+    return RepoSecretRevealResponse(value=value)
+
+
+@router.post("/repos/{repo_id}/secrets/{key}/test")
+async def probe_repo_secret(
+    repo_id: int,
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoSecretTestResponse:
+    """Run a minimal connectivity probe for a repo secret.
+
+    Supported probers: ``postgres_url`` (URL parse only), ``stripe``
+    (HTTP HEAD to api.stripe.com/v1/balance).  Unknown key names return
+    ``{ok: false, kind: null, message: "no test kind configured"}``.
+    """
+    import httpx
+
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    # Fetch the row metadata to determine purpose/test_kind.
+    rows = await _rs.list_keys(
+        repo.id,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    purpose = next((r.get("purpose") for r in rows if r["key"] == key), None)
+    kind = _infer_test_kind(key, purpose)
+
+    if kind is None:
+        return RepoSecretTestResponse(
+            ok=False,
+            kind=None,
+            message="no test kind configured",
+        )
+
+    value = await _rs.get(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    if not value:
+        return RepoSecretTestResponse(ok=False, kind=kind, message="Not set")
+
+    if kind == "postgres_url":
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(value)
+            if parsed.scheme not in ("postgresql", "postgres") or not parsed.hostname:
+                raise ValueError("bad scheme or missing host")
+            return RepoSecretTestResponse(ok=True, kind=kind, message=None)
+        except Exception:
+            return RepoSecretTestResponse(
+                ok=False, kind=kind, message="Malformed PostgreSQL URL"
+            )
+
+    if kind == "stripe":
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.head(
+                "https://api.stripe.com/v1/balance",
+                headers={"Authorization": f"Bearer {value}"},
+            )
+        if r.status_code == 200:
+            return RepoSecretTestResponse(ok=True, kind=kind, message=None)
+        return RepoSecretTestResponse(
+            ok=False, kind=kind, message=f"Stripe returned {r.status_code}"
+        )
+
+    return RepoSecretTestResponse(ok=False, kind=kind, message="no test kind configured")
 
 
 @router.post("/auth/users")
