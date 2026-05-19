@@ -14,6 +14,7 @@ from agent.tools.grep_tool import GrepTool
 from agent.tools.query_repo_graph import QueryRepoGraphTool
 from agent.tools.recall_memory import RecallMemoryTool
 from agent.tools.remember_memory import RememberMemoryTool
+from agent.tools.secrets import GetSecretTool, ListRepoSecretsTool
 from agent.tools.skill import SkillTool
 from agent.tools.subagent import SubagentTool
 from agent.tools.test_runner import TestRunnerTool
@@ -46,6 +47,8 @@ def create_default_registry(
     registry.register(SkillTool())  # Load superpowers methodology
     registry.register(RecallMemoryTool())  # Query shared team-memory graph
     registry.register(QueryRepoGraphTool())  # Query the repo's code graph (ADR-016 Phase 6)
+    registry.register(ListRepoSecretsTool())  # ADR-019: list repo secret keys (no values)
+    registry.register(GetSecretTool())  # ADR-019: read one secret value into agent context
 
     if with_web:
         from shared.config import settings

@@ -78,7 +78,7 @@ async def run(task: Task) -> str:
     gaps: list[dict[str, Any]] = []
     summary_lines: list[str] = []
 
-    handle = await verify_primitives.boot_dev_server(workspace=workspace)
+    handle = await verify_primitives.boot_dev_server(workspace=workspace, repo_id=task.repo_id)
     try:
         if handle.state == "failed":
             gaps.append(

@@ -164,6 +164,7 @@ async def handle_merge_conflict_resolution(task_id: int, pr_url: str) -> None:
             workspace_name=f"conflict-resolve-{task_id}",
             user_id=getattr(task, "created_by_user_id", None),
             organization_id=getattr(task, "organization_id", None),
+            repo_id=getattr(task, "repo_id", None),
         )
     except Exception:
         log.exception(f"Clone failed for conflict resolution task #{task_id}")

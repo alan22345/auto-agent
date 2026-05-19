@@ -83,6 +83,10 @@ class TaskStatus(str, enum.Enum):
     # the user to answer the domain-grill agent's pending question.
     AWAITING_DOMAIN_GRILL        = "awaiting_domain_grill"
     AWAITING_DOMAIN_ADR_APPROVAL = "awaiting_domain_adr_approval"
+    # ADR-019 T7 — gate between Phase C (domain ADR approval) and Phase D
+    # (child trio dispatch). Parent parks here until every architect-required
+    # secret has a populated value_enc in repo_secrets.
+    AWAITING_REQUIRED_SECRETS    = "awaiting_required_secrets"
     DISPATCHING_DOMAIN_BUILDS    = "dispatching_domain_builds"
     BUILDING_DOMAINS             = "building_domains"
     AWAITING_FINAL_VERIFICATION  = "awaiting_final_verification"
@@ -652,6 +656,53 @@ class RepoGraph(Base):
     # 'ok' / 'partial' — surface failures-isolated-per-area state in the UI.
     status = Column(String(16), nullable=False, default="ok", server_default="ok")
     graph_json = Column(JSONB, nullable=False)
+
+
+# --- Per-repo project secrets vault (ADR-019) ---------------------------------
+#
+# `RepoSecret` stores project credentials per repo. Unlike `UserSecret` (which
+# is per-user and has a closed key allowlist), this table accepts any uppercase
+# env-var-style key and supports two sources: 'user' (typed by the user) and
+# 'architect_required' (declared by the domain architect as a project need).
+# value_enc is nullable so architect-declared rows can exist as placeholders
+# before the user populates them.
+#
+# Read/written via shared/repo_secrets.py — never instantiate directly.
+
+
+class RepoSecret(Base):
+    """Per-repo, per-org encrypted project secret. Read/written via
+    shared/repo_secrets.py — never instantiate directly. ``value_enc`` is
+    pgcrypto-encrypted ciphertext; nullable so architect-required rows can
+    exist before the user populates them.
+
+    source = 'user' | 'architect_required'
+    purpose is populated when source = 'architect_required' to explain to the
+    user why the key is needed.
+    """
+
+    __tablename__ = "repo_secrets"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "key", name="uq_repo_secrets_repo_key"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(
+        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    key = Column(String(255), nullable=False)
+    value_enc = Column(LargeBinary, nullable=True)
+    source = Column(String(32), nullable=False, default="user", server_default="user")
+    purpose = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=_utcnow, nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+    )
     is_complete = Column(
         Boolean,
         nullable=False,

@@ -79,7 +79,7 @@ async def run(task: Task) -> str:
         f"Task title: {task.title}\n\n"
         "Now write the system-level ADR. Use the `submit-root-adr` "
         "skill to produce `.auto-agent/adrs/000-system.md`. Remember the "
-        "≤7 domains cap."
+        "≤10 domains cap."
     )
 
     target = os.path.join(workspace, ROOT_ADR_PATH)

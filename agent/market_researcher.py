@@ -54,6 +54,7 @@ async def run_market_research(
             0,
             config.dev_branch or repo.default_branch,
             workspace_name=ws_name,
+            repo_id=repo.id,
         )
     except Exception:
         log.exception("market researcher: clone failed for repo=%s", repo.name)

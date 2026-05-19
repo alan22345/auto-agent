@@ -79,6 +79,7 @@ async def answer_architect_question(parent_task_id: int) -> None:
         product_brief = repo.product_brief or ""
         repo_url = repo.url
         repo_name = repo.name
+        repo_id = repo.id
         default_branch = repo.default_branch or "main"
 
     if not product_brief:
@@ -93,6 +94,7 @@ async def answer_architect_question(parent_task_id: int) -> None:
         parent_task_id,
         default_branch,
         workspace_name=f"po-{repo_name.replace('/', '-')}-{parent_task_id}",
+        repo_id=repo_id,
     )
     workspace_root = _workspace_root(workspace)
 

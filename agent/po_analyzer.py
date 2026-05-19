@@ -199,7 +199,8 @@ async def handle_po_analysis(
 
     ws_name = f"po-{repo.name.replace('/', '-')}"
     workspace = await clone_repo(
-        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name
+        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name,
+        repo_id=repo.id,
     )
 
     prompt = build_po_analysis_prompt(

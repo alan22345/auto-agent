@@ -31,6 +31,7 @@ Return shape:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -39,7 +40,12 @@ from sqlalchemy import select
 from agent.lifecycle.factory import create_agent, home_dir_for_task
 from agent.lifecycle.scaffold import domain_grill
 from agent.lifecycle.scaffold._workspace import prepare_scaffold_workspace
-from agent.lifecycle.scaffold.prompts import DOMAIN_ARCHITECT_SYSTEM
+from agent.lifecycle.scaffold.prompts import domain_architect_system
+from agent.lifecycle.scaffold.required_secrets import (
+    parse_manifest_file,
+    read_all_manifests,
+    reconcile,
+)
 from agent.lifecycle.scaffold.validators import (
     parse_domains,
     validate_domain_adr,
@@ -50,6 +56,7 @@ from agent.lifecycle.workspace_paths import (
     domain_adr_path,
     domain_grill_path,
 )
+from shared import repo_secrets
 from shared.database import async_session
 
 if TYPE_CHECKING:
@@ -101,6 +108,11 @@ async def _persist_current_domain_idx(task_id: int, value: int) -> None:
         new_bucket[_SCAFFOLD_KEY] = new_scaffold
         live.subtasks = new_bucket
         await s.commit()
+
+
+def _workspace_as_path(workspace: str) -> Path:
+    """Convert the workspace string to a ``pathlib.Path``."""
+    return Path(workspace)
 
 
 def _read_text(path: str) -> str:
@@ -215,10 +227,33 @@ async def run(task: Task) -> dict[str, Any]:
         grill_summary_abs = os.path.join(workspace, grill_summary_rel)
         grill_summary_text = _read_text(grill_summary_abs)
 
-        system_prompt = DOMAIN_ARCHITECT_SYSTEM.format(
+        # -- Collect repo-secret state so the prompt can show what's already set.
+        workspace_path = _workspace_as_path(workspace)
+        currently_set: list[str] = []
+        already_declared: list[tuple[str, str]] = []
+        if task.repo_id and task.organization_id:
+            try:
+                key_rows = await repo_secrets.list_keys(
+                    task.repo_id,
+                    organization_id=task.organization_id,
+                )
+                currently_set = [row["key"] for row in key_rows if row.get("set")]
+            except Exception:
+                # Non-fatal: prompt degrades gracefully to "(none set)".
+                pass
+            # Read sibling manifests already on disk (previously written domains).
+            sibling_manifests = read_all_manifests(workspace_path)
+            for manifest in sibling_manifests:
+                if manifest.domain != slug:
+                    for entry_item in manifest.secrets:
+                        already_declared.append((entry_item.key, manifest.domain))
+
+        system_prompt = domain_architect_system(
             domain_name=name,
             domain_slug=slug,
             index=idx,
+            currently_set=currently_set,
+            already_declared=already_declared,
         )
 
         prompt = (
@@ -276,6 +311,61 @@ async def run(task: Task) -> dict[str, Any]:
                 "Errors:\n" + "\n".join(f"- {e}" for e in result.errors)
             )
             await agent.run(retry_prompt, system=system_prompt, resume=True)
+
+        # -- Post-run: validate the required-secrets manifest if the architect
+        #    wrote one, then ALWAYS run reconcile so DB rows stay in sync.
+        req_secrets_rel = f".auto-agent/required_secrets/{slug}.json"
+        req_secrets_abs = os.path.join(workspace, req_secrets_rel)
+        if os.path.isfile(req_secrets_abs):
+            manifest_path = Path(req_secrets_abs)
+            for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
+                try:
+                    parse_manifest_file(manifest_path)
+                    break
+                except (ValueError, Exception) as exc:
+                    if attempt > MAX_VALIDATION_RETRIES:
+                        log.warning(
+                            "scaffold.domain_architect.secrets_manifest_invalid",
+                            task_id=task.id,
+                            slug=slug,
+                            error=str(exc),
+                        )
+                        raise
+                    retry_secrets_prompt = (
+                        "Your required-secrets manifest failed validation. Fix "
+                        "the errors below and re-submit via `submit-required-secrets` "
+                        "(overwriting the same file). Do not output the manifest in "
+                        "chat — just call the skill and stop.\n\n"
+                        f"Error: {exc}"
+                    )
+                    await agent.run(retry_secrets_prompt, system=system_prompt, resume=True)
+
+        # Reconcile runs unconditionally — even when no manifest was written this
+        # round.  This ensures that keys dropped by a revise pass get demoted
+        # rather than lingering as stale architect_required rows.
+        if task.repo_id and task.organization_id:
+            try:
+                report = await reconcile(
+                    workspace_path,
+                    repo_id=task.repo_id,
+                    organization_id=task.organization_id,
+                )
+                log.info(
+                    "scaffold.domain_architect.reconcile_complete",
+                    task_id=task.id,
+                    slug=slug,
+                    promoted=report.promoted,
+                    demoted=report.demoted,
+                    created=report.created,
+                    unchanged=report.unchanged,
+                )
+            except Exception as exc:
+                log.warning(
+                    "scaffold.domain_architect.reconcile_failed",
+                    task_id=task.id,
+                    slug=slug,
+                    error=str(exc),
+                )
 
         entry = dict(domain)
         entry["index"] = idx

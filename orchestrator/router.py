@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from croniter import croniter
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Path, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
@@ -24,6 +24,9 @@ from orchestrator.auth import (
 )
 from orchestrator.auth import (
     current_org_id as current_org_id_dep,
+)
+from orchestrator.auth import (
+    current_user_id as current_user_id_dep,
 )
 from orchestrator.deduplicator import find_duplicate_by_source_id, find_duplicate_by_title
 from orchestrator.feedback import analyze_patterns, get_feedback_summary, record_outcome
@@ -99,6 +102,10 @@ from shared.types import (
     RepoGraphProgressData,
     RepoGraphRefreshResponse,
     RepoResponse,
+    RepoSecretListResponse,
+    RepoSecretPutRequest,
+    RepoSecretRevealResponse,
+    RepoSecretTestResponse,
     ReviewAttemptOut,
     ScaffoldArtefactMarkdown,
     ScaffoldDomainAdrEntry,
@@ -786,6 +793,261 @@ async def test_my_secret(
         return SecretTestResponse(ok=False, detail=f"Anthropic returned {r.status_code}")
 
     return SecretTestResponse(ok=False, detail="No test handler for this key")
+
+
+# --- Per-repo secrets API (ADR-019) ---
+
+
+def _infer_test_kind(key: str, purpose: str | None) -> str | None:
+    """Infer the test probe kind from the key name or its purpose field.
+
+    Returns one of the known prober identifiers or ``None`` if no match.
+    """
+    if purpose:
+        lower = purpose.lower()
+        if "postgres_url" in lower or "postgresql" in lower:
+            return "postgres_url"
+        if "stripe" in lower:
+            return "stripe"
+
+    ku = key.upper()
+    if ku in ("POSTGRES_URL", "DATABASE_URL", "POSTGRESQL_URL"):
+        return "postgres_url"
+    if ku.startswith("STRIPE"):
+        return "stripe"
+    return None
+
+
+async def _check_repo_access(
+    session: AsyncSession,
+    repo_id: int,
+    org_id: int,
+) -> Repo:
+    """Look up the repo and enforce org membership.
+
+    Raises 404 if no repo with ``repo_id`` exists (or it belongs to a
+    different org — we don't distinguish to avoid cross-org oracle attacks).
+    Raises 403 if the returned repo's ``organization_id`` doesn't match the
+    caller's org (belt-and-suspenders guard; the scoped helper already filters,
+    but we check explicitly so unit tests that pass a wrong-org mock get a 403).
+    """
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    # Explicit org check — belt-and-suspenders against bypassed scoped filter.
+    if repo.organization_id != org_id:
+        raise HTTPException(status_code=403, detail="Repo belongs to a different organisation")
+    return repo
+
+
+@router.get("/repos/{repo_id}/secrets")
+async def get_repo_secrets(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoSecretListResponse:
+    """List secret keys for a repo.  Values are never included."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    rows = await _rs.list_keys(
+        repo.id,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    # list_keys returns dicts with key "set"; remap to is_set (avoids shadowing builtin).
+    from shared.types import RepoSecretListEntry
+
+    entries = [
+        RepoSecretListEntry(
+            key=row["key"],
+            is_set=row["set"],
+            source=row["source"],
+            purpose=row.get("purpose"),
+            updated_at=row.get("updated_at"),
+        )
+        for row in rows
+    ]
+    return RepoSecretListResponse(keys=entries)
+
+
+@router.put("/repos/{repo_id}/secrets/{key}")
+async def put_repo_secret(
+    repo_id: int,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+    body: RepoSecretPutRequest = ...,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Upsert a repo secret.  Empty/null value clears the row."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    if body.value is None or body.value == "":
+        await _rs.delete(
+            repo.id,
+            key,
+            organization_id=repo.organization_id,
+            session=session,
+        )
+        await session.commit()
+        return {"ok": True, "cleared": True}
+
+    await _rs.set(
+        repo.id,
+        key,
+        body.value,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    await session.commit()
+
+    # ADR-019 T7 — re-evaluate the secrets gate for any SCAFFOLD parent
+    # of this repo currently parked at AWAITING_REQUIRED_SECRETS.
+    parked = await _find_parked_scaffold_parents(session, repo.id)
+    for parked_task in parked:
+        gate_passed = await _recheck_secrets_gate_for_task(parked_task, session)
+        if gate_passed:
+            _dispatch_scaffold_driver(parked_task.id)
+
+    return {"ok": True, "cleared": False}
+
+
+@router.delete("/repos/{repo_id}/secrets/{key}", status_code=204)
+async def delete_repo_secret(
+    repo_id: int,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> Response:
+    """Delete a repo secret.  Returns 204."""
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    await _rs.delete(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/repos/{repo_id}/secrets/{key}/reveal")
+async def reveal_repo_secret(
+    repo_id: int,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+    user_id: int = Depends(current_user_id_dep),
+) -> RepoSecretRevealResponse:
+    """Return the plaintext value for a repo secret.
+
+    Audit-logged via structlog with event=secret_reveal.
+    **No** event is published on the WebSocket bus (ADR-019 §9).
+    """
+    import structlog
+
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    value = await _rs.get(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+
+    structlog.get_logger().info(
+        "secret_reveal",
+        user_id=user_id,
+        repo_id=repo_id,
+        key=key,
+        org_id=org_id,
+    )
+
+    return RepoSecretRevealResponse(value=value)
+
+
+@router.post("/repos/{repo_id}/secrets/{key}/test")
+async def probe_repo_secret(
+    repo_id: int,
+    key: str = Path(..., pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RepoSecretTestResponse:
+    """Run a minimal connectivity probe for a repo secret.
+
+    Supported probers: ``postgres_url`` (URL parse only), ``stripe``
+    (HTTP HEAD to api.stripe.com/v1/balance).  Unknown key names return
+    ``{ok: false, kind: null, message: "no test kind configured"}``.
+    """
+    import httpx
+
+    from shared import repo_secrets as _rs
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+
+    # Fetch the row metadata to determine purpose/test_kind.
+    rows = await _rs.list_keys(
+        repo.id,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    purpose = next((r.get("purpose") for r in rows if r["key"] == key), None)
+    kind = _infer_test_kind(key, purpose)
+
+    if kind is None:
+        return RepoSecretTestResponse(
+            ok=False,
+            kind=None,
+            message="no test kind configured",
+        )
+
+    value = await _rs.get(
+        repo.id,
+        key,
+        organization_id=repo.organization_id,
+        session=session,
+    )
+    if not value:
+        return RepoSecretTestResponse(ok=False, kind=kind, message="Not set")
+
+    if kind == "postgres_url":
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(value)
+            if parsed.scheme not in ("postgresql", "postgres") or not parsed.hostname:
+                raise ValueError("bad scheme or missing host")
+            return RepoSecretTestResponse(ok=True, kind=kind, message=None)
+        except Exception:
+            return RepoSecretTestResponse(
+                ok=False, kind=kind, message="Malformed PostgreSQL URL"
+            )
+
+    if kind == "stripe":
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.head(
+                    "https://api.stripe.com/v1/balance",
+                    headers={"Authorization": f"Bearer {value}"},
+                )
+            ok = r.status_code == 200
+            return RepoSecretTestResponse(
+                ok=ok,
+                kind=kind,
+                message=None if ok else f"Stripe returned {r.status_code}",
+            )
+        except httpx.HTTPError as e:
+            return RepoSecretTestResponse(
+                ok=False, kind=kind, message=f"Connection error: {type(e).__name__}"
+            )
 
 
 @router.post("/auth/users")
@@ -4164,6 +4426,89 @@ async def claude_pair_status(
         claude_auth_status=user.claude_auth_status,
         claude_paired_at=user.claude_paired_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR-019 T7 — Scaffold secrets gate helpers + recheck endpoint
+# ---------------------------------------------------------------------------
+
+
+async def _find_parked_scaffold_parents(
+    session: AsyncSession,
+    repo_id: int,
+) -> list[Task]:
+    """Return SCAFFOLD parent tasks parked at AWAITING_REQUIRED_SECRETS for ``repo_id``."""
+    result = await session.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            Task.status == TaskStatus.AWAITING_REQUIRED_SECRETS,
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def _recheck_secrets_gate_for_task(task: Task, session: AsyncSession) -> bool:
+    """Re-run the gate check for a parked scaffold parent.
+
+    Transitions to DISPATCHING_DOMAIN_BUILDS via
+    ``dispatch_children.check_secrets_gate`` if all required secrets are
+    now populated. Returns True if the gate passed (transition fired),
+    False if still waiting.
+    """
+    from agent.lifecycle.scaffold import dispatch_children as _dc
+
+    return await _dc.check_secrets_gate(task)
+
+
+async def _find_missing_for_task(task: Task, session: AsyncSession) -> list[str]:
+    """Return the list of missing architect-required keys for a parked task."""
+    from shared import repo_secrets as _rs
+
+    return await _rs.list_missing_architect_required(
+        task.repo_id,
+        organization_id=task.organization_id,
+        session=session,
+    )
+
+
+@router.post("/scaffold/{task_id}/recheck-secrets")
+async def scaffold_recheck_secrets(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Manually re-evaluate the secrets gate for a parked scaffold parent.
+
+    ADR-019 T7 — the common unblock path is the PUT-secret trigger; this
+    endpoint is a manual re-poke for cases where the auto-trigger was
+    missed or the user wants to force a re-check.
+
+    - 404 if task not found (or cross-org — scoped query returns None).
+    - 409 if the task is not at AWAITING_REQUIRED_SECRETS.
+    - 200 {unblocked: true, missing: []} if gate passed and driver re-invoked.
+    - 200 {unblocked: false, missing: [...]} if still waiting.
+    """
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    # Belt-and-suspenders cross-org check: the scoped query should have caught
+    # this, but explicitly check anyway so cross-org access returns 403 not 404.
+    if task.organization_id != org_id:
+        raise HTTPException(status_code=403, detail="Task belongs to a different organization")
+    if task.status != TaskStatus.AWAITING_REQUIRED_SECRETS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Not parked on secrets; current status: {task.status.value}",
+        )
+
+    gate_passed = await _recheck_secrets_gate_for_task(task, session)
+    if gate_passed:
+        missing: list[str] = []
+        _dispatch_scaffold_driver(task.id)
+        return {"unblocked": True, "missing": missing}
+
+    missing = await _find_missing_for_task(task, session)
+    return {"unblocked": False, "missing": missing}
 
 
 @router.post("/claude/pair/disconnect")

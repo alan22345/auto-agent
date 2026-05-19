@@ -134,7 +134,8 @@ async def handle_architecture_analysis(session: AsyncSession, config: FreeformCo
 
     ws_name = f"arch-{repo.name.replace('/', '-')}"
     workspace = await clone_repo(
-        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name
+        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name,
+        repo_id=repo.id,
     )
 
     prompt = build_architecture_analysis_prompt(

@@ -249,6 +249,7 @@ async def _prepare_parent_workspace(parent: Task) -> str:
             base_branch,
             user_id=parent.created_by_user_id,
             organization_id=parent.organization_id,
+            repo_id=parent.repo_id,
         )
         await create_branch(workspace, branch)
         return workspace

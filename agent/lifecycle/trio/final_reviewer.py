@@ -172,6 +172,7 @@ async def _smoke_and_ui(
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    repo_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run the dedicated smoke agent over the integrated change, then
     inspect any UI routes.
@@ -216,7 +217,7 @@ async def _smoke_and_ui(
 
     handle: ServerHandle | None = None
     try:
-        handle = await boot_dev_server(workspace=workspace_root)
+        handle = await boot_dev_server(workspace=workspace_root, repo_id=repo_id)
         if handle.state != "running":
             # UI inspection is best-effort once smoke has already passed
             # — don't synthesise a gap just because we couldn't boot
@@ -424,6 +425,7 @@ async def run_final_review(
     home_dir: str | None = None,
     org_id: int | None = None,
     slice_name: str | None = None,
+    repo_id: int | None = None,
 ) -> FinalReviewResult:
     """Run the final reviewer for one round.
 
@@ -462,6 +464,7 @@ async def run_final_review(
         repo_name=repo_name,
         home_dir=home_dir,
         org_id=org_id,
+        repo_id=repo_id,
     )
 
     # Round-aware prompt context.

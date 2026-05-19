@@ -42,6 +42,15 @@ class ToolContext:
     task_id: int | None = None
     # Parent task ID when the current task is a trio child. None otherwise.
     parent_task_id: int | None = None
+    # Repo ID for the workspace the agent is operating inside. Optional —
+    # only set when the agent is tied to a specific repo (coding agents,
+    # scaffold children). Non-repo contexts (PO analyzer, harness) leave
+    # this as None.
+    repo_id: int | None = None
+    # Organization ID for the repo. Optional — populated alongside repo_id.
+    # Required by repo_secrets calls; kept separate so the tools can fail
+    # fast with a clear message if missing.
+    organization_id: int | None = None
 
     def resolve(self, path: str) -> str | None:
         """Resolve a path against the workspace, refusing escapes.

@@ -21,6 +21,9 @@ const STEPS: Step[] = [
   // BUILDING_DOMAIN_ADRS. Park here when paused on a user question.
   { status: 'awaiting_domain_grill', label: 'Domain grill', short: 'C·' },
   { status: 'awaiting_domain_adr_approval', label: 'Domain review', short: 'C*' },
+  // ADR-019 §4 — hard gate between Phase C and Phase D while required
+  // secrets are unpopulated.
+  { status: 'awaiting_required_secrets', label: 'Secrets', short: 'C†' },
   { status: 'dispatching_domain_builds', label: 'Dispatch', short: 'D' },
   { status: 'building_domains', label: 'Building', short: 'D*' },
   { status: 'awaiting_final_verification', label: 'Verify', short: 'E' },

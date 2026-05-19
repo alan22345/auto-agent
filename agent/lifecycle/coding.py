@@ -251,6 +251,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
+        repo_id=task.repo_id,
     )
 
     # Reuse existing branch or generate new one
@@ -382,6 +383,7 @@ async def _handle_coding_single(
             with_browser=server_handle is not None,
             with_consult_architect=trio_child,
             dev_server_log_path=server_handle.log_path if server_handle else None,
+            repo_id=task.repo_id,
         )
         result = await agent.run(coding_prompt, resume=is_continuation)
     finally:
@@ -414,6 +416,7 @@ async def _handle_coding_single(
             task_id=task_id,
             home_dir=await home_dir_for_task(task),
             org_id=task.organization_id,
+            repo_id=task.repo_id,
         )
         await reflection_agent.run(MEMORY_REFLECTION_PROMPT, resume=True)
         log.info(f"Task #{task_id}: memory reflection complete")
@@ -518,6 +521,7 @@ async def _handle_coding_with_subtasks(
             max_turns=40,
             home_dir=await home_dir_for_task(task),
             org_id=task.organization_id,
+            repo_id=task.repo_id,
         )
         result = await agent.run(prompt, resume=False)
         output = result.output
@@ -805,6 +809,7 @@ async def _finish_coding(
             task_id=task_id,
             home_dir=await home_dir_for_task(task),
             org_id=task.organization_id,
+            repo_id=task.repo_id,
         )
         result = await agent.run(review_prompt, resume=True)
         review_output = result.output

@@ -246,6 +246,7 @@ async def _run_sub_architect_slice(
     items: list[dict[str, Any]] = backlog_outcome["items"]
 
     # 3. Per-item builder→heavy-review loop ---------------------------------
+    repo_id = repo.id if repo is not None else None
     per_item_outcome = await _run_slice_per_item_loop(
         workspace_root=workspace_root,
         slice_name=slice_name,
@@ -253,6 +254,7 @@ async def _run_sub_architect_slice(
         items=items,
         repo_name=repo_name,
         org_id=org_id,
+        repo_id=repo_id,
     )
     if per_item_outcome["status"] != "completed":
         return per_item_outcome
@@ -265,6 +267,7 @@ async def _run_sub_architect_slice(
         items=items,
         repo_name=repo_name,
         org_id=org_id,
+        repo_id=repo_id,
     )
     return final_outcome
 
@@ -535,6 +538,7 @@ async def _run_slice_per_item_loop(
     items: list[dict[str, Any]],
     repo_name: str | None,
     org_id: int | None,
+    repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Walk the slice backlog through the parent dispatcher with slice_name.
 
@@ -554,6 +558,7 @@ async def _run_slice_per_item_loop(
             home_dir=None,
             org_id=org_id,
             slice_name=slice_name,
+            repo_id=repo_id,
         )
         if not result.ok:
             reason = result.failure_reason or (
@@ -577,6 +582,7 @@ async def _run_slice_final_review(
     items: list[dict[str, Any]],
     repo_name: str | None,
     org_id: int | None,
+    repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Run the slice-scoped final reviewer.
 
@@ -598,6 +604,7 @@ async def _run_slice_final_review(
         home_dir=None,
         org_id=org_id,
         slice_name=slice_name,
+        repo_id=repo_id,
     )
 
     if result.verdict == "passed":
@@ -611,6 +618,7 @@ async def _run_slice_final_review(
         gaps=result.gaps,
         repo_name=repo_name,
         org_id=org_id,
+        repo_id=repo_id,
     )
     if gap_fix_outcome["status"] != "completed":
         return gap_fix_outcome
@@ -627,6 +635,7 @@ async def _run_slice_final_review(
         home_dir=None,
         org_id=org_id,
         slice_name=slice_name,
+        repo_id=repo_id,
     )
     if rerun.verdict == "passed":
         return {"status": "completed"}
@@ -648,6 +657,7 @@ async def _run_slice_gap_fix(
     gaps: list[dict[str, Any]],
     repo_name: str | None,
     org_id: int | None,
+    repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Resume the slice architect's session and ask it to close gaps.
 
@@ -732,6 +742,7 @@ async def _run_slice_gap_fix(
             items=new_items,
             repo_name=repo_name,
             org_id=org_id,
+            repo_id=repo_id,
         )
 
     return {

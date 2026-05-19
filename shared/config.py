@@ -128,3 +128,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def reserved_env_keys() -> frozenset[str]:
+    """Env vars that auto-agent reads via Settings — must NOT leak to scaffolded projects.
+
+    Derived from the field names of ``Settings`` so the list cannot drift behind
+    the codebase. Every new ``Settings`` field is automatically protected.
+    """
+    return frozenset(name.upper() for name in Settings.model_fields)

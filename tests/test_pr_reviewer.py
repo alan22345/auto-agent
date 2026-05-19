@@ -60,6 +60,7 @@ class _FakeTask:
         pr_url: str = "http://gh/pr/1",
         base_branch: str = "main",
         branch_name: str = "feat/x",
+        repo_id: int | None = None,
     ):
         self.id = task_id
         self.pr_url = pr_url
@@ -67,6 +68,7 @@ class _FakeTask:
         self.branch_name = branch_name
         self.title = "Sample task"
         self.description = "Sample description"
+        self.repo_id = repo_id
 
 
 # A clean diff (no stub patterns, one fastapi route touched).

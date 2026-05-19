@@ -52,7 +52,7 @@ One architect agent produces the system-level ADR.
   - Bounded contexts / domains, each with a one-paragraph scope, public surface, dependencies on other domains.
   - Cross-cutting concerns (auth, observability, deployment, data layer).
   - Named domain list for Phase C: `domains: [{name, scope_summary}, ...]`.
-- **Bounded at ≤7 domains.** If the root architect emits >7 it's rejected with feedback and re-tried in the same session (architect's persisted session model from ADR-015 §13). After 2 rejections, escalate.
+- **Bounded at ≤10 domains.** If the root architect emits >10 it's rejected with feedback and re-tried in the same session (architect's persisted session model from ADR-015 §13). After 2 rejections, escalate.
 
 State transition: `BUILDING_ROOT_ADR → AWAITING_ROOT_ADR_APPROVAL`.
 

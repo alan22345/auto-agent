@@ -145,6 +145,8 @@ async def run_search_turn(
         on_tool_call=on_tool_call,
         on_thinking=on_thinking,
         event_sink=event_sink,
+        repo_id=None,        # search loops are not repo-scoped
+        organization_id=None,
     )
 
     async def runner() -> None:

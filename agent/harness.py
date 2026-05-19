@@ -87,7 +87,7 @@ async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
 
     owner_and_name = repo_data.url.replace("https://github.com/", "").replace(".git", "").replace("/", "-")
     ws_name = f"harness-{owner_and_name}"
-    workspace = await clone_repo(repo_data.url, task_id=0, default_branch=repo_data.default_branch, workspace_name=ws_name)
+    workspace = await clone_repo(repo_data.url, task_id=0, default_branch=repo_data.default_branch, workspace_name=ws_name, repo_id=None)  # onboarding: no repo_id
 
     branch_name = "auto-agent/harness-onboarding"
 
