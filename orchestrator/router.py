@@ -88,7 +88,6 @@ from shared.types import (
     GraphCodePreviewResponse,
     GraphStalenessResponse,
     LatestRepoGraphData,
-    RepoGraphProgressData,
     LoginRequest,
     LoginResponse,
     MarketBriefResponse,
@@ -97,6 +96,7 @@ from shared.types import (
     PlanRead,
     RepoData,
     RepoGraphConfigData,
+    RepoGraphProgressData,
     RepoGraphRefreshResponse,
     RepoResponse,
     ReviewAttemptOut,
@@ -3212,9 +3212,10 @@ async def _estimate_total_files(repo_id: int) -> int:
     """Count non-test source files in the graph workspace.
 
     Memoized 30 s per repo so repeated /graph/latest hits don't re-walk."""
+    import os as _os
+
     from agent.graph_analyzer.test_filter import is_test_file
     from agent.graph_workspace import graph_workspace_path
-    import os as _os
 
     now = _time.time()
     cached = _TOTAL_FILES_CACHE.get(repo_id)

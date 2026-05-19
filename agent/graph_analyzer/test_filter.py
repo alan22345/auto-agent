@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 
-
 _TEST_DIR_NAMES = frozenset(
     {
         "__tests__",

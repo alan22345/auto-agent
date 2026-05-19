@@ -11,8 +11,8 @@ re-walking the file.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 
 @dataclass
@@ -102,7 +102,7 @@ def apply_plan(
     blob: dict,
     processed: dict,
     plan: ChangedFilesPlan,
-    re_walk: Optional[Callable[[str], dict]] = None,
+    re_walk: Callable[[str], dict] | None = None,
 ) -> set[str]:
     """Mutate ``blob`` and ``processed`` per ``plan``. Return the set of
     additional files that need to be re-walked (the cascade set).

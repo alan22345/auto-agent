@@ -40,7 +40,6 @@ from sqlalchemy import select
 from agent.graph_analyzer import analyser_version as _analyser_version_fn
 from agent.graph_analyzer import run_partial_pipeline, run_pipeline
 from agent.graph_analyzer.diff import (
-    ChangedFilesPlan,
     CheckpointCommitUnreachable,
     apply_plan,
     changed_files,

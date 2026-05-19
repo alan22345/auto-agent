@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import fnmatch
 import os
-from datetime import UTC, datetime, timezone
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 import yaml
@@ -55,7 +56,7 @@ CheckpointFlush = Callable[[dict, dict, list], Awaitable[None]]
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # Bumped per phase as new capability lands. Phase 7 adds partial-mode
@@ -221,10 +222,10 @@ async def _analyse_area(
     workspace: str,
     area_name: str,
     patterns: list[str],
-    blob_dict: Optional[dict] = None,
-    processed_files: Optional[dict] = None,
-    failed_sites: Optional[list] = None,
-    on_file_checkpoint: Optional[CheckpointFlush] = None,
+    blob_dict: dict | None = None,
+    processed_files: dict | None = None,
+    failed_sites: list | None = None,
+    on_file_checkpoint: CheckpointFlush | None = None,
 ) -> tuple[list[Node], list[Edge], list[UnresolvedSite], set[str], AreaStatus]:
     """Run the parser dispatch over one area.
 
@@ -380,10 +381,10 @@ async def run_pipeline(
     workspace: str,
     commit_sha: str,
     provider: LLMProvider | None = None,
-    on_file_checkpoint: Optional[CheckpointFlush] = None,
-    initial_processed_files: Optional[dict] = None,
-    initial_failed_sites: Optional[list] = None,
-    initial_blob: Optional[dict] = None,
+    on_file_checkpoint: CheckpointFlush | None = None,
+    initial_processed_files: dict | None = None,
+    initial_failed_sites: list | None = None,
+    initial_blob: dict | None = None,
 ) -> RepoGraphBlob:
     """Run the full Phase 2 + Phase 3 pipeline against ``workspace``.
 
@@ -413,9 +414,9 @@ async def run_pipeline(
     areas = _discover_areas(workspace)
 
     # Initialise resume/checkpoint state.
-    processed_files: Optional[dict] = None
-    failed_sites: Optional[list] = None
-    blob_dict: Optional[dict] = None
+    processed_files: dict | None = None
+    failed_sites: list | None = None
+    blob_dict: dict | None = None
 
     if on_file_checkpoint is not None:
         processed_files = dict(initial_processed_files or {})
