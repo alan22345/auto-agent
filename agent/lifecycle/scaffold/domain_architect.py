@@ -313,16 +313,14 @@ async def run(task: Task) -> dict[str, Any]:
             await agent.run(retry_prompt, system=system_prompt, resume=True)
 
         # -- Post-run: validate the required-secrets manifest if the architect
-        #    wrote one, then run reconcile so DB rows stay in sync.
+        #    wrote one, then ALWAYS run reconcile so DB rows stay in sync.
         req_secrets_rel = f".auto-agent/required_secrets/{slug}.json"
         req_secrets_abs = os.path.join(workspace, req_secrets_rel)
         if os.path.isfile(req_secrets_abs):
             manifest_path = Path(req_secrets_abs)
-            manifest_ok = False
             for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
                 try:
                     parse_manifest_file(manifest_path)
-                    manifest_ok = True
                     break
                 except (ValueError, Exception) as exc:
                     if attempt > MAX_VALIDATION_RETRIES:
@@ -342,29 +340,32 @@ async def run(task: Task) -> dict[str, Any]:
                     )
                     await agent.run(retry_secrets_prompt, system=system_prompt, resume=True)
 
-            if manifest_ok and task.repo_id and task.organization_id:
-                try:
-                    report = await reconcile(
-                        workspace_path,
-                        repo_id=task.repo_id,
-                        organization_id=task.organization_id,
-                    )
-                    log.info(
-                        "scaffold.domain_architect.reconcile_complete",
-                        task_id=task.id,
-                        slug=slug,
-                        promoted=report.promoted,
-                        demoted=report.demoted,
-                        created=report.created,
-                        unchanged=report.unchanged,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "scaffold.domain_architect.reconcile_failed",
-                        task_id=task.id,
-                        slug=slug,
-                        error=str(exc),
-                    )
+        # Reconcile runs unconditionally — even when no manifest was written this
+        # round.  This ensures that keys dropped by a revise pass get demoted
+        # rather than lingering as stale architect_required rows.
+        if task.repo_id and task.organization_id:
+            try:
+                report = await reconcile(
+                    workspace_path,
+                    repo_id=task.repo_id,
+                    organization_id=task.organization_id,
+                )
+                log.info(
+                    "scaffold.domain_architect.reconcile_complete",
+                    task_id=task.id,
+                    slug=slug,
+                    promoted=report.promoted,
+                    demoted=report.demoted,
+                    created=report.created,
+                    unchanged=report.unchanged,
+                )
+            except Exception as exc:
+                log.warning(
+                    "scaffold.domain_architect.reconcile_failed",
+                    task_id=task.id,
+                    slug=slug,
+                    error=str(exc),
+                )
 
         entry = dict(domain)
         entry["index"] = idx

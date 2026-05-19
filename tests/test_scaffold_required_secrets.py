@@ -681,10 +681,65 @@ async def test_reconcile_updates_purpose_when_changed(tmp_path):
         mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await reconcile(tmp_path, repo_id=1, organization_id=7)
+        report = await reconcile(tmp_path, repo_id=1, organization_id=7)
 
-    # Purpose changed → counts as promoted (source was already architect_required but updated)
+    # Purpose changed → upsert is called, but report classification is `unchanged`
+    # (source did not flip — key was already architect_required).
     assert "STRIPE_API_KEY" in upsert_calls
+    assert "STRIPE_API_KEY" in report.unchanged
+    assert "STRIPE_API_KEY" not in report.promoted
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purpose_change_classified_as_unchanged(tmp_path):
+    """An architect_required row whose purpose is updated lands in `unchanged`, not `promoted`."""
+    from agent.lifecycle.scaffold.required_secrets import reconcile
+
+    secrets_dir = tmp_path / ".auto-agent" / "required_secrets"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "domain": "auth",
+                "secrets": [
+                    {"key": "JWT_SECRET", "purpose": "new purpose"},
+                ],
+            }
+        )
+    )
+
+    # Existing architect_required row with an old purpose.
+    existing_rows = [
+        {
+            "key": "JWT_SECRET",
+            "set": False,
+            "source": "architect_required",
+            "purpose": "old purpose",
+            "updated_at": None,
+        }
+    ]
+
+    async def fake_list_keys(repo_id, *, organization_id, session=None):
+        return existing_rows
+
+    with (
+        patch("agent.lifecycle.scaffold.required_secrets.repo_secrets.list_keys", side_effect=fake_list_keys),
+        patch(
+            "agent.lifecycle.scaffold.required_secrets.repo_secrets.upsert_architect_required",
+            new=AsyncMock(),
+        ),
+        patch("agent.lifecycle.scaffold.required_secrets.repo_secrets.demote_to_user", new=AsyncMock()),
+        patch("agent.lifecycle.scaffold.required_secrets.async_session") as mock_session_ctx,
+    ):
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        report = await reconcile(tmp_path, repo_id=1, organization_id=7)
+
+    assert "JWT_SECRET" in report.unchanged
+    assert "JWT_SECRET" not in report.promoted
 
 
 @pytest.mark.asyncio
@@ -827,6 +882,98 @@ async def test_reconcile_cross_domain_duplicate_keys_are_fine(tmp_path):
 
     # Should only create one placeholder row even though two domains declared it
     assert upsert_calls.count("POSTGRES_URL") == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_runs_even_when_no_manifest_file_written(tmp_path):
+    """Reconcile runs after architect.run regardless of whether the architect wrote
+    a manifest file — needed so dropped keys get demoted on revise rounds."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    # We test via the domain_architect.run entry-point so we exercise the real
+    # orchestration flow.  Patch everything that hits external services.
+    from shared.models import Task
+
+    task = MagicMock(spec=Task)
+    task.id = 42
+    task.repo_id = 1
+    task.organization_id = 7
+    task.description = "test task"
+    task.subtasks = {}
+    repo_mock = MagicMock()
+    repo_mock.name = "test-repo"
+    task.repo = repo_mock
+
+    # Workspace with no required_secrets dir (architect wrote nothing).
+    workspace_path = tmp_path
+    auto_agent_dir = tmp_path / ".auto-agent"
+    auto_agent_dir.mkdir()
+
+    # Pre-create a root ADR so run() doesn't bail early.
+    adrs_dir = tmp_path / ".auto-agent" / "adrs"
+    adrs_dir.mkdir(parents=True)
+    root_adr = tmp_path / ".auto-agent" / "adrs" / "000-system.md"
+    root_adr.write_text(
+        "# System ADR\n\n"
+        "## domains:\n\n"
+        "```yaml\n"
+        "- name: Auth\n"
+        "  slug: auth\n"
+        "  scope_summary: Authentication domain\n"
+        "```\n"
+    )
+
+    reconcile_calls: list = []
+
+    async def fake_reconcile(workspace, *, repo_id, organization_id):
+        reconcile_calls.append({"repo_id": repo_id, "organization_id": organization_id})
+        from agent.lifecycle.scaffold.required_secrets import ReconcileReport
+        return ReconcileReport()
+
+    with (
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=str(workspace_path)),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
+            new=AsyncMock(return_value=str(tmp_path / "home")),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.domain_grill.run",
+            new=AsyncMock(return_value={"status": "summary_written"}),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.create_agent",
+        ) as mock_create_agent,
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.reconcile",
+            side_effect=fake_reconcile,
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx",
+            new=AsyncMock(),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.repo_secrets.list_keys",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.parse_domains",
+            return_value=[{"name": "Auth", "slug": "auth", "scope_summary": "Authentication domain"}],
+        ),
+    ):
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock()
+        mock_create_agent.return_value = mock_agent
+
+        from agent.lifecycle.scaffold import domain_architect
+        await domain_architect.run(task)
+
+    # reconcile must have been called even though no manifest file was written.
+    assert len(reconcile_calls) == 1
+    assert reconcile_calls[0]["repo_id"] == 1
+    assert reconcile_calls[0]["organization_id"] == 7
 
 
 # ---------------------------------------------------------------------------

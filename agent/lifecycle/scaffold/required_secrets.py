@@ -284,13 +284,12 @@ async def reconcile(
                 report.promoted.append(key)
             else:
                 # Already architect_required — update purpose if changed.
+                # Either way this is still `unchanged` (source did not flip).
                 if existing.get("purpose") != purpose:
                     await repo_secrets.upsert_architect_required(
                         repo_id, key, purpose, organization_id=organization_id, session=session
                     )
-                    report.promoted.append(key)
-                else:
-                    report.unchanged.append(key)
+                report.unchanged.append(key)
 
         # --- Process architect_required rows that are no longer declared ---
         for key, existing in existing_by_key.items():
