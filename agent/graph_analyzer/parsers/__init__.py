@@ -132,9 +132,35 @@ def supported_extensions() -> tuple[str, ...]:
     return tuple(sorted(_REGISTRY))
 
 
+def parse_file_for_nodes(workspace: str, rel_path: str) -> list[dict]:
+    """Cheap tree-sitter parse — returns just the node ids for one file.
+
+    No gap-fill, no LLM, no edges. Used by run_refresh's M-cascade pre-pass
+    to determine which previously-targeted nodes survived a file change.
+    """
+    parser = parser_for(rel_path)
+    if parser is None:
+        return []
+    abs_path = os.path.join(workspace, rel_path)
+    try:
+        with open(abs_path, "rb") as fh:
+            source = fh.read()
+    except OSError:
+        return []
+    # area is only needed for node metadata — use the file's directory as a
+    # lightweight stand-in so the parsers don't raise on a missing kwarg.
+    area = os.path.dirname(rel_path) or "."
+    result = parser.parse_file(rel_path=rel_path, area=area, source=source)
+    return [
+        {"id": n.id, "file": n.file}
+        for n in result.nodes
+    ]
+
+
 __all__ = [
     "ParseResult",
     "Parser",
+    "parse_file_for_nodes",
     "parser_for",
     "supported_extensions",
 ]
