@@ -5,8 +5,9 @@ DB-backed — skips when DATABASE_URL is missing."""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -76,8 +77,11 @@ async def test_resume_after_midflight_cancel(monkeypatch, tmp_path):
 
     monkeypatch.setattr(graph_refresh, "run_pipeline", fake_pipeline)
 
-    with pytest.raises(RuntimeError):
-        await graph_refresh.run_refresh(repo_id=repo_id, request_id="r1")
+    # ``run_refresh`` catches Exception internally and publishes
+    # ``repo_graph_failed`` rather than re-raising — so the crash is
+    # swallowed but the per-file checkpoints fired before the raise must
+    # already be persisted (that's what we assert next).
+    await graph_refresh.run_refresh(repo_id=repo_id, request_id="r1")
 
     async with async_session() as s:
         result = await s.execute(select(RepoGraph).where(RepoGraph.repo_id == repo_id))
@@ -85,22 +89,43 @@ async def test_resume_after_midflight_cancel(monkeypatch, tmp_path):
         assert row.is_complete is False
         assert set(row.processed_files.keys()) == {"a.ts", "b.ts"}
 
-    async def fake_pipeline_2(*, on_file_checkpoint=None, initial_processed_files=None, **kwargs):
+    async def fake_pipeline_2(
+        *,
+        on_file_checkpoint=None,
+        initial_processed_files=None,
+        initial_blob=None,
+        **kwargs,
+    ):
         assert set(initial_processed_files.keys()) == {"a.ts", "b.ts"}
+        # The resume must hand the pipeline the inherited blob so that
+        # nodes/edges from already-processed files survive the finalize
+        # overwrite. (See 2026-05-20 incident: 6056 edges → 0 edges.)
+        assert initial_blob is not None
+        inherited_nodes = list(initial_blob.get("nodes") or [])
+        inherited_edges = list(initial_blob.get("edges") or [])
+        assert any(n.get("file") == "a.ts" for n in inherited_nodes)
+        assert any(n.get("file") == "b.ts" for n in inherited_nodes)
+
+        merged_nodes = [*inherited_nodes, {"id": "c.ts::z", "file": "c.ts"}]
+        merged_edges = list(inherited_edges)
         await on_file_checkpoint(
-            {"nodes": [{"id": "c.ts::z", "file": "c.ts"}], "edges": []},
+            {"nodes": merged_nodes, "edges": merged_edges},
             {**initial_processed_files,
              "c.ts": {"sites_attempted": 1, "sites_succeeded": 1,
                       "edges_added": 0, "processed_at": "2026-05-19T00:00:02Z"}},
             [],
         )
-        from types import SimpleNamespace
+        # Simulate run_pipeline's contract under the fix: the returned
+        # blob includes the inherited nodes/edges so finalize doesn't
+        # destroy 594 files of work.
+        blob_dict = {
+            "nodes": merged_nodes, "edges": merged_edges,
+            "areas": [], "public_symbols": [],
+            "commit_sha": "cafebabe",
+        }
         return SimpleNamespace(
-            model_dump=lambda mode=None: {
-                "nodes": [], "edges": [], "areas": [], "public_symbols": [],
-                "commit_sha": "cafebabe",
-            },
-            model_dump_json=lambda: '{"nodes":[],"edges":[],"areas":[],"public_symbols":[],"commit_sha":"cafebabe"}',
+            model_dump=lambda mode=None: blob_dict,
+            model_dump_json=lambda: json.dumps(blob_dict),
             areas=[],
             analyser_version="test",
         )
@@ -113,3 +138,10 @@ async def test_resume_after_midflight_cancel(monkeypatch, tmp_path):
         row = result.scalar_one()
         assert row.is_complete is True
         assert "c.ts" in row.processed_files
+        # Regression guard for the 2026-05-20 incident: finalize must not
+        # blow away inherited nodes/edges from prior checkpoints.
+        final_node_files = {n.get("file") for n in row.graph_json.get("nodes") or []}
+        assert {"a.ts", "b.ts", "c.ts"}.issubset(final_node_files), (
+            "Inherited nodes from a.ts/b.ts were overwritten by finalize — "
+            "this is the bug that destroyed 3012 nodes / 6056 edges in prod."
+        )

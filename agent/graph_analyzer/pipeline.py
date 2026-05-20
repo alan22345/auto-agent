@@ -446,6 +446,20 @@ async def run_pipeline(
     # part of the destination area's public surface.
     all_public_symbols: set[str] = set()
 
+    # Resume: seed the accumulators from inherited checkpoint state so
+    # files we skip in the area loop still contribute to the returned
+    # blob — and so post-processing stages (gap-fill, http_match,
+    # boundary) see the full graph. Without this, the pipeline's return
+    # value drops everything from previously-processed files and the
+    # caller's final overwrite of ``r.graph_json`` destroys 594 files of
+    # accumulated work.
+    if initial_blob is not None and on_file_checkpoint is not None:
+        for n in initial_blob.get("nodes", []) or []:
+            all_nodes.append(n if isinstance(n, Node) else Node.model_validate(n))
+        for e in initial_blob.get("edges", []) or []:
+            all_edges.append(e if isinstance(e, Edge) else Edge.model_validate(e))
+        all_public_symbols.update(initial_blob.get("public_symbols") or [])
+
     for name, patterns in areas:
         nodes, edges, sites, public_symbols, status = await _analyse_area(
             workspace=workspace,

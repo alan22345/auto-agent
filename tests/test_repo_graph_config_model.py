@@ -98,7 +98,7 @@ async def test_repo_graph_config_round_trip() -> None:
         create_async_engine,
     )
 
-    from shared.models import Organization
+    from shared.models import Organization, Plan
 
     engine = create_async_engine(os.environ["DATABASE_URL"], future=True)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -107,7 +107,19 @@ async def test_repo_graph_config_round_trip() -> None:
         await session.begin()
         try:
             # Create a real Organization + Repo so the FKs resolve.
-            org = Organization(name=f"graph-test-org-{os.getpid()}")
+            # Organization.slug + plan_id are both NOT NULL (slug since
+            # eb0f9c15, plan_id since migration 029); migration 029 seeds
+            # a ``free`` plan we can attach to.
+            plan_row = await session.execute(
+                sa.select(Plan).where(Plan.name == "free")
+            )
+            free_plan = plan_row.scalar_one()
+            pid = os.getpid()
+            org = Organization(
+                name=f"graph-test-org-{pid}",
+                slug=f"graph-test-org-{pid}",
+                plan_id=free_plan.id,
+            )
             session.add(org)
             await session.flush()
 

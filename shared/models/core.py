@@ -656,6 +656,27 @@ class RepoGraph(Base):
     # 'ok' / 'partial' — surface failures-isolated-per-area state in the UI.
     status = Column(String(16), nullable=False, default="ok", server_default="ok")
     graph_json = Column(JSONB, nullable=False)
+    # ADR-016 checkpoint/resume columns (migration 048_repo_graph_checkpoint).
+    # is_complete flips true once a full pipeline run finishes; processed_files
+    # / failed_sites carry per-file resume state.
+    is_complete = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    processed_files = Column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    failed_sites = Column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
 
 
 # --- Per-repo project secrets vault (ADR-019) ---------------------------------
@@ -702,22 +723,4 @@ class RepoSecret(Base):
     )
     updated_at = Column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
-    )
-    is_complete = Column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=text("false"),
-    )
-    processed_files = Column(
-        JSONB,
-        nullable=False,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-    )
-    failed_sites = Column(
-        JSONB,
-        nullable=False,
-        default=list,
-        server_default=text("'[]'::jsonb"),
     )

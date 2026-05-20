@@ -1,7 +1,7 @@
 """repo_secrets
 
-Revision ID: 048
-Revises: 047
+Revision ID: 050
+Revises: 048
 Create Date: 2026-05-19
 
 Adds the per-repo project secrets vault table for ADR-019 (T1):
@@ -13,14 +13,20 @@ Adds the per-repo project secrets vault table for ADR-019 (T1):
 
 Unique constraint on (repo_id, key) — one value per key per repo.
 Index on repo_id and organization_id for efficient per-repo and per-org queries.
+
+Renumbered 048 → 050 on 2026-05-20: PR #51 merge collided with
+``048_repo_graph_checkpoint`` which had landed concurrently on main.
+Alembic refused to operate with two ``revision="048"`` files. The
+graph_checkpoint migration was already applied to prod, so it keeps 048;
+this one moves to 050.
 """
 
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "048"
-down_revision = "047"
+revision = "050"
+down_revision = "048"
 
 
 def upgrade() -> None:
