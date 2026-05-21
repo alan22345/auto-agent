@@ -9,6 +9,7 @@ import { BranchPicker } from '@/components/code-graph/branch-picker';
 import { RefreshButton } from '@/components/code-graph/refresh-button';
 import { FreshnessBanner } from '@/components/code-graph/freshness-banner';
 import { EdgeEvidencePopover } from '@/components/code-graph/edge-evidence-popover';
+import { AreaFilter } from '@/components/code-graph/area-filter';
 import { EdgeKindFilter } from '@/components/code-graph/edge-kind-filter';
 import { GraphCanvas } from '@/components/code-graph/graph-canvas';
 import { NodeSidePanel } from '@/components/code-graph/node-side-panel';
@@ -57,6 +58,8 @@ export default function CodeGraphRepoPage({
   const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<Edge['kind']>>(
     () => new Set(),
   );
+  // 2026-05-21 — bulk per-area hide. Empty = all areas visible.
+  const [hiddenAreas, setHiddenAreas] = useState<Set<string>>(() => new Set());
   // Phase 7 P2c §11 — ancestor / descendant highlight subgraph. The
   // side panel computes it; the canvas paints it. Clears whenever the
   // selected node changes so a stale highlight doesn't sit around.
@@ -159,6 +162,10 @@ export default function CodeGraphRepoPage({
                 >
                   <SearchInput onChange={setSearchQuery} />
                   <EdgeKindFilter onChange={setHiddenEdgeKinds} />
+                  <AreaFilter
+                    areas={latest.blob.areas.map((a) => a.name)}
+                    onChange={setHiddenAreas}
+                  />
                 </div>
                 <div className="flex min-h-0 flex-1 gap-4">
                   <div className="min-w-0 flex-1">
@@ -178,6 +185,7 @@ export default function CodeGraphRepoPage({
                       }
                       searchQuery={searchQuery}
                       hiddenEdgeKinds={hiddenEdgeKinds}
+                      hiddenAreas={hiddenAreas}
                       reachabilityHighlight={reachabilityHighlight}
                     />
                   </div>

@@ -28,6 +28,7 @@
     "clsx": "2.1.1",
     "cytoscape": "^3.33.3",
     "cytoscape-expand-collapse": "^4.1.1",
+    "cytoscape-fcose": "^2.2.0",
     "lucide-react": "0.408.0",
     "next": "14.2.5",
     "react": "18.3.1",
