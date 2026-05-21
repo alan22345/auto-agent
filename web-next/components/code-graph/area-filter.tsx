@@ -73,8 +73,22 @@ export function AreaFilter({
 
   const visibleCount = areas.length - hidden.size;
 
+  // ``isolation-isolate`` forces a new stacking context here so the
+  // dropdown's ``z-50`` is unambiguously above the cytoscape canvas
+  // sibling (which spawns its own ``z-index:0`` stacking context). The
+  // relative wrapper alone wasn't enough — without explicit isolation,
+  // some browsers happily hit-test the canvas underneath even when the
+  // dropdown visually paints on top.
+  //
+  // stopPropagation on mousedown for every clickable element inside
+  // the menu mirrors the canvas-overlay buttons in graph-canvas.tsx —
+  // even though the menu lives outside the cytoscape host (so the
+  // host's mousedown listener shouldn't fire), the document-level
+  // mousedown closer is on this same component, and any future ancestor
+  // listener would inherit the same bug. Defence-in-depth: keep clicks
+  // local to the menu.
   return (
-    <div ref={rootRef} className={`relative ${className ?? ''}`}>
+    <div ref={rootRef} className={`relative isolate ${className ?? ''}`}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -98,6 +112,8 @@ export function AreaFilter({
           // down from the toolbar over the graph area below).
           className="absolute left-0 z-50 mt-1 w-64 rounded-md border bg-popover text-popover-foreground shadow-md"
           role="listbox"
+          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between border-b px-2 py-1.5 text-[11px]">
             <button

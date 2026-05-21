@@ -591,7 +591,17 @@ export function GraphCanvas({
         * intercepts its own click. Earlier attempts at making the
         * overlay a sibling of the host left cytoscape's internal
         * stacking context above the toolbar — clicks tunneled through
-        * to graph nodes underneath. */}
+        * to graph nodes underneath.
+        *
+        * stopPropagation on mousedown is the load-bearing bit: cytoscape
+        * binds mousedown on the host (our containerRef) and projects
+        * any descendant click into graph coords + emits a ``tap``. The
+        * button's onClick still fires regardless — but the projected
+        * tap also fires, and tends to hit the area node behind the
+        * button which then opens the side panel. So the user sees the
+        * side panel open and concludes "the click went through to the
+        * graph". Stopping bubble-phase propagation at the button keeps
+        * cytoscape from seeing the event at all. */}
       <div
         data-testid="graph-collapse-controls"
         className="pointer-events-none absolute right-2 top-2 z-30 flex items-center gap-1"
@@ -599,6 +609,8 @@ export function GraphCanvas({
         <button
           type="button"
           onClick={handleCollapseAll}
+          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
           data-testid="graph-collapse-all"
           aria-label="Collapse all areas"
           title="Collapse all areas"
@@ -610,6 +622,8 @@ export function GraphCanvas({
         <button
           type="button"
           onClick={handleExpandAll}
+          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
           data-testid="graph-expand-all"
           aria-label="Expand all areas"
           title="Expand all areas"
