@@ -578,52 +578,35 @@ export function GraphCanvas({
     }
   };
 
-  // Native mousedown listeners on the toolbar buttons stop the event
-  // from bubbling up to cytoscape's container-level listener. React's
-  // synthetic onMouseDown fires too late: React 17+ delegates events
-  // through a single root listener, so the synthetic dispatch happens
-  // AFTER the native event has already bubbled past cytoscape's
-  // listener on containerRef. A listener attached natively to the
-  // button fires in target phase (before bubble) and is the only way
-  // to keep cytoscape from seeing the event at all.
-  const collapseBtnRef = useRef<HTMLButtonElement>(null);
-  const expandBtnRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const stop = (e: Event) => e.stopPropagation();
-    const wired: Array<[HTMLElement, string]> = [];
-    for (const btn of [collapseBtnRef.current, expandBtnRef.current]) {
-      if (!btn) continue;
-      for (const ev of ['mousedown', 'pointerdown', 'touchstart'] as const) {
-        btn.addEventListener(ev, stop);
-        wired.push([btn, ev]);
-      }
-    }
-    return () => {
-      for (const [btn, ev] of wired) btn.removeEventListener(ev, stop);
-    };
-  }, []);
-
+  // The cytoscape canvases live inside their own dedicated host div —
+  // ``cyHostRef`` below — and the toolbar / refresh-overlay live as
+  // SIBLINGS of that host inside the outer wrapper. Every previous
+  // attempt at making the toolbar a CHILD of the cytoscape host hit
+  // the same trap: cytoscape binds mousedown on its host element, and
+  // any click on a descendant bubbles into that listener — cytoscape
+  // projects the click into graph coords and emits a tap on the area
+  // node behind the button, which opens the side panel. The user
+  // perceives it as "the click went to the graph". Layered fixes
+  // (z-30, ``pointer-events-none`` wrapper, React stopPropagation,
+  // native stopPropagation on the button) either ran too late under
+  // React 17+ root delegation or just didn't fully cover the case.
+  //
+  // Sibling structure dodges the whole class of bug: cytoscape's
+  // listener is on cyHostRef, and the buttons are NOT descendants of
+  // cyHostRef, so the listener never fires for button clicks. ``z-50``
+  // + a wrapping ``isolate`` on the outer div pins the toolbar above
+  // the canvas's z-0 stacking context.
   return (
     <div
-      ref={containerRef}
       data-testid="code-graph-canvas"
-      className={`relative h-[calc(100vh-260px)] min-h-[400px] w-full overflow-hidden rounded-md border bg-background ${className ?? ''}`}
+      className={`relative isolate h-[calc(100vh-260px)] min-h-[400px] w-full overflow-hidden rounded-md border bg-background ${className ?? ''}`}
     >
-      {/* Toolbar overlay — child of the cytoscape host (same pattern as
-        * ``AreaRefreshOverlay``). ``pointer-events-none`` on the wrapper
-        * lets cytoscape capture every click on bare canvas; each
-        * button opts back in with ``pointer-events-auto`` so it
-        * intercepts its own click. The native mousedown stoppers wired
-        * up in the effect above keep cytoscape's container listener
-        * from seeing the event — React's synthetic onMouseDown fires
-        * too late (after the native event has already bubbled past
-        * cytoscape via React 17+ root delegation). */}
+      <div ref={containerRef} className="absolute inset-0" />
       <div
         data-testid="graph-collapse-controls"
-        className="pointer-events-none absolute right-2 top-2 z-30 flex items-center gap-1"
+        className="pointer-events-none absolute right-2 top-2 z-50 flex items-center gap-1"
       >
         <button
-          ref={collapseBtnRef}
           type="button"
           onClick={handleCollapseAll}
           data-testid="graph-collapse-all"
@@ -635,7 +618,6 @@ export function GraphCanvas({
           Collapse all
         </button>
         <button
-          ref={expandBtnRef}
           type="button"
           onClick={handleExpandAll}
           data-testid="graph-expand-all"

@@ -7,12 +7,15 @@
 // per-node ``area-hidden`` class so every descendant of the area drops
 // out of the canvas, and edges crossing into a hidden area drop too.
 //
-// Mirrors ``edge-kind-filter.tsx`` in shape: uncontrolled, owns its
-// own state, emits on every toggle. A "Show all" / "Hide all" pair
-// short-circuits the most common cases for graphs with many areas
-// (cardamon has 19).
+// The menu is rendered through a React portal to ``document.body``
+// with ``position: fixed``. This puts the menu in the document's root
+// stacking context with no nested z-index / overflow / transform
+// ancestors that could trap or clip it — the cytoscape canvas (which
+// owns its own ``z-index:0`` stacking context on the page) cannot
+// intercept clicks even if it visually overlaps the menu coordinates.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown } from 'lucide-react';
 
 interface Props {
@@ -25,6 +28,11 @@ interface Props {
   className?: string;
 }
 
+interface MenuPos {
+  left: number;
+  top: number;
+}
+
 export function AreaFilter({
   areas,
   onChange,
@@ -35,15 +43,49 @@ export function AreaFilter({
     () => new Set(initialHidden ?? []),
   );
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
+  const [mounted, setMounted] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close the dropdown when the user clicks outside it. Keyboard
-  // dismissal (Escape) is also handy for a11y.
+  // Portal target only exists on the client — gate the portal render
+  // on a mount flag so SSR sees the toggle button only.
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Re-compute the menu's fixed coordinates whenever it opens. The
+  // menu drops down from the toggle button: ``left`` aligns with the
+  // toggle's left edge, ``top`` sits just below the toggle. Recompute
+  // on scroll / resize so the menu doesn't drift away from the button.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const compute = () => {
+      const t = toggleRef.current;
+      if (!t) return;
+      const r = t.getBoundingClientRect();
+      setMenuPos({ left: r.left, top: r.bottom + 4 });
+    };
+    compute();
+    window.addEventListener('scroll', compute, true);
+    window.addEventListener('resize', compute);
+    return () => {
+      window.removeEventListener('scroll', compute, true);
+      window.removeEventListener('resize', compute);
+    };
+  }, [open]);
+
+  // Close on click-outside (toggle or menu). Uses the global document
+  // mousedown so it works regardless of where in the DOM the menu has
+  // been portalled to.
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e: MouseEvent) => {
-      if (!rootRef.current) return;
-      if (!rootRef.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (toggleRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
@@ -73,9 +115,69 @@ export function AreaFilter({
 
   const visibleCount = areas.length - hidden.size;
 
+  const menu = open && menuPos && (
+    <div
+      ref={menuRef}
+      data-testid="area-filter-menu"
+      role="listbox"
+      style={{
+        position: 'fixed',
+        left: menuPos.left,
+        top: menuPos.top,
+        zIndex: 9999,
+      }}
+      className="w-64 rounded-md border bg-popover text-popover-foreground shadow-md"
+    >
+      <div className="flex items-center justify-between border-b px-2 py-1.5 text-[11px]">
+        <button
+          type="button"
+          data-testid="area-filter-show-all"
+          onClick={showAll}
+          className="underline-offset-2 hover:underline"
+        >
+          Show all
+        </button>
+        <button
+          type="button"
+          data-testid="area-filter-hide-all"
+          onClick={hideAll}
+          className="underline-offset-2 hover:underline"
+        >
+          Hide all
+        </button>
+      </div>
+      <div className="max-h-72 overflow-y-auto px-2 py-1">
+        {areas.map((name) => {
+          const checked = !hidden.has(name);
+          return (
+            <label
+              key={name}
+              className="flex cursor-pointer items-center gap-2 py-1 text-xs"
+            >
+              <input
+                type="checkbox"
+                data-testid={`area-filter-${name}`}
+                checked={checked}
+                onChange={() => toggle(name)}
+                className="h-3.5 w-3.5 cursor-pointer accent-primary"
+              />
+              <span className="truncate">{name}</span>
+            </label>
+          );
+        })}
+        {areas.length === 0 && (
+          <p className="px-1 py-2 text-xs text-muted-foreground">
+            No areas in this graph.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   return (
-    <div ref={rootRef} className={`relative ${className ?? ''}`}>
+    <div className={`relative ${className ?? ''}`}>
       <button
+        ref={toggleRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         data-testid="area-filter-toggle"
@@ -88,65 +190,7 @@ export function AreaFilter({
         </span>
         <ChevronDown size={12} />
       </button>
-      {open && (
-        <div
-          data-testid="area-filter-menu"
-          // ``z-50`` lifts the dropdown above the cytoscape canvas's
-          // ``z-index:0`` stacking context. The dropdown itself
-          // creates its own stacking context (position:absolute +
-          // z-index:50), so its painting position in the root
-          // stacking context is unambiguous. Adding ``isolation``
-          // to the wrapper TRAPS the z-50 inside the wrapper's own
-          // sc (which is then z-auto in the parent) — that breaks
-          // stacking, do not add it.
-          className="absolute left-0 z-50 mt-1 w-64 rounded-md border bg-popover text-popover-foreground shadow-md"
-          role="listbox"
-        >
-          <div className="flex items-center justify-between border-b px-2 py-1.5 text-[11px]">
-            <button
-              type="button"
-              data-testid="area-filter-show-all"
-              onClick={showAll}
-              className="underline-offset-2 hover:underline"
-            >
-              Show all
-            </button>
-            <button
-              type="button"
-              data-testid="area-filter-hide-all"
-              onClick={hideAll}
-              className="underline-offset-2 hover:underline"
-            >
-              Hide all
-            </button>
-          </div>
-          <div className="max-h-72 overflow-y-auto px-2 py-1">
-            {areas.map((name) => {
-              const checked = !hidden.has(name);
-              return (
-                <label
-                  key={name}
-                  className="flex cursor-pointer items-center gap-2 py-1 text-xs"
-                >
-                  <input
-                    type="checkbox"
-                    data-testid={`area-filter-${name}`}
-                    checked={checked}
-                    onChange={() => toggle(name)}
-                    className="h-3.5 w-3.5 cursor-pointer accent-primary"
-                  />
-                  <span className="truncate">{name}</span>
-                </label>
-              );
-            })}
-            {areas.length === 0 && (
-              <p className="px-1 py-2 text-xs text-muted-foreground">
-                No areas in this graph.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
+      {mounted && menu ? createPortal(menu, document.body) : null}
     </div>
   );
 }
