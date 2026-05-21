@@ -39,7 +39,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type cytoscape from 'cytoscape';
-import { ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
+import {
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Minus,
+  Plus,
+} from 'lucide-react';
 import type { RepoGraphBlob, AreaStatus, Edge, Node } from '@/types/api';
 import { AreaRefreshOverlay } from './area-refresh-overlay';
 
@@ -540,21 +545,40 @@ export function GraphCanvas({
     });
   }, [cyState, blob, hiddenAreas]);
 
+  // Re-fit after a queued layout cycle. Small delay so we don't catch
+  // the extension's internal layout mid-flight; the same pattern was
+  // already used by the old binary Collapse/Expand all handlers.
+  const refit = (cy: cytoscape.Core) => {
+    setTimeout(() => {
+      try {
+        cy.fit(undefined, 30);
+      } catch {
+        /* unmounted */
+      }
+    }, 250);
+  };
+
+  // Tree depth helper — walks ``parent()`` chain until it hits the
+  // root. Areas live at depth 0, files at 1, classes at 2, functions
+  // at 3 (or wherever — the helper is generic). Used by the stepwise
+  // expansion handlers below.
+  const nodeTreeDepth = (n: cytoscape.NodeSingular): number => {
+    let d = 0;
+    let p = n.parent();
+    while (p.length > 0) {
+      d++;
+      p = p.parent();
+    }
+    return d;
+  };
+
   const handleCollapseAll = () => {
     const cy = cyRef.current;
     const api = expandCollapseApiRef.current;
     if (!cy || !api) return;
     try {
       api.collapseAll();
-      // Re-fit after the layout the extension queues internally; small
-      // delay so we don't catch it mid-flight.
-      setTimeout(() => {
-        try {
-          cy.fit(undefined, 30);
-        } catch {
-          /* unmounted */
-        }
-      }, 250);
+      refit(cy);
     } catch {
       /* extension swallowed */
     }
@@ -566,13 +590,61 @@ export function GraphCanvas({
     if (!cy || !api) return;
     try {
       api.expandAll();
-      setTimeout(() => {
-        try {
-          cy.fit(undefined, 30);
-        } catch {
-          /* unmounted */
-        }
-      }, 250);
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  // Stepwise: expand the SHALLOWEST currently-collapsed compounds —
+  // i.e. peel back exactly one layer of compression. Picking the
+  // shallowest set means the user sees the next ring of the
+  // hierarchy come into view (areas → files → classes → functions),
+  // not random pockets of detail at deeper levels.
+  const handleExpandOneLevel = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      const expandable = api.expandableNodes();
+      if (expandable.length === 0) return;
+      let minDepth = Infinity;
+      expandable.forEach((n) => {
+        const d = nodeTreeDepth(n);
+        if (d < minDepth) minDepth = d;
+      });
+      const toExpand = expandable.filter(
+        (n) => nodeTreeDepth(n) === minDepth,
+      );
+      if (toExpand.length === 0) return;
+      api.expand(toExpand);
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  // Stepwise: collapse the DEEPEST currently-expanded compounds —
+  // the mirror of expandOneLevel. Folds the innermost ring back in
+  // so the user can step out of detail layer by layer.
+  const handleCollapseOneLevel = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      const collapsible = api.collapsibleNodes();
+      if (collapsible.length === 0) return;
+      let maxDepth = -1;
+      collapsible.forEach((n) => {
+        const d = nodeTreeDepth(n);
+        if (d > maxDepth) maxDepth = d;
+      });
+      const toCollapse = collapsible.filter(
+        (n) => nodeTreeDepth(n) === maxDepth,
+      );
+      if (toCollapse.length === 0) return;
+      api.collapse(toCollapse);
+      refit(cy);
     } catch {
       /* extension swallowed */
     }
@@ -602,9 +674,23 @@ export function GraphCanvas({
       className={`relative isolate h-[calc(100vh-260px)] min-h-[400px] w-full overflow-hidden rounded-md border bg-background ${className ?? ''}`}
     >
       <div ref={containerRef} className="absolute inset-0" />
+      {/* Four stepped expansion controls — collapse all the way (◀◀),
+        * collapse one layer (◀), expand one layer (▶), expand all the
+        * way (▶▶). The two "all" extremes are still here because they
+        * are the most common shortcut on large graphs; the two
+        * single-step buttons let users peel back the hierarchy one
+        * ring at a time (areas → files → classes → functions).
+        *
+        * z-index 1000 is load-bearing: cytoscape-expand-collapse
+        * injects its OWN canvas inside the cytoscape host at z-index
+        * 999 to draw the per-compound +/- cue icons. That canvas
+        * normally captures pointer events for the entire host area —
+        * so any overlay at a lower z-index (z-50, the previous value)
+        * silently loses every click to the cue canvas. The toolbar
+        * has to live above z-999 to receive its own clicks. */}
       <div
         data-testid="graph-collapse-controls"
-        className="pointer-events-none absolute right-2 top-2 z-50 flex items-center gap-1"
+        className="pointer-events-none absolute right-2 top-2 z-[1000] flex items-center gap-1 rounded-md border bg-card/95 p-1 shadow-sm"
       >
         <button
           type="button"
@@ -612,10 +698,29 @@ export function GraphCanvas({
           data-testid="graph-collapse-all"
           aria-label="Collapse all areas"
           title="Collapse all areas"
-          className="pointer-events-auto inline-flex h-7 items-center gap-1 rounded-md border bg-card/95 px-2 text-xs shadow-sm hover:bg-card"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
         >
-          <ChevronsDownUp size={12} />
-          Collapse all
+          <ChevronsDownUp size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={handleCollapseOneLevel}
+          data-testid="graph-collapse-one"
+          aria-label="Collapse one layer"
+          title="Collapse one layer (fold innermost ring)"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <Minus size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={handleExpandOneLevel}
+          data-testid="graph-expand-one"
+          aria-label="Expand one layer"
+          title="Expand one layer (peel back next ring)"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <Plus size={14} />
         </button>
         <button
           type="button"
@@ -623,10 +728,9 @@ export function GraphCanvas({
           data-testid="graph-expand-all"
           aria-label="Expand all areas"
           title="Expand all areas"
-          className="pointer-events-auto inline-flex h-7 items-center gap-1 rounded-md border bg-card/95 px-2 text-xs shadow-sm hover:bg-card"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
         >
-          <ChevronsUpDown size={12} />
-          Expand all
+          <ChevronsUpDown size={14} />
         </button>
       </div>
       {repoId !== undefined && (
@@ -674,6 +778,16 @@ interface ExpandCollapseOptions {
 interface ExpandCollapseApi {
   collapseAll: () => void;
   expandAll: () => void;
+  /** Collapse a specific collection of compound nodes. */
+  collapse: (eles: cytoscape.NodeCollection) => void;
+  /** Expand a specific collection of compound nodes. */
+  expand: (eles: cytoscape.NodeCollection) => void;
+  /** Cytoscape collection of nodes that are currently expandable (i.e.
+   * collapsed compounds). */
+  expandableNodes: () => cytoscape.NodeCollection;
+  /** Cytoscape collection of nodes that are currently collapsible (i.e.
+   * expanded compounds with children). */
+  collapsibleNodes: () => cytoscape.NodeCollection;
 }
 
 function buildAreaErrorMap(areas: AreaStatus[]): Record<string, string | null> {
