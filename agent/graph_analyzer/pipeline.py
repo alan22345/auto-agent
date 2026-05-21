@@ -7,12 +7,15 @@ Stages (matches ADR §10):
 2. For each area: walk files, dispatch by extension to the right parser
    (via :func:`agent.graph_analyzer.parsers.parser_for`), accumulate
    nodes, AST edges, and unresolved-dispatch sites.
-3. **Phase 3 gap-fill** — per area, when an ``LLMProvider`` is
-   supplied: feed each :class:`UnresolvedSite` through
-   :func:`gap_fill_site`; fall back to :func:`agent_escape` when the
-   one-shot returns zero validatable edges. Every emitted edge is
-   then run through the unconditional citation + target validators
-   (``agent/graph_analyzer/validator.py``); failures are dropped.
+3. **Gap-fill** — when an ``LLMProvider`` is supplied: each
+   :class:`UnresolvedSite` runs through a single one-shot
+   :func:`gap_fill_site` call. Sites are dispatched concurrently
+   (bounded by :data:`_GAP_FILL_CONCURRENCY`); every emitted edge runs
+   through the unconditional citation + target validators
+   (``agent/graph_analyzer/validator.py``); failures are dropped. There
+   is no multi-turn agent-escape fallback — empty one-shot results
+   simply yield no LLM edge for that site (the redesign that replaced
+   the 27-42h cardamon stall with a few minutes).
 4. Per-area failure isolation — a parser exception marks the area
    ``failed`` and continues with the next area. Gap-fill exceptions
    for a single site never fail the area.
@@ -26,6 +29,7 @@ AST-only output, no LLM call.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 from collections.abc import Awaitable, Callable
@@ -35,7 +39,6 @@ from typing import TYPE_CHECKING
 import structlog
 import yaml
 
-from agent.graph_analyzer.agent_escape import agent_escape
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
@@ -54,9 +57,23 @@ log = structlog.get_logger(__name__)
 CheckpointFlush = Callable[[dict, dict, list], Awaitable[None]]
 # (blob_dict, processed_files_dict, failed_sites_list) -> None
 
+#: Type alias for the live-progress hook. Callers (the refresh
+#: lifecycle handler) pass one in to receive a ``(done, total)`` ping
+#: per completed gap-fill site. The pipeline never imports the
+#: orchestrator concern (in-memory tracker, event bus); this seam
+#: keeps the dependency arrow correct.
+GapFillProgressHook = Callable[[int, int], Awaitable[None]]
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+#: Concurrency cap for gap-fill across sites. Each site is one cheap
+#: Haiku call (~5s), independent of the others. 8-in-flight is the
+#: knee where additional parallelism stops translating to wall-clock
+#: gains given Bedrock's per-account throttling.
+_GAP_FILL_CONCURRENCY = 8
 
 
 # Bumped per phase as new capability lands. Phase 7 adds partial-mode
@@ -382,6 +399,7 @@ async def run_pipeline(
     commit_sha: str,
     provider: LLMProvider | None = None,
     on_file_checkpoint: CheckpointFlush | None = None,
+    on_progress: GapFillProgressHook | None = None,
     initial_processed_files: dict | None = None,
     initial_failed_sites: list | None = None,
     initial_blob: dict | None = None,
@@ -395,14 +413,18 @@ async def run_pipeline(
         provider: Optional LLM provider. When ``None``, the pipeline
             emits AST-only edges (Phase 2 behaviour). When provided,
             each :class:`UnresolvedSite` runs through one-shot gap-fill
-            and (on empty/invalid result) the bounded agent-escape;
-            validated LLM edges land in the blob with
-            ``source_kind="llm"``.
+            and validated LLM edges land in the blob with
+            ``source_kind="llm"`` (no multi-turn fallback).
         on_file_checkpoint: Optional async callback invoked after each
             file completes. Receives ``(blob_dict, processed_files,
             failed_sites)`` so the caller can persist incremental
             progress (e.g. for crash recovery). When ``None``, the
             pipeline behaves exactly as before.
+        on_progress: Optional async callback ``(done, total) -> None``.
+            Fires once per completed gap-fill site so callers can
+            surface live "X of Y" progress to the UI. The pipeline
+            never reads/writes the orchestrator-side tracker itself —
+            the callback is the seam.
         initial_processed_files: Resume state — dict of already-processed
             file paths to their metadata. Files present here are skipped
             unless they also appear in ``initial_failed_sites``.
@@ -469,6 +491,7 @@ async def run_pipeline(
             provider=provider,
             nodes=all_nodes,
             per_area_sites=per_area_sites,
+            on_progress=on_progress,
         )
         all_edges.extend(llm_edges)
 
@@ -536,6 +559,7 @@ async def run_partial_pipeline(
     target_area: str,
     previous_blob: RepoGraphBlob,
     provider: LLMProvider | None = None,
+    on_progress: GapFillProgressHook | None = None,
 ) -> RepoGraphBlob:
     """Re-analyse a single area and splice the result into the previous
     blob (ADR-016 §10 — Phase 7).
@@ -631,6 +655,7 @@ async def run_partial_pipeline(
             provider=provider,
             nodes=all_nodes,
             per_area_sites=[(target_area, target_sites)],
+            on_progress=on_progress,
         )
         all_edges.extend(llm_edges)
 
@@ -780,29 +805,56 @@ async def _run_gap_fill_stage(
     provider: LLMProvider,
     nodes: list[Node],
     per_area_sites: list[tuple[str, list[UnresolvedSite]]],
+    on_progress: GapFillProgressHook | None = None,
 ) -> list[Edge]:
-    """For each unresolved site, run gap-fill (and on empty/invalid
-    result, agent-escape). Validate every emitted edge against the
-    actual workspace; drop failures. Returns the surviving LLM edges.
+    """One-shot gap-fill across every unresolved site, in parallel.
 
-    Validation order:
-      1. Soft filter inside gap-fill / escape: target in candidate pool.
+    Each site gets exactly one :func:`gap_fill_site` call — there is no
+    multi-turn fallback. Sites are dispatched concurrently bounded by
+    :data:`_GAP_FILL_CONCURRENCY`; the candidate pool is precomputed
+    once per area so the gather doesn't re-rank for every site.
+
+    Validation order (unchanged from prior implementation):
+      1. Soft filter inside gap-fill: target must be in candidate pool.
       2. ``validate_citation`` against the workspace.
       3. ``validate_target`` against the final node set.
 
     Step 1 is a fast belt-and-braces check; steps 2 + 3 are the
     unconditional gates promised by ADR-016 §3.
+
+    Per-site exceptions are caught and surface as zero edges for that
+    site — they never fail the whole stage.
+
+    ``on_progress`` (when supplied) fires after each site completes
+    with the cumulative ``(done, total)``. The hook is awaited
+    serialised under an internal lock so callers don't have to make
+    their tracker concurrent-safe; if the hook raises, the run still
+    completes — progress is best-effort UX, not load-bearing state.
     """
-    validated: list[Edge] = []
-    for area_name, sites in per_area_sites:
-        candidates = _candidate_pool_for_area(nodes, area_name)
-        for site in sites:
+    total = sum(len(sites) for _, sites in per_area_sites)
+    if total == 0:
+        return []
+
+    candidates_by_area: dict[str, list[Node]] = {
+        area: _candidate_pool_for_area(nodes, area) for area, _ in per_area_sites
+    }
+
+    semaphore = asyncio.Semaphore(_GAP_FILL_CONCURRENCY)
+    progress_lock = asyncio.Lock()
+    done = 0
+
+    async def _gap_fill_one(
+        area_name: str,
+        site: UnresolvedSite,
+    ) -> list[Edge]:
+        nonlocal done
+        async with semaphore:
             try:
                 llm_edges = await gap_fill_site(
                     provider=provider,
                     workspace_path=workspace,
                     site=site,
-                    candidate_nodes=candidates,
+                    candidate_nodes=candidates_by_area[area_name],
                 )
             except Exception as e:
                 log.warning(
@@ -812,30 +864,25 @@ async def _run_gap_fill_stage(
                     error_type=e.__class__.__name__,
                 )
                 llm_edges = []
-
-            # Escalate to bounded agent-loop if one-shot was empty OR if
-            # every emitted edge fails the validation gates.
-            survivors = _validate_edges(workspace, llm_edges, nodes)
-            if not survivors:
+        survivors = _validate_edges(workspace, llm_edges, nodes)
+        if on_progress is not None:
+            async with progress_lock:
+                done += 1
                 try:
-                    escape_edges = await agent_escape(
-                        provider=provider,
-                        workspace_path=workspace,
-                        site=site,
-                        candidate_nodes=candidates,
-                    )
+                    await on_progress(done, total)
                 except Exception as e:
                     log.warning(
-                        "graph_agent_escape_site_unexpected",
-                        site=site.containing_node_id,
+                        "graph_gap_fill_progress_hook_failed",
                         error=str(e),
                         error_type=e.__class__.__name__,
                     )
-                    escape_edges = []
-                survivors = _validate_edges(workspace, escape_edges, nodes)
+        return survivors
 
-            validated.extend(survivors)
-    return validated
+    tasks = [
+        _gap_fill_one(area_name, site) for area_name, sites in per_area_sites for site in sites
+    ]
+    results = await asyncio.gather(*tasks)
+    return [edge for batch in results for edge in batch]
 
 
 def _validate_edges(

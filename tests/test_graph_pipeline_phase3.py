@@ -6,15 +6,18 @@ These tests pin the new behaviour:
 * ``run_pipeline(..., provider=None)`` keeps the Phase 2 behaviour
   bit-for-bit — no LLM call, only AST edges.
 * When a ``provider`` is supplied, unresolved sites are funnelled
-  through gap-fill (then agent-escape on fallback) and the surviving
-  validated edges land in the blob with ``source_kind="llm"``.
+  through a single one-shot ``gap_fill_site`` call (no multi-turn agent
+  escape) and the surviving validated edges land in the blob with
+  ``source_kind="llm"``.
 * Edges that fail citation or target validation are dropped before they
   reach the blob.
-* Escape triggers when one-shot returns zero edges.
+* Empty one-shot result for a site simply yields no LLM edge for that
+  site — no fallback retry burns budget.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -23,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent.graph_analyzer.pipeline import run_pipeline
-from agent.llm.types import LLMResponse, Message, TokenUsage, ToolCall
+from agent.llm.types import LLMResponse, Message, TokenUsage
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "graph_repo_python"
 
@@ -44,51 +47,6 @@ def _provider_returning_one_shot(payload: dict) -> MagicMock:
             usage=TokenUsage(input_tokens=10, output_tokens=10),
         ),
     )
-    return provider
-
-
-def _provider_routes_by_tools(
-    *,
-    gap_fill_payload: dict,
-    escape_payload: dict,
-) -> MagicMock:
-    """Routes provider.complete responses based on whether the call
-    supplies tools (escape) or not (gap-fill). This way one mock works
-    no matter how many sites the pipeline finds.
-
-    The gap-fill case returns the supplied ``gap_fill_payload`` as JSON.
-    The escape case returns a single ``return_findings`` tool call with
-    ``escape_payload`` as the arguments dict.
-    """
-    provider = MagicMock()
-
-    async def respond(*, messages, system, max_tokens, temperature, tools=None):
-        if tools:
-            return LLMResponse(
-                message=Message(
-                    role="assistant",
-                    content="",
-                    tool_calls=[
-                        ToolCall(
-                            id="t1",
-                            name="return_findings",
-                            arguments=escape_payload,
-                        ),
-                    ],
-                ),
-                stop_reason="tool_use",
-                usage=TokenUsage(input_tokens=10, output_tokens=10),
-            )
-        return LLMResponse(
-            message=Message(
-                role="assistant",
-                content=json.dumps(gap_fill_payload),
-            ),
-            stop_reason="end_turn",
-            usage=TokenUsage(input_tokens=10, output_tokens=10),
-        )
-
-    provider.complete = AsyncMock(side_effect=respond)
     return provider
 
 
@@ -181,27 +139,106 @@ async def test_failed_target_drops_edge(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escape_triggers_when_gap_fill_empty(tmp_path: Path) -> None:
-    """One-shot returns empty edges → escape is invoked → escape
-    returns a valid edge → blob carries it."""
+async def test_empty_gap_fill_does_not_trigger_fallback(tmp_path: Path) -> None:
+    """One-shot returns empty edges → site simply has no LLM edge. No
+    multi-turn agent-escape fallback fires. This is the load-bearing
+    cost-discipline change in this redesign: previously every empty
+    one-shot burned up to 5 turns x 60 s in the bounded agent-escape
+    loop, which is what caused the ~12-sites/hour stall on cardamon."""
     ws = _setup_workspace(tmp_path)
-    provider = _provider_routes_by_tools(
-        gap_fill_payload={"edges": []},
-        escape_payload={
-            "edges": [
-                {
-                    "target_node_id": "agent_area/registry.py::ping_handler",
-                    "evidence_line": 35,
-                    "evidence_snippet": "return HANDLERS[name](payload)",
-                },
-            ],
-        },
+    provider = _provider_returning_one_shot({"edges": []})
+    await run_pipeline(workspace=ws, commit_sha="x", provider=provider)
+
+    # Inspect every recorded call — none must have been a tools-bearing
+    # agent-escape invocation. (gap_fill_site calls complete_json which
+    # only ever passes tools=None.)
+    for call in provider.complete.await_args_list:
+        assert call.kwargs.get("tools") in (None, []), (
+            f"gap-fill stage made a tools-bearing call: {call.kwargs}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_on_progress_callback_fires_per_site(tmp_path: Path) -> None:
+    """``run_pipeline`` exposes an ``on_progress`` hook so callers (the
+    refresh lifecycle handler) can report live gap-fill progress to the
+    UI without the pipeline depending on the orchestrator. The callback
+    receives ``(done, total)`` and must fire at least once per completed
+    site, with ``done`` monotonically rising to ``total``."""
+    ws = _setup_workspace(tmp_path)
+    provider = _provider_returning_one_shot({"edges": []})
+
+    progress_calls: list[tuple[int, int]] = []
+
+    async def on_progress(done: int, total: int) -> None:
+        progress_calls.append((done, total))
+
+    await run_pipeline(
+        workspace=ws,
+        commit_sha="x",
+        provider=provider,
+        on_progress=on_progress,
     )
-    blob = await run_pipeline(workspace=ws, commit_sha="x", provider=provider)
-    llm_edges = [e for e in blob.edges if e.source_kind == "llm"]
-    assert any(e.target == "agent_area/registry.py::ping_handler" for e in llm_edges), llm_edges
-    # gap_fill ran per site (≥1), escape ran for each empty gap-fill (≥1).
-    assert provider.complete.await_count >= 2
+
+    # Fixture has 2 unresolved sites — pin the contract.
+    assert len(progress_calls) >= 2
+    # Every callback reports the same total.
+    totals = {t for _, t in progress_calls}
+    assert totals == {2}
+    # done values are unique and monotone.
+    done_values = [d for d, _ in progress_calls]
+    assert done_values == sorted(done_values)
+    assert done_values[-1] == 2
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_stage_runs_sites_concurrently(tmp_path: Path) -> None:
+    """Sites are independent — the stage must dispatch them concurrently
+    so wall-clock scales with the slowest site, not the sum. We assert
+    this by stalling the mock and tracking peak in-flight calls."""
+    ws = _setup_workspace(tmp_path)
+
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def stalled_respond(**kwargs):
+        nonlocal in_flight, peak
+        async with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            # Long enough that a sequential implementation would never
+            # show >1 in flight, short enough to keep the test fast.
+            await asyncio.sleep(0.05)
+        finally:
+            async with lock:
+                in_flight -= 1
+        return LLMResponse(
+            message=Message(role="assistant", content=json.dumps({"edges": []})),
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+
+    provider = MagicMock()
+    provider.complete = AsyncMock(side_effect=stalled_respond)
+
+    # The fixture has at least one unresolved site; if it has more this
+    # test gets even sharper. We only assert peak >= 2 to keep the bar
+    # robust in CI.
+    # First, force the fixture to have ≥2 sites by checking the no-LLM
+    # blob's status counts.
+    from agent.graph_analyzer.pipeline import run_pipeline as _rp
+
+    baseline = await _rp(workspace=ws, commit_sha="x", provider=None)
+    total_sites = sum(a.unresolved_dynamic_sites for a in baseline.areas)
+    if total_sites < 2:
+        pytest.skip(
+            f"fixture only has {total_sites} unresolved sites; concurrency test needs ≥2",
+        )
+
+    await run_pipeline(workspace=ws, commit_sha="x", provider=provider)
+    assert peak >= 2, f"gap-fill stage ran serially: peak={peak}"
 
 
 @pytest.mark.asyncio

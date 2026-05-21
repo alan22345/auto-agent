@@ -1,8 +1,8 @@
 """One-shot LLM gap-fill for unresolved dispatch sites (ADR-016 Phase 3 §3).
 
 For each :class:`UnresolvedSite` the parser surfaces, we feed the LLM
-the surrounding source plus the candidate node ids and ask it to emit
-zero or more ``calls`` edges in a tight JSON shape::
+the surrounding source plus a metadata-rich list of candidate nodes
+and ask it to emit zero or more ``calls`` edges in a tight JSON shape::
 
     {"edges": [
         {"target_node_id": "...", "evidence_line": 42,
@@ -19,12 +19,17 @@ This module returns the constructed :class:`shared.types.Edge` instances
 here is "target id must be in the candidate pool"; everything else is
 deferred to the unconditional validators.
 
-Cost discipline (per the Phase 3 brief):
+Cost discipline:
 
-* The candidate-pool size is capped at :data:`_CANDIDATE_CAP` (150 by
-  default) before we build the prompt.
+* The candidate-pool size is capped at :data:`_CANDIDATE_CAP` before we
+  build the prompt. Tighter is better — the LLM only ever cites one or
+  two targets per site, and a long candidate list dilutes the choice.
 * Output is bounded to :data:`_GAP_FILL_MAX_TOKENS` (1024) — gap-fill
   has a tight, structured shape; it does not need 4k tokens.
+* Each candidate line carries ``file:line_start-line_end`` and ``kind``
+  so the LLM can disambiguate without reading source. The old
+  bare-id list forced the agent-escape fallback to grep/read_file,
+  which burned its token budget within 2-3 turns.
 """
 
 from __future__ import annotations
@@ -45,11 +50,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-#: Hard cap on the number of candidate node ids included in the LLM
-#: prompt. Too-large candidate lists balloon tokens for little benefit —
-#: the LLM only ever cites one or two per site. 150 is enough to cover
-#: a moderately-sized area without crowding the prompt.
-_CANDIDATE_CAP = 150
+#: Hard cap on the number of candidate nodes included in the LLM prompt.
+#: Tight on purpose: the LLM only ever cites one or two per site, and a
+#: long candidate list dilutes the choice + grows tokens. The pipeline
+#: ranks same-area candidates first (``_candidate_pool_for_area``) so
+#: this cap keeps the highest-signal candidates and drops the long tail.
+_CANDIDATE_CAP = 40
 
 #: Output token budget for gap-fill. The JSON shape is small; we never
 #: need 4k. Keeping this tight makes the gap-fill cost predictable.
@@ -66,20 +72,44 @@ class _LLMEdgePayload(BaseModel):
     evidence_snippet: str = Field(min_length=1)
 
 
+def _format_candidate(node: Node) -> str:
+    """Render one candidate as a metadata-rich bullet for the prompt.
+
+    Format: ``- <id> (<kind>) @ <file>:<lstart>-<lend> [<decorators>]``.
+    Pieces that are absent on the node are silently dropped so the line
+    stays compact. This is the load-bearing change that lets the LLM
+    resolve a site in one shot — bare ids forced it into the slow
+    agent-escape loop to grep/read source.
+    """
+    parts = [f"- {node.id} ({node.kind})"]
+    if node.file:
+        if node.line_start and node.line_end and node.line_end > node.line_start:
+            parts.append(f"@ {node.file}:{node.line_start}-{node.line_end}")
+        elif node.line_start:
+            parts.append(f"@ {node.file}:{node.line_start}")
+        else:
+            parts.append(f"@ {node.file}")
+    if node.decorators:
+        parts.append(f"[{', '.join(node.decorators)}]")
+    return " ".join(parts)
+
+
 def _build_system_prompt(
     site: UnresolvedSite,
-    candidate_ids: list[str],
+    candidates: list[Node],
 ) -> str:
     """Build the system prompt for one gap-fill call."""
-    bulleted = "\n".join(f"- {nid}" for nid in candidate_ids)
+    bulleted = "\n".join(_format_candidate(n) for n in candidates)
     return (
         "You resolve dynamic-dispatch call sites in a code graph.\n"
         "\n"
         "The user message shows ONE unresolved call site in a Python "
         "codebase, with ~30 lines of surrounding source. Static "
         "analysis could not determine which function the call lands on. "
-        "Your job: identify the resolved target(s) by reading the "
-        f"surrounding code. The dispatch pattern is hinted as: {site.pattern_hint}.\n"
+        "Your job: identify the resolved target(s) from the candidate "
+        "list. Use the file:line metadata next to each candidate to "
+        "disambiguate — you do not need any external lookups. The "
+        f"dispatch pattern is hinted as: {site.pattern_hint}.\n"
         "\n"
         "OUTPUT — return ONLY a JSON object with this shape, no prose, no "
         "markdown fences:\n"
@@ -98,7 +128,7 @@ def _build_system_prompt(
         '4. If you cannot resolve the site, return {"edges": []}. '
         "Do not guess.\n"
         "\n"
-        "Candidate target nodes (graph ids):\n"
+        "Candidate target nodes:\n"
         f"{bulleted}\n"
     )
 
@@ -190,10 +220,9 @@ async def gap_fill_site(
     """
     # Cap candidate pool and capture id set up-front for the soft filter.
     bounded = candidate_nodes[:_CANDIDATE_CAP]
-    candidate_ids = [n.id for n in bounded]
-    id_set = set(candidate_ids)
+    id_set = {n.id for n in bounded}
 
-    system = _build_system_prompt(site, candidate_ids)
+    system = _build_system_prompt(site, bounded)
     user = _build_user_message(site)
 
     try:
