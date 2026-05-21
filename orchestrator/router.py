@@ -3367,8 +3367,16 @@ async def disable_repo_graph(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> dict:
-    """Disable code-graph analysis. Deletes the config row; the workspace
-    on disk is left as-is (Phase 2's analyser owns its lifecycle)."""
+    """Disable code-graph analysis. Deletes the config row and the
+    historical ``repo_graphs`` analysis rows so a future re-enable starts
+    from a clean slate. The workspace on disk is left as-is (Phase 2's
+    analyser owns its lifecycle).
+
+    Without the cascade, ``/graph/progress`` would surface the previous
+    run's ``is_complete=True`` state after a disable→enable round-trip,
+    because that endpoint reads the latest ``RepoGraph`` row by
+    ``repo_id`` rather than by current config.
+    """
     repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
     if not repo:
         raise HTTPException(404, "Repo not found")
@@ -3380,6 +3388,9 @@ async def disable_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
+    await session.execute(
+        sql_delete(RepoGraph).where(RepoGraph.repo_id == repo.id)
+    )
     await session.delete(cfg)
     await session.commit()
     return {"disabled": repo.id}
