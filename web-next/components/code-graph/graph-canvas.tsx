@@ -578,6 +578,31 @@ export function GraphCanvas({
     }
   };
 
+  // Native mousedown listeners on the toolbar buttons stop the event
+  // from bubbling up to cytoscape's container-level listener. React's
+  // synthetic onMouseDown fires too late: React 17+ delegates events
+  // through a single root listener, so the synthetic dispatch happens
+  // AFTER the native event has already bubbled past cytoscape's
+  // listener on containerRef. A listener attached natively to the
+  // button fires in target phase (before bubble) and is the only way
+  // to keep cytoscape from seeing the event at all.
+  const collapseBtnRef = useRef<HTMLButtonElement>(null);
+  const expandBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const stop = (e: Event) => e.stopPropagation();
+    const wired: Array<[HTMLElement, string]> = [];
+    for (const btn of [collapseBtnRef.current, expandBtnRef.current]) {
+      if (!btn) continue;
+      for (const ev of ['mousedown', 'pointerdown', 'touchstart'] as const) {
+        btn.addEventListener(ev, stop);
+        wired.push([btn, ev]);
+      }
+    }
+    return () => {
+      for (const [btn, ev] of wired) btn.removeEventListener(ev, stop);
+    };
+  }, []);
+
   return (
     <div
       ref={containerRef}
@@ -588,29 +613,19 @@ export function GraphCanvas({
         * ``AreaRefreshOverlay``). ``pointer-events-none`` on the wrapper
         * lets cytoscape capture every click on bare canvas; each
         * button opts back in with ``pointer-events-auto`` so it
-        * intercepts its own click. Earlier attempts at making the
-        * overlay a sibling of the host left cytoscape's internal
-        * stacking context above the toolbar — clicks tunneled through
-        * to graph nodes underneath.
-        *
-        * stopPropagation on mousedown is the load-bearing bit: cytoscape
-        * binds mousedown on the host (our containerRef) and projects
-        * any descendant click into graph coords + emits a ``tap``. The
-        * button's onClick still fires regardless — but the projected
-        * tap also fires, and tends to hit the area node behind the
-        * button which then opens the side panel. So the user sees the
-        * side panel open and concludes "the click went through to the
-        * graph". Stopping bubble-phase propagation at the button keeps
-        * cytoscape from seeing the event at all. */}
+        * intercepts its own click. The native mousedown stoppers wired
+        * up in the effect above keep cytoscape's container listener
+        * from seeing the event — React's synthetic onMouseDown fires
+        * too late (after the native event has already bubbled past
+        * cytoscape via React 17+ root delegation). */}
       <div
         data-testid="graph-collapse-controls"
         className="pointer-events-none absolute right-2 top-2 z-30 flex items-center gap-1"
       >
         <button
+          ref={collapseBtnRef}
           type="button"
           onClick={handleCollapseAll}
-          onMouseDown={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
           data-testid="graph-collapse-all"
           aria-label="Collapse all areas"
           title="Collapse all areas"
@@ -620,10 +635,9 @@ export function GraphCanvas({
           Collapse all
         </button>
         <button
+          ref={expandBtnRef}
           type="button"
           onClick={handleExpandAll}
-          onMouseDown={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
           data-testid="graph-expand-all"
           aria-label="Expand all areas"
           title="Expand all areas"
