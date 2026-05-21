@@ -130,6 +130,85 @@ class TestRunPipeline:
         assert not any(n.file and n.file.startswith("__pycache__/") for n in blob.nodes)
 
 
+@pytest.mark.asyncio
+class TestModuleImportResolution:
+    """Bare ``module:<dotted>`` placeholders on import edges must be
+    rewritten to the corresponding ``file:`` node id so the rendered
+    graph has no phantom endpoints.
+
+    Regression test for the 2026-05-21 "graph canvas empty on a freshly-
+    built local repo" handover: an import edge of shape
+    ``module:dispatcher.router -> module:handlers`` left phantom endpoints
+    that cytoscape silently dropped (and broke its cose layout, leaving
+    every node at the origin). The pipeline owns the cross-file knowledge
+    needed to resolve these placeholders — the per-file parser cannot.
+    """
+
+    async def test_import_edges_resolve_module_placeholders_to_file_nodes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Reproduce the handover repro on a tiny fixture: a dispatcher
+        # area that imports from a handlers area. Both ends must resolve
+        # to ``file:`` node ids — the rendered graph cannot tolerate
+        # endpoints that aren't in the node set.
+        ws = tmp_path / "workspace"
+        (ws / "dispatcher").mkdir(parents=True)
+        (ws / "handlers").mkdir(parents=True)
+        (ws / "dispatcher" / "__init__.py").write_text("")
+        (ws / "dispatcher" / "router.py").write_text(
+            "from handlers import ping_handler\n"
+            "def dispatch(name):\n"
+            "    return ping_handler(name)\n",
+        )
+        (ws / "handlers" / "__init__.py").write_text(
+            "def ping_handler(name):\n    return name\n",
+        )
+
+        blob = await run_pipeline(workspace=str(ws), commit_sha="abc")
+
+        node_ids = {n.id for n in blob.nodes}
+        imports = [e for e in blob.edges if e.kind == "imports"]
+        # The router-to-handlers import edge must exist and both
+        # endpoints must be real nodes in the graph.
+        router_to_handlers = [
+            e
+            for e in imports
+            if "router" in e.evidence.file and "handlers" in e.evidence.snippet
+        ]
+        assert router_to_handlers, "expected the router->handlers import edge"
+        for e in router_to_handlers:
+            assert e.source in node_ids, (
+                f"phantom source {e.source!r} — not a node in the graph"
+            )
+            assert e.target in node_ids, (
+                f"phantom target {e.target!r} — not a node in the graph"
+            )
+            # And specifically they should be file-level nodes.
+            assert e.source.startswith("file:")
+            assert e.target.startswith("file:")
+
+    async def test_external_module_import_edges_are_dropped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # ``import os`` produces an edge to ``module:os`` — there is no
+        # ``file:`` node for stdlib / third-party modules, so the edge
+        # would render as a phantom endpoint in cytoscape. The pipeline
+        # drops these so the canvas has only edges between real nodes.
+        ws = tmp_path / "workspace"
+        (ws / "area_a").mkdir(parents=True)
+        (ws / "area_a" / "__init__.py").write_text("")
+        (ws / "area_a" / "mod.py").write_text("import os\n")
+
+        blob = await run_pipeline(workspace=str(ws), commit_sha="abc")
+
+        node_ids = {n.id for n in blob.nodes}
+        for e in blob.edges:
+            assert e.source in node_ids, f"phantom source {e.source!r}"
+            assert e.target in node_ids, f"phantom target {e.target!r}"
+
+
 class TestOverallStatus:
     def test_all_ok(self) -> None:
         s = [AreaStatus(name="a", status="ok"), AreaStatus(name="b", status="ok")]

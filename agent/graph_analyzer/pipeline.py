@@ -543,6 +543,15 @@ async def run_pipeline(
     # expect.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
+    # Resolve bare ``module:<dotted>`` endpoints on import edges to the
+    # corresponding ``file:`` node id, and drop edges whose endpoints
+    # still don't resolve to a real node. Per-file parsers emit import
+    # edges between two ``module:`` placeholders because they have no
+    # cross-file knowledge; without this step the rendered graph carries
+    # phantom endpoints that cytoscape silently drops (and breaks its
+    # layout, leaving every node at the origin).
+    all_edges = _resolve_module_imports_to_files(all_edges, all_nodes)
+
     # Then, run the boundary flagger. It mutates no inputs — returns a
     # new edge list with ``boundary_violation`` and ``violation_reason``
     # populated. HTTP edges are unconditionally exempt; same-area edges
@@ -698,6 +707,13 @@ async def run_partial_pipeline(
     # symbols via ``module:`` placeholders.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
+    # 6b. Resolve bare ``module:<dotted>`` import endpoints to real
+    # ``file:`` nodes (and drop edges that still don't resolve). See the
+    # full-pipeline path for the rationale — the partial path needs the
+    # same hygiene step so re-analysed areas don't reintroduce phantom
+    # endpoints into the rendered graph.
+    all_edges = _resolve_module_imports_to_files(all_edges, all_nodes)
+
     # 7. Boundary flagging — re-runs across the full edge set.
     rules = load_boundary_rules(workspace)
     all_edges = flag_violations(
@@ -782,6 +798,86 @@ def _resolve_cross_area_module_targets(
             Edge(
                 source=edge.source,
                 target=resolved.id,
+                kind=edge.kind,
+                evidence=edge.evidence,
+                source_kind=edge.source_kind,
+                boundary_violation=edge.boundary_violation,
+                violation_reason=edge.violation_reason,
+            ),
+        )
+    return rewritten
+
+
+def _resolve_module_imports_to_files(
+    edges: list[Edge],
+    nodes: list[Node],
+) -> list[Edge]:
+    """Rewrite bare ``module:<dotted>`` endpoints (no ``.<symbol>``
+    suffix) on import edges to the corresponding ``file:`` node id when
+    one exists, and drop edges whose endpoints still don't resolve to a
+    real node.
+
+    Per-file parsers emit import edges as ``module:<src> -> module:<tgt>``
+    because they don't know about other files. The pipeline is the first
+    place that can rewrite those placeholders against the full node set.
+    The renderer (cytoscape) silently drops edges whose endpoints aren't
+    in the node set AND its compound layout breaks when phantom edges
+    are present, so unresolved external imports (e.g. ``module:os``) are
+    dropped rather than rendered.
+
+    Only bare ``module:<dotted>`` endpoints are touched. Non-``module:``
+    ids (``file:``, ``area:``, ``<file>::<symbol>``) pass through
+    unchanged. ``module:<dotted>.<symbol>`` shapes are also left alone —
+    that space is owned by :func:`_resolve_cross_area_module_targets`,
+    and the renderer falls back to a defensive orphan-edge filter for
+    the residual unresolved-symbol case.
+    """
+    # Build a lookup from synthetic ``module:<dotted>`` ids to the real
+    # ``file:`` node id by inverting the parser's file -> module mapping.
+    file_module_to_id: dict[str, str] = {}
+    for n in nodes:
+        if n.kind != "file" or not n.file:
+            continue
+        module_dotted = _file_to_module(n.file)
+        if module_dotted is None:
+            continue
+        file_module_to_id[f"module:{module_dotted}"] = n.id
+
+    def _resolve(endpoint: str) -> str | None:
+        """Return the rewritten endpoint, or ``None`` to signal the
+        whole edge should be dropped."""
+        if not endpoint.startswith("module:"):
+            return endpoint
+        rewritten = file_module_to_id.get(endpoint)
+        if rewritten is not None:
+            return rewritten
+        # ``module:<dotted>.<symbol>`` (symbol-level placeholder) — leave
+        # alone whether or not the file is known locally. Same-area
+        # contracts (e.g. ``module:agent_area.base.Animal`` on inherits
+        # edges) and the boundary flagger both depend on this shape.
+        # Residual phantoms here are caught by the renderer's defensive
+        # orphan-edge filter.
+        dotted = endpoint[len("module:") :]
+        if "." in dotted:
+            return endpoint
+        # Bare ``module:<dotted>`` with no file match — an external
+        # module reference (``module:os``, ``module:react``) that can't
+        # be rendered. Drop the edge.
+        return None
+
+    rewritten: list[Edge] = []
+    for edge in edges:
+        new_source = _resolve(edge.source)
+        new_target = _resolve(edge.target)
+        if new_source is None or new_target is None:
+            continue
+        if new_source == edge.source and new_target == edge.target:
+            rewritten.append(edge)
+            continue
+        rewritten.append(
+            Edge(
+                source=new_source,
+                target=new_target,
                 kind=edge.kind,
                 evidence=edge.evidence,
                 source_kind=edge.source_kind,

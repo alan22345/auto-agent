@@ -238,26 +238,44 @@ export function GraphCanvas({
         ],
       });
 
-      // Run the expand-collapse extension with all compounds initially
-      // collapsed.
-      const ec = (
+      // Register the expand-collapse extension so the user can toggle
+      // compounds via the UI. We previously called ``collapseAll()``
+      // immediately on mount, but that left the cose layout unable to
+      // position anything (all nodes ended up at the origin) and the
+      // canvas rendered blank. Leave compounds expanded by default —
+      // the layout runs cleanly, and the user can collapse manually if
+      // a large graph needs hiding.
+      (
         cy as unknown as {
           expandCollapse: (opts: {
             layoutBy: { name: string; padding?: number };
             fisheye: boolean;
             animate: boolean;
-          }) => {
-            collapseAll: () => void;
-          };
+          }) => unknown;
         }
       ).expandCollapse({
         layoutBy: { name: 'cose', padding: 30 },
         fisheye: false,
         animate: false,
       });
-      ec.collapseAll();
-      cy.layout({ name: 'cose', padding: 30 }).run();
-      cy.fit(undefined, 30);
+      // `cy.layout(...).run()` lays out asynchronously — fitting before
+      // positions are final leaves nodes outside the viewport (canvas
+      // looks empty on first render). Use the layout's documented
+      // `stop` callback to fit *after* positions settle, with a
+      // setTimeout backstop for the rare case where the layout never
+      // fires `stop` (empty / single-element graph).
+      const cyInstance = cy;
+      const fitOnce = () => {
+        try {
+          cyInstance.fit(undefined, 30);
+        } catch {
+          // cy may already be destroyed during unmount race — silent.
+        }
+      };
+      cyInstance
+        .layout({ name: 'cose', padding: 30, animate: false, stop: fitOnce } as cytoscape.LayoutOptions)
+        .run();
+      setTimeout(fitOnce, 250);
 
       // Tap handlers — drive the side panel + evidence popover. They
       // forward into refs (captured per render) so handler identity
@@ -415,8 +433,10 @@ export function blobToCytoscapeElements(
 ): CyElement[] {
   const elements: CyElement[] = [];
   const highlightedEdgeId = options.highlightedEdgeId ?? null;
+  const nodeIds = new Set<string>();
 
   for (const n of blob.nodes as Node[]) {
+    nodeIds.add(n.id);
     const failed = areaErrorById[n.id] != null;
     elements.push({
       data: {
@@ -432,6 +452,14 @@ export function blobToCytoscapeElements(
   }
 
   for (const e of blob.edges as Edge[]) {
+    // Defensive filter: cytoscape silently drops edges whose endpoints
+    // aren't in the node set AND its compound-graph layout
+    // (cose + expand-collapse) breaks when phantom edges are present,
+    // leaving every node positioned at the origin. The pipeline tries
+    // to keep these out; this is a belt-and-braces guard so a single
+    // unresolved ``module:`` placeholder can never render the canvas
+    // blank.
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) continue;
     const id = `${e.source}->${e.target}:${e.kind}`;
     const isViolation = e.boundary_violation === true;
     const isLlmDeduced = e.source_kind === 'llm';

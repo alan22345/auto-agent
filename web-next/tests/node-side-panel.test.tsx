@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { NodeSidePanel, groupEdgesByKind } from '@/components/code-graph/node-side-panel';
+import {
+  NodeSidePanel,
+  collectSubtreeNodeIds,
+  groupEdgesByKind,
+} from '@/components/code-graph/node-side-panel';
 import type { Edge, RepoGraphBlob } from '@/types/api';
 
 function wrap(ui: React.ReactNode) {
@@ -97,6 +101,96 @@ const blob: RepoGraphBlob = {
     },
   ],
 };
+
+describe('collectSubtreeNodeIds', () => {
+  // ADR-016 §11 — when the user selects a compound (area/file) node,
+  // the side panel must surface edges that cross the subtree boundary,
+  // not just edges whose endpoint id literally equals the compound's id
+  // (there are none — edges connect leaf nodes underneath). The
+  // subtree-id helper drives that aggregation.
+  const compoundBlob: RepoGraphBlob = {
+    commit_sha: 'x',
+    generated_at: '2026-05-21T00:00:00Z',
+    analyser_version: 'phase7-0.7.0',
+    areas: [],
+    nodes: [
+      {
+        id: 'area:dispatcher',
+        kind: 'area',
+        label: 'dispatcher',
+        file: null,
+        line_start: null,
+        line_end: null,
+        area: 'dispatcher',
+        parent: null,
+      },
+      {
+        id: 'file:dispatcher/router.py',
+        kind: 'file',
+        label: 'router.py',
+        file: 'dispatcher/router.py',
+        line_start: 1,
+        line_end: 12,
+        area: 'dispatcher',
+        parent: 'area:dispatcher',
+      },
+      {
+        id: 'dispatcher/router.py::dispatch',
+        kind: 'function',
+        label: 'dispatch',
+        file: 'dispatcher/router.py',
+        line_start: 6,
+        line_end: 8,
+        area: 'dispatcher',
+        parent: 'file:dispatcher/router.py',
+      },
+      {
+        id: 'area:handlers',
+        kind: 'area',
+        label: 'handlers',
+        file: null,
+        line_start: null,
+        line_end: null,
+        area: 'handlers',
+        parent: null,
+      },
+      {
+        id: 'file:handlers/__init__.py',
+        kind: 'file',
+        label: '__init__.py',
+        file: 'handlers/__init__.py',
+        line_start: 1,
+        line_end: 16,
+        area: 'handlers',
+        parent: 'area:handlers',
+      },
+    ],
+    edges: [],
+  };
+
+  it('returns just the node id for a leaf node', () => {
+    const set = collectSubtreeNodeIds(
+      compoundBlob,
+      'dispatcher/router.py::dispatch',
+    );
+    expect(Array.from(set)).toEqual(['dispatcher/router.py::dispatch']);
+  });
+
+  it('walks the parent tree for compound (area / file) nodes', () => {
+    const set = collectSubtreeNodeIds(compoundBlob, 'area:dispatcher');
+    expect(set.has('area:dispatcher')).toBe(true);
+    expect(set.has('file:dispatcher/router.py')).toBe(true);
+    expect(set.has('dispatcher/router.py::dispatch')).toBe(true);
+    // Nodes in a different area are not part of this subtree.
+    expect(set.has('area:handlers')).toBe(false);
+    expect(set.has('file:handlers/__init__.py')).toBe(false);
+  });
+
+  it('returns just the node id when the id is unknown', () => {
+    const set = collectSubtreeNodeIds(compoundBlob, 'no-such-node');
+    expect(Array.from(set)).toEqual(['no-such-node']);
+  });
+});
 
 describe('groupEdgesByKind', () => {
   it('groups edges in canonical kind order', () => {
@@ -227,6 +321,196 @@ describe('NodeSidePanel', () => {
       ),
     ).toBeTruthy();
     expect(incoming.textContent).toContain('Cat.meow');
+  });
+
+  it('aggregates descendant edges for a compound (area) node', () => {
+    // Regression test for the 2026-05-21 screenshot bug: selecting an
+    // area node showed "Incoming edges: 0 / Outgoing edges: 0" even
+    // though descendant function nodes had edges crossing into / out of
+    // another area. The fix walks the parent tree so an area's
+    // "outgoing" surfaces any edge whose source is somewhere inside it
+    // and whose target is outside.
+    const dispatcherBlob: RepoGraphBlob = {
+      commit_sha: 'x',
+      generated_at: '2026-05-21T00:00:00Z',
+      analyser_version: 'phase7-multi-0.7.0',
+      areas: [],
+      nodes: [
+        {
+          id: 'area:dispatcher',
+          kind: 'area',
+          label: 'dispatcher',
+          file: null,
+          line_start: null,
+          line_end: null,
+          area: 'dispatcher',
+          parent: null,
+        },
+        {
+          id: 'file:dispatcher/router.py',
+          kind: 'file',
+          label: 'router.py',
+          file: 'dispatcher/router.py',
+          line_start: 1,
+          line_end: 12,
+          area: 'dispatcher',
+          parent: 'area:dispatcher',
+        },
+        {
+          id: 'dispatcher/router.py::dispatch',
+          kind: 'function',
+          label: 'dispatch',
+          file: 'dispatcher/router.py',
+          line_start: 6,
+          line_end: 8,
+          area: 'dispatcher',
+          parent: 'file:dispatcher/router.py',
+        },
+        {
+          id: 'dispatcher/router.py::dispatch_many',
+          kind: 'function',
+          label: 'dispatch_many',
+          file: 'dispatcher/router.py',
+          line_start: 10,
+          line_end: 11,
+          area: 'dispatcher',
+          parent: 'file:dispatcher/router.py',
+        },
+        {
+          id: 'area:handlers',
+          kind: 'area',
+          label: 'handlers',
+          file: null,
+          line_start: null,
+          line_end: null,
+          area: 'handlers',
+          parent: null,
+        },
+        {
+          id: 'file:handlers/__init__.py',
+          kind: 'file',
+          label: '__init__.py',
+          file: 'handlers/__init__.py',
+          line_start: 1,
+          line_end: 16,
+          area: 'handlers',
+          parent: 'area:handlers',
+        },
+        {
+          id: 'handlers/__init__.py::ping_handler',
+          kind: 'function',
+          label: 'ping_handler',
+          file: 'handlers/__init__.py',
+          line_start: 3,
+          line_end: 4,
+          area: 'handlers',
+          parent: 'file:handlers/__init__.py',
+        },
+      ],
+      edges: [
+        // imports — crosses the dispatcher → handlers boundary.
+        {
+          source: 'file:dispatcher/router.py',
+          target: 'file:handlers/__init__.py',
+          kind: 'imports',
+          evidence: {
+            file: 'dispatcher/router.py',
+            line: 1,
+            snippet: 'from handlers import …',
+          },
+          source_kind: 'ast',
+          boundary_violation: false,
+        },
+        // calls — also crosses the boundary.
+        {
+          source: 'dispatcher/router.py::dispatch',
+          target: 'handlers/__init__.py::ping_handler',
+          kind: 'calls',
+          evidence: {
+            file: 'dispatcher/router.py',
+            line: 7,
+            snippet: 'HANDLERS.get(name)',
+          },
+          source_kind: 'llm',
+          boundary_violation: true,
+          violation_reason: 'internal_access',
+        },
+        // internal — both endpoints inside dispatcher; must NOT show
+        // up as either incoming or outgoing for area:dispatcher.
+        {
+          source: 'dispatcher/router.py::dispatch_many',
+          target: 'dispatcher/router.py::dispatch',
+          kind: 'calls',
+          evidence: {
+            file: 'dispatcher/router.py',
+            line: 11,
+            snippet: 'dispatch(name, p)',
+          },
+          source_kind: 'ast',
+          boundary_violation: false,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ file: null, line_start: null, line_end: null, content: '' }),
+      }),
+    );
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={dispatcherBlob}
+        nodeId="area:dispatcher"
+      />,
+    );
+
+    // Outgoing — 1 imports edge + 1 calls edge crossing into handlers.
+    expect(
+      screen.getByTestId('node-side-panel-outgoing-count').textContent,
+    ).toBe('2');
+    // Incoming — nothing comes into the dispatcher subtree.
+    expect(
+      screen.getByTestId('node-side-panel-incoming-count').textContent,
+    ).toBe('0');
+
+    // The internal dispatch_many -> dispatch edge must not appear in
+    // either direction — it lives inside the dispatcher subtree.
+    const outgoing = screen.getByTestId('node-side-panel-outgoing');
+    expect(outgoing.textContent).not.toContain('dispatch_many');
+  });
+
+  it('opens the edge-evidence popover when an edge row is clicked', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    const onShow = vi.fn();
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={blob}
+        nodeId="agent/dog.py::Dog.bark"
+        onShowEdgeEvidence={onShow}
+      />,
+    );
+    const outgoing = screen.getByTestId('node-side-panel-outgoing');
+    const row = outgoing.querySelector('[data-testid="edge-row"]');
+    expect(row).toBeTruthy();
+    fireEvent.click(row as Element);
+    expect(onShow).toHaveBeenCalledTimes(1);
+    const [edgeId, pos] = onShow.mock.calls[0];
+    expect(edgeId).toMatch(/:calls$|:inherits$/);
+    expect(pos).toEqual({ x: expect.any(Number), y: expect.any(Number) });
   });
 
   it('emits onSelectEdge when an edge row is clicked', () => {

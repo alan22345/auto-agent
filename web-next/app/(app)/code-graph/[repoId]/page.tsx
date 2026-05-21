@@ -187,6 +187,9 @@ export default function CodeGraphRepoPage({
                       blob={latest.blob}
                       nodeId={selectedNodeId}
                       onSelectEdge={setHighlightedEdgeId}
+                      onShowEdgeEvidence={(id, pos) =>
+                        setSelectedEdge({ id, pos })
+                      }
                       onHighlightReachability={setReachabilityHighlight}
                       onClose={() => {
                         setReachabilityHighlight(null);

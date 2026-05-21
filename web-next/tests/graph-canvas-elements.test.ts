@@ -49,11 +49,41 @@ const blob: RepoGraphBlob = {
       area: 'agent',
       parent: 'area:agent',
     },
+    {
+      id: 'file:agent/base.py',
+      kind: 'file',
+      label: 'base.py',
+      file: 'agent/base.py',
+      line_start: 1,
+      line_end: 10,
+      area: 'agent',
+      parent: 'area:agent',
+    },
+    {
+      id: 'agent/dog.py::Dog.describe',
+      kind: 'function',
+      label: 'describe',
+      file: 'agent/dog.py',
+      line_start: 3,
+      line_end: 5,
+      area: 'agent',
+      parent: 'file:agent/dog.py',
+    },
+    {
+      id: 'agent/dog.py::Dog.speak',
+      kind: 'function',
+      label: 'speak',
+      file: 'agent/dog.py',
+      line_start: 6,
+      line_end: 7,
+      area: 'agent',
+      parent: 'file:agent/dog.py',
+    },
   ],
   edges: [
     {
       source: 'file:agent/dog.py',
-      target: 'module:agent_area.base',
+      target: 'file:agent/base.py',
       kind: 'imports',
       evidence: { file: 'agent/dog.py', line: 1, snippet: 'from agent_area.base import Animal' },
       source_kind: 'ast',
@@ -167,6 +197,51 @@ describe('blobToCytoscapeElements', () => {
     expect(edge!.data.sourceKindLlm).toBe(true);
     // Source kind itself is still carried for the evidence popover.
     expect(edge!.data.sourceKind).toBe('llm');
+  });
+
+  it('drops edges whose endpoints are not in the node set', () => {
+    // Regression test for the 2026-05-21 "canvas renders blank" bug:
+    // cytoscape silently rejects edges referencing non-existent nodes
+    // AND its compound layout breaks when phantom edges are present,
+    // leaving every node positioned at the origin. The builder must
+    // filter those out before handing elements to cytoscape.
+    const orphanBlob: RepoGraphBlob = {
+      ...blob,
+      edges: [
+        // Phantom source — ``module:dispatcher.router`` is not a node.
+        {
+          source: 'module:dispatcher.router',
+          target: 'file:agent/dog.py',
+          kind: 'imports',
+          evidence: { file: 'dispatcher/router.py', line: 1, snippet: 'from agent import dog' },
+          source_kind: 'ast',
+          boundary_violation: false,
+        },
+        // Phantom target — ``module:handlers`` is not a node.
+        {
+          source: 'file:agent/dog.py',
+          target: 'module:handlers',
+          kind: 'imports',
+          evidence: { file: 'agent/dog.py', line: 2, snippet: 'from handlers import HANDLERS' },
+          source_kind: 'ast',
+          boundary_violation: false,
+        },
+        // Valid edge — both endpoints exist.
+        {
+          source: 'file:agent/dog.py',
+          target: 'file:agent/base.py',
+          kind: 'imports',
+          evidence: { file: 'agent/dog.py', line: 1, snippet: 'from agent.base import Animal' },
+          source_kind: 'ast',
+          boundary_violation: false,
+        },
+      ],
+    };
+    const els = blobToCytoscapeElements(orphanBlob, {});
+    const edges = els.filter((e) => e.data.source !== undefined);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.data.source).toBe('file:agent/dog.py');
+    expect(edges[0]!.data.target).toBe('file:agent/base.py');
   });
 
   it('omits sourceKindLlm on edges with source_kind="ast"', () => {

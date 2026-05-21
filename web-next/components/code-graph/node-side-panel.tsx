@@ -34,6 +34,14 @@ interface Props {
    * ids) the canvas should highlight, or ``null`` to clear the
    * highlight. The parent page owns the canvas overlay state. */
   onHighlightReachability?: (nodes: Set<string> | null) => void;
+  /** Open the edge-evidence popover for the given edge id. The parent
+   * page anchors it relative to the row that fired the request so the
+   * popover stays connected to the click target. ``null`` clears any
+   * open popover. */
+  onShowEdgeEvidence?: (
+    edgeId: string,
+    pos: { x: number; y: number },
+  ) => void;
 }
 
 type ReachabilityMode = 'ancestors' | 'descendants' | null;
@@ -45,6 +53,7 @@ export function NodeSidePanel({
   onSelectEdge,
   onClose,
   onHighlightReachability,
+  onShowEdgeEvidence,
 }: Props) {
   // Local mirror of whether a reachability mode is active so the
   // "Clear highlight" button can render. The actual Set lives on the
@@ -57,13 +66,33 @@ export function NodeSidePanel({
     [blob.nodes, nodeId],
   );
 
+  // For compound nodes (``area`` / ``file``) the panel surfaces edges
+  // that cross the node's subtree boundary — edges into a descendant
+  // are "incoming", edges out of a descendant are "outgoing". For a
+  // leaf node (function / class) the subtree set is ``{nodeId}`` and
+  // the predicates degenerate to the plain ``source === nodeId`` /
+  // ``target === nodeId`` match. Internal edges (both endpoints inside
+  // the subtree) are deliberately hidden — they belong to the node's
+  // interior, not its surface.
+  const subtree = useMemo(
+    () => collectSubtreeNodeIds(blob, nodeId),
+    [blob, nodeId],
+  );
   const incoming = useMemo(
-    () => groupEdgesByKind(blob.edges as Edge[], (e) => e.target === nodeId),
-    [blob.edges, nodeId],
+    () =>
+      groupEdgesByKind(
+        blob.edges as Edge[],
+        (e) => subtree.has(e.target) && !subtree.has(e.source),
+      ),
+    [blob.edges, subtree],
   );
   const outgoing = useMemo(
-    () => groupEdgesByKind(blob.edges as Edge[], (e) => e.source === nodeId),
-    [blob.edges, nodeId],
+    () =>
+      groupEdgesByKind(
+        blob.edges as Edge[],
+        (e) => subtree.has(e.source) && !subtree.has(e.target),
+      ),
+    [blob.edges, subtree],
   );
 
   // Code preview is only fetched when the node actually has a file +
@@ -197,6 +226,7 @@ export function NodeSidePanel({
           groups={incoming}
           blob={blob}
           onSelect={onSelectEdge}
+          onShowEvidence={onShowEdgeEvidence}
         />
         <EdgeSection
           title="Outgoing edges"
@@ -204,6 +234,7 @@ export function NodeSidePanel({
           groups={outgoing}
           blob={blob}
           onSelect={onSelectEdge}
+          onShowEvidence={onShowEdgeEvidence}
         />
       </div>
     </aside>
@@ -279,12 +310,14 @@ function EdgeSection({
   groups,
   blob,
   onSelect,
+  onShowEvidence,
 }: {
   title: string;
   testId: string;
   groups: EdgeGroup[];
   blob: RepoGraphBlob;
   onSelect?: (edgeId: string | null) => void;
+  onShowEvidence?: (edgeId: string, pos: { x: number; y: number }) => void;
 }) {
   const [open, setOpen] = useState(true);
   const total = groups.reduce((acc, g) => acc + g.edges.length, 0);
@@ -336,7 +369,22 @@ function EdgeSection({
                           type="button"
                           data-testid="edge-row"
                           data-edge-id={id}
-                          onClick={() => onSelect?.(id)}
+                          onClick={(evt) => {
+                            onSelect?.(id);
+                            if (onShowEvidence) {
+                              // Anchor the popover at the right edge of
+                              // the row so it floats just outside the
+                              // side panel rather than under the user's
+                              // cursor.
+                              const rect = (
+                                evt.currentTarget as HTMLElement
+                              ).getBoundingClientRect();
+                              onShowEvidence(id, {
+                                x: rect.right,
+                                y: rect.top,
+                              });
+                            }
+                          }}
                           className="w-full rounded px-1 py-0.5 text-left hover:bg-muted"
                         >
                           <span className="font-mono">
@@ -365,6 +413,47 @@ function EdgeSection({
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Walk the parent hierarchy from ``startId`` and return the set of
+ * node ids under it (inclusive of ``startId``).
+ *
+ * Compound nodes (kind=area / kind=file) have descendants that point at
+ * them via ``Node.parent``; leaf nodes have none, so the result is just
+ * ``{startId}``. The side panel uses this to surface edges that cross
+ * the boundary of the selected node's subtree — an area node's
+ * "outgoing" edges are edges whose source is anywhere inside it but
+ * whose target is outside.
+ *
+ * Cycles are impossible by construction (parent forms a tree), but the
+ * walk uses a ``visited`` set anyway as a cheap safety belt against
+ * malformed blobs.
+ */
+export function collectSubtreeNodeIds(
+  blob: RepoGraphBlob,
+  startId: string,
+): Set<string> {
+  const childrenByParent = new Map<string, string[]>();
+  for (const n of blob.nodes as Node[]) {
+    if (n.parent == null) continue;
+    const list = childrenByParent.get(n.parent) ?? [];
+    list.push(n.id);
+    childrenByParent.set(n.parent, list);
+  }
+  const visited = new Set<string>([startId]);
+  const stack: string[] = [startId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    const children = childrenByParent.get(id);
+    if (!children) continue;
+    for (const c of children) {
+      if (visited.has(c)) continue;
+      visited.add(c);
+      stack.push(c);
+    }
+  }
+  return visited;
+}
 
 export function groupEdgesByKind(
   edges: Edge[],
