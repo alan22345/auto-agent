@@ -63,6 +63,58 @@ def task_channel(_isolated_task_channel: InMemoryTaskChannelFactory) -> InMemory
     return _isolated_task_channel
 
 
+@pytest.fixture(autouse=True)
+def _graph_workspaces_tmpdir(tmp_path, monkeypatch):
+    """Point ``settings.graph_workspaces_dir`` at a tmp path.
+
+    The shared-config default is ``/data/graph-workspaces`` which exists
+    in the Docker image but is unwritable on macOS. Tests that exercise
+    ``graph_workspace_lock`` (or anything calling
+    ``ensure_graph_workspace_parent``) would otherwise hit
+    ``[Errno 30] Read-only file system: '/data'``. Always-on per-test
+    fixture — harmless for tests that don't touch graph workspaces.
+    """
+    workspaces = tmp_path / "graph-workspaces"
+    workspaces.mkdir(parents=True, exist_ok=True)
+    from shared.config import settings
+    monkeypatch.setattr(settings, "graph_workspaces_dir", str(workspaces))
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_async_engine_per_loop():
+    """Re-bind ``shared.database.engine`` / ``async_session`` to a fresh
+    engine bound to the test's event loop.
+
+    The module declares ``engine = create_async_engine(...)`` at import
+    time, which binds asyncpg's connection futures to whichever asyncio
+    loop ran first. pytest-asyncio's default per-test loop scope then
+    causes 'got Future attached to a different loop' on subsequent DB
+    tests. We can't just swap the module attribute — tests do
+    ``from shared.database import async_session`` which captures the old
+    sessionmaker. Instead we rebind the existing sessionmaker to a fresh
+    engine via ``configure(bind=...)``; that mutates state the imported
+    name still points at.
+
+    No-op when DATABASE_URL is unset (DB tests skip anyway).
+    """
+    if not os.environ.get("DATABASE_URL"):
+        yield
+        return
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from shared import database as _db
+    prev_engine = _db.engine
+    fresh_engine = create_async_engine(os.environ["DATABASE_URL"], echo=False)
+    _db.engine = fresh_engine
+    _db.async_session.configure(bind=fresh_engine)
+    try:
+        yield
+    finally:
+        _db.engine = prev_engine
+        _db.async_session.configure(bind=prev_engine)
+        await fresh_engine.dispose()
+
+
 @pytest_asyncio.fixture
 async def session():
     """Real-DB session bound to a fresh AsyncEngine per test.

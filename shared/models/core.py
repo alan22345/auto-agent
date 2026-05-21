@@ -656,6 +656,9 @@ class RepoGraph(Base):
     # 'ok' / 'partial' — surface failures-isolated-per-area state in the UI.
     status = Column(String(16), nullable=False, default="ok", server_default="ok")
     graph_json = Column(JSONB, nullable=False)
+    # ADR-016 checkpoint/resume columns (migration 048_repo_graph_checkpoint).
+    # is_complete flips true once a full pipeline run finishes; processed_files
+    # / failed_sites carry per-file resume state.
     is_complete = Column(
         Boolean,
         nullable=False,

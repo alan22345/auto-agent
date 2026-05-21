@@ -6,17 +6,21 @@ to the Postgres ``taskstatus`` enum column fails with an enum constraint error.
 ``ADD VALUE IF NOT EXISTS`` keeps the migration safe to re-run on stacks that
 already applied the value manually.
 
-Revision ID: 049
-Revises: 048
+Revision ID: 051
+Revises: 050
 Create Date: 2026-05-19
+
+Renumbered 049 → 051 on 2026-05-20: ``048_repo_secrets`` moved to 050 to
+avoid colliding with ``048_repo_graph_checkpoint``; this migration depends
+on the secrets-related ADR-019 chain, so it follows along.
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "049"
-down_revision = "048"
+revision = "051"
+down_revision = "050"
 branch_labels = None
 depends_on = None
 
