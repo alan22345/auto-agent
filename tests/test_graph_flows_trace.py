@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from agent.graph_analyzer.flows import MAX_FLOW_STEPS, trace_flow
+from agent.graph_analyzer.flows import MAX_FLOW_STEPS, classify_terminal, trace_flow
 from shared.types import (
     Edge,
     EdgeEvidence,
@@ -143,3 +143,50 @@ def test_transitive_cycle_back_edge():
     assert steps[-1].is_cycle_back is True
     # Confirm the cycle-back step is at the right depth (depth 3).
     assert steps[-1].depth == 3
+
+
+def _terminal_blob(last_node_label_targets: list[tuple[str, str]]) -> RepoGraphBlob:
+    """Build a blob where the final node ``last`` has the given outgoing
+    call edges, each to a node whose ``label`` is the second tuple item.
+    """
+    nodes = [_fn("a"), _fn("last")]
+    edges = [_call("a", "last")]
+    for target_id, target_label in last_node_label_targets:
+        nodes.append(
+            Node(
+                id=target_id, kind="function", label=target_label,
+                file="x.py", area="src",
+            ),
+        )
+        edges.append(_call("last", target_id))
+    return _blob(nodes, edges)
+
+
+def test_terminal_queue_publish():
+    blob = _terminal_blob([("q.enqueue", "enqueue")])
+    kind = classify_terminal(blob, last_step_node_id="last", entry_kind="http")
+    assert kind == "queue_publish"
+
+
+def test_terminal_external_http():
+    blob = _terminal_blob([("h.get", "requests.get")])
+    kind = classify_terminal(blob, last_step_node_id="last", entry_kind="http")
+    assert kind == "external_http"
+
+
+def test_terminal_db_write():
+    blob = _terminal_blob([("s.commit", "session.commit")])
+    kind = classify_terminal(blob, last_step_node_id="last", entry_kind="http")
+    assert kind == "db_write"
+
+
+def test_terminal_response_for_http_with_no_outgoing():
+    blob = _terminal_blob([])
+    kind = classify_terminal(blob, last_step_node_id="last", entry_kind="http")
+    assert kind == "response"
+
+
+def test_terminal_none_when_unclassifiable_for_queue_entry():
+    blob = _terminal_blob([])
+    kind = classify_terminal(blob, last_step_node_id="last", entry_kind="queue")
+    assert kind == "none"

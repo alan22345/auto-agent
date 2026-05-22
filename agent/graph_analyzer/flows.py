@@ -17,13 +17,16 @@ touches disk.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from shared.types import (
     EntryPoint,
+    EntryPointKind,
     FlowStep,
     Node,
     RepoGraphBlob,
+    TerminalKind,
 )
 
 # Spec §10: hard cap on per-flow step count. Anything past this is
@@ -92,4 +95,51 @@ def trace_flow(blob: RepoGraphBlob, entry_point: EntryPoint) -> list[FlowStep]:
     return steps
 
 
-__all__ = ["BRANCH_INLINE_DEPTH", "MAX_FLOW_STEPS", "trace_flow"]
+_QUEUE_PUBLISH_RE = re.compile(
+    r"^(?:enqueue|publish|send_task|delay|apply_async)$",
+)
+_EXTERNAL_HTTP_RE = re.compile(
+    r"^(?:requests\.(?:get|post|put|delete|patch)|httpx\.(?:get|post|put|delete|patch)|fetch|axios(?:\.\w+)?)$",
+)
+_DB_WRITE_RE = re.compile(
+    r"^(?:session\.(?:add|delete|commit|merge)|.*INSERT.*|.*UPDATE.*|.*DELETE.*)$",
+)
+
+
+def classify_terminal(
+    blob: RepoGraphBlob,
+    last_step_node_id: str,
+    entry_kind: EntryPointKind,
+) -> TerminalKind:
+    """Classify the terminal kind for a flow whose trace ends at *last_step_node_id*.
+
+    Looks at the outgoing call edges of the last step's node. If any
+    match a queue/http/db pattern (in that precedence), returns the
+    matching kind. Otherwise: HTTP-entered flows with no outgoing call
+    edges default to ``"response"``; other entry kinds default to
+    ``"none"``.
+    """
+    nodes_by_id = {n.id: n for n in blob.nodes}
+    outgoing_targets: list[Node] = []
+    for edge in blob.edges:
+        if edge.kind == "calls" and edge.source == last_step_node_id:
+            target = nodes_by_id.get(edge.target)
+            if target is not None:
+                outgoing_targets.append(target)
+
+    for target in outgoing_targets:
+        if _QUEUE_PUBLISH_RE.match(target.label):
+            return "queue_publish"
+    for target in outgoing_targets:
+        if _EXTERNAL_HTTP_RE.match(target.label):
+            return "external_http"
+    for target in outgoing_targets:
+        if _DB_WRITE_RE.match(target.label):
+            return "db_write"
+
+    if not outgoing_targets and entry_kind == "http":
+        return "response"
+    return "none"
+
+
+__all__ = ["BRANCH_INLINE_DEPTH", "MAX_FLOW_STEPS", "classify_terminal", "trace_flow"]
