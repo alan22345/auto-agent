@@ -23,11 +23,14 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from agent.llm.structured import complete_json
+from agent.llm.types import Message
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from shared.types import FlowStep, Node
-    # Future: LLMProvider typed import added in Task 3.
+    from agent.llm.base import LLMProvider
+    from shared.types import Flow, FlowStep, Node
 
 log = structlog.get_logger(__name__)
 
@@ -89,4 +92,63 @@ def _load_file_slices(
     return out
 
 
-__all__ = ["MAX_LINES_PER_STEP", "_load_file_slices"]
+#: Maximum tokens for a per-flow naming response. The output is tiny
+#: (a name + one sentence), so a tight cap prevents the model from
+#: padding with reasoning. Mirrors gap_fill.py's choice.
+_FLOW_LABEL_MAX_TOKENS = 256
+
+_FLOW_LABEL_SYSTEM = (
+    "You name code flows for a developer-facing repo map. Each flow is a "
+    "trace from an entry point (HTTP route, queue handler, CLI command, "
+    "scheduled job) to a terminal side effect.\n\n"
+    "Given the entry point, terminal kind, and source-code slices, "
+    "return JSON exactly:\n"
+    '{"name": "<<=4 words, Title Case>", '
+    '"description": "<<=25 words, one sentence>"}\n\n'
+    "The name should be product-language (what the user does), not "
+    "function names. Bad: \"login function\". Good: \"Google OAuth Login\"."
+)
+
+
+async def _label_flow(
+    provider: LLMProvider,
+    flow: Flow,
+    slices: list[dict[str, object]],
+) -> tuple[str | None, str | None]:
+    """Ask the LLM to name *flow* given its source slices.
+
+    Returns ``(name, description)``. Returns ``(None, None)`` if the LLM
+    call fails (parse error, empty strings) — caller leaves the flow
+    unlabelled rather than fabricating a name.
+    """
+    payload = {
+        "entry_point": flow.entry_point.node_id,
+        "entry_kind": flow.entry_point.kind,
+        "terminal_kind": flow.terminal_kind,
+        "step_labels": [s.node_id for s in flow.steps[:10]],
+        "source_slices": slices,
+    }
+    user_msg = Message(role="user", content=str(payload))
+
+    try:
+        response = await complete_json(
+            provider,
+            messages=[user_msg],
+            system=_FLOW_LABEL_SYSTEM,
+            max_tokens=_FLOW_LABEL_MAX_TOKENS,
+            temperature=0.0,
+            retries=2,
+        )
+    except ValueError as exc:
+        log.warning("flow_label.parse_failed", flow_id=flow.id, error=str(exc))
+        return (None, None)
+
+    name = response.get("name") or None
+    description = response.get("description") or None
+    if not name or not description:
+        log.warning("flow_label.empty_response", flow_id=flow.id, response=response)
+        return (None, None)
+    return (name, description)
+
+
+__all__ = ["MAX_LINES_PER_STEP", "_label_flow", "_load_file_slices"]

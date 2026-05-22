@@ -6,9 +6,12 @@ file-hash cache come in subsequent tasks.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
-from agent.graph_analyzer.flow_labeler import _load_file_slices
-from shared.types import FlowStep, Node
+import pytest
+
+from agent.graph_analyzer.flow_labeler import _label_flow, _load_file_slices
+from shared.types import EntryPoint, Flow, FlowStep, Node
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,3 +101,81 @@ def test_load_slices_deduplicates_same_file_line_pair(tmp_path: Path) -> None:
     ]
     slices = _load_file_slices(tmp_path, steps, nodes)
     assert len(slices) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3: _label_flow tests
+# ---------------------------------------------------------------------------
+
+
+def _flow(
+    id_: str = "auth_a1b2",
+    entry: str = "api/login.py::login",
+    kind: str = "http",
+    terminal: str = "api/login.py::login",
+) -> Flow:
+    return Flow(
+        id=id_,
+        entry_point=EntryPoint(node_id=entry, kind=kind),
+        terminal_node_id=terminal,
+        terminal_kind="response",
+        steps=[FlowStep(node_id=entry, depth=0)],
+        file_set=["api/login.py"],
+        file_set_hash="sha256:test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_label_flow_returns_name_and_description_from_llm():
+    from agent.graph_analyzer import flow_labeler
+
+    flow = _flow()
+    slices = [{"file": "api/login.py", "lines": [1, 5], "content": "def login(): ..."}]
+
+    async def fake_complete_json(*args, **kwargs):
+        return {"name": "Login Flow", "description": "Authenticates the user."}
+
+    monkeypatched = AsyncMock(side_effect=fake_complete_json)
+    flow_labeler.complete_json = monkeypatched  # type: ignore[attr-defined]
+    try:
+        name, desc = await _label_flow(MagicMock(), flow, slices)
+    finally:
+        from agent.llm.structured import complete_json as real
+        flow_labeler.complete_json = real  # type: ignore[attr-defined]
+    assert name == "Login Flow"
+    assert desc == "Authenticates the user."
+    monkeypatched.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_label_flow_returns_none_when_llm_fails():
+    from agent.graph_analyzer import flow_labeler
+
+    async def fake_complete_json(*args, **kwargs):
+        raise ValueError("could not parse")
+
+    flow_labeler.complete_json = AsyncMock(side_effect=fake_complete_json)  # type: ignore[attr-defined]
+    try:
+        name, desc = await _label_flow(MagicMock(), _flow(), [])
+    finally:
+        from agent.llm.structured import complete_json as real
+        flow_labeler.complete_json = real  # type: ignore[attr-defined]
+    assert name is None
+    assert desc is None
+
+
+@pytest.mark.asyncio
+async def test_label_flow_rejects_empty_strings():
+    from agent.graph_analyzer import flow_labeler
+
+    async def fake_complete_json(*args, **kwargs):
+        return {"name": "", "description": ""}
+
+    flow_labeler.complete_json = AsyncMock(side_effect=fake_complete_json)  # type: ignore[attr-defined]
+    try:
+        name, desc = await _label_flow(MagicMock(), _flow(), [])
+    finally:
+        from agent.llm.structured import complete_json as real
+        flow_labeler.complete_json = real  # type: ignore[attr-defined]
+    assert name is None
+    assert desc is None
