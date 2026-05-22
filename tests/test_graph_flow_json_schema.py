@@ -100,3 +100,76 @@ def test_flow_json_blob_round_trip():
     )
     again = FlowJsonBlob.model_validate(blob.model_dump())
     assert again == blob
+
+
+def test_flow_phase2_fields_default_to_none():
+    """Phase 2 adds labeled_at_commit on Flow + Capability and
+    labeler_model on FlowJsonBlob. All default to None so Phase 1 blobs
+    continue to deserialise."""
+    from shared.types import Capability, Flow, FlowJsonBlob
+
+    flow = Flow(
+        id="x",
+        entry_point=EntryPoint(node_id="m.f", kind="http"),
+        terminal_node_id="m.f",
+        terminal_kind="response",
+        steps=[FlowStep(node_id="m.f", depth=0)],
+        file_set=[],
+        file_set_hash="sha256:abc",
+    )
+    assert flow.labeled_at_commit is None
+
+    cap = Capability(
+        id="c",
+        flow_ids=["x"],
+        flow_membership_hash="sha256:def",
+    )
+    assert cap.labeled_at_commit is None
+
+    blob = FlowJsonBlob(
+        capabilities=[cap],
+        flows=[flow],
+        unreached=[],
+        derived_at_commit="sha:0",
+        deriver_version=DERIVER_VERSION,
+    )
+    assert blob.labeler_model is None
+
+
+def test_flow_phase2_fields_round_trip_populated():
+    """When labelled, the new fields survive a round trip."""
+    from shared.types import Capability, Flow, FlowJsonBlob
+
+    flow = Flow(
+        id="x",
+        entry_point=EntryPoint(node_id="m.f", kind="http"),
+        terminal_node_id="m.f",
+        terminal_kind="response",
+        steps=[FlowStep(node_id="m.f", depth=0)],
+        file_set=[],
+        file_set_hash="sha256:abc",
+        name="Login Flow",
+        description="Authenticates the user via OAuth.",
+        labeled_at_commit="sha:7e9f",
+    )
+    cap = Capability(
+        id="c",
+        flow_ids=["x"],
+        flow_membership_hash="sha256:def",
+        name="Authentication",
+        description="User identity and sessions.",
+        labeled_at_commit="sha:7e9f",
+    )
+    blob = FlowJsonBlob(
+        capabilities=[cap],
+        flows=[flow],
+        unreached=[],
+        derived_at_commit="sha:7e9f",
+        deriver_version=DERIVER_VERSION,
+        labeler_model="claude-haiku-4-5",
+    )
+    again = FlowJsonBlob.model_validate(blob.model_dump())
+    assert again == blob
+    assert again.flows[0].labeled_at_commit == "sha:7e9f"
+    assert again.capabilities[0].labeled_at_commit == "sha:7e9f"
+    assert again.labeler_model == "claude-haiku-4-5"
