@@ -198,3 +198,16 @@ def test_terminal_none_when_unclassifiable_for_queue_entry():
     blob = _terminal_blob([])
     kind = classify_terminal(blob, last_step_node_id="last", entry_kind="queue")
     assert kind == "none"
+
+
+def test_diamond_convergence_not_marked_cycle_back():
+    """Regression: A→B, A→C, B→D, C→D. D appears once, not flagged cycle-back."""
+    blob = _blob(
+        [_fn("a"), _fn("b"), _fn("c"), _fn("d")],
+        [_call("a", "b"), _call("a", "c"), _call("b", "d"), _call("c", "d")],
+    )
+    steps = trace_flow(blob, EntryPoint(node_id="a", kind="http"))
+    ids = [s.node_id for s in steps]
+    assert ids.count("d") == 1
+    d_step = next(s for s in steps if s.node_id == "d")
+    assert d_step.is_cycle_back is False

@@ -91,7 +91,8 @@ class QueryRepoGraphTool(Tool):
                     "with evidence; 'public_surface' returns nodes in an "
                     "area's public API; 'path_between' returns a list of "
                     "node ids; 'violates_boundaries' returns a single edge "
-                    "dict or null."
+                    "dict or null; 'which_capability' returns the flow(s) "
+                    "and capability group containing a node."
                 ),
             },
             "params": {
@@ -102,7 +103,8 @@ class QueryRepoGraphTool(Tool):
                     "take {node_id}; public_surface takes {area_name}; "
                     "path_between takes {source_id, target_id, "
                     "max_depth?=5}; violates_boundaries takes "
-                    "{source_id, target_id}."
+                    "{source_id, target_id}; which_capability takes "
+                    "{node: \"<node_id>\"}."
                 ),
             },
         },

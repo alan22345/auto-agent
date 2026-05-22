@@ -67,23 +67,32 @@ def trace_flow(blob: RepoGraphBlob, entry_point: EntryPoint) -> list[FlowStep]:
     nodes_by_id: dict[str, Node] = {n.id: n for n in blob.nodes}
 
     steps: list[FlowStep] = []
-    # Frontier entries: (node_id, depth, branch_root_depth_or_None).
-    frontier: list[tuple[str, int, int | None]] = [(entry_point.node_id, 0, None)]
-    on_path: set[str] = set()
+    # Frontier entries: (node_id, depth, branch_root_depth_or_None, ancestors).
+    # ancestors: frozenset of node ids on the path from entry to the current
+    # node — used to detect true back-edges (cycles) vs. diamond convergence.
+    frontier: list[tuple[str, int, int | None, frozenset[str]]] = [
+        (entry_point.node_id, 0, None, frozenset()),
+    ]
+    visited: set[str] = set()
 
     while frontier and len(steps) < MAX_FLOW_STEPS:
-        node_id, depth, branch_root_depth = frontier.pop(0)
-        if node_id in on_path:
-            # Cycle: emit a cycle-back terminal step but do not expand.
+        node_id, depth, branch_root_depth, ancestors = frontier.pop(0)
+
+        if node_id in ancestors:
+            # True cycle: this node is an ancestor of itself on this path.
             steps.append(FlowStep(node_id=node_id, depth=depth, is_cycle_back=True))
             continue
+
+        if node_id in visited:
+            # Diamond convergence — already emitted as a normal step; skip.
+            continue
+        visited.add(node_id)
 
         targets = _outgoing_call_targets(edges_by_source, node_id)
         is_branch_root = len(targets) >= 2
         steps.append(
             FlowStep(node_id=node_id, depth=depth, is_branch_root=is_branch_root),
         )
-        on_path.add(node_id)
 
         if not targets:
             continue
@@ -93,6 +102,7 @@ def trace_flow(blob: RepoGraphBlob, entry_point: EntryPoint) -> list[FlowStep]:
         # tests call "the branch root").  Otherwise inherit the existing
         # branch-root depth (None on the dominant / trunk path).
         new_root_depth = depth + 1 if is_branch_root else branch_root_depth
+        new_ancestors = ancestors | {node_id}
 
         for target in targets:
             if target not in nodes_by_id:
@@ -100,7 +110,7 @@ def trace_flow(blob: RepoGraphBlob, entry_point: EntryPoint) -> list[FlowStep]:
             child_depth = depth + 1
             if new_root_depth is not None and child_depth - new_root_depth > BRANCH_INLINE_DEPTH:
                 continue
-            frontier.append((target, child_depth, new_root_depth))
+            frontier.append((target, child_depth, new_root_depth, new_ancestors))
 
     return steps
 

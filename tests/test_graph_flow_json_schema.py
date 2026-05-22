@@ -12,6 +12,7 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
+from agent.graph_analyzer.flows import DERIVER_VERSION
 from shared.types import (
     Capability,
     EntryPoint,
@@ -95,7 +96,7 @@ def test_flow_json_blob_round_trip():
         ],
         unreached=["m.helper"],
         derived_at_commit="sha:7e9f",
-        deriver_version="phase1",
+        deriver_version=DERIVER_VERSION,
     )
     again = FlowJsonBlob.model_validate(blob.model_dump())
     assert again == blob

@@ -236,3 +236,43 @@ async def test_recompute_uses_workspace_when_exists(
     assert captured["workspace_root"] == tmp_path
     assert out.repo_id == repo.id
     assert row.flow_json is not None
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
+async def test_recompute_handles_str_return_from_graph_workspace_path(
+    mock_get_repo,
+    tmp_path: Path,
+) -> None:
+    """Regression: graph_workspace_path returns str, endpoint must Path() it
+    before calling .exists(). A str has no .exists() → AttributeError if
+    the endpoint doesn't wrap it in Path first."""
+    from orchestrator.router import recompute_graph_flows
+
+    repo = _make_repo()
+    row = _make_graph_row(is_complete=True)
+
+    mock_get_repo.return_value = repo
+
+    session = AsyncMock(spec=AsyncSession)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = row
+    session.execute.return_value = mock_result
+
+    # Return a plain str (as the real graph_workspace_path does via os.path.join)
+    # pointing at a non-existent path, so the endpoint falls back to path-only
+    # hash mode. The key assertion: no AttributeError from calling .exists() on str.
+    with patch(
+        "agent.graph_workspace.graph_workspace_path",
+        return_value=str(tmp_path / "nonexistent"),
+    ):
+        out = await recompute_graph_flows(
+            repo_id=repo.id,
+            session=session,
+            org_id=1,
+        )
+
+    assert out.repo_id == repo.id
+    assert isinstance(out.flow_count, int)
+    assert row.flow_json is not None
+    session.commit.assert_called_once()

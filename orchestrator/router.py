@@ -3501,7 +3501,14 @@ async def recompute_graph_flows(
 
     blob = RepoGraphBlob.model_validate(row.graph_json)
 
-    workspace_path = graph_workspace_path(repo_id=repo.id)
+    # NOTE: writes to the latest is_complete row, which may differ from the
+    # row that RepoGraphConfig.last_analysis_id points to (read by the agent
+    # op via _load_graph). If they diverge, an agent calling which_capability
+    # may see "flow_json not computed yet" even after a successful recompute.
+    # Aligning these two read paths is tracked as a Phase 2 follow-up.
+    from pathlib import Path as _Path
+
+    workspace_path = _Path(graph_workspace_path(repo_id=repo.id))
     flow_blob = derive_flow_blob(
         blob,
         workspace_root=workspace_path if workspace_path.exists() else None,
