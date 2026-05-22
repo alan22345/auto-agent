@@ -102,3 +102,56 @@ def test_one_node_matches_at_most_one_kind():
     eps = detect_entry_points(_make_blob(nodes, edges))
     assert len(eps) == 1
     assert eps[0].kind == "http"
+
+
+def test_class_kind_node_with_decorator_is_not_entry_point():
+    # Sanity: the function-only filter excludes class-kind nodes even
+    # if they carry a decorator that would qualify a function.
+    node = Node(
+        id="src/x.py::WorkerClass",
+        kind="class",
+        label="WorkerClass",
+        file="src/x.py",
+        area="src",
+        decorators=["@click.command()"],
+    )
+    eps = detect_entry_points(_make_blob([node], []))
+    assert eps == []
+
+
+def test_class_kind_node_with_worker_suffix_is_not_entry_point():
+    # The *_worker name pattern only applies to functions.
+    node = Node(
+        id="src/x.py::EmissionsWorker",
+        kind="class",
+        label="EmissionsWorker",
+        file="src/x.py",
+        area="src",
+    )
+    eps = detect_entry_points(_make_blob([node], []))
+    assert eps == []
+
+
+def test_queue_beats_cron_when_both_decorators_present():
+    # Same function decorated with both @celery.task and @scheduled_*
+    # should be classified as queue (higher precedence).
+    nodes = [
+        _fn(
+            "workers/x.py::run",
+            decorators=["@celery.task", "@scheduled_task('@hourly')"],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["queue"]
+
+
+def test_cron_beats_cli_when_both_decorators_present():
+    nodes = [
+        _fn(
+            "cli/jobs.py::main",
+            file="cli/jobs.py",
+            decorators=["@scheduled_task('0 0 * * *')", "@click.command()"],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["cron"]

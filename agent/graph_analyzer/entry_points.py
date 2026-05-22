@@ -71,7 +71,8 @@ def detect_entry_points(blob: RepoGraphBlob) -> list[EntryPoint]:
     result: list[EntryPoint] = []
     seen: set[str] = set()
 
-    def _add(node: Node, kind: EntryPointKind) -> None:
+    def _claim(node: Node, kind: EntryPointKind) -> None:
+        """Claim *node* for *kind*. No-op if the node was already claimed."""
         if node.id in seen:
             return
         result.append(EntryPoint(node_id=node.id, kind=kind))
@@ -82,22 +83,22 @@ def detect_entry_points(blob: RepoGraphBlob) -> list[EntryPoint]:
         if node.kind != "function":
             continue
         if _is_http_entry(node, http_targets):
-            _add(node, "http")
+            _claim(node, "http")
     for node in blob.nodes:
         if node.kind != "function":
             continue
         if _is_queue_entry(node):
-            _add(node, "queue")
+            _claim(node, "queue")
     for node in blob.nodes:
         if node.kind != "function":
             continue
         if _is_cron_entry(node):
-            _add(node, "cron")
+            _claim(node, "cron")
     for node in blob.nodes:
         if node.kind != "function":
             continue
         if _is_cli_entry(node):
-            _add(node, "cli")
+            _claim(node, "cli")
 
     return result
 
