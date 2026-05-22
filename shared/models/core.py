@@ -677,6 +677,10 @@ class RepoGraph(Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
+    # Capability/flow derivation (Phase 1 of capability-flow map spec).
+    # Nullable: a freshly-completed analysis has graph_json but no
+    # flow_json until the recompute endpoint is hit.
+    flow_json = Column(JSONB, nullable=True)
 
 
 # --- Per-repo project secrets vault (ADR-019) ---------------------------------
