@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -136,15 +137,15 @@ async def test_recompute_writes_flow_json_for_completed_graph(
         org_id=1,
     )
 
-    # Shape checks.
-    assert out["repo_id"] == repo.id
-    assert isinstance(out["flow_count"], int)
-    assert isinstance(out["capability_count"], int)
-    assert isinstance(out["unreached_count"], int)
-    assert out["derived_at_commit"] == "abc1234"
+    # Shape checks — endpoint now returns a typed RecomputeFlowsResponse.
+    assert out.repo_id == repo.id
+    assert isinstance(out.flow_count, int)
+    assert isinstance(out.capability_count, int)
+    assert isinstance(out.unreached_count, int)
+    assert out.derived_at_commit == "abc1234"
 
     # At least one flow detected (two HTTP entry-points → two flows).
-    assert out["flow_count"] >= 1
+    assert out.flow_count >= 1
 
     # flow_json was persisted.
     assert row.flow_json is not None
@@ -196,32 +197,42 @@ async def test_recompute_404_for_other_org_repo(
 
 @pytest.mark.asyncio
 @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
-@patch("agent.graph_workspace.graph_workspace_path")
 async def test_recompute_uses_workspace_when_exists(
-    mock_ws_path,
     mock_get_repo,
     tmp_path: Path,
 ) -> None:
-    """When the workspace path exists it is passed to derive_flow_blob."""
+    """When graph_workspace_path returns a real existing directory, it is
+    forwarded to derive_flow_blob as workspace_root (not None)."""
+    from agent.graph_analyzer.flows import derive_flow_blob
     from orchestrator.router import recompute_graph_flows
 
     repo = _make_repo()
     row = _make_graph_row(is_complete=True)
 
     mock_get_repo.return_value = repo
-    # tmp_path exists → workspace_root should be forwarded.
-    mock_ws_path.return_value = tmp_path
 
     session = AsyncMock(spec=AsyncSession)
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = row
     session.execute.return_value = mock_result
 
-    out = await recompute_graph_flows(
-        repo_id=repo.id,
-        session=session,
-        org_id=1,
-    )
+    captured: dict[str, Any] = {}
+    real_derive = derive_flow_blob
 
-    assert out["repo_id"] == repo.id
+    def _spy(graph_blob, workspace_root=None):
+        captured["workspace_root"] = workspace_root
+        return real_derive(graph_blob, workspace_root=workspace_root)
+
+    with (
+        patch("agent.graph_analyzer.flows.derive_flow_blob", side_effect=_spy),
+        patch("agent.graph_workspace.graph_workspace_path", return_value=tmp_path),
+    ):
+        out = await recompute_graph_flows(
+            repo_id=repo.id,
+            session=session,
+            org_id=1,
+        )
+
+    assert captured["workspace_root"] == tmp_path
+    assert out.repo_id == repo.id
     assert row.flow_json is not None

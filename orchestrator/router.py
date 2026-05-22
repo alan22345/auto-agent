@@ -97,6 +97,7 @@ from shared.types import (
     OutcomeResponse,
     PlanApprovalRequest,
     PlanRead,
+    RecomputeFlowsResponse,
     RepoData,
     RepoGraphConfigData,
     RepoGraphProgressData,
@@ -3466,12 +3467,13 @@ async def refresh_repo_graph(
 
 @router.post(
     "/repos/{repo_id}/graph/flows/recompute",
+    response_model=RecomputeFlowsResponse,
 )
 async def recompute_graph_flows(
     repo_id: int,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
-) -> dict:
+) -> RecomputeFlowsResponse:
     """Derive capability/flow data from the latest completed RepoGraph row.
 
     Loads the latest completed analysis, runs the pure-Python derivation
@@ -3513,13 +3515,13 @@ async def recompute_graph_flows(
     row.flow_json = flow_blob.model_dump(mode="json")
     await session.commit()
 
-    return {
-        "repo_id": repo_id,
-        "flow_count": len(flow_blob.flows),
-        "capability_count": len(flow_blob.capabilities),
-        "unreached_count": len(flow_blob.unreached),
-        "derived_at_commit": flow_blob.derived_at_commit,
-    }
+    return RecomputeFlowsResponse(
+        repo_id=repo_id,
+        flow_count=len(flow_blob.flows),
+        capability_count=len(flow_blob.capabilities),
+        unreached_count=len(flow_blob.unreached),
+        derived_at_commit=flow_blob.derived_at_commit,
+    )
 
 
 import time as _time

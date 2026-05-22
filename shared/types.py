@@ -503,6 +503,16 @@ class FlowJsonBlob(BaseModel):
     deriver_version: str
 
 
+class RecomputeFlowsResponse(BaseModel):
+    """``POST /api/repos/{id}/graph/flows/recompute`` response body."""
+
+    repo_id: int
+    flow_count: int
+    capability_count: int
+    unreached_count: int
+    derived_at_commit: str
+
+
 # --- Linear types ---
 
 
