@@ -412,6 +412,96 @@ class GraphStalenessResponse(BaseModel):
     drifted: bool
 
 
+# --- Capability / flow derivation (Phase 1 of capability-flow map spec) ---
+#
+# A *flow* is one forward-trace from a detected entry point to a terminal
+# side effect, recorded over the nodes/edges in `RepoGraphBlob`. A
+# *capability* is a named group of flows. Phase 1 derives flows; Phase 2
+# labels them via an LLM call. The shape supports both phases: name and
+# description fields are nullable so Phase 1 blobs round-trip through a
+# Phase 2-aware deserialiser.
+
+EntryPointKind = Literal["http", "queue", "cron", "cli"]
+TerminalKind = Literal["response", "queue_publish", "external_http", "db_write", "none"]
+
+
+class EntryPoint(BaseModel):
+    """One node detected as a flow entry point — see spec §3 step 1."""
+
+    node_id: str
+    kind: EntryPointKind
+
+
+class FlowStep(BaseModel):
+    """One node on a flow's forward trace.
+
+    ``depth`` is the BFS distance from the entry point along the dominant
+    path; branch nodes carry the branch root's depth. ``is_branch_root``
+    flags a node that fans out into multiple outgoing call edges at the
+    same depth (rendered as a branch fork in Phase 3). ``is_cycle_back``
+    marks the back-edge target when a cycle was detected and the trace
+    stopped without re-expanding (spec §3 step 4).
+    """
+
+    node_id: str
+    depth: int
+    is_branch_root: bool = False
+    is_cycle_back: bool = False
+
+
+class Flow(BaseModel):
+    """One flow — entry point through forward trace to a terminal effect.
+
+    ``name`` and ``description`` are produced by the Phase 2 LLM labeller;
+    Phase 1 leaves them ``None``. ``file_set_hash`` is the SHA-256 of the
+    sorted-by-path file contents that make up this flow's ``file_set``;
+    Phase 2 uses it to skip re-labelling unchanged flows (spec §4).
+    """
+
+    id: str
+    entry_point: EntryPoint
+    terminal_node_id: str
+    terminal_kind: TerminalKind
+    steps: list[FlowStep]
+    file_set: list[str]
+    file_set_hash: str
+    name: str | None = None
+    description: str | None = None
+
+
+class Capability(BaseModel):
+    """One named capability — a group of related flows.
+
+    Phase 1 emits exactly one capability with ``id="unlabeled"`` covering
+    every derived flow. Phase 2 groups flows into ~5-12 capabilities and
+    populates ``name`` / ``description``. ``flow_membership_hash`` is the
+    SHA-256 of the sorted ``flow_ids`` list; Phase 2 skips re-labelling
+    capabilities whose membership hash matches the persisted value.
+    """
+
+    id: str
+    flow_ids: list[str]
+    flow_membership_hash: str
+    name: str | None = None
+    description: str | None = None
+
+
+class FlowJsonBlob(BaseModel):
+    """Full capability/flow derivation result — payload of
+    ``RepoGraph.flow_json``.
+
+    ``unreached`` is the list of node ids in the underlying graph that
+    no flow's forward trace touched. Surfaced as the Unreached tray in
+    the Phase 3 UI (spec §3 step 6).
+    """
+
+    capabilities: list[Capability]
+    flows: list[Flow]
+    unreached: list[str]
+    derived_at_commit: str
+    deriver_version: str
+
+
 # --- Linear types ---
 
 
