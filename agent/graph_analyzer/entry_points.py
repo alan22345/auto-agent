@@ -37,6 +37,14 @@ from shared.types import EntryPoint, EntryPointKind, Node, RepoGraphBlob
 _HTTP_DECORATOR_RE = re.compile(
     r"^@\w+\.(?:get|post|put|patch|delete|options|head|api_route|route|websocket)\b",
 )
+
+# Next.js App Router HTTP handlers. ``app/**/route.ts`` files export
+# named functions ``GET``, ``POST``, ``PATCH``, ``DELETE`` etc. — each
+# is one HTTP entry point. ``pages/api/**`` (Pages Router) uses a
+# default-export pattern that isn't legible at the node level without
+# tracking export status, so it stays out of v1.
+_NEXTJS_ROUTE_FILE_RE = re.compile(r"(?:^|/)route\.(?:ts|js|tsx|jsx)$")
+_HTTP_METHOD_LABEL_RE = re.compile(r"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$")
 _QUEUE_DECORATOR_RE = re.compile(
     r"^@(?:celery\.task|app\.task|dramatiq\.actor|rq\.job|worker(?:\.\w+)?)\b",
 )
@@ -52,7 +60,18 @@ _CLI_DIR_RE = re.compile(r"(?:^|/)cli/")
 def _is_http_entry(node: Node, http_targets: set[str]) -> bool:
     if node.id in http_targets:
         return True
-    return any(_HTTP_DECORATOR_RE.match(d) for d in node.decorators)
+    if any(_HTTP_DECORATOR_RE.match(d) for d in node.decorators):
+        return True
+    # Next.js App Router: a function named ``GET`` / ``POST`` / ... in
+    # a file named ``route.ts`` is a route handler. The TS parser
+    # surfaces these as plain function nodes with the HTTP-method label.
+    if (
+        node.file
+        and _NEXTJS_ROUTE_FILE_RE.search(node.file)
+        and _HTTP_METHOD_LABEL_RE.match(node.label)
+    ):
+        return True
+    return False
 
 
 def _is_queue_entry(node: Node) -> bool:
