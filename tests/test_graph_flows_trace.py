@@ -128,3 +128,18 @@ def test_non_call_edges_are_not_followed():
     )
     steps = trace_flow(blob, EntryPoint(node_id="a", kind="http"))
     assert [s.node_id for s in steps] == ["a", "b"]
+
+
+def test_transitive_cycle_back_edge():
+    # a → b → c → a. The trace visits a, b, c, then detects "a" already
+    # on path and emits an is_cycle_back step without re-expanding.
+    blob = _blob(
+        [_fn("a"), _fn("b"), _fn("c")],
+        [_call("a", "b"), _call("b", "c"), _call("c", "a")],
+    )
+    steps = trace_flow(blob, EntryPoint(node_id="a", kind="http"))
+    ids = [s.node_id for s in steps]
+    assert ids == ["a", "b", "c", "a"]
+    assert steps[-1].is_cycle_back is True
+    # Confirm the cycle-back step is at the right depth (depth 3).
+    assert steps[-1].depth == 3

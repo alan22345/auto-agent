@@ -75,17 +75,17 @@ def trace_flow(blob: RepoGraphBlob, entry_point: EntryPoint) -> list[FlowStep]:
         if not targets:
             continue
 
-        # If the current node is itself a branch root, its children's
-        # depth cap is rooted at the current depth.  Otherwise inherit
-        # the existing branch-root depth (which may be None on the
-        # dominant path).
-        new_root_depth = depth if is_branch_root else branch_root_depth
+        # If the current node is itself a branch root, root the depth cap
+        # at depth+1 (the first child on the branch — what the spec and
+        # tests call "the branch root").  Otherwise inherit the existing
+        # branch-root depth (None on the dominant / trunk path).
+        new_root_depth = depth + 1 if is_branch_root else branch_root_depth
 
         for target in targets:
             if target not in nodes_by_id:
                 continue
             child_depth = depth + 1
-            if new_root_depth is not None and child_depth - new_root_depth > BRANCH_INLINE_DEPTH + 1:
+            if new_root_depth is not None and child_depth - new_root_depth > BRANCH_INLINE_DEPTH:
                 continue
             frontier.append((target, child_depth, new_root_depth))
 
