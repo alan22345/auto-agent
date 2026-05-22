@@ -19,18 +19,20 @@ Cost discipline:
 """
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
 
 import structlog
 
 from agent.llm.structured import complete_json
 from agent.llm.types import Message
+from shared.types import Capability, Flow, FlowJsonBlob
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from agent.llm.base import LLMProvider
-    from shared.types import Flow, FlowStep, Node
+    from shared.types import FlowStep, Node
 
 log = structlog.get_logger(__name__)
 
@@ -242,4 +244,138 @@ async def _label_capabilities(
     return out
 
 
-__all__ = ["MAX_LINES_PER_STEP", "_label_capabilities", "_label_flow", "_load_file_slices"]
+def _capability_hash(flow_ids: list[str]) -> str:
+    """SHA-256 over sorted comma-joined flow_ids, returns ``"sha256:<hex>"``."""
+    joined = ",".join(sorted(flow_ids))
+    return f"sha256:{hashlib.sha256(joined.encode('utf-8')).hexdigest()}"
+
+
+def _phase1_fallback_capability(flow_ids: list[str]) -> Capability:
+    """Build the single 'unlabeled' capability with id ``'unlabeled'``."""
+    return Capability(
+        id="unlabeled",
+        flow_ids=flow_ids,
+        flow_membership_hash=_capability_hash(flow_ids),
+        name=None,
+        description=None,
+        labeled_at_commit=None,
+    )
+
+
+async def label_flow_blob(
+    blob: FlowJsonBlob,
+    prior_blob: FlowJsonBlob | None,
+    workspace_root: Path,
+    nodes_by_id: dict[str, Node],
+    provider: LLMProvider,
+    *,
+    labeler_model: str = "claude-haiku-4-5",
+) -> FlowJsonBlob:
+    """Phase 2 entry point: label flows + capabilities in *blob*.
+
+    Reuses prior labels whose ``file_set_hash`` (per-flow) or
+    ``flow_membership_hash`` (per-capability) matches the supplied
+    *prior_blob*. Falls back to the Phase 1 single-"unlabeled" capability
+    shape if the LLM grouping call fails.
+
+    Returns a *new* :class:`FlowJsonBlob`. The input blob is not mutated.
+    """
+    # Build a lookup of prior flows by id for cache checks.
+    prior_flows_by_id: dict[str, Flow] = {}
+    if prior_blob is not None:
+        prior_flows_by_id = {f.id: f for f in prior_blob.flows}
+
+    labelled_flows: list[Flow] = []
+    for flow in blob.flows:
+        prior = prior_flows_by_id.get(flow.id)
+        if (
+            prior is not None
+            and prior.file_set_hash == flow.file_set_hash
+            and prior.name is not None
+            and prior.description is not None
+        ):
+            labelled_flows.append(
+                flow.model_copy(
+                    update={
+                        "name": prior.name,
+                        "description": prior.description,
+                        "labeled_at_commit": prior.labeled_at_commit,
+                    },
+                ),
+            )
+            continue
+
+        slices = _load_file_slices(workspace_root, flow.steps, nodes_by_id)
+        name, description = await _label_flow(provider, flow, slices)
+        labelled_flows.append(
+            flow.model_copy(
+                update={
+                    "name": name,
+                    "description": description,
+                    "labeled_at_commit": blob.derived_at_commit if name else None,
+                },
+            ),
+        )
+
+    # Capability grouping over the now-labelled flows.
+    cap_dicts = await _label_capabilities(provider, labelled_flows)
+
+    if not cap_dicts:
+        capabilities = [
+            _phase1_fallback_capability([f.id for f in labelled_flows]),
+        ]
+    else:
+        # Build prior capabilities by membership hash for cache.
+        prior_caps_by_hash: dict[str, Capability] = {}
+        if prior_blob is not None:
+            prior_caps_by_hash = {
+                c.flow_membership_hash: c for c in prior_blob.capabilities
+            }
+
+        capabilities = []
+        for i, cap in enumerate(cap_dicts):
+            flow_ids: list[str] = cap["flow_ids"]  # type: ignore[assignment]
+            mh = _capability_hash(flow_ids)
+            prior_cap = prior_caps_by_hash.get(mh)
+            if prior_cap is not None and prior_cap.name is not None:
+                capabilities.append(
+                    Capability(
+                        id=prior_cap.id,
+                        flow_ids=flow_ids,
+                        flow_membership_hash=mh,
+                        name=prior_cap.name,
+                        description=prior_cap.description,
+                        labeled_at_commit=prior_cap.labeled_at_commit,
+                    ),
+                )
+            else:
+                capabilities.append(
+                    Capability(
+                        id=f"cap_{i}_{mh[7:15]}",  # stable, derived from hash prefix
+                        flow_ids=flow_ids,
+                        flow_membership_hash=mh,
+                        name=cap["name"],  # type: ignore[arg-type]
+                        description=cap["description"],  # type: ignore[arg-type]
+                        labeled_at_commit=blob.derived_at_commit,
+                    ),
+                )
+
+    return FlowJsonBlob(
+        capabilities=capabilities,
+        flows=labelled_flows,
+        unreached=blob.unreached,
+        derived_at_commit=blob.derived_at_commit,
+        deriver_version=blob.deriver_version,
+        labeler_model=labeler_model,
+    )
+
+
+__all__ = [
+    "MAX_LINES_PER_STEP",
+    "_capability_hash",
+    "_label_capabilities",
+    "_label_flow",
+    "_load_file_slices",
+    "_phase1_fallback_capability",
+    "label_flow_blob",
+]
