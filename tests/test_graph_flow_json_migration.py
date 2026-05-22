@@ -75,3 +75,7 @@ def test_orm_has_nullable_flow_json_column() -> None:
     from shared.models.core import RepoGraph
     col = RepoGraph.__table__.columns["flow_json"]
     assert col.nullable is True
+    # JSONB (Postgres-specific) is a subclass of sa.JSON, so this check is
+    # portable: it passes on Postgres (JSONB) while still rejecting any
+    # accidental String/Text misconfiguration.
+    assert isinstance(col.type, sa.JSON)
