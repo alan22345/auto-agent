@@ -151,4 +151,95 @@ async def _label_flow(
     return (name, description)
 
 
-__all__ = ["MAX_LINES_PER_STEP", "_label_flow", "_load_file_slices"]
+_CAPABILITY_LABEL_MAX_TOKENS = 1024
+
+_CAPABILITY_LABEL_SYSTEM = (
+    "You group code flows into named capabilities for a developer-facing "
+    "repo map. A capability is a coherent set of user-visible behaviours "
+    "(e.g. \"Authentication\", \"Carbon Calculation\").\n\n"
+    "Given a list of flows (each with an id, a flow name, an entry point, "
+    "and a terminal kind), return JSON exactly:\n"
+    '{"capabilities": [\n'
+    '  {"name": "<<=4 words, Title Case>",\n'
+    '   "description": "<<=25 words, one sentence>",\n'
+    '   "flow_ids": ["<id>", "<id>", ...]},\n'
+    "  ...\n"
+    "]}\n\n"
+    "Rules:\n"
+    "- Produce 5 to 12 capabilities total when possible. Fewer is fine if "
+    "  the repo is small.\n"
+    "- Each flow id appears in exactly one capability.\n"
+    "- Flows that don't fit any group go into a single \"Other\" capability."
+)
+
+
+async def _label_capabilities(
+    provider: LLMProvider,
+    flows: list[Flow],
+) -> list[dict[str, object]]:
+    """Ask the LLM to group *flows* into named capabilities.
+
+    Returns a list of dicts ``{name, description, flow_ids}``. On LLM
+    failure or empty input returns ``[]``; the caller falls back to the
+    Phase 1 single-capability shape.
+
+    Any returned capability that references flow_ids not in the input
+    list is dropped (defends against hallucinated ids).
+    """
+    if not flows:
+        return []
+
+    payload = {
+        "flows": [
+            {
+                "id": f.id,
+                "name": f.name,
+                "entry_point": f.entry_point.node_id,
+                "entry_kind": f.entry_point.kind,
+                "terminal_kind": f.terminal_kind,
+            }
+            for f in flows
+        ],
+    }
+    user_msg = Message(role="user", content=str(payload))
+
+    try:
+        response = await complete_json(
+            provider,
+            messages=[user_msg],
+            system=_CAPABILITY_LABEL_SYSTEM,
+            max_tokens=_CAPABILITY_LABEL_MAX_TOKENS,
+            temperature=0.0,
+            retries=2,
+        )
+    except ValueError as exc:
+        log.warning("capability_label.parse_failed", error=str(exc))
+        return []
+
+    raw_caps = response.get("capabilities") or []
+    valid_ids = {f.id for f in flows}
+    out: list[dict[str, object]] = []
+    for cap in raw_caps:
+        if not isinstance(cap, dict):
+            continue
+        flow_ids = cap.get("flow_ids", [])
+        if not isinstance(flow_ids, list) or not all(fid in valid_ids for fid in flow_ids):
+            log.warning(
+                "capability_label.drop_unknown_flow_ids",
+                cap_name=cap.get("name"),
+                flow_ids=flow_ids,
+            )
+            continue
+        if not cap.get("name") or not cap.get("description"):
+            continue
+        out.append(
+            {
+                "name": cap["name"],
+                "description": cap["description"],
+                "flow_ids": flow_ids,
+            },
+        )
+    return out
+
+
+__all__ = ["MAX_LINES_PER_STEP", "_label_capabilities", "_label_flow", "_load_file_slices"]
