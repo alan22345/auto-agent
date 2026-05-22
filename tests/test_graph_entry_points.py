@@ -255,3 +255,80 @@ def test_http_decorator_on_class_kind_node_is_ignored():
     )
     eps = detect_entry_points(_make_blob([node], []))
     assert eps == []
+
+
+# ---------------------------------------------------------------------------
+# Next.js App Router route handlers — ``app/**/route.ts`` files export
+# named functions ``GET``/``POST``/... per HTTP method.
+# ---------------------------------------------------------------------------
+
+
+def test_nextjs_app_router_get_handler_is_http_entry_point():
+    nodes = [
+        _fn(
+            "app/api/v1/assets/[id]/route.ts::GET",
+            file="app/api/v1/assets/[id]/route.ts",
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_nextjs_app_router_multiple_methods_in_one_file_are_each_entries():
+    nodes = [
+        _fn(
+            "app/api/v1/assets/[id]/route.ts::GET",
+            file="app/api/v1/assets/[id]/route.ts",
+        ),
+        _fn(
+            "app/api/v1/assets/[id]/route.ts::PATCH",
+            file="app/api/v1/assets/[id]/route.ts",
+        ),
+        _fn(
+            "app/api/v1/assets/[id]/route.ts::DELETE",
+            file="app/api/v1/assets/[id]/route.ts",
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert {e.kind for e in eps} == {"http"}
+    assert len(eps) == 3
+
+
+def test_nextjs_function_in_route_file_with_non_method_label_is_not_entry_point():
+    # Helper functions in the same route.ts file (lowercase / non-method
+    # name) are not entries — only the literal HTTP method exports are.
+    nodes = [
+        _fn(
+            "app/api/foo/route.ts::handleRequest",
+            file="app/api/foo/route.ts",
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert eps == []
+
+
+def test_nextjs_method_named_function_in_non_route_file_is_not_entry_point():
+    # A function called ``GET`` in any file other than ``route.ts`` is
+    # not a Next.js route handler — guards against false positives from
+    # helper modules.
+    nodes = [
+        _fn(
+            "lib/http/methods.ts::GET",
+            file="lib/http/methods.ts",
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert eps == []
+
+
+def test_nextjs_route_js_file_extension_also_qualifies():
+    # The regex accepts ``.ts | .js | .tsx | .jsx`` so plain-JS
+    # Next.js apps don't fall off the heuristic.
+    nodes = [
+        _fn(
+            "app/api/v1/health/route.js::GET",
+            file="app/api/v1/health/route.js",
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
