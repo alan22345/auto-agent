@@ -6,12 +6,15 @@ through a Phase-2-aware deserialiser.
 """
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
 from shared.types import (
     Capability,
     EntryPoint,
+    EntryPointKind,
     Flow,
     FlowJsonBlob,
     FlowStep,
@@ -20,14 +23,14 @@ from shared.types import (
 
 def test_entry_point_kind_literal_values():
     # All four kinds defined in the spec §3 step 1
-    for kind in ("http", "queue", "cron", "cli"):
-        ep = EntryPoint(node_id="m.f", kind=kind)  # type: ignore[arg-type]
+    for kind in get_args(EntryPointKind):
+        ep = EntryPoint(node_id="m.f", kind=kind)
         assert ep.kind == kind
 
 
 def test_entry_point_rejects_unknown_kind():
     with pytest.raises(ValidationError):
-        EntryPoint(node_id="m.f", kind="websocket")  # type: ignore[arg-type]
+        EntryPoint(node_id="m.f", kind="websocket")
 
 
 def test_flow_step_minimum_shape():

@@ -453,9 +453,9 @@ class Flow(BaseModel):
     """One flow — entry point through forward trace to a terminal effect.
 
     ``name`` and ``description`` are produced by the Phase 2 LLM labeller;
-    Phase 1 leaves them ``None``. ``file_set_hash`` is the SHA-256 of the
-    sorted-by-path file contents that make up this flow's ``file_set``;
-    Phase 2 uses it to skip re-labelling unchanged flows (spec §4).
+    Phase 1 leaves them ``None``. ``file_set_hash`` is the SHA-256 over the
+    file contents of ``file_set``, sorted by path and concatenated before
+    hashing; Phase 2 uses it to skip re-labelling unchanged flows (spec §4).
     """
 
     id: str
@@ -492,7 +492,8 @@ class FlowJsonBlob(BaseModel):
 
     ``unreached`` is the list of node ids in the underlying graph that
     no flow's forward trace touched. Surfaced as the Unreached tray in
-    the Phase 3 UI (spec §3 step 6).
+    the Phase 3 UI (spec §3 step 6). Phase 2 adds ``labeled_at_commit``
+    and ``labeler_model`` fields when LLM labelling lands.
     """
 
     capabilities: list[Capability]
