@@ -261,14 +261,21 @@ async def test_capability_cache_hit_preserves_prior_name(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_capability_grouping_failure_falls_back_to_unlabeled(tmp_path: Path):
-    """When the LLM grouping call returns [], the result has the Phase 1
-    'unlabeled' capability containing every flow."""
+    """When BOTH the freeform LLM grouping AND the path-prefix fallback
+    return nothing, the result is the Phase 1 'unlabeled' capability
+    containing every flow. The path-prefix fallback is robust enough
+    that it usually doesn't return [], but if both signal an upstream
+    failure the user still sees a non-empty capability."""
     from agent.graph_analyzer import flow_labeler
 
     real_lf = flow_labeler._label_flow
     real_lc = flow_labeler._label_capabilities
+    real_lpp = flow_labeler._label_capabilities_by_path_prefix
     flow_labeler._label_flow = AsyncMock(return_value=("F", "f."))  # type: ignore[attr-defined]
     flow_labeler._label_capabilities = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+    flow_labeler._label_capabilities_by_path_prefix = AsyncMock(  # type: ignore[attr-defined]
+        return_value=[],
+    )
 
     new_blob = _blob([_flow(id_="f1", entry="x", file_hash="h")])
 
@@ -283,10 +290,57 @@ async def test_capability_grouping_failure_falls_back_to_unlabeled(tmp_path: Pat
     finally:
         flow_labeler._label_flow = real_lf  # type: ignore[attr-defined]
         flow_labeler._label_capabilities = real_lc  # type: ignore[attr-defined]
+        flow_labeler._label_capabilities_by_path_prefix = real_lpp  # type: ignore[attr-defined]
 
     assert len(result.capabilities) == 1
     assert result.capabilities[0].id == "unlabeled"
     assert result.capabilities[0].flow_ids == ["f1"]
+
+
+@pytest.mark.asyncio
+async def test_capability_grouping_falls_back_to_prefix_when_llm_returns_empty(
+    tmp_path: Path,
+):
+    """Cardamon-scale case: the freeform LLM grouping call returns []
+    (typically because the response truncated at the token cap), but
+    the path-prefix fallback successfully produces capabilities so the
+    user never sees an 'unlabeled' bucket."""
+    from agent.graph_analyzer import flow_labeler
+
+    real_lf = flow_labeler._label_flow
+    real_lc = flow_labeler._label_capabilities
+    real_lpp = flow_labeler._label_capabilities_by_path_prefix
+    flow_labeler._label_flow = AsyncMock(return_value=("F", "f."))  # type: ignore[attr-defined]
+    flow_labeler._label_capabilities = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+    flow_labeler._label_capabilities_by_path_prefix = AsyncMock(  # type: ignore[attr-defined]
+        return_value=[
+            {
+                "name": "Agents",
+                "description": "Lifecycle of AI agents.",
+                "flow_ids": ["f1"],
+            },
+        ],
+    )
+
+    new_blob = _blob([_flow(id_="f1", entry="x", file_hash="h")])
+
+    try:
+        result = await label_flow_blob(
+            new_blob,
+            prior_blob=None,
+            workspace_root=tmp_path,
+            nodes_by_id={"x": _node("x")},
+            provider=MagicMock(),
+        )
+    finally:
+        flow_labeler._label_flow = real_lf  # type: ignore[attr-defined]
+        flow_labeler._label_capabilities = real_lc  # type: ignore[attr-defined]
+        flow_labeler._label_capabilities_by_path_prefix = real_lpp  # type: ignore[attr-defined]
+
+    assert len(result.capabilities) == 1
+    assert result.capabilities[0].name == "Agents"
+    assert result.capabilities[0].flow_ids == ["f1"]
+    assert result.capabilities[0].id != "unlabeled"
 
 
 @pytest.mark.asyncio

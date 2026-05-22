@@ -154,7 +154,55 @@ async def _label_flow(
     return (name, description)
 
 
-_CAPABILITY_LABEL_MAX_TOKENS = 1024
+_CAPABILITY_LABEL_MAX_TOKENS = 4096
+
+# Path segments that don't carry capability semantics on their own —
+# stripped when computing a group key from an entry-point file path.
+# Examples:
+#   ``app/api/v1/agents/[id]/route.ts``  → ``agents``
+#   ``app/api/billing/checkout/route.ts``→ ``billing``
+#   ``orchestrator/router.py``           → ``orchestrator``
+_GROUP_KEY_SKIP = {
+    "",
+    "app",
+    "api",
+    "src",
+    "lib",
+    "pages",
+    "v1",
+    "v2",
+    "v3",
+    "v4",
+}
+
+
+def _path_group_key(entry_node_id: str) -> str:
+    """Pick a stable group key from an entry-point node id.
+
+    The id has shape ``<file>::<function>``. We walk the file path
+    segment-by-segment, skipping framework / versioning noise and
+    Next.js dynamic-segment brackets, and return the first
+    "interesting" segment. Falls back to ``"other"`` if everything
+    was filtered out.
+
+    Deterministic — no LLM call. Used as the bucket key for the
+    URL-prefix capability fallback (see :func:`label_flow_blob`).
+    """
+    file_path = entry_node_id.split("::", 1)[0]
+    parts = file_path.split("/")
+    for raw in parts:
+        seg = raw.strip()
+        # Skip Next.js dynamic segments ("[id]", "[...slug]") and
+        # the well-known noise prefixes.
+        if seg.startswith("[") and seg.endswith("]"):
+            continue
+        if seg in _GROUP_KEY_SKIP:
+            continue
+        # Drop the filename itself — caller wants a directory-level key.
+        if "." in seg and seg not in {"."}:
+            continue
+        return seg
+    return "other"
 
 _CAPABILITY_LABEL_SYSTEM = (
     "You group code flows into named capabilities for a developer-facing "
@@ -245,6 +293,118 @@ async def _label_capabilities(
     return out
 
 
+_PREFIX_NAMING_MAX_TOKENS = 2048
+
+_PREFIX_NAMING_SYSTEM = (
+    "You name code capabilities for a developer-facing repo map.\n\n"
+    "Each input group has a path prefix (already a stable grouping key) "
+    "and three sample flow names from that group. For each group, return "
+    "a Title-Case capability name (<= 4 words) and a one-sentence "
+    "description (<= 25 words).\n\n"
+    "Output JSON:\n"
+    '{"groups": [\n'
+    '  {"prefix": "<input prefix>",\n'
+    '   "name": "<Title Case, <=4 words>",\n'
+    '   "description": "<<=25 words>"},\n'
+    "  ...\n"
+    "]}\n\n"
+    "Rules:\n"
+    "- Exactly one entry per input group.\n"
+    '- Echo each prefix verbatim — do not invent new keys.\n'
+    "- Do not include flow_ids."
+)
+
+
+async def _name_capability_groups(
+    provider: LLMProvider,
+    groups: dict[str, list[Flow]],
+) -> dict[str, dict[str, str]]:
+    """Ask the LLM to give each path-prefix group a name + description.
+
+    Returns ``{prefix: {"name": str, "description": str}}``. On LLM
+    failure returns ``{}``; the caller substitutes the bare prefix as
+    the name so the user still sees real groups, just less polished.
+    """
+    if not groups:
+        return {}
+    payload = {
+        "groups": [
+            {
+                "prefix": prefix,
+                "samples": [f.name or f.id for f in flows[:3]],
+            }
+            for prefix, flows in sorted(groups.items())
+        ],
+    }
+    user_msg = Message(role="user", content=str(payload))
+    try:
+        response = await complete_json(
+            provider,
+            messages=[user_msg],
+            system=_PREFIX_NAMING_SYSTEM,
+            max_tokens=_PREFIX_NAMING_MAX_TOKENS,
+            temperature=0.0,
+            retries=2,
+        )
+    except ValueError as exc:
+        log.warning("capability_label.prefix_naming_parse_failed", error=str(exc))
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for entry in response.get("groups") or []:
+        if not isinstance(entry, dict):
+            continue
+        prefix = entry.get("prefix")
+        name = entry.get("name")
+        description = entry.get("description")
+        if not (prefix and name and description):
+            continue
+        if prefix not in groups:  # hallucination guard
+            continue
+        out[str(prefix)] = {"name": str(name), "description": str(description)}
+    return out
+
+
+async def _label_capabilities_by_path_prefix(
+    provider: LLMProvider,
+    flows: list[Flow],
+) -> list[dict[str, object]]:
+    """Deterministic capability grouping by entry-point path prefix.
+
+    Robust fallback for repos whose flow count exceeds what a single LLM
+    grouping call can emit (LLM response truncates at the token cap and
+    the primary grouper returns no capabilities). The grouping itself
+    is pure-Python — only the per-bucket name + description require an
+    LLM call, and that response stays O(buckets) regardless of flow
+    count.
+
+    Returns the same shape as :func:`_label_capabilities`. Falls back
+    to using the bare prefix as the capability name when the LLM fails
+    to name the buckets, so the user still sees real groups.
+    """
+    if not flows:
+        return []
+    groups: dict[str, list[Flow]] = {}
+    for f in flows:
+        key = _path_group_key(f.entry_point.node_id)
+        groups.setdefault(key, []).append(f)
+
+    names = await _name_capability_groups(provider, groups)
+
+    out: list[dict[str, object]] = []
+    for prefix, group_flows in sorted(groups.items()):
+        named = names.get(prefix)
+        out.append(
+            {
+                "name": (named or {}).get("name") or prefix.replace("-", " ").title(),
+                "description": (named or {}).get("description")
+                or f"Flows under the ``{prefix}`` path prefix.",
+                "flow_ids": [f.id for f in group_flows],
+            },
+        )
+    return out
+
+
 def _capability_hash(flow_ids: list[str]) -> str:
     """SHA-256 over sorted comma-joined flow_ids, returns ``"sha256:<hex>"``."""
     joined = ",".join(sorted(flow_ids))
@@ -318,8 +478,22 @@ async def label_flow_blob(
             ),
         )
 
-    # Capability grouping over the now-labelled flows.
+    # Capability grouping over the now-labelled flows. First-line attempt
+    # is the freeform LLM grouping (one call over all flow summaries).
+    # When the flow count is large enough that the response truncates at
+    # the token cap, the call returns no usable capabilities — at that
+    # point the URL-prefix fallback kicks in. That fallback's grouping is
+    # deterministic; only the per-bucket name/description requires an LLM
+    # call, and that response stays small regardless of flow count.
     cap_dicts = await _label_capabilities(provider, labelled_flows)
+    if not cap_dicts and labelled_flows:
+        log.info(
+            "capability_label.falling_back_to_path_prefix",
+            flow_count=len(labelled_flows),
+        )
+        cap_dicts = await _label_capabilities_by_path_prefix(
+            provider, labelled_flows
+        )
 
     if not cap_dicts:
         capabilities = [
@@ -373,8 +547,10 @@ __all__ = [
     "MAX_LINES_PER_STEP",
     "_capability_hash",
     "_label_capabilities",
+    "_label_capabilities_by_path_prefix",
     "_label_flow",
     "_load_file_slices",
+    "_path_group_key",
     "_phase1_fallback_capability",
     "label_flow_blob",
 ]
