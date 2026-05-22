@@ -530,6 +530,10 @@ class RecomputeFlowsResponse(BaseModel):
     capability_count: int
     unreached_count: int
     derived_at_commit: str
+    labeled_flow_count: int = 0
+    """Number of flows that received a non-null name from the Phase 2
+    labeller. 0 in Phase 1; matches ``flow_count`` once all flows label
+    successfully."""
 
 
 # --- Linear types ---

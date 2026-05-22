@@ -3508,21 +3508,44 @@ async def recompute_graph_flows(
     # Aligning these two read paths is tracked as a Phase 2 follow-up.
     from pathlib import Path as _Path
 
+    from agent.graph_analyzer.flow_labeler import label_flow_blob
+    from agent.llm import get_structured_extractor_provider
+    from shared.types import FlowJsonBlob
+
     workspace_path = _Path(graph_workspace_path(repo_id=repo.id))
     flow_blob = derive_flow_blob(
         blob,
         workspace_root=workspace_path if workspace_path.exists() else None,
     )
 
-    row.flow_json = flow_blob.model_dump(mode="json")
+    # Phase 2: LLM labelling.
+    prior_blob: FlowJsonBlob | None = None
+    if row.flow_json is not None:
+        try:
+            prior_blob = FlowJsonBlob.model_validate(row.flow_json)
+        except Exception:  # defensive against stale Phase 1 shapes
+            prior_blob = None
+
+    nodes_by_id = {n.id: n for n in blob.nodes}
+    provider = get_structured_extractor_provider()
+    labelled = await label_flow_blob(
+        flow_blob,
+        prior_blob=prior_blob,
+        workspace_root=workspace_path if workspace_path.exists() else _Path("."),
+        nodes_by_id=nodes_by_id,
+        provider=provider,
+    )
+
+    row.flow_json = labelled.model_dump(mode="json")
     await session.commit()
 
     return RecomputeFlowsResponse(
         repo_id=repo_id,
-        flow_count=len(flow_blob.flows),
-        capability_count=len(flow_blob.capabilities),
-        unreached_count=len(flow_blob.unreached),
-        derived_at_commit=flow_blob.derived_at_commit,
+        flow_count=len(labelled.flows),
+        capability_count=len(labelled.capabilities),
+        unreached_count=len(labelled.unreached),
+        derived_at_commit=labelled.derived_at_commit,
+        labeled_flow_count=sum(1 for f in labelled.flows if f.name is not None),
     )
 
 

@@ -131,11 +131,22 @@ async def test_recompute_writes_flow_json_for_completed_graph(
     mock_result.scalar_one_or_none.return_value = row
     session.execute.return_value = mock_result
 
-    out = await recompute_graph_flows(
-        repo_id=repo.id,
-        session=session,
-        org_id=1,
-    )
+    # Phase 2: mock labeller so tests stay hermetic (no real LLM calls).
+    async def _passthrough_labeller(blob, **kw):
+        return blob
+
+    with (
+        patch(
+            "agent.graph_analyzer.flow_labeler.label_flow_blob",
+            side_effect=_passthrough_labeller,
+        ),
+        patch("agent.llm.get_structured_extractor_provider", return_value=MagicMock()),
+    ):
+        out = await recompute_graph_flows(
+            repo_id=repo.id,
+            session=session,
+            org_id=1,
+        )
 
     # Shape checks — endpoint now returns a typed RecomputeFlowsResponse.
     assert out.repo_id == repo.id
@@ -223,9 +234,17 @@ async def test_recompute_uses_workspace_when_exists(
         captured["workspace_root"] = workspace_root
         return real_derive(graph_blob, workspace_root=workspace_root)
 
+    async def _passthrough_labeller(blob, **kw):
+        return blob
+
     with (
         patch("agent.graph_analyzer.flows.derive_flow_blob", side_effect=_spy),
         patch("agent.graph_workspace.graph_workspace_path", return_value=tmp_path),
+        patch(
+            "agent.graph_analyzer.flow_labeler.label_flow_blob",
+            side_effect=_passthrough_labeller,
+        ),
+        patch("agent.llm.get_structured_extractor_provider", return_value=MagicMock()),
     ):
         out = await recompute_graph_flows(
             repo_id=repo.id,
@@ -262,9 +281,19 @@ async def test_recompute_handles_str_return_from_graph_workspace_path(
     # Return a plain str (as the real graph_workspace_path does via os.path.join)
     # pointing at a non-existent path, so the endpoint falls back to path-only
     # hash mode. The key assertion: no AttributeError from calling .exists() on str.
-    with patch(
-        "agent.graph_workspace.graph_workspace_path",
-        return_value=str(tmp_path / "nonexistent"),
+    async def _passthrough_labeller(blob, **kw):
+        return blob
+
+    with (
+        patch(
+            "agent.graph_workspace.graph_workspace_path",
+            return_value=str(tmp_path / "nonexistent"),
+        ),
+        patch(
+            "agent.graph_analyzer.flow_labeler.label_flow_blob",
+            side_effect=_passthrough_labeller,
+        ),
+        patch("agent.llm.get_structured_extractor_provider", return_value=MagicMock()),
     ):
         out = await recompute_graph_flows(
             repo_id=repo.id,
