@@ -1,5 +1,6 @@
 """Phase 2 integration: recompute endpoint calls labeller and persists
 labelled output. The labeller is mocked so this test stays hermetic."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

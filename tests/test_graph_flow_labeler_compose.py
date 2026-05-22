@@ -3,6 +3,7 @@
 These tests mock the per-flow and per-capability LLM helpers and verify
 the cache logic + cache-miss path.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -27,8 +28,13 @@ from shared.types import (
 
 def _node(node_id: str) -> Node:
     return Node(
-        id=node_id, kind="function", label=node_id, file=f"{node_id}.py",
-        area="src", line_start=1, line_end=3,
+        id=node_id,
+        kind="function",
+        label=node_id,
+        file=f"{node_id}.py",
+        area="src",
+        line_start=1,
+        line_end=3,
     )
 
 
@@ -60,23 +66,27 @@ async def test_cache_hit_skips_per_flow_llm_call(tmp_path: Path):
     from agent.graph_analyzer import flow_labeler
 
     flow_label_mock = AsyncMock()
-    cap_label_mock = AsyncMock(return_value=[
-        {"name": "Auth", "description": "Sign-in.", "flow_ids": ["f1"]},
-    ])
+    cap_label_mock = AsyncMock(
+        return_value=[
+            {"name": "Auth", "description": "Sign-in.", "flow_ids": ["f1"]},
+        ]
+    )
 
     prior = _blob(
-        [Flow(
-            id="f1",
-            entry_point=EntryPoint(node_id="x", kind="http"),
-            terminal_node_id="x",
-            terminal_kind="response",
-            steps=[FlowStep(node_id="x", depth=0)],
-            file_set=["x.py"],
-            file_set_hash="h1",
-            name="Existing Name",
-            description="Existing Desc.",
-            labeled_at_commit="sha:old",
-        )],
+        [
+            Flow(
+                id="f1",
+                entry_point=EntryPoint(node_id="x", kind="http"),
+                terminal_node_id="x",
+                terminal_kind="response",
+                steps=[FlowStep(node_id="x", depth=0)],
+                file_set=["x.py"],
+                file_set_hash="h1",
+                name="Existing Name",
+                description="Existing Desc.",
+                labeled_at_commit="sha:old",
+            )
+        ],
         commit="sha:old",
     )
     new_blob = _blob([_flow(id_="f1", entry="x", file_hash="h1")], commit="sha:new")
@@ -110,24 +120,28 @@ async def test_cache_miss_calls_llm_and_sets_commit(tmp_path: Path):
     (tmp_path / "x.py").write_text("def x(): pass\n")
 
     flow_label_mock = AsyncMock(return_value=("Login Flow", "Authenticates."))
-    cap_label_mock = AsyncMock(return_value=[
-        {"name": "Auth", "description": "Sign-in.", "flow_ids": ["f1"]},
-    ])
+    cap_label_mock = AsyncMock(
+        return_value=[
+            {"name": "Auth", "description": "Sign-in.", "flow_ids": ["f1"]},
+        ]
+    )
 
     # Prior blob has a flow but with a DIFFERENT file_set_hash — cache miss.
     prior = _blob(
-        [Flow(
-            id="f1",
-            entry_point=EntryPoint(node_id="x", kind="http"),
-            terminal_node_id="x",
-            terminal_kind="response",
-            steps=[FlowStep(node_id="x", depth=0)],
-            file_set=["x.py"],
-            file_set_hash="h_OLD",
-            name="Old Name",
-            description="Old Desc.",
-            labeled_at_commit="sha:old",
-        )],
+        [
+            Flow(
+                id="f1",
+                entry_point=EntryPoint(node_id="x", kind="http"),
+                terminal_node_id="x",
+                terminal_kind="response",
+                steps=[FlowStep(node_id="x", depth=0)],
+                file_set=["x.py"],
+                file_set_hash="h_OLD",
+                name="Old Name",
+                description="Old Desc.",
+                labeled_at_commit="sha:old",
+            )
+        ],
         commit="sha:old",
     )
     new_blob = _blob([_flow(id_="f1", entry="x", file_hash="h_NEW")], commit="sha:new")
@@ -138,8 +152,11 @@ async def test_cache_miss_calls_llm_and_sets_commit(tmp_path: Path):
     flow_labeler._label_capabilities = cap_label_mock  # type: ignore[attr-defined]
     try:
         result = await label_flow_blob(
-            new_blob, prior_blob=prior, workspace_root=tmp_path,
-            nodes_by_id={"x": _node("x")}, provider=MagicMock(),
+            new_blob,
+            prior_blob=prior,
+            workspace_root=tmp_path,
+            nodes_by_id={"x": _node("x")},
+            provider=MagicMock(),
         )
     finally:
         flow_labeler._label_flow = real_lf  # type: ignore[attr-defined]
@@ -158,40 +175,64 @@ async def test_capability_cache_hit_preserves_prior_name(tmp_path: Path):
     from agent.graph_analyzer import flow_labeler
 
     # Prior had Auth capability with flow_ids ["f1", "f2"]; its hash:
-    prior_hash = "sha256:" + hashlib.sha256(
-        ",".join(sorted(["f1", "f2"])).encode("utf-8"),
-    ).hexdigest()
+    prior_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            ",".join(sorted(["f1", "f2"])).encode("utf-8"),
+        ).hexdigest()
+    )
     prior = FlowJsonBlob(
         flows=[
-            Flow(id="f1", entry_point=EntryPoint(node_id="a", kind="http"),
-                 terminal_node_id="a", terminal_kind="response",
-                 steps=[FlowStep(node_id="a", depth=0)], file_set=[],
-                 file_set_hash="h", name="A", description="a.",
-                 labeled_at_commit="sha:old"),
-            Flow(id="f2", entry_point=EntryPoint(node_id="b", kind="http"),
-                 terminal_node_id="b", terminal_kind="response",
-                 steps=[FlowStep(node_id="b", depth=0)], file_set=[],
-                 file_set_hash="h", name="B", description="b.",
-                 labeled_at_commit="sha:old"),
+            Flow(
+                id="f1",
+                entry_point=EntryPoint(node_id="a", kind="http"),
+                terminal_node_id="a",
+                terminal_kind="response",
+                steps=[FlowStep(node_id="a", depth=0)],
+                file_set=[],
+                file_set_hash="h",
+                name="A",
+                description="a.",
+                labeled_at_commit="sha:old",
+            ),
+            Flow(
+                id="f2",
+                entry_point=EntryPoint(node_id="b", kind="http"),
+                terminal_node_id="b",
+                terminal_kind="response",
+                steps=[FlowStep(node_id="b", depth=0)],
+                file_set=[],
+                file_set_hash="h",
+                name="B",
+                description="b.",
+                labeled_at_commit="sha:old",
+            ),
         ],
         capabilities=[
-            Capability(id="cap_prior", flow_ids=["f1", "f2"],
-                       flow_membership_hash=prior_hash,
-                       name="Prior Auth", description="Old desc.",
-                       labeled_at_commit="sha:old"),
+            Capability(
+                id="cap_prior",
+                flow_ids=["f1", "f2"],
+                flow_membership_hash=prior_hash,
+                name="Prior Auth",
+                description="Old desc.",
+                labeled_at_commit="sha:old",
+            ),
         ],
-        unreached=[], derived_at_commit="sha:old", deriver_version="phase1",
+        unreached=[],
+        derived_at_commit="sha:old",
+        deriver_version="phase1",
     )
 
     # New emit: same flow_ids → same hash → cache hit.
     flow_label_mock = AsyncMock(return_value=("X", "x."))  # would be used on miss
-    cap_label_mock = AsyncMock(return_value=[
-        {"name": "Newly Generated", "description": "new.", "flow_ids": ["f1", "f2"]},
-    ])
+    cap_label_mock = AsyncMock(
+        return_value=[
+            {"name": "Newly Generated", "description": "new.", "flow_ids": ["f1", "f2"]},
+        ]
+    )
 
     new_blob = _blob(
-        [_flow(id_="f1", entry="a", file_hash="h"),
-         _flow(id_="f2", entry="b", file_hash="h")],
+        [_flow(id_="f1", entry="a", file_hash="h"), _flow(id_="f2", entry="b", file_hash="h")],
         commit="sha:new",
     )
 
@@ -201,7 +242,9 @@ async def test_capability_cache_hit_preserves_prior_name(tmp_path: Path):
     flow_labeler._label_capabilities = cap_label_mock  # type: ignore[attr-defined]
     try:
         result = await label_flow_blob(
-            new_blob, prior_blob=prior, workspace_root=tmp_path,
+            new_blob,
+            prior_blob=prior,
+            workspace_root=tmp_path,
             nodes_by_id={"a": _node("a"), "b": _node("b")},
             provider=MagicMock(),
         )
@@ -231,8 +274,11 @@ async def test_capability_grouping_failure_falls_back_to_unlabeled(tmp_path: Pat
 
     try:
         result = await label_flow_blob(
-            new_blob, prior_blob=None, workspace_root=tmp_path,
-            nodes_by_id={"x": _node("x")}, provider=MagicMock(),
+            new_blob,
+            prior_blob=None,
+            workspace_root=tmp_path,
+            nodes_by_id={"x": _node("x")},
+            provider=MagicMock(),
         )
     finally:
         flow_labeler._label_flow = real_lf  # type: ignore[attr-defined]
@@ -250,16 +296,21 @@ async def test_labeler_model_persisted_in_blob(tmp_path: Path):
     real_lf = flow_labeler._label_flow
     real_lc = flow_labeler._label_capabilities
     flow_labeler._label_flow = AsyncMock(return_value=("F", "f."))  # type: ignore[attr-defined]
-    flow_labeler._label_capabilities = AsyncMock(return_value=[
-        {"name": "X", "description": "x.", "flow_ids": ["f1"]},
-    ])
+    flow_labeler._label_capabilities = AsyncMock(
+        return_value=[
+            {"name": "X", "description": "x.", "flow_ids": ["f1"]},
+        ]
+    )
 
     new_blob = _blob([_flow(id_="f1", entry="x", file_hash="h")])
 
     try:
         result = await label_flow_blob(
-            new_blob, prior_blob=None, workspace_root=tmp_path,
-            nodes_by_id={"x": _node("x")}, provider=MagicMock(),
+            new_blob,
+            prior_blob=None,
+            workspace_root=tmp_path,
+            nodes_by_id={"x": _node("x")},
+            provider=MagicMock(),
             labeler_model="claude-test-model",
         )
     finally:

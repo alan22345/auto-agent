@@ -17,6 +17,7 @@ Cost discipline:
 * Reuses prior labels whose ``file_set_hash`` / ``flow_membership_hash``
   match the input blob -- the cache key contract from Phase 1 §4.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -108,7 +109,7 @@ _FLOW_LABEL_SYSTEM = (
     '{"name": "<<=4 words, Title Case>", '
     '"description": "<<=25 words, one sentence>"}\n\n'
     "The name should be product-language (what the user does), not "
-    "function names. Bad: \"login function\". Good: \"Google OAuth Login\"."
+    'function names. Bad: "login function". Good: "Google OAuth Login".'
 )
 
 
@@ -158,7 +159,7 @@ _CAPABILITY_LABEL_MAX_TOKENS = 1024
 _CAPABILITY_LABEL_SYSTEM = (
     "You group code flows into named capabilities for a developer-facing "
     "repo map. A capability is a coherent set of user-visible behaviours "
-    "(e.g. \"Authentication\", \"Carbon Calculation\").\n\n"
+    '(e.g. "Authentication", "Carbon Calculation").\n\n'
     "Given a list of flows (each with an id, a flow name, an entry point, "
     "and a terminal kind), return JSON exactly:\n"
     '{"capabilities": [\n'
@@ -171,7 +172,7 @@ _CAPABILITY_LABEL_SYSTEM = (
     "- Produce 5 to 12 capabilities total when possible. Fewer is fine if "
     "  the repo is small.\n"
     "- Each flow id appears in exactly one capability.\n"
-    "- Flows that don't fit any group go into a single \"Other\" capability."
+    '- Flows that don\'t fit any group go into a single "Other" capability.'
 )
 
 
@@ -328,9 +329,7 @@ async def label_flow_blob(
         # Build prior capabilities by membership hash for cache.
         prior_caps_by_hash: dict[str, Capability] = {}
         if prior_blob is not None:
-            prior_caps_by_hash = {
-                c.flow_membership_hash: c for c in prior_blob.capabilities
-            }
+            prior_caps_by_hash = {c.flow_membership_hash: c for c in prior_blob.capabilities}
 
         capabilities = []
         for i, cap in enumerate(cap_dicts):

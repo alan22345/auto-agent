@@ -1,4 +1,5 @@
 """Tests for capability grouping + labelling (Phase 2)."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -35,8 +36,11 @@ async def test_label_capabilities_groups_flows():
     expected_response = {
         "capabilities": [
             {"name": "Auth", "description": "Sign-in flows.", "flow_ids": ["a", "b"]},
-            {"name": "Reports", "description": "Report submission and viewing.",
-             "flow_ids": ["c", "d"]},
+            {
+                "name": "Reports",
+                "description": "Report submission and viewing.",
+                "flow_ids": ["c", "d"],
+            },
         ],
     }
 
@@ -45,6 +49,7 @@ async def test_label_capabilities_groups_flows():
         caps = await _label_capabilities(MagicMock(), flows)
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
 
     assert len(caps) == 2
@@ -63,6 +68,7 @@ async def test_label_capabilities_returns_empty_on_failure():
         caps = await _label_capabilities(MagicMock(), [_flow("a", "Login")])
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
 
     assert caps == []
@@ -87,6 +93,7 @@ async def test_label_capabilities_drops_capabilities_with_unknown_flow_ids():
         caps = await _label_capabilities(MagicMock(), flows)
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
     # The "Auth" capability is dropped because "ghost" isn't a real id.
     assert len(caps) == 1
@@ -103,6 +110,7 @@ async def test_label_capabilities_handles_empty_flow_list():
         caps = await _label_capabilities(MagicMock(), [])
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
 
     # No flows = no LLM call = no capabilities.

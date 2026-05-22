@@ -3,6 +3,7 @@
 Covers _load_file_slices first; per-flow LLM labelling and the
 file-hash cache come in subsequent tasks.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -70,7 +71,10 @@ def test_load_slices_skips_nodes_without_file_or_line_info(tmp_path: Path) -> No
     # Node has no file / no line_start — skipped.
     nodes = {
         "unknown::x": Node(
-            id="unknown::x", kind="function", label="x", area="src",
+            id="unknown::x",
+            kind="function",
+            label="x",
+            area="src",
         ),
     }
     steps = [FlowStep(node_id="unknown::x", depth=0)]
@@ -141,6 +145,7 @@ async def test_label_flow_returns_name_and_description_from_llm():
         name, desc = await _label_flow(MagicMock(), flow, slices)
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
     assert name == "Login Flow"
     assert desc == "Authenticates the user."
@@ -159,6 +164,7 @@ async def test_label_flow_returns_none_when_llm_fails():
         name, desc = await _label_flow(MagicMock(), _flow(), [])
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
     assert name is None
     assert desc is None
@@ -176,6 +182,7 @@ async def test_label_flow_rejects_empty_strings():
         name, desc = await _label_flow(MagicMock(), _flow(), [])
     finally:
         from agent.llm.structured import complete_json as real
+
         flow_labeler.complete_json = real  # type: ignore[attr-defined]
     assert name is None
     assert desc is None
