@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.models import Repo, RepoGraph
+from shared.models import Repo, RepoGraph, RepoGraphConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +23,26 @@ def _make_repo(*, repo_id: int = 1):
     repo.name = "demo"
     repo.organization_id = 1
     return repo
+
+
+def _make_cfg(*, last_analysis_id: int | None = 1):
+    """RepoGraphConfig mock for the alignment-fix execute() side_effect."""
+    cfg = MagicMock(spec=RepoGraphConfig)
+    cfg.last_analysis_id = last_analysis_id
+    return cfg
+
+
+def _two_results(row, cfg):
+    """Build a list of two MagicMock execute results: row first, cfg second.
+
+    Used as ``session.execute.side_effect`` so the endpoint's two
+    consecutive queries (latest analysis row, then RepoGraphConfig) each
+    get the right mock back.
+    """
+    a, b = MagicMock(), MagicMock()
+    a.scalar_one_or_none.return_value = row
+    b.scalar_one_or_none.return_value = cfg
+    return [a, b]
 
 
 def _make_graph_row(*, repo_id: int = 1, is_complete: bool = True):
@@ -121,15 +141,14 @@ async def test_recompute_writes_flow_json_for_completed_graph(
 
     repo = _make_repo()
     row = _make_graph_row(is_complete=True)
+    cfg = _make_cfg(last_analysis_id=row.id)
 
     mock_get_repo.return_value = repo
     # Workspace path does not exist so falls back to path-only hash mode.
     mock_ws_path.return_value = Path("/nonexistent/workspace")
 
     session = AsyncMock(spec=AsyncSession)
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = row
-    session.execute.return_value = mock_result
+    session.execute.side_effect = _two_results(row, cfg)
 
     # Phase 2: mock labeller so tests stay hermetic (no real LLM calls).
     async def _passthrough_labeller(blob, **kw):
@@ -219,13 +238,12 @@ async def test_recompute_uses_workspace_when_exists(
 
     repo = _make_repo()
     row = _make_graph_row(is_complete=True)
+    cfg = _make_cfg(last_analysis_id=row.id)
 
     mock_get_repo.return_value = repo
 
     session = AsyncMock(spec=AsyncSession)
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = row
-    session.execute.return_value = mock_result
+    session.execute.side_effect = _two_results(row, cfg)
 
     captured: dict[str, Any] = {}
     real_derive = derive_flow_blob
@@ -270,13 +288,12 @@ async def test_recompute_handles_str_return_from_graph_workspace_path(
 
     repo = _make_repo()
     row = _make_graph_row(is_complete=True)
+    cfg = _make_cfg(last_analysis_id=row.id)
 
     mock_get_repo.return_value = repo
 
     session = AsyncMock(spec=AsyncSession)
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = row
-    session.execute.return_value = mock_result
+    session.execute.side_effect = _two_results(row, cfg)
 
     # Return a plain str (as the real graph_workspace_path does via os.path.join)
     # pointing at a non-existent path, so the endpoint falls back to path-only

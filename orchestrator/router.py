@@ -90,6 +90,7 @@ from shared.types import (
     GateDecisionOut,
     GraphCodePreviewResponse,
     GraphStalenessResponse,
+    LatestFlowsData,
     LatestRepoGraphData,
     LoginRequest,
     LoginResponse,
@@ -3501,11 +3502,12 @@ async def recompute_graph_flows(
 
     blob = RepoGraphBlob.model_validate(row.graph_json)
 
-    # NOTE: writes to the latest is_complete row, which may differ from the
-    # row that RepoGraphConfig.last_analysis_id points to (read by the agent
-    # op via _load_graph). If they diverge, an agent calling which_capability
-    # may see "flow_json not computed yet" even after a successful recompute.
-    # Aligning these two read paths is tracked as a Phase 2 follow-up.
+    # Phase 3 alignment fix: also bump RepoGraphConfig.last_analysis_id to
+    # this row id so the agent op (which_capability) and the Map view GET
+    # both read the row whose flow_json we just wrote. Without this, an
+    # agent calling which_capability could see "flow_json not computed yet"
+    # right after a successful recompute when the config points at an older
+    # analysis row.
     from pathlib import Path as _Path
 
     from agent.graph_analyzer.flow_labeler import label_flow_blob
@@ -3537,6 +3539,14 @@ async def recompute_graph_flows(
     )
 
     row.flow_json = labelled.model_dump(mode="json")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is not None and cfg.last_analysis_id != row.id:
+        cfg.last_analysis_id = row.id
+
     await session.commit()
 
     return RecomputeFlowsResponse(
@@ -3546,6 +3556,61 @@ async def recompute_graph_flows(
         unreached_count=len(labelled.unreached),
         derived_at_commit=labelled.derived_at_commit,
         labeled_flow_count=sum(1 for f in labelled.flows if f.name is not None),
+    )
+
+
+@router.get(
+    "/repos/{repo_id}/graph/flows",
+    response_model=LatestFlowsData,
+)
+async def get_repo_graph_flows(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> LatestFlowsData:
+    """Return the persisted ``flow_json`` for ``repo_id`` (Phase 3 Map view).
+
+    Reads the row pointed to by ``RepoGraphConfig.last_analysis_id`` so a
+    successful recompute (which keeps that pointer in sync) is visible
+    immediately. ``blob`` is ``None`` when no recompute has produced a
+    ``flow_json`` yet — the UI surfaces a "Compute capability map" empty
+    state in that case.
+    """
+    from shared.types import FlowJsonBlob
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    if cfg.last_analysis_id is None:
+        return LatestFlowsData(repo_id=repo.id)
+
+    row_result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        return LatestFlowsData(repo_id=repo.id)
+
+    blob: FlowJsonBlob | None = None
+    if row.flow_json is not None:
+        try:
+            blob = FlowJsonBlob.model_validate(row.flow_json)
+        except Exception:
+            blob = None
+
+    return LatestFlowsData(
+        repo_id=repo.id,
+        repo_graph_id=row.id,
+        generated_at=row.generated_at.isoformat() if row.generated_at else None,
+        blob=blob,
     )
 
 
