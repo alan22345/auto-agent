@@ -3464,6 +3464,64 @@ async def refresh_repo_graph(
     return RepoGraphRefreshResponse(request_id=request_id, status="accepted")
 
 
+@router.post(
+    "/repos/{repo_id}/graph/flows/recompute",
+)
+async def recompute_graph_flows(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> dict:
+    """Derive capability/flow data from the latest completed RepoGraph row.
+
+    Loads the latest completed analysis, runs the pure-Python derivation
+    pipeline (``derive_flow_blob``), and persists the result to
+    ``RepoGraph.flow_json``.  Returns a summary so callers can confirm
+    the derivation ran without fetching the full blob.
+
+    Phase 1 of the capability-flow map spec (ADR-016 §capability-flow).
+    """
+    from agent.graph_analyzer.flows import derive_flow_blob
+    from agent.graph_workspace import graph_workspace_path
+    from shared.types import RepoGraphBlob
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraph)
+        .where(RepoGraph.repo_id == repo.id, RepoGraph.is_complete.is_(True))
+        .order_by(RepoGraph.generated_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404,
+            "No completed graph found for this repo. Run /graph/refresh first.",
+        )
+
+    blob = RepoGraphBlob.model_validate(row.graph_json)
+
+    workspace_path = graph_workspace_path(repo_id=repo.id)
+    flow_blob = derive_flow_blob(
+        blob,
+        workspace_root=workspace_path if workspace_path.exists() else None,
+    )
+
+    row.flow_json = flow_blob.model_dump(mode="json")
+    await session.commit()
+
+    return {
+        "repo_id": repo_id,
+        "flow_count": len(flow_blob.flows),
+        "capability_count": len(flow_blob.capabilities),
+        "unreached_count": len(flow_blob.unreached),
+        "derived_at_commit": flow_blob.derived_at_commit,
+    }
+
+
 import time as _time
 
 _TOTAL_FILES_CACHE: dict[int, tuple[float, int]] = {}
