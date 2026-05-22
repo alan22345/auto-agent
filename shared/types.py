@@ -536,6 +536,23 @@ class RecomputeFlowsResponse(BaseModel):
     successfully."""
 
 
+class LatestFlowsData(BaseModel):
+    """``GET /api/repos/{id}/graph/flows`` payload — the Phase 3 Map view
+    consumes this directly. ``blob`` is ``None`` until a recompute lands.
+
+    ``repo_graph_id`` and ``generated_at`` come from the graph row whose
+    ``flow_json`` produced ``blob``; the UI uses them in the freshness
+    banner / "Recompute map" button. The endpoint reads the row pointed
+    to by ``RepoGraphConfig.last_analysis_id`` so it always matches the
+    blob the agent op ``which_capability`` resolves against.
+    """
+
+    repo_id: int
+    repo_graph_id: int | None = None
+    generated_at: str | None = None
+    blob: FlowJsonBlob | None = None
+
+
 # --- Linear types ---
 
 
