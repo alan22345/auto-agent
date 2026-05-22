@@ -160,10 +160,16 @@ async def create_repo_and_scaffold_task(
     private: bool = True,
     loop: bool = True,
     *,
+    name_override: str = "",
     user_id: int | None = None,
     organization_id: int | None = None,
 ) -> tuple[Repo, Task]:
-    """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task."""
+    """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task.
+
+    When ``name_override`` is provided, it's used as the repo slug (after
+    sanitisation) instead of the LLM-generated one. Empty string falls back
+    to Claude-picked names.
+    """
     from shared.github_auth import get_github_token
 
     # repos.organization_id is NOT NULL (migration 027). Fail fast before
@@ -185,9 +191,18 @@ async def create_repo_and_scaffold_task(
     if not description:
         raise CreateRepoError("Description is required.")
 
-    # 1. Name generation
-    name = await _generate_name_via_claude(description)
-    log.info(f"Generated repo name '{name}' for description: {description[:80]}")
+    # 1. Name: caller-supplied (sanitised) wins; otherwise ask Claude.
+    if name_override.strip():
+        name = _sanitize_slug(name_override)
+        if not name or name == "new-project":
+            raise CreateRepoError(
+                f"'{name_override}' isn't a usable repo name — use letters, "
+                f"digits, and hyphens."
+            )
+        log.info(f"Using caller-supplied repo name '{name}'")
+    else:
+        name = await _generate_name_via_claude(description)
+        log.info(f"Generated repo name '{name}' for description: {description[:80]}")
 
     async with httpx.AsyncClient(timeout=30) as client:
         # 2. Resolve owner

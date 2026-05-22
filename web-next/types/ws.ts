@@ -125,7 +125,7 @@ export type WSCommand =
   | { type: 'approve_suggestion'; suggestion_id: number }
   | { type: 'reject_suggestion'; suggestion_id: number }
   | { type: 'load_freeform_tasks' }
-  | { type: 'create_repo'; description: string; org: string; loop: boolean }
+  | { type: 'create_repo'; description: string; name: string; org: string; loop: boolean }
   | {
       type: 'toggle_freeform';
       repo_name: string;

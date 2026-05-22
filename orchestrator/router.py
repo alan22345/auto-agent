@@ -4110,6 +4110,9 @@ async def delete_freeform_config(
 
 class CreateRepoRequest(BaseModel):
     description: str
+    # Optional caller-supplied repo name. Sanitised server-side; empty falls
+    # back to Claude-picked names.
+    name: str = ""
     org: str = ""
     private: bool = True
     # When True (default), the new repo enters the continuous-improvement loop
@@ -4152,6 +4155,7 @@ async def create_repo_from_description(
             org_override=req.org,
             private=req.private,
             loop=req.loop,
+            name_override=req.name,
             user_id=user_id,
             organization_id=caller_org_id,
         )

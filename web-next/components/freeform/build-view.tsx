@@ -10,6 +10,7 @@ import { useWS } from '@/hooks/useWS';
 
 export function BuildView() {
   const [description, setDescription] = useState('');
+  const [name, setName] = useState('');
   const [org, setOrg] = useState('');
   const [loop, setLoop] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -21,6 +22,7 @@ export function BuildView() {
     setError(null);
     setSuccess(`Created ${e.repo.name} — scaffold task #${e.task.id} queued.`);
     setDescription('');
+    setName('');
     setOrg('');
   }, []));
 
@@ -42,6 +44,7 @@ export function BuildView() {
     const sent = wsClient.send({
       type: 'create_repo',
       description: description.trim(),
+      name: name.trim(),
       org: org.trim(),
       loop,
     });
@@ -74,8 +77,20 @@ export function BuildView() {
               onChange={(e) => setDescription(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              Claude will pick a short repo name from this. Be specific about features you want in
-              the first version.
+              Be specific about features you want in the first version.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="cr-name">Repo name (optional)</Label>
+            <Input
+              id="cr-name"
+              placeholder="Leave empty and Claude will pick a slug from the description"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Lowercase letters, digits, and hyphens. Anything else gets sanitised.
             </p>
           </div>
 
