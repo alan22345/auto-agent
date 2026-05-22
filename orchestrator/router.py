@@ -1028,9 +1028,7 @@ async def probe_repo_secret(
                 raise ValueError("bad scheme or missing host")
             return RepoSecretTestResponse(ok=True, kind=kind, message=None)
         except Exception:
-            return RepoSecretTestResponse(
-                ok=False, kind=kind, message="Malformed PostgreSQL URL"
-            )
+            return RepoSecretTestResponse(ok=False, kind=kind, message="Malformed PostgreSQL URL")
 
     if kind == "stripe":
         try:
@@ -2571,10 +2569,7 @@ async def scaffold_domain_grill_answer(
         session,
         task,
         TaskStatus.BUILDING_DOMAIN_ADRS,
-        message=(
-            f"Domain grill answer received for `{req.domain_slug}`; "
-            "resuming domain loop"
-        ),
+        message=(f"Domain grill answer received for `{req.domain_slug}`; resuming domain loop"),
     )
     await session.commit()
 
@@ -3296,7 +3291,8 @@ async def enable_repo_graph(
     branch = req.analysis_branch or repo.default_branch or "main"
     if not BRANCH_NAME_RE.match(branch):
         raise HTTPException(
-            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+            400,
+            "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
         )
 
     cfg = RepoGraphConfig(
@@ -3346,7 +3342,8 @@ async def update_repo_graph_config(
 
     if not BRANCH_NAME_RE.match(req.analysis_branch):
         raise HTTPException(
-            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+            400,
+            "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
         )
 
     result = await session.execute(
@@ -3442,9 +3439,7 @@ async def refresh_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
-    if area is not None and (
-        not AREA_NAME_RE.match(area) or ".." in area
-    ):
+    if area is not None and (not AREA_NAME_RE.match(area) or ".." in area):
         raise HTTPException(
             400,
             "Invalid area name: alphanumeric + '.', '_', '-' (no '..' or '/')",
@@ -3653,10 +3648,7 @@ async def get_repo_graph_progress(
         raise HTTPException(404, "Repo not found")
 
     result = await session.execute(
-        select(RepoGraph)
-        .where(RepoGraph.repo_id == repo.id)
-        .order_by(RepoGraph.id.desc())
-        .limit(1)
+        select(RepoGraph).where(RepoGraph.repo_id == repo.id).order_by(RepoGraph.id.desc()).limit(1)
     )
     row = result.scalar_one_or_none()
     if row is None:
@@ -3676,9 +3668,7 @@ async def get_repo_graph_progress(
     from agent.graph_workspace import lock_is_held
 
     status: str = (
-        "unchanged"
-        if row.is_complete
-        else ("running" if lock_is_held(repo_id) else "idle")
+        "unchanged" if row.is_complete else ("running" if lock_is_held(repo_id) else "idle")
     )
     return RepoGraphProgressData(
         is_complete=row.is_complete,

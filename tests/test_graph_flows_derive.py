@@ -1,6 +1,7 @@
 """Top-level derive_flow_blob composes detection + trace + terminal +
 hashing + capability assembly into a FlowJsonBlob.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -21,32 +22,66 @@ from shared.types import (
 
 def _blob():
     nodes = [
-        Node(id="api/login.py::login", kind="function", label="login",
-             file="api/login.py", area="api"),
-        Node(id="api/login.py::validate", kind="function", label="validate",
-             file="api/login.py", area="api"),
-        Node(id="lib/db.py::session.commit", kind="function",
-             label="session.commit", file="lib/db.py", area="lib"),
+        Node(
+            id="api/login.py::login",
+            kind="function",
+            label="login",
+            file="api/login.py",
+            area="api",
+        ),
+        Node(
+            id="api/login.py::validate",
+            kind="function",
+            label="validate",
+            file="api/login.py",
+            area="api",
+        ),
+        Node(
+            id="lib/db.py::session.commit",
+            kind="function",
+            label="session.commit",
+            file="lib/db.py",
+            area="lib",
+        ),
         # Web caller — produces the http edge that marks `login` as an entry.
-        Node(id="web/login.tsx::handleSubmit", kind="function",
-             label="handleSubmit", file="web/login.tsx", area="web"),
+        Node(
+            id="web/login.tsx::handleSubmit",
+            kind="function",
+            label="handleSubmit",
+            file="web/login.tsx",
+            area="web",
+        ),
         # Unreached node — no edges in or out.
-        Node(id="lib/orphan.py::unused", kind="function", label="unused",
-             file="lib/orphan.py", area="lib"),
+        Node(
+            id="lib/orphan.py::unused",
+            kind="function",
+            label="unused",
+            file="lib/orphan.py",
+            area="lib",
+        ),
     ]
     edges = [
-        Edge(source="web/login.tsx::handleSubmit",
-             target="api/login.py::login", kind="http",
-             evidence=EdgeEvidence(file="web/login.tsx", line=1, snippet="fetch"),
-             source_kind="ast"),
-        Edge(source="api/login.py::login", target="api/login.py::validate",
-             kind="calls",
-             evidence=EdgeEvidence(file="api/login.py", line=2, snippet="validate()"),
-             source_kind="ast"),
-        Edge(source="api/login.py::validate",
-             target="lib/db.py::session.commit", kind="calls",
-             evidence=EdgeEvidence(file="api/login.py", line=3, snippet="commit"),
-             source_kind="ast"),
+        Edge(
+            source="web/login.tsx::handleSubmit",
+            target="api/login.py::login",
+            kind="http",
+            evidence=EdgeEvidence(file="web/login.tsx", line=1, snippet="fetch"),
+            source_kind="ast",
+        ),
+        Edge(
+            source="api/login.py::login",
+            target="api/login.py::validate",
+            kind="calls",
+            evidence=EdgeEvidence(file="api/login.py", line=2, snippet="validate()"),
+            source_kind="ast",
+        ),
+        Edge(
+            source="api/login.py::validate",
+            target="lib/db.py::session.commit",
+            kind="calls",
+            evidence=EdgeEvidence(file="api/login.py", line=3, snippet="commit"),
+            source_kind="ast",
+        ),
     ]
     return RepoGraphBlob(
         commit_sha="abc123",

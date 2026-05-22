@@ -165,7 +165,9 @@ class _SessionStub:
         return result
 
 
-def _make_config(*, repo_id: int = 1, workspace_path: str = "/ws", last_analysis_id: int | None = 42):
+def _make_config(
+    *, repo_id: int = 1, workspace_path: str = "/ws", last_analysis_id: int | None = 42
+):
     cfg = MagicMock()
     cfg.repo_id = repo_id
     cfg.workspace_path = workspace_path
@@ -173,7 +175,9 @@ def _make_config(*, repo_id: int = 1, workspace_path: str = "/ws", last_analysis
     return cfg
 
 
-def _make_graph_row(*, graph_id: int = 42, commit_sha: str = "test-sha-wc", flow_json=None, blob=None):
+def _make_graph_row(
+    *, graph_id: int = 42, commit_sha: str = "test-sha-wc", flow_json=None, blob=None
+):
     row = MagicMock()
     row.id = graph_id
     row.commit_sha = commit_sha
@@ -271,9 +275,7 @@ async def test_which_capability_node_not_in_graph(tmp_path: Path) -> None:
     flow_json = flow_blob.model_dump(mode="json")
 
     tool = QueryRepoGraphTool()
-    result = await _run(
-        tool, str(tmp_path), {"node": "nonexistent.py::ghost"}, flow_json=flow_json
-    )
+    result = await _run(tool, str(tmp_path), {"node": "nonexistent.py::ghost"}, flow_json=flow_json)
 
     assert result.is_error is False
     payload = json.loads(result.output)
@@ -285,9 +287,7 @@ async def test_which_capability_node_not_in_graph(tmp_path: Path) -> None:
 async def test_which_capability_when_flow_json_is_null(tmp_path: Path) -> None:
     """When flow_json is null the op returns unreached=True with an actionable note."""
     tool = QueryRepoGraphTool()
-    result = await _run(
-        tool, str(tmp_path), {"node": "module_a.py::entry_a"}, flow_json=None
-    )
+    result = await _run(tool, str(tmp_path), {"node": "module_a.py::entry_a"}, flow_json=None)
 
     assert result.is_error is False
     payload = json.loads(result.output)

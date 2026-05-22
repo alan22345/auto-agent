@@ -189,11 +189,13 @@ class QueryRepoGraphTool(Tool):
         # 4. Dispatch to per-op handler.
         try:
             if op == "which_capability":
-                payload = {"result": _which_capability(
-                    flow_json=graph_row.flow_json,
-                    graph_blob=blob,
-                    params=params,
-                )}
+                payload = {
+                    "result": _which_capability(
+                        flow_json=graph_row.flow_json,
+                        graph_blob=blob,
+                        params=params,
+                    )
+                }
             else:
                 payload = _dispatch(
                     op=op,

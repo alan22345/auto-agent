@@ -15,6 +15,7 @@ the blob from the DB, runs derivation, writes the result back. The
 file-hash step in :func:`derive_flow_blob` is the only stage that
 touches disk.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -223,13 +224,17 @@ def derive_flow_blob(
             reached.add(step.node_id)
 
         file_set = sorted(
-            {nodes_by_id[s.node_id].file
-             for s in steps
-             if s.node_id in nodes_by_id and nodes_by_id[s.node_id].file},
+            {
+                nodes_by_id[s.node_id].file
+                for s in steps
+                if s.node_id in nodes_by_id and nodes_by_id[s.node_id].file
+            },
         )
         last_step = steps[-1]
         terminal_kind = classify_terminal(
-            graph_blob, last_step.node_id, ep.kind,
+            graph_blob,
+            last_step.node_id,
+            ep.kind,
         )
         flow = Flow(
             id=_stable_flow_id(ep.node_id),
@@ -254,8 +259,7 @@ def derive_flow_blob(
     )
 
     unreached = sorted(
-        n.id for n in graph_blob.nodes
-        if n.id not in reached and n.kind == "function"
+        n.id for n in graph_blob.nodes if n.id not in reached and n.kind == "function"
     )
 
     return FlowJsonBlob(

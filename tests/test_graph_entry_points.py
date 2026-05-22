@@ -4,6 +4,7 @@ Builds synthetic RepoGraphBlobs and asserts the detector returns the
 expected EntryPoint list. No real fixtures needed — the detector is a
 pure function over the blob.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

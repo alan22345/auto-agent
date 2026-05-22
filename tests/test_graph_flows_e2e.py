@@ -6,6 +6,7 @@ per-module unit tests in test_graph_entry_points / test_graph_flows_*
 cover behaviour. This one catches integration drift across the chain:
 parser → blob → entry_points → trace → terminal → derive → FlowJsonBlob.
 """
+
 from __future__ import annotations
 
 import shutil

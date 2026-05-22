@@ -20,6 +20,7 @@ This is pure: no I/O, no DB, no LLM. Heuristics are easy to extend —
 add a kind by adding a clause; missed entry points land in the
 Unreached tray downstream.
 """
+
 from __future__ import annotations
 
 import re

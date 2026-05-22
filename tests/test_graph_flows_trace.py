@@ -3,6 +3,7 @@
 trace_flow walks call edges forward from an entry point, capping depth
 and collapsing deep branches per spec §3 steps 3-4.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -30,7 +31,11 @@ def _blob(nodes, edges):
 
 def _fn(node_id: str) -> Node:
     return Node(
-        id=node_id, kind="function", label=node_id, file=f"{node_id}.py", area="src",
+        id=node_id,
+        kind="function",
+        label=node_id,
+        file=f"{node_id}.py",
+        area="src",
     )
 
 
@@ -154,8 +159,11 @@ def _terminal_blob(last_node_label_targets: list[tuple[str, str]]) -> RepoGraphB
     for target_id, target_label in last_node_label_targets:
         nodes.append(
             Node(
-                id=target_id, kind="function", label=target_label,
-                file="x.py", area="src",
+                id=target_id,
+                kind="function",
+                label=target_label,
+                file="x.py",
+                area="src",
             ),
         )
         edges.append(_call("last", target_id))

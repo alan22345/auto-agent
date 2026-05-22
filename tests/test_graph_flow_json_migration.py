@@ -4,6 +4,7 @@ Adds nullable flow_json JSONB column on repo_graphs. Phase 1 of the
 capability/flow map spec persists the result of forward-tracing flows
 from entry points to terminal side effects.
 """
+
 from __future__ import annotations
 
 import os
@@ -73,6 +74,7 @@ def test_orm_has_nullable_flow_json_column() -> None:
     Runs without a DB; pure SQLAlchemy metadata introspection.
     """
     from shared.models.core import RepoGraph
+
     col = RepoGraph.__table__.columns["flow_json"]
     assert col.nullable is True
     # JSONB (Postgres-specific) is a subclass of sa.JSON, so this check is

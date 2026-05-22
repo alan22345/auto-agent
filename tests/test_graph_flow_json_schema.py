@@ -4,6 +4,7 @@ Phase 1 leaves name/description as None; Phase 2 will populate them.
 The schema must accept both shapes so a Phase-1-written blob round-trips
 through a Phase-2-aware deserialiser.
 """
+
 from __future__ import annotations
 
 from typing import get_args

@@ -33,6 +33,7 @@ class ClassificationResult(BaseModel):
 
 class TaskData(BaseModel):
     """Typed representation of a task from the orchestrator API."""
+
     id: int
     title: str
     description: str
@@ -66,10 +67,10 @@ class TaskData(BaseModel):
     # flips the DB column to NOT NULL, so legacy rows still serialize cleanly.
     organization_id: int | None = None
     # Structured intent (extracted by LLM after classification)
-    change_type: str | None = None          # "bugfix", "feature", "refactor", "config", "docs"
-    target_areas: str | None = None         # comma-separated file paths or module areas
-    acceptance_criteria: str | None = None   # what "done" looks like
-    constraints: str | None = None          # what NOT to do
+    change_type: str | None = None  # "bugfix", "feature", "refactor", "config", "docs"
+    target_areas: str | None = None  # comma-separated file paths or module areas
+    acceptance_criteria: str | None = None  # what "done" looks like
+    constraints: str | None = None  # what NOT to do
     # Trio (architect/builder/reviewer) — parent points to the trio parent
     # task when this is a child work item; otherwise None.
     parent_task_id: int | None = None
@@ -80,6 +81,7 @@ class TaskData(BaseModel):
 
 class TaskMessageData(BaseModel):
     """A user-posted feedback message on a task."""
+
     id: int
     task_id: int
     sender: str
@@ -89,11 +91,13 @@ class TaskMessageData(BaseModel):
 
 class TaskMessagePost(BaseModel):
     """Inbound body for POST /api/tasks/{id}/messages."""
+
     content: str
 
 
 class RepoData(BaseModel):
     """Typed representation of a repo from the orchestrator API."""
+
     id: int
     name: str
     url: str
@@ -115,6 +119,7 @@ class RepoData(BaseModel):
 
 class PRReviewComment(BaseModel):
     """A review comment from a GitHub PR."""
+
     author: str
     body: str
     type: Literal["review", "inline"]
@@ -124,6 +129,7 @@ class PRReviewComment(BaseModel):
 
 class CIStatus(BaseModel):
     """CI status for a commit."""
+
     sha: str
     state: Literal["success", "failure", "pending", "error"]
     message: str = ""
@@ -521,6 +527,7 @@ class RecomputeFlowsResponse(BaseModel):
 
 class SuggestionData(BaseModel):
     """Typed representation of a PO suggestion."""
+
     id: int
     repo_id: int | None = None
     repo_name: str | None = None
@@ -552,6 +559,7 @@ class MarketBriefResponse(BaseModel):
 
 class FreeformConfigData(BaseModel):
     """Typed representation of a freeform mode config."""
+
     id: int
     repo_name: str | None = None
     enabled: bool = False
@@ -576,6 +584,7 @@ class FreeformConfigData(BaseModel):
 
 class LinearIssue(BaseModel):
     """A Linear issue returned from the GraphQL API."""
+
     id: str
     identifier: str
     title: str
@@ -589,6 +598,7 @@ class LinearIssue(BaseModel):
 
 class UserData(BaseModel):
     """Typed representation of a user."""
+
     id: int
     username: str
     display_name: str
@@ -629,6 +639,7 @@ class SignupResponse(BaseModel):
     """Response for POST /api/auth/signup. Always returns 201 with the new
     user's id; the client should display "check your email" — never assume
     the email was actually delivered."""
+
     user_id: int
     email: str
     verification_sent: bool
@@ -643,11 +654,13 @@ class ChangeEmailRequest(BaseModel):
 
 class SecretListResponse(BaseModel):
     """Names only — values never leave the server."""
+
     keys: list[str]
 
 
 class SecretPutRequest(BaseModel):
     """``value=None`` clears the secret (equivalent to DELETE)."""
+
     value: str | None = None
 
 
@@ -756,6 +769,7 @@ class MemorySaveResult(BaseModel):
 
 class MemoryEntitySummary(BaseModel):
     """Lightweight entity card for search results / recent list."""
+
     id: str
     name: str
     type: str
@@ -766,6 +780,7 @@ class MemoryEntitySummary(BaseModel):
 
 class MemoryFact(BaseModel):
     """A fact row as seen in the browser detail view."""
+
     id: str
     content: str
     kind: str
@@ -808,6 +823,7 @@ class ReviewCombinedVerdict(BaseModel):
 
 class VerifyAttemptOut(BaseModel):
     """API shape for a verify attempt row."""
+
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
@@ -823,6 +839,7 @@ class VerifyAttemptOut(BaseModel):
 
 class ReviewAttemptOut(BaseModel):
     """API shape for a review attempt row."""
+
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
@@ -841,6 +858,7 @@ class ReviewAttemptOut(BaseModel):
 
 class WorkItem(BaseModel):
     """One backlog item the architect dispatches to a builder child task."""
+
     id: str
     title: str
     description: str
@@ -851,12 +869,14 @@ class WorkItem(BaseModel):
 
 class RepairContext(BaseModel):
     """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
+
     ci_log: str
     failed_pr_url: str
 
 
 class ArchitectDecision(BaseModel):
     """The decision field on an ArchitectAttempt row when phase=checkpoint."""
+
     action: Literal["continue", "revise", "done", "awaiting_clarification", "blocked"]
     reason: str | None = None
     question: str | None = None  # only when action=awaiting_clarification
@@ -864,6 +884,7 @@ class ArchitectDecision(BaseModel):
 
 class ArchitectAttemptOut(BaseModel):
     """API shape for an architect_attempts row."""
+
     id: int
     task_id: int
     phase: Literal["initial", "consult", "checkpoint", "revision"]
@@ -885,6 +906,7 @@ class ArchitectAttemptOut(BaseModel):
 
 class TrioReviewAttemptOut(BaseModel):
     """API shape for a trio_review_attempts row."""
+
     id: int
     task_id: int
     cycle: int
@@ -896,6 +918,7 @@ class TrioReviewAttemptOut(BaseModel):
 
 class DecisionOut(BaseModel):
     """API shape for one ADR file under ``docs/decisions/``."""
+
     filename: str
     title: str
     url: str
