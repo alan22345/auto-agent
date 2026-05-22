@@ -27,6 +27,16 @@ import re
 
 from shared.types import EntryPoint, EntryPointKind, Node, RepoGraphBlob
 
+# FastAPI / Flask / aiohttp / Starlette HTTP route decorators. Catches
+# the four common surface forms: ``@router.get(...)``, ``@app.post(...)``,
+# ``@blueprint.route(...)``, ``@routes.delete(...)``. Without this the
+# only HTTP entry-points the pipeline picks up are the cross-language
+# ones surfaced by ADR-016 Phase 4's TS→Python matching, which is empty
+# for Python-only repos (the Map view then renders an "unlabeled /
+# 0 flows" empty state even when the repo is full of FastAPI routes).
+_HTTP_DECORATOR_RE = re.compile(
+    r"^@\w+\.(?:get|post|put|patch|delete|options|head|api_route|route|websocket)\b",
+)
 _QUEUE_DECORATOR_RE = re.compile(
     r"^@(?:celery\.task|app\.task|dramatiq\.actor|rq\.job|worker(?:\.\w+)?)\b",
 )
@@ -40,7 +50,9 @@ _CLI_DIR_RE = re.compile(r"(?:^|/)cli/")
 
 
 def _is_http_entry(node: Node, http_targets: set[str]) -> bool:
-    return node.id in http_targets
+    if node.id in http_targets:
+        return True
+    return any(_HTTP_DECORATOR_RE.match(d) for d in node.decorators)
 
 
 def _is_queue_entry(node: Node) -> bool:

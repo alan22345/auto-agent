@@ -156,3 +156,102 @@ def test_cron_beats_cli_when_both_decorators_present():
     ]
     eps = detect_entry_points(_make_blob(nodes, []))
     assert [e.kind for e in eps] == ["cron"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP route decorators (FastAPI / Flask / aiohttp). Without these the
+# detector only sees cross-language HTTP edges (TS → Python), so a
+# Python-only FastAPI repo with hundreds of routes lands at the
+# ``unlabeled / 0 flows`` empty state in the Map view.
+# ---------------------------------------------------------------------------
+
+
+def test_fastapi_router_get_decorator_is_http_entry_point():
+    nodes = [
+        _fn(
+            "orchestrator/router.py::list_repos",
+            decorators=['@router.get("/api/repos")'],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_fastapi_router_post_decorator_is_http_entry_point():
+    nodes = [
+        _fn(
+            "orchestrator/router.py::create_repo",
+            decorators=['@router.post("/api/repos")'],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_fastapi_app_methods_are_http_entry_points():
+    nodes = [
+        _fn("app/main.py::get_users", decorators=['@app.get("/users")']),
+        _fn(
+            "app/main.py::patch_user", decorators=['@app.patch("/users/{id}")'],
+        ),
+        _fn(
+            "app/main.py::delete_user",
+            decorators=['@app.delete("/users/{id}")'],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert {e.kind for e in eps} == {"http"}
+    assert len(eps) == 3
+
+
+def test_flask_blueprint_route_decorator_is_http_entry_point():
+    nodes = [
+        _fn(
+            "blueprints/api.py::profile",
+            decorators=["@bp.route('/profile', methods=['GET'])"],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_fastapi_websocket_decorator_is_http_entry_point():
+    # WebSocket handlers ride the same path-based decorator pattern as
+    # HTTP routes — we classify them as ``http`` so they end up on the
+    # Map view rather than the Unreached tray.
+    nodes = [
+        _fn(
+            "web/main.py::ws_handler",
+            decorators=['@app.websocket("/ws")'],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_http_decorator_takes_precedence_over_handler_suffix():
+    # ``request_handler`` would normally qualify as queue via the
+    # ``_handler$`` regex; a route decorator wins.
+    nodes = [
+        _fn(
+            "api/handlers.py::request_handler",
+            decorators=['@router.post("/x")'],
+        ),
+    ]
+    eps = detect_entry_points(_make_blob(nodes, []))
+    assert [e.kind for e in eps] == ["http"]
+
+
+def test_http_decorator_on_class_kind_node_is_ignored():
+    # Function-only filter still applies — a class declared with a
+    # route-style decorator (unusual) is not an entry point.
+    node = Node(
+        id="src/x.py::Resource",
+        kind="class",
+        label="Resource",
+        file="src/x.py",
+        area="src",
+        decorators=['@app.route("/x")'],
+    )
+    eps = detect_entry_points(_make_blob([node], []))
+    assert eps == []
