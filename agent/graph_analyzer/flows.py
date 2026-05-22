@@ -17,12 +17,21 @@ touches disk.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
+from agent.graph_analyzer.entry_points import detect_entry_points
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from shared.types import (
+    Capability,
     EntryPoint,
     EntryPointKind,
+    Flow,
+    FlowJsonBlob,
     FlowStep,
     Node,
     RepoGraphBlob,
@@ -137,9 +146,132 @@ def classify_terminal(
         if _DB_WRITE_RE.match(target.label):
             return "db_write"
 
+    # Also check if the terminal node itself matches a pattern —
+    # e.g. `session.commit` is the last node in the trace with no
+    # further call edges; its own label signals the terminal kind.
+    last_node = nodes_by_id.get(last_step_node_id)
+    if last_node is not None:
+        if _QUEUE_PUBLISH_RE.match(last_node.label):
+            return "queue_publish"
+        if _EXTERNAL_HTTP_RE.match(last_node.label):
+            return "external_http"
+        if _DB_WRITE_RE.match(last_node.label):
+            return "db_write"
+
     if not outgoing_targets and entry_kind == "http":
         return "response"
     return "none"
 
 
-__all__ = ["BRANCH_INLINE_DEPTH", "MAX_FLOW_STEPS", "classify_terminal", "trace_flow"]
+# Bumped when the derivation logic changes in a way that invalidates
+# persisted flow_json blobs.
+DERIVER_VERSION = "phase1"
+
+
+def _stable_flow_id(entry_node_id: str) -> str:
+    digest = hashlib.sha256(entry_node_id.encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def _hash_file_set(file_set: list[str], workspace_root: Path | None) -> str:
+    hasher = hashlib.sha256()
+    for path in file_set:
+        hasher.update(path.encode("utf-8"))
+        hasher.update(b"\0")
+        if workspace_root is not None:
+            full = workspace_root / path
+            try:
+                data = full.read_bytes()
+            except OSError:
+                data = b""
+            hasher.update(len(data).to_bytes(8, "big"))
+            hasher.update(data)
+        # When workspace_root is None we hash path-only — useful for unit
+        # tests and as a deterministic fallback when no workspace is
+        # available.  Phase 2 always supplies a workspace.
+    return f"sha256:{hasher.hexdigest()}"
+
+
+def _hash_flow_membership(flow_ids: list[str]) -> str:
+    joined = ",".join(sorted(flow_ids))
+    return f"sha256:{hashlib.sha256(joined.encode('utf-8')).hexdigest()}"
+
+
+def derive_flow_blob(
+    graph_blob: RepoGraphBlob,
+    workspace_root: Path | None,
+) -> FlowJsonBlob:
+    """Compose entry-point detection + per-entry forward trace +
+    terminal classification + file-set hashing into a single
+    :class:`FlowJsonBlob`.
+
+    When *workspace_root* is provided, ``file_set_hash`` uses the live
+    contents of each file in the flow's ``file_set``. Otherwise the
+    hash is path-only (Phase 1 callers may run without a workspace;
+    Phase 2's labelling step always supplies one).
+    """
+    nodes_by_id = {n.id: n for n in graph_blob.nodes}
+    entry_points = detect_entry_points(graph_blob)
+
+    flows: list[Flow] = []
+    reached: set[str] = set()
+    for ep in entry_points:
+        steps = trace_flow(graph_blob, ep)
+        if not steps:
+            continue
+        for step in steps:
+            reached.add(step.node_id)
+
+        file_set = sorted(
+            {nodes_by_id[s.node_id].file
+             for s in steps
+             if s.node_id in nodes_by_id and nodes_by_id[s.node_id].file},
+        )
+        last_step = steps[-1]
+        terminal_kind = classify_terminal(
+            graph_blob, last_step.node_id, ep.kind,
+        )
+        flow = Flow(
+            id=_stable_flow_id(ep.node_id),
+            entry_point=ep,
+            terminal_node_id=last_step.node_id,
+            terminal_kind=terminal_kind,
+            steps=steps,
+            file_set=file_set,
+            file_set_hash=_hash_file_set(file_set, workspace_root),
+            name=None,
+            description=None,
+        )
+        flows.append(flow)
+
+    flow_ids = [f.id for f in flows]
+    capability = Capability(
+        id="unlabeled",
+        flow_ids=flow_ids,
+        flow_membership_hash=_hash_flow_membership(flow_ids),
+        name=None,
+        description=None,
+    )
+
+    unreached = sorted(
+        n.id for n in graph_blob.nodes
+        if n.id not in reached and n.kind == "function"
+    )
+
+    return FlowJsonBlob(
+        capabilities=[capability],
+        flows=flows,
+        unreached=unreached,
+        derived_at_commit=graph_blob.commit_sha,
+        deriver_version=DERIVER_VERSION,
+    )
+
+
+__all__ = [
+    "BRANCH_INLINE_DEPTH",
+    "DERIVER_VERSION",
+    "MAX_FLOW_STEPS",
+    "classify_terminal",
+    "derive_flow_blob",
+    "trace_flow",
+]
