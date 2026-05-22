@@ -92,7 +92,11 @@ export type WSEvent =
   | { type: 'freeform_config_list'; configs: FreeformConfig[] }
   | { type: 'suggestion_list'; suggestions: Suggestion[] }
   | { type: 'freeform_tasks_list'; tasks: TaskData[] }
-  | { type: 'repo_created'; repo_name: string }
+  | {
+      type: 'repo_created';
+      repo: { id: number; name: string; url: string; default_branch?: string };
+      task: TaskData;
+    }
   | { type: 'memory_rows'; rows: MemoryRow[]; source_id?: string }
   | { type: 'memory_saved'; results: { ok: boolean; error?: string }[] }
   | { type: 'memory_error'; message: string }

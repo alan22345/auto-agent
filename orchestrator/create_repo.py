@@ -166,6 +166,14 @@ async def create_repo_and_scaffold_task(
     """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task."""
     from shared.github_auth import get_github_token
 
+    # repos.organization_id is NOT NULL (migration 027). Fail fast before
+    # we hit GitHub, otherwise a missing org leaves an orphan repo on the
+    # user's account when the DB insert later 500s.
+    if organization_id is None:
+        raise CreateRepoError(
+            "organization_id is required — caller must be authenticated."
+        )
+
     if not await get_github_token(user_id=user_id, organization_id=organization_id):
         raise CreateRepoError(
             "No GitHub auth configured — set GITHUB_TOKEN, or configure a "

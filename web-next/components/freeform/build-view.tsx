@@ -1,32 +1,54 @@
 'use client';
-// Mirrors renderFreeformBuildNew() in web/static/index.html ~line 1247
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { wsClient } from '@/lib/ws';
+import { useWS } from '@/hooks/useWS';
 
 export function BuildView() {
   const [description, setDescription] = useState('');
   const [org, setOrg] = useState('');
   const [loop, setLoop] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!description.trim()) {
-      alert('Describe what you want to build');
-      return;
-    }
-    setSubmitting(true);
-    wsClient.send({ type: 'create_repo', description: description.trim(), org: org.trim(), loop });
-    // TODO: listen for repo_created / error to reset submitting state (see web/static/index.html ~line 1553 onNextWsMessage usage)
+  useWS('repo_created', useCallback((e) => {
+    setSubmitting(false);
+    setError(null);
+    setSuccess(`Created ${e.repo.name} — scaffold task #${e.task.id} queued.`);
     setDescription('');
     setOrg('');
-    // Reset after a reasonable timeout since we don't have onNextWsMessage here yet
-    setTimeout(() => setSubmitting(false), 200_000);
+  }, []));
+
+  useWS('error', useCallback((e) => {
+    if (!submitting) return;
+    setSubmitting(false);
+    setError(e.message);
+  }, [submitting]));
+
+  function handleSubmit(ev: React.FormEvent) {
+    ev.preventDefault();
+    if (!description.trim()) {
+      setError('Describe what you want to build');
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setSubmitting(true);
+    const sent = wsClient.send({
+      type: 'create_repo',
+      description: description.trim(),
+      org: org.trim(),
+      loop,
+    });
+    if (!sent) {
+      setSubmitting(false);
+      setError('Not connected to the server — try again in a moment.');
+    }
   }
 
   return (
@@ -83,6 +105,17 @@ export function BuildView() {
             <Switch checked={loop} onCheckedChange={setLoop} id="cr-loop" />
           </div>
         </section>
+
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+        {success && (
+          <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
+            {success}
+          </div>
+        )}
 
         <Button type="submit" disabled={submitting}>
           {submitting ? 'Creating… this may take up to 3 minutes' : 'Create & Scaffold'}

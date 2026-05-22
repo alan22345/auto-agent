@@ -4135,15 +4135,15 @@ async def create_repo_from_description(
     if not req.description.strip():
         raise HTTPException(400, "description is required")
 
-    user_id: int | None = None
-    caller_org_id: int | None = None
-    if auto_agent_session or authorization:
-        try:
-            payload = _verify_cookie_or_header(auto_agent_session, authorization)
-            user_id = payload.get("user_id")
-            caller_org_id = payload.get("current_org_id")
-        except HTTPException:
-            user_id = None
+    # Auth is required: the new Repo row must be stamped with the caller's
+    # organization_id (NOT NULL since migration 027). Resolve identity
+    # before any side-effects — otherwise a failed DB insert leaves an
+    # orphan repo on the user's GitHub account.
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    user_id = payload.get("user_id")
+    caller_org_id = payload.get("current_org_id")
+    if not user_id or not caller_org_id:
+        raise HTTPException(401, "Authentication required to create a repo")
 
     try:
         repo, task = await create_repo_and_scaffold_task(
