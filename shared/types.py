@@ -506,8 +506,9 @@ class FlowJsonBlob(BaseModel):
 
     ``unreached`` is the list of node ids in the underlying graph that
     no flow's forward trace touched. Surfaced as the Unreached tray in
-    the Phase 3 UI (spec §3 step 6). Phase 2 adds ``labeled_at_commit``
-    and ``labeler_model`` fields when LLM labelling lands.
+    the Phase 3 UI (spec §3 step 6). Phase 2 added ``labeled_at_commit``
+    (on ``Flow``/``Capability``) and ``labeler_model`` (on this blob) for
+    LLM provenance tracking; they remain ``None`` on Phase 1-derived blobs.
     """
 
     capabilities: list[Capability]
