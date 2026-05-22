@@ -15,7 +15,7 @@
 // same product surface (LODs, drill-in, ports, cross-fade) without the
 // layout/style indirection.
 'use client';
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useEffect, useState } from 'react';
 import { ChevronRight, ArrowRight } from 'lucide-react';
 import type {
   Capability,
@@ -55,6 +55,18 @@ export function lodForFocus(focus: FocusPath): Lod {
   if (focus.flowId) return 2;
   if (focus.capabilityId) return 1;
   return 0;
+}
+
+// Drop the deepest non-null segment of a ``FocusPath`` — the in-component
+// equivalent of the page-level ``drillOut`` exported from
+// ``app/(app)/code-graph/[repoId]/page.tsx``. Duplicated to keep the
+// page → canvas import direction one-way.
+export function drillOutFocus(focus: FocusPath): FocusPath {
+  if (focus.stepNodeId)
+    return { capabilityId: focus.capabilityId, flowId: focus.flowId, stepNodeId: null };
+  if (focus.flowId)
+    return { capabilityId: focus.capabilityId, flowId: null, stepNodeId: null };
+  return ROOT_FOCUS;
 }
 
 interface Props {
@@ -106,6 +118,35 @@ export function MapCanvas({
   const focusedFlow = focus.flowId
     ? flowsById.get(focus.flowId) ?? null
     : null;
+
+  // Phase 5 §6 — keyboard nav. Esc / ArrowUp drills out one LOD, Home
+  // returns to LOD 0. Lives on MapCanvas (not on the wrapping page)
+  // so any host of the component gets the keybinds for free. Skip when
+  // focus is inside a text input so typing isn't hijacked.
+  useEffect(() => {
+    function onKey(ev: KeyboardEvent) {
+      const target = ev.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (ev.key === 'Escape' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        onFocusChange(drillOutFocus(focus));
+        return;
+      }
+      if (ev.key === 'Home') {
+        ev.preventDefault();
+        onFocusChange(ROOT_FOCUS);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focus, onFocusChange]);
 
   // Search filter — case-insensitive substring on the visible field set
   // for the current LOD. Empty / whitespace clears the filter.

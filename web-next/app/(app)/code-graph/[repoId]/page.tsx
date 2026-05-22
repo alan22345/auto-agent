@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -88,37 +88,9 @@ export default function CodeGraphRepoPage({
     router.replace(`?${next.toString()}`, { scroll: false });
   };
 
-  // Phase 5 §6 — keyboard nav. Esc drills out one LOD, Home returns to
-  // LOD 0. Mounted only when the Map tab is active so the Raw view's
-  // cytoscape keybinds (existing) are untouched. Skip when the focus is
-  // inside a text input so typing isn't hijacked.
-  useEffect(() => {
-    if (activeTab !== 'map') return;
-    function onKey(ev: KeyboardEvent) {
-      const target = ev.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
-      if (ev.key === 'Escape' || ev.key === 'ArrowUp') {
-        ev.preventDefault();
-        setFocus(drillOut(focusPath));
-        return;
-      }
-      if (ev.key === 'Home') {
-        ev.preventDefault();
-        setFocus(ROOT_FOCUS);
-        return;
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, focusPath.capabilityId, focusPath.flowId, focusPath.stepNodeId]);
+  // Phase 5 §6 keyboard nav (Esc / ArrowUp drill out, Home → LOD 0)
+  // lives on MapCanvas itself, so any host of the component gets the
+  // bindings for free. See ``components/code-graph/map-canvas.tsx``.
 
   const { data: config, isLoading, isError, error } = useCodeGraphConfig(
     Number.isFinite(repoId) ? repoId : null,
