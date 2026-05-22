@@ -3,7 +3,7 @@ import {
   encodeFocusForQuery,
   parseFocusFromQuery,
   drillOut,
-} from '@/app/(app)/code-graph/[repoId]/page';
+} from '@/lib/code-graph-focus';
 import {
   ROOT_FOCUS,
   lodForFocus,
