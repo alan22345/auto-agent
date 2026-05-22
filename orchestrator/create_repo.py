@@ -48,6 +48,17 @@ def _slug_fallback(description: str) -> str:
     return slug or "new-project"
 
 
+def _sanitize_description(text: str) -> str:
+    """Make a description safe for GitHub's repo `description` field.
+
+    GitHub rejects descriptions with control characters (newlines, tabs).
+    Replace them with spaces and collapse runs of whitespace.
+    """
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:350]
+
+
 def _sanitize_slug(name: str) -> str:
     """Force any name into a valid GitHub repo slug."""
     name = name.strip().lower()
@@ -131,24 +142,40 @@ async def _create_github_repo(
     url = f"{GITHUB_API}/orgs/{owner}/repos" if is_org else f"{GITHUB_API}/user/repos"
     payload = {
         "name": name,
-        "description": description[:350],
+        "description": _sanitize_description(description),
         "private": private,
         "auto_init": True,
     }
     resp = await client.post(url, headers=headers, json=payload)
-    if resp.status_code == 422:
-        raise CreateRepoError(
-            f"GitHub rejected the repo name '{name}' — "
-            f"it probably already exists. Try a different description."
-        )
     if resp.status_code == 403:
         raise CreateRepoError(
             "GitHub returned 403 — your token lacks permission to create repos. "
             "Make sure it has the 'repo' scope (and 'admin:org' if creating under an org)."
         )
     if resp.status_code not in (200, 201):
+        # Surface GitHub's actual validation errors instead of guessing.
+        # 422 from /user/repos can mean "name taken", "name reserved after
+        # deletion", "name violates rules", "free-plan private-repo limit",
+        # etc. — different fixes for each.
+        target = f"{owner}/{name}" if is_org else name
+        try:
+            body = resp.json()
+            top = body.get("message", "")
+            errs = body.get("errors", []) or []
+            parts: list[str] = []
+            for err in errs:
+                msg = err.get("message") or err.get("code")
+                field = err.get("field")
+                if msg and field:
+                    parts.append(f"{field}: {msg}")
+                elif msg:
+                    parts.append(msg)
+            detail = "; ".join(parts) if parts else top
+        except (ValueError, AttributeError):
+            detail = resp.text[:300]
         raise CreateRepoError(
-            f"GitHub repo creation failed: {resp.status_code} {resp.text[:300]}"
+            f"GitHub rejected the request for '{target}' "
+            f"(HTTP {resp.status_code}): {detail}"
         )
     return resp.json()
 
