@@ -55,7 +55,12 @@ class TaskData(BaseModel):
     # resolution rule. ``None`` when no repo is attached (legacy rows).
     effective_mode: Literal["freeform", "human_in_loop"] | None = None
     priority: int = 100
-    subtasks: list[dict] | None = None
+    # ``subtasks`` is a multi-purpose JSONB column. Trio parents store a list
+    # of child-task descriptors here; SCAFFOLD parents (ADR-018) store a dict
+    # of round counters / progress markers (e.g. ``{"scaffold":
+    # {"current_domain_idx": 4, "final_verify_rounds": 1}}``). Wire schema
+    # accepts both so a scaffold task with populated state still serialises.
+    subtasks: list[dict] | dict | None = None
     current_subtask: int | None = None
     # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips. None = grilling

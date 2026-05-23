@@ -59,6 +59,33 @@ def _sanitize_description(text: str) -> str:
     return cleaned[:350]
 
 
+_TITLE_SKIP_PREFIXES: tuple[str, ...] = ("#", ">", "```", "|", "---", "===")
+_TITLE_NUMBERED_RE = re.compile(r"^\d+[.)]")
+
+
+def _first_prose_line(description: str) -> str:
+    """Return the first non-structural line of ``description``, or ``""``.
+
+    Skips empty lines, markdown headers (``#``, ``##``…), blockquotes,
+    code fences, table rows, horizontal rules, and numbered section
+    markers (``1.``, ``2)``). The intent-grill agent reads the task title
+    verbatim; if it sees ``## 1. …`` it infers a "section of a series"
+    framing and under-scopes the whole build (ADR-018 regression observed
+    on the first harpoon attempt).
+    """
+
+    for raw in description.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(_TITLE_SKIP_PREFIXES):
+            continue
+        if _TITLE_NUMBERED_RE.match(line):
+            continue
+        return line
+    return ""
+
+
 def _sanitize_slug(name: str) -> str:
     """Force any name into a valid GitHub repo slug."""
     name = name.strip().lower()
@@ -250,9 +277,24 @@ async def create_repo_and_scaffold_task(
     await asyncio.sleep(2)
 
     # 4. Insert Repo rows (full name + short alias, mirroring repo_sync.py)
+    # ``mode='freeform'`` is critical for "Build something new": ``Repo.mode``
+    # is what the standin resolver (``resolve_effective_mode``) reads to
+    # decide whether the PO standin fires at every gate. Default DB value
+    # is ``human_in_loop`` (conservative for legacy repos), so without this
+    # the freeform standins never fire — children deadlock at the design
+    # gate even though ``Task.freeform_mode=True``.
+    # For "Build something new" runs the user-supplied description IS the
+    # product brief — it's the only product-shaped context the PO standin
+    # gets at every gate. Without it the standin falls back to deterministic
+    # defaults (logged as ``plan_approval:no_product_brief``) and approves
+    # designs without any grounding in what we're actually building. Stamp
+    # the brief on both repo rows here so the freeform standins running
+    # later read the real product context.
     full_repo = Repo(
         name=full_name, url=clone_url, default_branch=default_branch,
         organization_id=organization_id,
+        mode="freeform",
+        product_brief=description,
     )
     session.add(full_repo)
 
@@ -266,6 +308,8 @@ async def create_repo_and_scaffold_task(
         short_repo = Repo(
             name=name, url=clone_url, default_branch=default_branch,
             organization_id=organization_id,
+            mode="freeform",
+            product_brief=description,
         )
         session.add(short_repo)
 
@@ -290,8 +334,19 @@ async def create_repo_and_scaffold_task(
     )
     session.add(config)
 
-    # 6. Create the scaffold task
-    title = description.splitlines()[0][:120]
+    # 6. Create the scaffold task.
+    #
+    # Title selection: the title is read by the intent-grill agent + PO
+    # standin alongside the description. If we naively grab the first line
+    # of the description and that line is a markdown section header
+    # (e.g. ``## 1. What this service is, in one paragraph``), the agent
+    # treats the task as "section 1 of a series of scaffolds" and writes a
+    # foundation-only intent.md — leading to a trivial build (the user hit
+    # this on the first harpoon attempt). Prefer the caller-supplied repo
+    # ``name`` (which is what the user typed in the UI). Fall back to the
+    # first non-structural line of the description.
+    base_title = (name or _first_prose_line(description) or "new project").strip()
+    title = base_title[:120]
     if not title.lower().startswith(("scaffold", "build", "create")):
         title = f"Scaffold: {title}"
 

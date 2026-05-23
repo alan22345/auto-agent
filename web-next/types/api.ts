@@ -850,6 +850,9 @@ export interface TaskData {
     | {
         [k: string]: unknown;
       }[]
+    | {
+        [k: string]: unknown;
+      }
     | null;
   current_subtask?: number | null;
   intake_qa?:

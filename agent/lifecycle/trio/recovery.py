@@ -21,11 +21,38 @@ async def resume_all_trio_parents() -> None:
     enforce idempotency internally, so re-running them on tasks that already
     have committed work is safe.
     """
+    # Resume every trio parent that's actively being driven OR parked at
+    # one of the front-half gates that can deadlock silently. In scope:
+    #   - ``TRIO_EXECUTING``: actively running the per-item loop.
+    #   - ``AWAITING_DESIGN_APPROVAL`` with ``freeform_mode=True``: the
+    #     standin needs the driver re-invoked so case B of
+    #     ``_advance_through_design_gate`` fires (writes the verdict,
+    #     transitions to ARCHITECT_BACKLOG_EMIT, runs run_initial).
+    #   - ``ARCHITECT_BACKLOG_EMIT`` (any backlog size): observed on the
+    #     2026-05-23 harpoon run that children stranded here with
+    #     ``trio_phase=AWAITING_BUILDER`` — backlog was emitted but the
+    #     per-item builder loop never started. Re-invoking run_trio_parent
+    #     is idempotent: ``has_backlog=True`` short-circuits the
+    #     architect re-run and falls into the per-item loop; empty backlog
+    #     re-runs ``architect.run_initial`` to emit a fresh one.
+    from sqlalchemy import or_
+
     from agent.lifecycle.trio import run_trio_parent
 
     async with async_session() as s:
         rows = (
-            (await s.execute(select(Task).where(Task.status == TaskStatus.TRIO_EXECUTING)))
+            (
+                await s.execute(
+                    select(Task).where(
+                        or_(
+                            Task.status == TaskStatus.TRIO_EXECUTING,
+                            (Task.status == TaskStatus.AWAITING_DESIGN_APPROVAL)
+                            & (Task.freeform_mode.is_(True)),
+                            Task.status == TaskStatus.ARCHITECT_BACKLOG_EMIT,
+                        )
+                    )
+                )
+            )
             .scalars()
             .all()
         )

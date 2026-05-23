@@ -66,3 +66,41 @@ async def test_generate_name_falls_back_when_sanitized_to_placeholder():
 
     # Fallback derives from the description, not the placeholder
     assert "recipes" in name or "scrape" in name
+
+
+# ---------------------------------------------------------------------------
+# Title extraction — regression for the "section of a series" mis-scope bug.
+# A user submitted a long brief whose first line was ``## 1. What this
+# service is, in one paragraph``. The old code took that line verbatim as the
+# task title, and the intent-grill agent inferred "first scaffold of a
+# series" → produced foundation-only domains.
+# ---------------------------------------------------------------------------
+
+
+def test_first_prose_line_skips_markdown_headers():
+    from orchestrator.create_repo import _first_prose_line
+
+    description = (
+        "## 1. What this service is, in one paragraph\n\n"
+        "A GTM outbound automation service that owns the strategy ends ...\n"
+    )
+    assert _first_prose_line(description).startswith("A GTM outbound")
+
+
+def test_first_prose_line_skips_blockquotes_and_numbered_markers():
+    from orchestrator.create_repo import _first_prose_line
+
+    description = (
+        "# Title\n"
+        "> blockquote\n"
+        "1) numbered marker\n"
+        "Real first sentence.\n"
+    )
+    assert _first_prose_line(description) == "Real first sentence."
+
+
+def test_first_prose_line_returns_empty_when_only_structural_lines():
+    from orchestrator.create_repo import _first_prose_line
+
+    description = "## header\n\n# another header\n"
+    assert _first_prose_line(description) == ""

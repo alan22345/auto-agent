@@ -1161,12 +1161,19 @@ _SCAFFOLD_CHILD_TERMINAL_STATUSES = (
 
 
 async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> None:
-    """When a child of a SCAFFOLD parent reaches a terminal state and all
-    siblings are also terminal, transition the parent to
-    AWAITING_FINAL_VERIFICATION and re-invoke ``run_scaffold_parent``.
+    """When a child of a SCAFFOLD parent reaches a terminal state:
+
+    1. If there's still an ``INTAKE`` sibling, publish ``task_created`` for
+       the next one so child trios under a scaffold run serially (bug 17 —
+       the user's contract is "only one child trio writing code at any
+       moment").
+    2. Otherwise, if all siblings are now terminal, transition the parent
+       to ``AWAITING_FINAL_VERIFICATION`` and re-invoke
+       ``run_scaffold_parent``.
 
     Idempotent: re-invocation is safe because the driver returns early if
-    the parent is not in BUILDING_DOMAINS.
+    the parent is not in ``BUILDING_DOMAINS``, and ``_publish_next_scaffold_child``
+    skips when a sibling is already mid-flight.
     """
 
     async with async_session() as session:
@@ -1190,6 +1197,24 @@ async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> 
         siblings = siblings_q.scalars().all()
         if not siblings:
             return
+
+        # Bug 17 — serial dispatch. If any sibling is still pending
+        # (status=INTAKE), kick off the next one and return without
+        # advancing the parent. We only fall through to the all-terminal
+        # check when there are no pending siblings left to dispatch.
+        pending = [s for s in siblings if s.status == TaskStatus.INTAKE]
+        if pending:
+            parent_id_for_next = parent.id
+            # Drop the session before publishing so the event handler can
+            # open its own without contention.
+            await session.commit()
+            from agent.lifecycle.scaffold.dispatch_children import (
+                _publish_next_scaffold_child,
+            )
+
+            await _publish_next_scaffold_child(parent_id_for_next)
+            return
+
         if not all(s.status in _SCAFFOLD_CHILD_TERMINAL_STATUSES for s in siblings):
             return
 
@@ -2035,6 +2060,16 @@ async def start_slack_notifications_if_configured() -> None:
     await slack_notification_loop()
 
 
+async def _scaffold_heartbeat_runner() -> None:
+    """Detect silently-stalled SCAFFOLD parents and re-invoke the driver.
+
+    See agent/lifecycle/scaffold/recovery.py::scaffold_heartbeat_watchdog
+    for the policy (5-min poll, 30-min stall threshold).
+    """
+    from agent.lifecycle.scaffold.recovery import scaffold_heartbeat_watchdog
+    await scaffold_heartbeat_watchdog()
+
+
 # ---------------------------------------------------------------------------
 # Startup recovery — re-emit events for tasks stuck in active states
 # ---------------------------------------------------------------------------
@@ -2177,6 +2212,11 @@ async def lifespan(app: FastAPI):
     from agent.lifecycle.trio.recovery import resume_all_trio_parents
     await resume_all_trio_parents()
 
+    # Same for scaffold parents (ADR-018) — wire up the freeform PO-standin
+    # gates so they don't strand on container restart.
+    from agent.lifecycle.scaffold.recovery import resume_all_scaffold_parents
+    await resume_all_scaffold_parents()
+
     bg = [
         asyncio.create_task(orchestrator_event_loop()),
         asyncio.create_task(run_scheduler()),
@@ -2192,6 +2232,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(pr_merge_poller()),
         asyncio.create_task(run_po_analysis_loop()),
         asyncio.create_task(run_architecture_loop()),
+        asyncio.create_task(_scaffold_heartbeat_runner()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")

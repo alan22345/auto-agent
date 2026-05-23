@@ -454,8 +454,12 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
         # mimic that directly here.
         tasks[parent_task.id].status = TaskStatus.BUILDING_DOMAIN_ADRS
 
-        # ===== Driver invocation #2b: BUILDING_DOMAIN_ADRS → AWAITING_DOMAIN_ADR_APPROVAL
-        # Re-entry: both grills + both ADRs complete; advance to gate.
+        # ===== Driver invocation #2b: BUILDING_DOMAIN_ADRS → BUILDING_DOMAINS
+        # Re-entry: both grills + both ADRs complete; the freeform driver
+        # walks straight through AWAITING_DOMAIN_ADR_APPROVAL (PO standin
+        # verdicts each domain), AWAITING_REQUIRED_SECRETS (mocked to pass),
+        # DISPATCHING_DOMAIN_BUILDS, and parks at BUILDING_DOMAINS — the
+        # driver's only wait-on-children state.
         reloaded = _clone_task(tasks[parent_task.id])
         await parent_mod.run_scaffold_parent(reloaded)
 
@@ -463,28 +467,7 @@ async def test_scaffold_parent_walks_full_flow_to_done(tmp_path: Path) -> None:
         assert (tmp_path / domain_adr_path(2, "cli")).is_file(), "cli ADR missing"
         assert (tmp_path / domain_grill_path(1, "core")).is_file(), "core grill missing"
         assert (tmp_path / domain_grill_path(2, "cli")).is_file(), "cli grill missing"
-        assert tasks[parent_task.id].status == TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL
         assert domain_architect_calls["n"] == 2
-
-        # ===== Simulate PO approving each domain ADR. ===========================
-        # The first verdict transitions back to BUILDING_DOMAIN_ADRS while
-        # the other slug is still unresolved; the second verdict advances to
-        # AWAITING_REQUIRED_SECRETS (ADR-019 T7 gate).
-        for slug in ("core", "cli"):
-            await domain_adr_approval.apply_verdict(
-                parent_task.id,
-                slug,
-                {"verdict": "approved", "comments": "lgtm"},
-            )
-        # After both verdicts the helper should have stamped
-        # AWAITING_REQUIRED_SECRETS (ADR-019 T7 — gate before Phase D).
-        assert tasks[parent_task.id].status == TaskStatus.AWAITING_REQUIRED_SECRETS
-
-        # ===== Driver invocation #3: AWAITING_REQUIRED_SECRETS → DISPATCHING_DOMAIN_BUILDS
-        # The fake_check_secrets_gate stub simulates zero missing secrets so
-        # the gate passes immediately and the driver loops into Phase D.
-        reloaded = _clone_task(tasks[parent_task.id])
-        await parent_mod.run_scaffold_parent(reloaded)
 
         # Two children created, one per approved domain.
         children = [t for t in tasks.values() if t.parent_task_id == parent_task.id]

@@ -514,6 +514,21 @@ async def _advance_through_design_gate(parent: Task) -> bool:
         await s.commit()
     await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
     await architect.run_design(parent.id)
+
+    # ``run_design`` just transitioned the task to AWAITING_DESIGN_APPROVAL.
+    # Re-enter the helper so case B (the standin / verdict path) fires on
+    # the SAME invocation. Without this, freeform-mode children deadlock:
+    # nothing else re-invokes the trio dispatcher (the trio recovery hook
+    # only picks TRIO_EXECUTING, and on_design_approved only fires after a
+    # verdict that the standin would have written). Recursion depth is
+    # bounded — case B either approves+returns True, rejects+returns False,
+    # or fails the verdict file lookup+returns False; none recurse back.
+    async with async_session() as _s:
+        live_after_design = (
+            await _s.execute(select(Task).where(Task.id == parent.id))
+        ).scalar_one()
+    if live_after_design.status == TaskStatus.AWAITING_DESIGN_APPROVAL:
+        return await _advance_through_design_gate(live_after_design)
     return False
 
 
@@ -534,10 +549,25 @@ async def _try_freeform_design_standin(
     """
 
     repo = getattr(parent, "repo", None)
+    if repo is None and getattr(parent, "repo_id", None) is not None:
+        # The ``parent`` may have been loaded outside an active session
+        # (e.g. by the trio recovery hook on startup) so the lazy ``repo``
+        # relationship is unresolved. Fetch the row directly by
+        # ``repo_id``. Without this fallback the standin returns silently
+        # and every recovered freeform child deadlocks at the design gate.
+        from shared.models import Repo
+
+        async with async_session() as _s:
+            repo = (
+                await _s.execute(select(Repo).where(Repo.id == parent.repo_id))
+            ).scalar_one_or_none()
+
     if repo is None:
-        # No repo attached: standin selection can still run (the §6
-        # default is the PO standin), but the freeform mode hint comes
-        # off the repo. Skip the call rather than mis-classify.
+        log.warning(
+            "trio.parent.freeform_design_standin_no_repo",
+            parent_id=parent.id,
+            repo_id=getattr(parent, "repo_id", None),
+        )
         return
 
     design_path = os.path.join(workspace_root, DESIGN_PATH)
