@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from agent.lifecycle.standin import run_freeform_gate
 from agent.lifecycle.trio import architect, design_approval, dispatcher
-from agent.lifecycle.workspace_paths import DESIGN_PATH
+from agent.lifecycle.workspace_paths import DESIGN_PATH, PR_REVIEW_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
 from shared.events import publish, task_iteration_complete, task_pr_created
@@ -607,6 +607,205 @@ async def _try_freeform_design_standin(
         )
 
 
+async def _try_freeform_pr_review_standin(
+    *,
+    parent: Task,
+    workspace_root: str,
+    pr_url: str,
+) -> None:
+    """In freeform mode, dispatch the architect/PO standin at the AWAITING_REVIEW gate.
+
+    User contract (2026-05-23): in a freeform repo, a code-review request
+    is a technical decision and should be auto-resolved by the standin
+    rather than waiting on a human. On approval we auto-merge the PR via
+    ``gh`` and transition the task to ``DONE`` (which fires
+    ``on_task_finished`` → bug-17 scaffold serial-dispatch picks the next
+    sibling). On rejection we log + leave the task parked at
+    ``AWAITING_REVIEW`` so iteration can be added later.
+
+    Best-effort: any error here is logged and swallowed — the task stays
+    at ``AWAITING_REVIEW`` and a human can intervene. The pre-PR
+    ``final_reviewer.run_final_review`` already gave the architect's
+    "passed" verdict (otherwise the PR wouldn't exist), so this gate is
+    structured to re-confirm + automate rather than re-architect.
+    """
+
+    import json as _json
+
+    from shared.events import task_done
+
+    repo = getattr(parent, "repo", None)
+    if repo is None and getattr(parent, "repo_id", None) is not None:
+        from shared.models import Repo
+
+        async with async_session() as _s:
+            repo = (
+                await _s.execute(select(Repo).where(Repo.id == parent.repo_id))
+            ).scalar_one_or_none()
+
+    if repo is None:
+        log.warning(
+            "trio.parent.freeform_pr_review_standin_no_repo",
+            parent_id=parent.id,
+            repo_id=getattr(parent, "repo_id", None),
+        )
+        return
+
+    target_branch = await _resolve_target_branch(parent.id)
+    pr_diff = ""
+    try:
+        from agent import sh
+
+        diff_res = await sh.run(
+            ["git", "diff", f"origin/{target_branch}..HEAD"],
+            cwd=workspace_root,
+            timeout=30,
+            max_output=400_000,
+        )
+        if not diff_res.failed:
+            pr_diff = diff_res.stdout or ""
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "trio.parent.freeform_pr_review_diff_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+
+    pr_metadata = {
+        "url": pr_url,
+        "title": f"trio: integration — {parent.title}",
+        "target_branch": target_branch,
+    }
+
+    try:
+        fired = await run_freeform_gate(
+            task=parent,
+            repo=repo,
+            gate="pr_review",
+            gate_input={"pr_diff": pr_diff, "pr_metadata": pr_metadata},
+            context={"workspace_root": workspace_root},
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "trio.parent.freeform_pr_review_standin_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+        return
+
+    if not fired:
+        # human_in_loop — wait for human review.
+        return
+
+    verdict_abs = os.path.join(workspace_root, PR_REVIEW_PATH)
+    try:
+        with open(verdict_abs) as fh:
+            verdict_payload = _json.load(fh)
+    except (OSError, _json.JSONDecodeError) as exc:
+        log.warning(
+            "trio.parent.freeform_pr_review_verdict_unreadable",
+            parent_id=parent.id,
+            path=verdict_abs,
+            error=str(exc),
+        )
+        return
+
+    verdict = (verdict_payload or {}).get("verdict") if isinstance(verdict_payload, dict) else None
+    comments = (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+
+    if verdict == "approved":
+        await _freeform_auto_merge_and_done(
+            parent=parent,
+            workspace_root=workspace_root,
+            pr_url=pr_url,
+            standin_comments=str(comments),
+        )
+        # Fire DONE so on_task_finished → bug-17 serial-dispatch picks next.
+        await publish(task_done(parent.id))
+        return
+
+    # changes_requested / rejected — leave at AWAITING_REVIEW for now. A
+    # follow-up should re-enter the trio with iteration_context, but the
+    # current scope is approval-path only.
+    log.info(
+        "trio.parent.freeform_pr_review_changes_requested",
+        parent_id=parent.id,
+        comments=str(comments)[:200],
+    )
+
+
+async def _freeform_auto_merge_and_done(
+    *,
+    parent: Task,
+    workspace_root: str,
+    pr_url: str,
+    standin_comments: str,
+) -> None:
+    """Auto-merge ``pr_url`` via ``gh`` and transition ``parent`` to DONE.
+
+    Failure to merge leaves the task at AWAITING_REVIEW with a log line —
+    the human can merge manually and the standard PR-merged webhook (or
+    a future recovery sweep) will finish the transition.
+    """
+
+    from agent import sh
+    from shared.github_auth import get_github_token
+
+    try:
+        token = await get_github_token(
+            user_id=parent.created_by_user_id,
+            organization_id=parent.organization_id,
+        )
+    except Exception as exc:  # pragma: no cover — env-dependent
+        log.warning(
+            "trio.parent.freeform_auto_merge_token_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+        return
+
+    gh_env = {"GH_TOKEN": token} if token else {}
+
+    merge_res = await sh.run(
+        ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
+        cwd=workspace_root,
+        timeout=60,
+        env=gh_env,
+    )
+    if merge_res.failed:
+        log.warning(
+            "trio.parent.freeform_auto_merge_failed",
+            parent_id=parent.id,
+            pr_url=pr_url,
+            stderr=(merge_res.stderr or "")[:500],
+        )
+        return
+
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        try:
+            await transition(
+                s,
+                p,
+                TaskStatus.DONE,
+                message=f"freeform PR auto-merged by standin: {standin_comments[:160]}",
+            )
+        except Exception as exc:  # pragma: no cover — narrow
+            log.warning(
+                "trio.parent.freeform_done_transition_failed",
+                parent_id=parent.id,
+                error=str(exc),
+            )
+            return
+        await s.commit()
+
+    log.info(
+        "trio.parent.freeform_pr_auto_merged",
+        parent_id=parent.id,
+        pr_url=pr_url,
+    )
+
+
 async def run_trio_parent(
     parent: Task,
     *,
@@ -1070,6 +1269,7 @@ async def _open_integration_pr_and_transition(
         await transition(s, p, TaskStatus.AWAITING_REVIEW, message="trio: awaiting review/feedback")
         await s.commit()
         branch = p.integration_branch or ""
+        freeform_mode = bool(p.freeform_mode)
 
     await publish(
         task_pr_created(parent.id, pr_url=pr_url or "", branch=branch),
@@ -1081,3 +1281,21 @@ async def _open_integration_pr_and_transition(
         pr_url=pr_url,
         target_branch=target_branch,
     )
+
+    # Freeform AWAITING_REVIEW gate (user contract 2026-05-23): in freeform
+    # repos a code-review PR is a technical decision — invoke the standin to
+    # auto-resolve. Approval → gh pr merge + transition DONE → on_task_finished
+    # fires → bug-17 serial-dispatch kicks the next scaffold sibling. The
+    # standin internally skips when ``Repo.mode == 'human_in_loop'``.
+    if freeform_mode and pr_url:
+        from agent.lifecycle.trio.architect import _prepare_parent_workspace
+
+        async with async_session() as s:
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            workspace = await _prepare_parent_workspace(p)
+        workspace_root = (
+            workspace.root if hasattr(workspace, "root") else str(workspace)
+        )
+        await _try_freeform_pr_review_standin(
+            parent=parent, workspace_root=workspace_root, pr_url=pr_url
+        )
