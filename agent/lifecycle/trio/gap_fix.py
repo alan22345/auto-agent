@@ -88,7 +88,7 @@ def _render_gaps(gaps: list[dict]) -> str:
 
 _GAP_FIX_PROMPT = """\
 The final reviewer found the following gaps after the per-item loop
-drained. Resume your architect session and decide how to close them.
+drained. Decide how to close them.
 
 You MUST use the ``submit-architect-decision`` skill to write
 ``.auto-agent/decision.json``. The preferred action is
@@ -98,6 +98,17 @@ believe the gaps can't be closed without escalation, use
 
 This is gap-fix round {round_idx} of {max_rounds}. After {max_rounds}
 rounds the orchestrator blocks the task automatically.
+
+== Hard rule ==
+If a gap says "domain X was never built" or "module Y is absent",
+the dispatch_new items MUST be the work to BUILD that module (create
+files, schemas, migrations, routes, services, tests). Do NOT emit
+"fix references in other domains" / "rename methods" / "verify
+upstream signatures" — that pattern produced the gap in the first
+place (the per-item loop drained a backlog of preparatory pin-tests
+without ever building the target domain). Read ``.auto-agent/design.md``
+for the canonical module layout and emit one item per file or per
+tight group of files.
 
 == Final reviewer's gaps ==
 {gaps}
@@ -148,6 +159,29 @@ async def run_gap_fix(
             session_id=f"trio-{parent_task_id}",
             storage_dir=workspace_root,
         )
+
+    # Verify the session blob actually exists on disk before passing
+    # ``resume=True`` to the agent. Observed on harpoon #25 (2026-05-24):
+    # the ArchitectAttempt row recorded ``session_blob_path='trio-25.json'``
+    # but the blob had been swept (workspace recreate / stash) between the
+    # initial architect run and the gap-fix entry. claude_cli's resume
+    # hit nothing and returned in ~1.4s without writing decision.json —
+    # silent failure → BLOCKED. Falling back to ``resume=False`` lets the
+    # architect run fresh against the gap prompt + design.md on disk.
+    if session is not None:
+        session_id = getattr(session, "session_id", None) or f"trio-{parent_task_id}"
+        candidate_paths = [
+            os.path.join(workspace_root, f"{session_id}.json"),
+            os.path.join(workspace_root, ".auto-agent", f"{session_id}.json"),
+        ]
+        if not any(os.path.isfile(p) for p in candidate_paths):
+            log.warning(
+                "trio.gap_fix.session_blob_missing_running_fresh",
+                parent_id=parent_task_id,
+                session_id=session_id,
+                checked_paths=candidate_paths,
+            )
+            session = None
 
     agent = create_architect_agent(
         workspace=workspace,
