@@ -148,8 +148,13 @@ async def test_max_rounds_exhausted_returns_needs_tiebreak():
 
 
 @pytest.mark.asyncio
-async def test_coder_no_diff_re_prompts_then_fails():
-    """If coder produces no diff at all, we re-prompt; final no-diff = terminal failure."""
+async def test_coder_no_diff_re_prompts_then_escalates_to_tiebreak():
+    """If coder produces no diff for MAX_ROUNDS rounds, escalate to architect
+    tiebreak. The most common cause (observed on harpoon #25, 2026-05-24)
+    is that the work item describes a state the codebase is already in —
+    only the architect can decide whether to accept-as-done or revise the
+    backlog.
+    """
     from agent.lifecycle.trio import reviewer as reviewer_mod
 
     run_coder = AsyncMock(side_effect=[_coder_entry(1), _coder_entry(2), _coder_entry(3)])
@@ -163,7 +168,7 @@ async def test_coder_no_diff_re_prompts_then_fails():
         result = await dispatch_item(**_KW)
 
     assert result.ok is False
-    assert result.needs_tiebreak is False  # no point asking architect with no diff
+    assert result.needs_tiebreak is True
     assert result.failure_reason == "coder_produced_no_diff"
     assert run_coder.await_count == 3
     run_heavy.assert_not_called()

@@ -943,7 +943,10 @@ async def run_trio_parent(
             )
             return
 
-        # Coder↔reviewer didn't converge → architect tiebreak.
+        # Coder↔reviewer didn't converge → architect tiebreak. Also fires
+        # when the coder produced no diff for MAX_ROUNDS rounds — the
+        # architect decides whether the work is already done (accept) or
+        # the item is misguided (revise_backlog). See dispatcher.py.
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         decision = await dispatcher.architect_tiebreak(
             parent_task_id=parent.id,
@@ -953,6 +956,7 @@ async def run_trio_parent(
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
+            no_diff_mode=(result.failure_reason == "coder_produced_no_diff"),
         )
         action = decision.get("action", "clarify")
         log.info(

@@ -193,8 +193,25 @@ def _reviewer_prompt(
     )
 
 
-def _tiebreak_prompt(work_item: dict, transcript: list[TranscriptEntry]) -> str:
-    """Architect tiebreak prompt — full transcript + decision schema."""
+def _tiebreak_prompt(
+    work_item: dict,
+    transcript: list[TranscriptEntry],
+    *,
+    no_diff_mode: bool = False,
+) -> str:
+    """Architect tiebreak prompt — full transcript + decision schema.
+
+    Two modes:
+
+    * Default (``no_diff_mode=False``): coder ↔ reviewer ran 3 rounds and
+      didn't converge on a verdict. The transcript has both roles' output.
+    * ``no_diff_mode=True``: coder ran 3 rounds and produced NO changes
+      each time. The reviewer never ran (nothing to review). Most likely
+      the work item describes a state the codebase is already in — the
+      architect should ``accept`` it (mark done) or ``revise_backlog`` to
+      drop the misguided item. ``redo`` rarely applies here because there
+      was no reviewer feedback to react to.
+    """
     title = work_item.get("title", "(no title)")
     item_id = work_item.get("id", "")
 
@@ -209,17 +226,38 @@ def _tiebreak_prompt(work_item: dict, transcript: list[TranscriptEntry]) -> str:
             )
         transcript_str.append("")
 
+    if no_diff_mode:
+        situation = (
+            "The coder ran 3 rounds and produced NO diff each time. The "
+            "reviewer never ran because there was nothing to review. As "
+            "the architect, decide what to do based on what the coder "
+            "actually said. The MOST LIKELY reasons for repeated no-diff:\n"
+            "  (a) the work item describes a state the codebase is "
+            "already in (rename to a name that exists, remove code that's "
+            "gone, etc.) — pick `accept`;\n"
+            "  (b) the item is genuinely ambiguous or misaligned with the "
+            "current codebase — pick `revise_backlog` and emit a clearer "
+            "set of items (or drop the item entirely by emitting zero "
+            "follow-ups);\n"
+            "  (c) the item is correctly scoped but the coder is "
+            "confused — pick `redo` with very specific guidance."
+        )
+    else:
+        situation = (
+            "The coder and reviewer ran 3 rounds without converging. As the"
+            " architect, you decide. Read the full transcript and pick:"
+        )
+
     return "\n".join(
         [
             f"## Tiebreak — work item {item_id}: {title}",
             "",
-            "The coder and reviewer ran 3 rounds without converging. As the",
-            "architect, you decide. Read the full transcript and pick:",
+            situation,
             "",
             "- `accept` — coder is right; mark this item done and continue.",
             "- `redo` — reviewer is right; specify the fix and re-dispatch the coder.",
             "- `revise_backlog` — the item itself is wrong; describe how to split,",
-            "  merge, or reword it.",
+            "  merge, or reword it (or emit zero items to drop it entirely).",
             "- `clarify` — we need human input to break the tie; supply the question.",
             "",
             "## Transcript",
@@ -388,9 +426,14 @@ async def dispatch_item(
         diff = await _git_diff_since(workspace, start_sha)
         if not diff.strip():
             # Coder made no observable changes at all — nothing to review.
-            # Try one more round with explicit feedback, but if this is
-            # already round MAX_ROUNDS we bail without a tiebreak (the
-            # architect can't break a tie with no actual work to judge).
+            # Try one more round with explicit feedback. After MAX_ROUNDS
+            # escalate to the architect tiebreak: the most common reason
+            # for repeated no-diff is that the work item is ALREADY done
+            # (the architect described a state-change that's already true
+            # in the codebase — observed on harpoon task #25 where T1
+            # asked to rename methods to names that already existed).
+            # The architect tiebreak can ``accept`` the item as done or
+            # ``revise_backlog`` to drop the misguided item.
             log.warning(
                 "trio.dispatcher.coder_produced_no_diff",
                 parent_id=parent_task_id,
@@ -403,12 +446,17 @@ async def dispatch_item(
                     transcript=transcript,
                     start_sha=start_sha,
                     head_sha=start_sha,
-                    needs_tiebreak=False,
+                    needs_tiebreak=True,
                     failure_reason="coder_produced_no_diff",
                 )
             feedback = (
-                "You did not actually change any files. Read the work item "
-                "again and make the concrete edits needed to implement it."
+                "You did not actually change any files. If the work item "
+                "describes a state the codebase is already in (e.g. asks "
+                "to rename a method to a name it already has, or remove "
+                "code that's already gone), say so explicitly in your "
+                "final message — the architect will accept the item as "
+                "done. Otherwise re-read the work item and make the "
+                "concrete edits needed to implement it."
             )
             continue
 
@@ -484,6 +532,7 @@ async def architect_tiebreak(
     repo_name: str | None,
     home_dir: str | None,
     org_id: int | None,
+    no_diff_mode: bool = False,
 ) -> dict:
     """Run the architect agent over a stuck coder↔reviewer transcript.
 
@@ -506,7 +555,7 @@ async def architect_tiebreak(
         org_id=org_id,
     )
 
-    prompt = _tiebreak_prompt(work_item, transcript)
+    prompt = _tiebreak_prompt(work_item, transcript, no_diff_mode=no_diff_mode)
     run_result = await agent.run(prompt)
     output = _result_output(run_result)
 
