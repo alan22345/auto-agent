@@ -865,6 +865,13 @@ async def run_trio_parent(
     if await _maybe_dispatch_sub_architects(parent):
         return
 
+    # Bug 22 (harpoon #25, 2026-05-24) heal: legacy backlogs whose items
+    # lack ``id`` cause an infinite dispatcher loop because
+    # ``_mark_item_done`` matches by id and silently no-ops on items with
+    # no id (item_id resolves to ``"(unknown)"``). Backfill IDs before
+    # the per-item loop so mark-done / replace-backlog work.
+    await _backfill_backlog_ids(parent.id)
+
     # Resolve once per cycle — re-cloning per item is wasteful and the
     # subagents share the workspace.
     parent_workspace: str | None = None
@@ -1257,6 +1264,43 @@ def _assign_missing_ids(
             next_n += 1
         out.append(ni)
     return out
+
+
+async def _backfill_backlog_ids(parent_id: int) -> bool:
+    """Stamp ``G{N}`` IDs onto any backlog item lacking one. Idempotent.
+
+    Returns ``True`` iff the backlog was modified (and committed).
+
+    Why this exists: ``_mark_item_done`` and ``_replace_backlog_item``
+    look items up by ``id``. A backlog whose items lack IDs (the
+    harpoon #25 shape, where the gap-fix architect emitted IDless items
+    pre-bug-22-fix) silently no-ops in those helpers and loops forever
+    in the dispatcher (every accept fails to mark, the next iteration
+    re-picks the same first-pending item, repeat). This defensive
+    backfill heals such legacy backlogs on parent entry and protects
+    against any future cause of IDless items reaching the per-item
+    loop.
+    """
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
+        backlog = list(p.trio_backlog or [])
+        if not backlog:
+            return False
+        idless = sum(1 for b in backlog if not (b.get("id") or "").strip())
+        if idless == 0:
+            return False
+        # Pass the full backlog as both ``existing`` and ``new_items`` so
+        # ``_assign_missing_ids`` skips explicit IDs and only stamps the
+        # blanks, using ``G{N}`` slots that don't collide with existing IDs.
+        rebuilt = _assign_missing_ids(backlog, backlog)
+        p.trio_backlog = rebuilt
+        await s.commit()
+        log.info(
+            "trio.parent.backfilled_backlog_ids",
+            parent_id=parent_id,
+            backfilled=idless,
+        )
+        return True
 
 
 async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:

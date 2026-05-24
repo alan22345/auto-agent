@@ -286,6 +286,102 @@ async def test_tiebreak_accept_preserved_when_description_has_no_file_paths(tmp_
 
 
 @pytest.mark.asyncio
+async def test_backfill_backlog_ids_stamps_missing_ids_in_place():
+    """Defensive heal: ``_backfill_backlog_ids`` rewrites a parent's
+    ``trio_backlog`` so every item has an ``id``. Idempotent — re-running
+    on an already-healthy backlog returns ``False`` (no changes).
+
+    Why this exists: ``_mark_item_done`` matches items by ``id``, so a
+    legacy backlog with IDless items (the harpoon #25 shape — gap-fix
+    architect emitted 13 items pre-fix) loops forever on the first
+    pending IDless item: tiebreak ``accept`` calls ``_mark_item_done``
+    with ``item_id="(unknown)"``, no item matches, the dispatcher loops.
+    """
+    from agent.lifecycle.trio import _backfill_backlog_ids
+
+    captured: dict = {}
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.trio_backlog: list[dict] = [
+                {"id": "T1", "title": "x", "status": "done"},
+                {"title": "no id", "status": "pending"},
+                {"id": "", "title": "blank id", "status": "pending"},
+                {"id": "T2", "title": "y", "status": "pending"},
+            ]
+
+    fake_task = FakeTask()
+
+    class FakeResult:
+        def scalar_one(self):
+            return fake_task
+
+    class FakeSession:
+        async def execute(self, *_a, **_k):
+            return FakeResult()
+
+        async def commit(self):
+            captured["backlog"] = list(fake_task.trio_backlog)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return None
+
+    from agent.lifecycle import trio as trio_mod
+
+    with patch.object(trio_mod, "async_session", lambda: FakeSession()):
+        changed = await _backfill_backlog_ids(42)
+
+    assert changed is True
+    out = captured["backlog"]
+    # T1 + auto-G1 + auto-G2 + T2 — explicit IDs preserved, blanks filled.
+    assert [b["id"] for b in out] == ["T1", "G1", "G2", "T2"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_backlog_ids_noop_when_all_ids_present():
+    """When every item already has an id, the function returns False and
+    does NOT commit (no JSONB write churn / no spurious history row)."""
+    from agent.lifecycle.trio import _backfill_backlog_ids
+
+    committed: list[bool] = []
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.trio_backlog: list[dict] = [
+                {"id": "T1", "title": "x", "status": "done"},
+                {"id": "T2", "title": "y", "status": "pending"},
+            ]
+
+    class FakeResult:
+        def scalar_one(self):
+            return FakeTask()
+
+    class FakeSession:
+        async def execute(self, *_a, **_k):
+            return FakeResult()
+
+        async def commit(self):
+            committed.append(True)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return None
+
+    from agent.lifecycle import trio as trio_mod
+
+    with patch.object(trio_mod, "async_session", lambda: FakeSession()):
+        changed = await _backfill_backlog_ids(42)
+
+    assert changed is False
+    assert committed == []
+
+
+@pytest.mark.asyncio
 async def test_tiebreak_verification_skipped_outside_no_diff_mode(tmp_path):
     """The verification ONLY runs in ``no_diff_mode``. For ordinary
     coder↔reviewer ties the architect has the full transcript and the
