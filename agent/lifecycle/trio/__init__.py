@@ -1210,11 +1210,62 @@ async def _drive_final_review_and_pr(
         return
 
 
+def _assign_missing_ids(
+    existing: list[dict],
+    new_items: list[dict],
+    *,
+    prefix: str = "G",
+) -> list[dict]:
+    """Return a fresh copy of ``new_items`` with any missing ``id`` filled.
+
+    Pure helper — does not mutate the caller's lists or dicts.
+
+    Auto-generates IDs as ``{prefix}{N}`` starting from the next available
+    integer (e.g. existing G1/G2 → next is G3). Explicit non-empty IDs are
+    preserved as-is.
+
+    Bug 22 (harpoon #25, 2026-05-24): the gap-fix architect emitted items
+    without ``id`` fields. Downstream tiebreak prompts rendered as
+    ``## Tiebreak — work item : <title>`` with no item handle, so the
+    architect couldn't anchor its accept/revise decision to a specific
+    item and false-accepted every no-diff round in a row. Auto-assigning
+    IDs here closes the gap regardless of what the architect emits.
+    """
+    used = set()
+    max_n = 0
+    for it in existing:
+        item_id = (it.get("id") or "").strip()
+        if not item_id:
+            continue
+        used.add(item_id)
+        if item_id.startswith(prefix):
+            suffix = item_id[len(prefix):]
+            if suffix.isdigit():
+                max_n = max(max_n, int(suffix))
+
+    next_n = max_n + 1
+    out: list[dict] = []
+    for item in new_items:
+        ni = dict(item)
+        item_id = (ni.get("id") or "").strip()
+        if not item_id:
+            while f"{prefix}{next_n}" in used:
+                next_n += 1
+            new_id = f"{prefix}{next_n}"
+            ni["id"] = new_id
+            used.add(new_id)
+            next_n += 1
+        out.append(ni)
+    return out
+
+
 async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     """Append architect-emitted new items to the parent's trio_backlog.
 
     Items default to ``status="pending"`` so the dispatcher picks them
-    up on the next per-item loop.
+    up on the next per-item loop. Items lacking an ``id`` get one
+    auto-assigned (see :func:`_assign_missing_ids`) so downstream tiebreak
+    prompts always have a unique item handle.
     """
 
     if not new_items:
@@ -1222,7 +1273,8 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
-        for item in new_items:
+        augmented = _assign_missing_ids(backlog, new_items)
+        for item in augmented:
             ni = dict(item)
             ni.setdefault("status", "pending")
             backlog.append(ni)

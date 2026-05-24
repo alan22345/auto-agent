@@ -30,6 +30,8 @@ coder↔reviewer state machine without a Postgres fixture.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +42,46 @@ from agent.lifecycle._naming import _fresh_session_id
 from agent.lifecycle.factory import create_agent
 
 log = structlog.get_logger()
+
+
+# File-path matcher used by the ``no_diff_mode`` tiebreak verifier.
+# Matches relative path tokens with a recognisable source-file extension —
+# the kind of explicit anchor an architect-emitted work item names when
+# describing the file(s) it expects the coder to create.
+_FILE_PATH_RE = re.compile(
+    r"(?:[A-Za-z0-9_\-\.]+/)+[A-Za-z0-9_\-]+"
+    r"\.(?:py|ts|tsx|js|jsx|md|sql|json|yaml|yml|toml|html|css|sh)\b"
+)
+
+
+def _extract_referenced_paths(work_item: dict) -> list[str]:
+    """Pull plausible file-path tokens out of the work item's text.
+
+    Used by the ``no_diff_mode`` tiebreak verifier (bug 22, harpoon #25
+    2026-05-24) to ground an architect ``accept`` verdict in actual
+    workspace state — if the item names files and NONE of them exist,
+    the architect can't honestly call the work done.
+    """
+    blob = " ".join(
+        str(work_item.get(k) or "")
+        for k in ("title", "description")
+    )
+    seen: list[str] = []
+    for m in _FILE_PATH_RE.findall(blob):
+        if m not in seen:
+            seen.append(m)
+    return seen
+
+
+def _missing_referenced_files(workspace: str, paths: list[str]) -> list[str]:
+    """Return the subset of ``paths`` that do not exist under ``workspace``."""
+    if not paths:
+        return []
+    missing: list[str] = []
+    for rel in paths:
+        if not os.path.exists(os.path.join(workspace, rel)):
+            missing.append(rel)
+    return missing
 
 
 # Per-item cap on coder→reviewer round-trips before escalating to the
@@ -562,6 +604,37 @@ async def architect_tiebreak(
     # Structured extraction via Haiku (ADR-014).
     extracted = await extract_tiebreak_decision(output)
     if extracted is not None:
+        # Bug 22 (harpoon #25, 2026-05-24): in no_diff_mode, the
+        # architect tends to anchor on the most recent commit as
+        # "evidence the work is done" and accept items whose target
+        # files don't actually exist. Ground the accept verdict in
+        # workspace state: if the item's description names file paths
+        # and NONE of them exist on disk, override to ``revise_backlog``
+        # so the next round emits items that actually build the missing
+        # files instead of marking ghost work as done.
+        if no_diff_mode and extracted.get("action") == "accept":
+            referenced = _extract_referenced_paths(work_item)
+            if referenced:
+                missing = _missing_referenced_files(workspace, referenced)
+                if missing and len(missing) == len(referenced):
+                    log.warning(
+                        "trio.dispatcher.tiebreak_accept_overridden",
+                        parent_id=parent_task_id,
+                        item_id=work_item.get("id"),
+                        missing_paths=missing,
+                        original_reason=extracted.get("reason"),
+                    )
+                    return {
+                        "action": "revise_backlog",
+                        "reason": (
+                            "architect accepted but referenced files are "
+                            f"missing on disk: {missing}. The work item "
+                            "describes building files that do not exist; "
+                            "the next round must emit items that create "
+                            "them."
+                        ),
+                        "missing_paths": missing,
+                    }
         return extracted
 
     # Extractor exhausted retries — fail safe to a human clarify so the

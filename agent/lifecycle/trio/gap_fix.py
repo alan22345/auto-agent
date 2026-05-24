@@ -110,6 +110,19 @@ without ever building the target domain). Read ``.auto-agent/design.md``
 for the canonical module layout and emit one item per file or per
 tight group of files.
 
+== Item contract ==
+Every dispatch_new item MUST include three fields:
+- ``id``: a unique handle (e.g. ``G1``, ``G2``, ... — the orchestrator
+  will auto-assign one if you omit it, but explicit IDs make logs and
+  the per-item tiebreak prompts traceable)
+- ``title``: one-line imperative summary
+- ``description``: 1-3 sentences naming the SPECIFIC files to create
+  or modify (e.g. ``src/harpoon/funnel/repositories.py``). Concrete
+  file paths matter: the orchestrator verifies the named paths exist
+  before accepting an item as done. An item whose description names
+  no concrete file paths is at high risk of being marked done without
+  any real work having happened.
+
 == Final reviewer's gaps ==
 {gaps}
 """
