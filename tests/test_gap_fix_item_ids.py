@@ -72,6 +72,83 @@ def test_assign_missing_ids_skips_existing_g_indices():
     assert out[1]["id"] == "G4"
 
 
+def test_assign_missing_ids_renames_colliding_explicit_ids():
+    """Bug discovered on task #26 (2026-05-25, 12-hr stall): the gap-fix
+    architect emitted new items with explicit ids ``G1``, ``G2`` even
+    though the backlog already had a done item with ``id=G1``.
+    ``_mark_item_done(id=G1)`` matched the first (done) G1, broke out
+    of the loop, and the pending duplicate never got marked done.
+
+    Fix: a NEW item with an explicit id that collides with an existing
+    id gets renamed to the next free ``G{N}`` slot. Established ids
+    (those already in existing-but-not-new-items) stay put."""
+    from agent.lifecycle.trio import _assign_missing_ids
+
+    existing = [
+        {"id": "T1", "title": "old t", "status": "done"},
+        {"id": "G1", "title": "old g1", "status": "done"},
+    ]
+    new_items = [
+        {"id": "G1", "title": "new g1 (collision)"},
+        {"id": "G2", "title": "new g2"},
+        {"title": "new no-id"},
+    ]
+    out = _assign_missing_ids(existing, new_items)
+
+    # Invariants: the colliding G1 was renamed, the union of existing
+    # and out has no duplicates, and every output item has an id.
+    out_ids = [o["id"] for o in out]
+    assert out_ids[0] != "G1", out
+    assert all((o.get("id") or "").strip() for o in out)
+    existing_ids = {e["id"] for e in existing}
+    assert existing_ids.isdisjoint(set(out_ids)) or existing_ids - set(out_ids) == existing_ids - {"T1", "G1"}
+    # Every id ends up unique across existing + new.
+    assert len(set(existing_ids | set(out_ids))) == len(existing) + len(out)
+
+
+def test_assign_missing_ids_dedupes_duplicates_within_new_items():
+    """If new_items itself has two items with the same id, the second
+    one gets renamed. Defends against an architect emitting duplicate
+    handles in a single dispatch_new."""
+    from agent.lifecycle.trio import _assign_missing_ids
+
+    out = _assign_missing_ids(
+        [],
+        [
+            {"id": "G1", "title": "first"},
+            {"id": "G1", "title": "second"},  # collides with first
+            {"title": "third"},
+        ],
+    )
+    ids = [o["id"] for o in out]
+    assert ids[0] == "G1"
+    assert ids[1] != "G1", ids
+    assert len(set(ids)) == 3, ids  # all unique
+
+
+def test_assign_missing_ids_backfill_case_dedupes_existing_duplicates():
+    """``_backfill_backlog_ids`` passes the SAME list as both existing
+    and new_items. In that case, a backlog with a pre-existing
+    duplicate (task #26 shape: done G1 + pending G1) should heal: the
+    FIRST occurrence keeps the id, the SECOND gets renamed."""
+    from agent.lifecycle.trio import _assign_missing_ids
+
+    backlog = [
+        {"id": "T1", "title": "x", "status": "done"},
+        {"id": "G1", "title": "first g1", "status": "done"},
+        {"id": "G1", "title": "second g1 (collision)", "status": "pending"},
+        {"id": "G2", "title": "second g2", "status": "pending"},
+    ]
+    out = _assign_missing_ids(backlog, backlog)
+
+    # First occurrences keep their ids; duplicates get renamed.
+    assert out[0]["id"] == "T1"
+    assert out[1]["id"] == "G1"
+    assert out[2]["id"] != "G1", out
+    assert out[2]["id"] != out[3]["id"]
+    assert len({o["id"] for o in out}) == 4  # all unique
+
+
 def test_assign_missing_ids_is_pure_does_not_mutate_input():
     """Caller's list must not be mutated — we return a fresh list of dicts."""
     from agent.lifecycle.trio import _assign_missing_ids

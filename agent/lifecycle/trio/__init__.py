@@ -217,18 +217,45 @@ async def _block_parent(parent_id: int, message: str) -> None:
 
 async def _mark_item_done(parent_id: int, item_id: str, head_sha: str | None) -> None:
     """Set an item's status to 'done' in tasks.trio_backlog. JSONB requires a
-    fresh list reference for SQLAlchemy to mark the column dirty."""
+    fresh list reference for SQLAlchemy to mark the column dirty.
+
+    Prefers the first PENDING item matching ``item_id`` — defends against
+    duplicate ids (task #26, 2026-05-25) where an already-done item with
+    the same id would otherwise be re-marked done (a no-op) and the
+    pending duplicate would be missed. ``_backfill_backlog_ids`` normally
+    eliminates duplicates on parent entry, but this is the last-line
+    guard.
+    """
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
+        target_idx: int | None = None
         for i, item in enumerate(backlog):
-            if item.get("id") == item_id:
-                new_item = dict(item)
-                new_item["status"] = "done"
-                if head_sha:
-                    new_item["head_sha"] = head_sha
-                backlog[i] = new_item
+            if item.get("id") == item_id and item.get("status") != "done":
+                target_idx = i
                 break
+        if target_idx is None:
+            # Fall back to any matching id (legacy behaviour).
+            for i, item in enumerate(backlog):
+                if item.get("id") == item_id:
+                    target_idx = i
+                    break
+        if target_idx is None:
+            # No item matched at all — silent no-op caused a 12-hr stall
+            # on task #26 (2026-05-25). Warn loudly so the next stall is
+            # diagnosable from a single grep.
+            log.warning(
+                "trio.parent.mark_done_no_match",
+                parent_id=parent_id,
+                item_id=item_id,
+                backlog_ids=[b.get("id") for b in backlog],
+            )
+            return
+        new_item = dict(backlog[target_idx])
+        new_item["status"] = "done"
+        if head_sha:
+            new_item["head_sha"] = head_sha
+        backlog[target_idx] = new_item
         p.trio_backlog = backlog
         await s.commit()
 
@@ -1223,82 +1250,114 @@ def _assign_missing_ids(
     *,
     prefix: str = "G",
 ) -> list[dict]:
-    """Return a fresh copy of ``new_items`` with any missing ``id`` filled.
+    """Return a fresh copy of ``new_items`` whose ids are unique.
 
     Pure helper — does not mutate the caller's lists or dicts.
 
-    Auto-generates IDs as ``{prefix}{N}`` starting from the next available
-    integer (e.g. existing G1/G2 → next is G3). Explicit non-empty IDs are
-    preserved as-is.
+    For each item in ``new_items``: if its ``id`` is missing/blank OR
+    collides with an id already in use (in ``existing``-but-not-``new_items``
+    or already assigned earlier in this pass), it gets renamed to the
+    next free ``{prefix}{N}`` slot. Non-colliding explicit ids are kept.
 
     Bug 22 (harpoon #25, 2026-05-24): the gap-fix architect emitted items
-    without ``id`` fields. Downstream tiebreak prompts rendered as
-    ``## Tiebreak — work item : <title>`` with no item handle, so the
-    architect couldn't anchor its accept/revise decision to a specific
-    item and false-accepted every no-diff round in a row. Auto-assigning
-    IDs here closes the gap regardless of what the architect emits.
+    WITHOUT ``id`` fields. Downstream tiebreak prompts rendered as
+    ``## Tiebreak — work item : <title>`` with no item handle and the
+    architect false-accepted every no-diff round.
+
+    Followup bug (task #26, 2026-05-25, 12-hr stall): the gap-fix
+    architect emitted NEW items with explicit ids ``G1``, ``G2`` that
+    collided with already-done items in the backlog. ``_mark_item_done``
+    matched the done G1 first, broke, and the pending duplicate never
+    got marked → dispatcher looped forever. This helper now renames
+    explicit collisions in addition to filling blanks.
     """
-    used = set()
+    # Identify which existing items are "established" (id stays put) vs
+    # which are being re-processed by this pass. ``_backfill_backlog_ids``
+    # passes the SAME list as both ``existing`` and ``new_items`` to heal
+    # a backlog in place — in that case every item is "new" for dedup
+    # purposes, so we identity-check against ``new_items``.
+    new_identities = {id(x) for x in new_items}
+
+    established_ids: set[str] = set()
     max_n = 0
     for it in existing:
+        if id(it) in new_identities:
+            continue
         item_id = (it.get("id") or "").strip()
         if not item_id:
             continue
-        used.add(item_id)
+        established_ids.add(item_id)
         if item_id.startswith(prefix):
             suffix = item_id[len(prefix):]
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
 
+    used: set[str] = set(established_ids)
     next_n = max_n + 1
     out: list[dict] = []
     for item in new_items:
         ni = dict(item)
         item_id = (ni.get("id") or "").strip()
-        if not item_id:
+        if not item_id or item_id in used:
             while f"{prefix}{next_n}" in used:
                 next_n += 1
             new_id = f"{prefix}{next_n}"
             ni["id"] = new_id
             used.add(new_id)
             next_n += 1
+        else:
+            used.add(item_id)
         out.append(ni)
     return out
 
 
 async def _backfill_backlog_ids(parent_id: int) -> bool:
-    """Stamp ``G{N}`` IDs onto any backlog item lacking one. Idempotent.
+    """Heal a parent's ``trio_backlog`` so every item has a unique id.
+    Idempotent.
 
     Returns ``True`` iff the backlog was modified (and committed).
 
-    Why this exists: ``_mark_item_done`` and ``_replace_backlog_item``
-    look items up by ``id``. A backlog whose items lack IDs (the
-    harpoon #25 shape, where the gap-fix architect emitted IDless items
-    pre-bug-22-fix) silently no-ops in those helpers and loops forever
-    in the dispatcher (every accept fails to mark, the next iteration
-    re-picks the same first-pending item, repeat). This defensive
-    backfill heals such legacy backlogs on parent entry and protects
-    against any future cause of IDless items reaching the per-item
-    loop.
+    Heals two pathological shapes:
+
+    1. **Missing ids** (harpoon #25, 2026-05-24): items without an ``id``
+       key cause ``_mark_item_done(item_id="(unknown)")`` to silently
+       no-op, looping the dispatcher forever.
+
+    2. **Duplicate ids** (task #26, 2026-05-25): items with explicit ids
+       that collide with already-done items cause
+       ``_mark_item_done(item_id="G1")`` to match the done item first,
+       break, and never reach the pending duplicate. Same infinite-loop
+       shape, different trigger.
     """
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
         if not backlog:
             return False
+
         idless = sum(1 for b in backlog if not (b.get("id") or "").strip())
-        if idless == 0:
+        seen: set[str] = set()
+        dupes = 0
+        for b in backlog:
+            iid = (b.get("id") or "").strip()
+            if not iid:
+                continue
+            if iid in seen:
+                dupes += 1
+            else:
+                seen.add(iid)
+
+        if idless == 0 and dupes == 0:
             return False
-        # Pass the full backlog as both ``existing`` and ``new_items`` so
-        # ``_assign_missing_ids`` skips explicit IDs and only stamps the
-        # blanks, using ``G{N}`` slots that don't collide with existing IDs.
+
         rebuilt = _assign_missing_ids(backlog, backlog)
         p.trio_backlog = rebuilt
         await s.commit()
         log.info(
             "trio.parent.backfilled_backlog_ids",
             parent_id=parent_id,
-            backfilled=idless,
+            idless=idless,
+            dupes=dupes,
         )
         return True
 
