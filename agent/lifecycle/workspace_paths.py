@@ -158,6 +158,21 @@ def domain_adr_approval_path(slug: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Project ADR publication target. Approved root/domain ADRs are copied here
+# from ``.auto-agent/adrs/`` so the canonical project ADR directory holds
+# the approved decision while the gates keep their working copy.
+# ---------------------------------------------------------------------------
+
+DOCS_DECISIONS_DIR = "docs/decisions"
+
+
+def docs_decision_path(filename: str) -> str:
+    """Path to a published ADR under ``docs/decisions/``."""
+
+    return f"{DOCS_DECISIONS_DIR}/{filename}"
+
+
+# ---------------------------------------------------------------------------
 # ADR-018 Stage 8 — per-domain grill round. A grill agent runs for each
 # domain before the matching domain architect writes its ADR. The grill
 # agent writes its summary to ``adrs/<idx>-<slug>.grill.md`` (markdown,
