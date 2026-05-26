@@ -233,3 +233,50 @@ Completion, plus the lifecycle events Created, Completed, and Deleted.
 ## Justification
 Tasks are the primary domain — no other domain owns this state.
 """
+
+
+@pytest.mark.asyncio
+async def test_root_architect_passes_session_id_so_resume_works(tmp_path):
+    """create_agent must receive a session_id; otherwise resume=True on retry is a silent no-op."""
+
+    from agent.lifecycle.scaffold import root_architect
+
+    workspace = str(tmp_path)
+    os.makedirs(os.path.join(workspace, ".auto-agent", "adrs"), exist_ok=True)
+
+    task = SimpleNamespace(
+        id=42,
+        title="x",
+        description="x",
+        organization_id=7,
+        repo=None,
+        freeform_mode=True,
+        created_by_user_id=None,
+    )
+
+    captured: dict = {}
+
+    def fake_create_agent(**kwargs):
+        captured["create_agent_kwargs"] = kwargs
+
+        async def fake_run(prompt, system=None, resume=False):
+            captured.setdefault("runs", []).append({"resume": resume})
+
+        return SimpleNamespace(run=fake_run)
+
+    with (
+        patch("agent.lifecycle.scaffold.root_architect.prepare_scaffold_workspace",
+              new=AsyncMock(return_value=workspace)),
+        patch("agent.lifecycle.scaffold.root_architect.home_dir_for_task",
+              new=AsyncMock(return_value=None)),
+        patch("agent.lifecycle.scaffold.root_architect.create_agent",
+              side_effect=fake_create_agent),
+    ):
+        with open(os.path.join(workspace, ".auto-agent", "adrs", "000-system.md"), "w") as fh:
+            fh.write(_VALID_ROOT_ADR)
+        await root_architect.run(task)
+
+    kwargs = captured["create_agent_kwargs"]
+    assert kwargs.get("session_id"), "root_architect must allocate a session_id so resume works"
+    # And it should be deterministic by task id so re-entry resumes the same conversation.
+    assert str(task.id) in kwargs["session_id"]

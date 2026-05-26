@@ -49,8 +49,15 @@ async def run(task: Task) -> str:
     intent_path = os.path.join(workspace, INTENT_PATH)
     intent_present = os.path.isfile(intent_path)
 
+    # Allocate a deterministic session_id so the validator-retry runs below
+    # can actually --resume the prior CLI session instead of paying the full
+    # system-prompt reload cost (see plans/2026-05-26-scaffold-token-savings.md
+    # Phase 2). The session_id is per-phase per-task; on retry we pass
+    # resume=True and AgentLoop._run_passthrough wires it through.
+    session_id = f"scaffold-{task.id}-root-architect"
     agent = create_agent(
         workspace=workspace,
+        session_id=session_id,
         task_id=task.id,
         task_description=task.description or "",
         repo_name=task.repo.name if task.repo else None,
