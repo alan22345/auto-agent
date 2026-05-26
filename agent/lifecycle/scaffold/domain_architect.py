@@ -274,8 +274,13 @@ async def run(task: Task) -> dict[str, Any]:
             f"Target path: `{target_rel}`."
         )
 
+        # Allocate a per-domain session_id so validation retries below
+        # (and the secrets-manifest retry) actually --resume the prior CLI
+        # session. See plans/2026-05-26-scaffold-token-savings.md Phase 2.
+        session_id = f"scaffold-{task.id}-domain-architect-{slug}"
         agent = create_agent(
             workspace=workspace,
+            session_id=session_id,
             task_id=task.id,
             task_description=task.description or "",
             repo_name=task.repo.name if task.repo else None,

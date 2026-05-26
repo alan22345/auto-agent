@@ -280,3 +280,73 @@ async def test_root_architect_passes_session_id_so_resume_works(tmp_path):
     assert kwargs.get("session_id"), "root_architect must allocate a session_id so resume works"
     # And it should be deterministic by task id so re-entry resumes the same conversation.
     assert str(task.id) in kwargs["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_domain_architect_passes_unique_session_id_per_domain(tmp_path):
+    """Each domain architect must get its own session_id so retries resume correctly."""
+
+    from agent.lifecycle.scaffold import domain_architect
+
+    workspace = str(tmp_path)
+    adrs_dir = os.path.join(workspace, ".auto-agent", "adrs")
+    os.makedirs(adrs_dir, exist_ok=True)
+    with open(os.path.join(workspace, ".auto-agent", "intent.md"), "w") as fh:
+        fh.write("intent")
+    # Root ADR with two domains.
+    with open(os.path.join(adrs_dir, "000-system.md"), "w") as fh:
+        fh.write(
+            "# 000 — System ADR\n\n## Vision\nx\n\n## Cross-cutting concerns\n- Auth\n\n## Domains\n"
+            "```yaml\ndomains:\n  - name: A\n    slug: a\n    scope_summary: a\n"
+            "  - name: B\n    slug: b\n    scope_summary: b\n```\n"
+        )
+    # Pre-write valid ADRs so validation does not loop.
+    for idx, slug in [(1, "a"), (2, "b")]:
+        with open(os.path.join(adrs_dir, f"00{idx}-{slug}.md"), "w") as fh:
+            fh.write(_VALID_DOMAIN_ADR)
+
+    task = SimpleNamespace(
+        id=99,
+        title="x",
+        description="x",
+        organization_id=7,
+        repo=None,
+        freeform_mode=True,
+        created_by_user_id=None,
+        repo_id=None,
+        subtasks={},
+    )
+
+    sessions_seen: list[str] = []
+
+    def fake_create_agent(**kwargs):
+        sessions_seen.append(kwargs.get("session_id") or "")
+
+        async def fake_run(prompt, system=None, resume=False):
+            pass
+
+        return SimpleNamespace(run=fake_run)
+
+    async def fake_grill(_task, _domain):
+        return {"status": "summary_written", "summary_path": "x"}
+
+    with (
+        patch("agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
+              new=AsyncMock(return_value=workspace)),
+        patch("agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
+              new=AsyncMock(return_value=None)),
+        patch("agent.lifecycle.scaffold.domain_architect.create_agent",
+              side_effect=fake_create_agent),
+        patch("agent.lifecycle.scaffold.domain_grill.run", new=fake_grill),
+        patch("agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx",
+              new=AsyncMock()),
+    ):
+        await domain_architect.run(task)
+
+    # Two domains -> two architect agents created, each with a non-empty,
+    # distinct session_id that includes both the task id and the slug.
+    assert len(sessions_seen) == 2
+    assert all(sessions_seen), "every domain architect must get a session_id"
+    assert len(set(sessions_seen)) == 2, "session_ids must be unique per domain"
+    assert all(str(task.id) in s for s in sessions_seen)
+    assert any("a" in s for s in sessions_seen) and any("b" in s for s in sessions_seen)
