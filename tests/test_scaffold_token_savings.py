@@ -45,12 +45,15 @@ async def test_root_architect_prompt_does_not_inline_intent_body(tmp_path):
     fake_agent = SimpleNamespace(run=fake_run)
 
     with (
-        patch("agent.lifecycle.scaffold.root_architect.prepare_scaffold_workspace",
-              new=AsyncMock(return_value=workspace)),
-        patch("agent.lifecycle.scaffold.root_architect.home_dir_for_task",
-              new=AsyncMock(return_value=None)),
-        patch("agent.lifecycle.scaffold.root_architect.create_agent",
-              return_value=fake_agent),
+        patch(
+            "agent.lifecycle.scaffold.root_architect.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=workspace),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.root_architect.home_dir_for_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("agent.lifecycle.scaffold.root_architect.create_agent", return_value=fake_agent),
     ):
         # Also write a minimally-valid root ADR so validation doesn't loop.
         adrs_dir = os.path.join(workspace, ".auto-agent", "adrs")
@@ -122,12 +125,15 @@ async def test_domain_grill_prompt_does_not_inline_intent_or_root_adr(tmp_path):
     fake_agent = SimpleNamespace(run=fake_run)
 
     with (
-        patch("agent.lifecycle.scaffold.domain_grill.prepare_scaffold_workspace",
-              new=AsyncMock(return_value=workspace)),
-        patch("agent.lifecycle.scaffold.domain_grill.home_dir_for_task",
-              new=AsyncMock(return_value=None)),
-        patch("agent.lifecycle.scaffold.domain_grill.create_agent",
-              return_value=fake_agent),
+        patch(
+            "agent.lifecycle.scaffold.domain_grill.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=workspace),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_grill.home_dir_for_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("agent.lifecycle.scaffold.domain_grill.create_agent", return_value=fake_agent),
     ):
         await domain_grill.run(task, domain)
 
@@ -150,7 +156,9 @@ async def test_domain_architect_prompt_does_not_inline_docs(tmp_path):
     with open(os.path.join(workspace, ".auto-agent", "intent.md"), "w") as fh:
         fh.write("UNIQUE_INTENT_SENTINEL")
     with open(os.path.join(adrs_dir, "000-system.md"), "w") as fh:
-        fh.write("# 000 — System ADR\n\n## Vision\nx\n\n## Cross-cutting concerns\n- Auth\n\n## Domains\n```yaml\ndomains:\n  - name: Tasks\n    slug: tasks\n    scope_summary: TODO items\n```\n")
+        fh.write(
+            "# 000 — System ADR\n\n## Vision\nx\n\n## Cross-cutting concerns\n- Auth\n\n## Domains\n```yaml\ndomains:\n  - name: Tasks\n    slug: tasks\n    scope_summary: TODO items\n```\n"
+        )
     with open(os.path.join(adrs_dir, "001-tasks.grill.md"), "w") as fh:
         fh.write("UNIQUE_GRILL_SUMMARY_SENTINEL")
 
@@ -177,15 +185,19 @@ async def test_domain_architect_prompt_does_not_inline_docs(tmp_path):
         return {"status": "summary_written", "summary_path": "x"}
 
     with (
-        patch("agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
-              new=AsyncMock(return_value=workspace)),
-        patch("agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
-              new=AsyncMock(return_value=None)),
-        patch("agent.lifecycle.scaffold.domain_architect.create_agent",
-              return_value=fake_agent),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=workspace),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("agent.lifecycle.scaffold.domain_architect.create_agent", return_value=fake_agent),
         patch("agent.lifecycle.scaffold.domain_grill.run", new=fake_grill),
-        patch("agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx",
-              new=AsyncMock()),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx", new=AsyncMock()
+        ),
     ):
         # Write a valid domain ADR up-front so validation does not loop.
         with open(os.path.join(adrs_dir, "001-tasks.md"), "w") as fh:
@@ -265,12 +277,17 @@ async def test_root_architect_passes_session_id_so_resume_works(tmp_path):
         return SimpleNamespace(run=fake_run)
 
     with (
-        patch("agent.lifecycle.scaffold.root_architect.prepare_scaffold_workspace",
-              new=AsyncMock(return_value=workspace)),
-        patch("agent.lifecycle.scaffold.root_architect.home_dir_for_task",
-              new=AsyncMock(return_value=None)),
-        patch("agent.lifecycle.scaffold.root_architect.create_agent",
-              side_effect=fake_create_agent),
+        patch(
+            "agent.lifecycle.scaffold.root_architect.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=workspace),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.root_architect.home_dir_for_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.root_architect.create_agent", side_effect=fake_create_agent
+        ),
     ):
         with open(os.path.join(workspace, ".auto-agent", "adrs", "000-system.md"), "w") as fh:
             fh.write(_VALID_ROOT_ADR)
@@ -331,15 +348,21 @@ async def test_domain_architect_passes_unique_session_id_per_domain(tmp_path):
         return {"status": "summary_written", "summary_path": "x"}
 
     with (
-        patch("agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
-              new=AsyncMock(return_value=workspace)),
-        patch("agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
-              new=AsyncMock(return_value=None)),
-        patch("agent.lifecycle.scaffold.domain_architect.create_agent",
-              side_effect=fake_create_agent),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
+            new=AsyncMock(return_value=workspace),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect.create_agent", side_effect=fake_create_agent
+        ),
         patch("agent.lifecycle.scaffold.domain_grill.run", new=fake_grill),
-        patch("agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx",
-              new=AsyncMock()),
+        patch(
+            "agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx", new=AsyncMock()
+        ),
     ):
         await domain_architect.run(task)
 

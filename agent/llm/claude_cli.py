@@ -149,9 +149,7 @@ class ClaudeCLIProvider(LLMProvider):
         proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -188,7 +186,8 @@ class ClaudeCLIProvider(LLMProvider):
             self._session_id = str(uuid.uuid4())
             log.warning(
                 "Claude CLI session %s already in use; rotated to %s and retrying",
-                stale, self._session_id,
+                stale,
+                self._session_id,
             )
             output, errors, returncode = await self._invoke_cli_once(prompt)
             if returncode is None:

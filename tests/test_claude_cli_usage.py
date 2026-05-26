@@ -79,7 +79,10 @@ async def test_invoke_cli_passes_output_format_json_flag():
             returncode = 0
 
             async def communicate(self):
-                return (b'{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}', b"")
+                return (
+                    b'{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}',
+                    b"",
+                )
 
         return _P()
 
