@@ -83,7 +83,9 @@ class ItemResult:
 
 async def _git_head_sha(workspace: str) -> str:
     res = await sh.run(
-        ["git", "rev-parse", "HEAD"], cwd=workspace, timeout=10,
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+        timeout=10,
     )
     if res.failed:
         raise RuntimeError(f"git rev-parse HEAD failed: {res.stderr}")
@@ -94,7 +96,9 @@ async def _git_diff_since(workspace: str, start_sha: str) -> str:
     """Return the unified diff from ``start_sha`` to current HEAD."""
     res = await sh.run(
         ["git", "diff", f"{start_sha}..HEAD"],
-        cwd=workspace, timeout=30, max_output=200_000,
+        cwd=workspace,
+        timeout=30,
+        max_output=200_000,
     )
     if res.failed:
         log.warning(
@@ -146,9 +150,7 @@ def _coder_prompt(work_item: dict, *, prior_feedback: str | None) -> str:
     return "\n".join(parts)
 
 
-def _reviewer_prompt(
-    work_item: dict, *, coder_summary: str, diff: str
-) -> str:
+def _reviewer_prompt(work_item: dict, *, coder_summary: str, diff: str) -> str:
     """Build the reviewer's prompt."""
     title = work_item.get("title", "(no title)")
     description = work_item.get("description", "")
@@ -204,8 +206,7 @@ def _tiebreak_prompt(work_item: dict, transcript: list[TranscriptEntry]) -> str:
         transcript_str.append(e.output[:4000])
         if e.verdict is not None:
             transcript_str.append(
-                f"Verdict: ok={e.verdict.get('ok')}, "
-                f"feedback={e.verdict.get('feedback', '')[:500]}"
+                f"Verdict: ok={e.verdict.get('ok')}, feedback={e.verdict.get('feedback', '')[:500]}"
             )
         transcript_str.append("")
 
@@ -271,9 +272,18 @@ async def _run_coder(
     round_idx: int,
     prior_feedback: str | None,
 ) -> TranscriptEntry:
-    """Spawn one coder subagent. Returns its transcript entry."""
+    """Spawn one coder subagent. Returns its transcript entry.
+
+    The coder REUSES its session across rounds for the same item so the
+    --resume on round 2+ picks up the prior turn's context instead of
+    paying the full claude --print system-prompt reload each round (see
+    plans/2026-05-26-scaffold-token-savings.md Phase 5). The reviewer
+    stays fresh per round for independence; only the coder resumes.
+    """
     item_id = work_item.get("id", "item")
-    session_id = _fresh_session_id(parent_task_id, f"coder-{item_id}-r{round_idx}")
+    # Deterministic session_id per (parent_task_id, item_id); round_idx is
+    # intentionally NOT in the key so rounds resume the same CLI session.
+    session_id = f"trio-coder-{parent_task_id}-{item_id}"
     agent = create_agent(
         workspace=workspace,
         session_id=session_id,
@@ -286,7 +296,7 @@ async def _run_coder(
         org_id=org_id,
     )
     prompt = _coder_prompt(work_item, prior_feedback=prior_feedback)
-    run_result = await agent.run(prompt)
+    run_result = await agent.run(prompt, resume=round_idx > 1)
     return TranscriptEntry(
         role="coder",
         round=round_idx,
