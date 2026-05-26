@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib as _hashlib
 import json as _json
 import os
 import re
@@ -565,25 +566,65 @@ async def _judge_screenshot(
     )
 
 
-async def inspect_ui(
-    *,
-    route: str,
-    intent: str,
-    base_url: str,
-) -> UIResult:
-    """Screenshot ``base_url + route`` and ask the model to PASS/FAIL it.
+# Module-level cache for inspect_ui verdicts.
+# Key: SHA-256 of f"{route}\x00{intent}\x00<screenshot-bytes>".
+# Value: a UIResult (same shape inspect_ui returns).
+# Bounded informally — final_verification caps at MAX_FINAL_VERIFY_ROUNDS=3
+# rounds * O(routes) entries per scaffold parent, so an unbounded dict is
+# acceptable for v1. If this ever grows, switch to functools.lru_cache or
+# an LRU dict. The cache is keyed on the screenshot bytes themselves so a
+# pixel-different render (i.e. the UI actually changed) misses and re-judges.
+_INSPECT_UI_CACHE: dict[str, UIResult] = {}
 
-    Gracefully degrades:
-      - Playwright import failure → ``UIResult(ok=False, reason="playwright_not_installed")``.
-      - LLM judge errors (parse failure, network) → ``UIResult(ok=False, reason="judge_error: <detail>")``.
+
+def _inspect_ui_cache_key(route: str, intent: str, screenshot: bytes) -> str:
+    h = _hashlib.sha256()
+    h.update(route.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(intent.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(screenshot)
+    return h.hexdigest()
+
+
+async def _capture_route_screenshot(*, route: str, base_url: str) -> bytes | None:
+    """Capture ``base_url + route`` as PNG bytes, or None on failure.
+
+    Returns ``None`` when Playwright isn't installed (so callers can emit
+    the ``playwright_not_installed`` graceful-degrade verdict) or when any
+    other screenshot error occurs. The error detail is preserved on a
+    module attribute (``_last_screenshot_error``) so :func:`inspect_ui`
+    can include it in the failure reason when appropriate.
     """
     url = base_url.rstrip("/") + "/" + route.lstrip("/")
     try:
-        screenshot = await _screenshot_route(url=url)
+        return await _screenshot_route(url=url)
     except ImportError:
-        return UIResult(ok=False, reason="playwright_not_installed")
+        # Playwright unavailable — signal via sentinel reason on the cache miss.
+        _capture_route_screenshot._last_error = "playwright_not_installed"  # type: ignore[attr-defined]
+        return None
     except Exception as exc:
-        return UIResult(ok=False, reason=f"screenshot_error: {exc}")
+        _capture_route_screenshot._last_error = f"screenshot_error: {exc}"  # type: ignore[attr-defined]
+        return None
+
+
+async def _vision_judge_screenshot(
+    *,
+    route: str,
+    intent: str,
+    screenshot: bytes | None,
+) -> UIResult:
+    """One vision-LLM call returning a :class:`UIResult`.
+
+    When ``screenshot is None``, returns the graceful-degrade verdict
+    (no LLM call) — preserves the original :func:`inspect_ui` behaviour
+    for the Playwright-not-installed / capture-failed paths.
+    """
+    if screenshot is None:
+        reason = getattr(
+            _capture_route_screenshot, "_last_error", "playwright_not_installed"
+        )
+        return UIResult(ok=False, reason=reason)
 
     try:
         verdict_payload = await _judge_screenshot(
@@ -599,6 +640,45 @@ async def inspect_ui(
     if verdict == "PASS":
         return UIResult(ok=True, reason=reason or "looks correct")
     return UIResult(ok=False, reason=reason or "verdict=FAIL")
+
+
+async def inspect_ui(
+    *,
+    route: str,
+    intent: str,
+    base_url: str,
+) -> UIResult:
+    """Screenshot ``base_url + route`` and ask the model to PASS/FAIL it.
+
+    Cached by ``(route, intent, screenshot-bytes)`` hash — a second call
+    with identical inputs short-circuits the vision-LLM. This matters for
+    the scaffold parent, which loops final-verification up to
+    ``MAX_FINAL_VERIFY_ROUNDS`` (=3) times; without the cache every route
+    pays a vision call per round even when the UI hasn't changed.
+
+    Gracefully degrades:
+      - Playwright import failure → ``UIResult(ok=False, reason="playwright_not_installed")``.
+      - LLM judge errors (parse failure, network) → ``UIResult(ok=False, reason="judge_error: <detail>")``.
+    """
+    screenshot = await _capture_route_screenshot(route=route, base_url=base_url)
+    if screenshot is None:
+        # Playwright unavailable / capture failed — preserve existing behaviour.
+        # Do NOT cache these: a missing dependency may be installed mid-run,
+        # and a transient capture error should be retried on the next round.
+        return await _vision_judge_screenshot(
+            route=route, intent=intent, screenshot=None
+        )
+
+    cache_key = _inspect_ui_cache_key(route, intent, screenshot)
+    cached = _INSPECT_UI_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = await _vision_judge_screenshot(
+        route=route, intent=intent, screenshot=screenshot
+    )
+    _INSPECT_UI_CACHE[cache_key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
