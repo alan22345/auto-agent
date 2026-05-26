@@ -76,11 +76,40 @@ class ClaudeCLIProvider(LLMProvider):
                 stop_reason="error",
             )
 
-        output = await self._run_cli(prompt)
+        import json as _json
+
+        raw = await self._run_cli(prompt)
+        text = raw
+        usage = TokenUsage()
+        try:
+            envelope = _json.loads(raw)
+            if isinstance(envelope, dict):
+                # Final-result envelope shape:
+                # {"type":"result","result":"...","usage":{"input_tokens":N,"output_tokens":M, ...}}
+                result_text = envelope.get("result")
+                if isinstance(result_text, str):
+                    text = result_text
+                u = envelope.get("usage")
+                if isinstance(u, dict):
+                    in_tok = int(u.get("input_tokens") or 0)
+                    out_tok = int(u.get("output_tokens") or 0)
+                    # Cache reads are billed at a fraction; we surface them as input
+                    # tokens for now (UsageSink doesn't distinguish yet).
+                    cache_read = int(u.get("cache_read_input_tokens") or 0)
+                    usage = TokenUsage(
+                        input_tokens=in_tok + cache_read,
+                        output_tokens=out_tok,
+                    )
+        except (ValueError, TypeError):
+            # Non-JSON output (older Claude Code, or an error path). Surface the
+            # raw text and leave usage at zero — emit_usage_event will record a
+            # zero-token event rather than crash.
+            pass
+
         return LLMResponse(
-            message=Message(role="assistant", content=output),
+            message=Message(role="assistant", content=text),
             stop_reason="end_turn",
-            usage=TokenUsage(),  # CLI doesn't report token usage
+            usage=usage,
         )
 
     async def count_tokens(
@@ -97,7 +126,7 @@ class ClaudeCLIProvider(LLMProvider):
 
         Returncode is None on timeout. Caller decides whether to retry.
         """
-        cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+        cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
 
         if self._session_id:
             if self._resume:
