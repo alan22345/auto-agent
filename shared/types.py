@@ -54,7 +54,10 @@ class TaskData(BaseModel):
     # resolution rule. ``None`` when no repo is attached (legacy rows).
     effective_mode: Literal["freeform", "human_in_loop"] | None = None
     priority: int = 100
-    subtasks: list[dict] | None = None
+    # Multi-purpose JSONB column: trio parents store a list of child
+    # entries; scaffold parents store a dict keyed by phase. Both shapes
+    # show up in /api/tasks listings, so the wire schema accepts either.
+    subtasks: list[dict] | dict | None = None
     current_subtask: int | None = None
     # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
     # across AWAITING_CLARIFICATION ↔ PLANNING round-trips. None = grilling
