@@ -136,3 +136,100 @@ async def test_domain_grill_prompt_does_not_inline_intent_or_root_adr(tmp_path):
     assert "UNIQUE_ROOT_ADR_SENTINEL" not in prompt, "root ADR still embedded"
     assert ".auto-agent/intent.md" in prompt
     assert ".auto-agent/adrs/000-system.md" in prompt
+
+
+@pytest.mark.asyncio
+async def test_domain_architect_prompt_does_not_inline_docs(tmp_path):
+    """The domain-architect prompt must not embed intent / root ADR / grill summary bodies."""
+
+    from agent.lifecycle.scaffold import domain_architect
+
+    workspace = str(tmp_path)
+    adrs_dir = os.path.join(workspace, ".auto-agent", "adrs")
+    os.makedirs(adrs_dir, exist_ok=True)
+    with open(os.path.join(workspace, ".auto-agent", "intent.md"), "w") as fh:
+        fh.write("UNIQUE_INTENT_SENTINEL")
+    with open(os.path.join(adrs_dir, "000-system.md"), "w") as fh:
+        fh.write("# 000 — System ADR\n\n## Vision\nx\n\n## Cross-cutting concerns\n- Auth\n\n## Domains\n```yaml\ndomains:\n  - name: Tasks\n    slug: tasks\n    scope_summary: TODO items\n```\n")
+    with open(os.path.join(adrs_dir, "001-tasks.grill.md"), "w") as fh:
+        fh.write("UNIQUE_GRILL_SUMMARY_SENTINEL")
+
+    task = SimpleNamespace(
+        id=1,
+        title="x",
+        description="x",
+        organization_id=7,
+        repo=None,
+        freeform_mode=True,
+        created_by_user_id=None,
+        repo_id=None,
+        subtasks={},
+    )
+
+    captured: dict = {"prompts": []}
+
+    async def fake_run(prompt, system=None, resume=False):
+        captured["prompts"].append(prompt)
+
+    fake_agent = SimpleNamespace(run=fake_run)
+
+    async def fake_grill(_task, _domain):
+        return {"status": "summary_written", "summary_path": "x"}
+
+    with (
+        patch("agent.lifecycle.scaffold.domain_architect.prepare_scaffold_workspace",
+              new=AsyncMock(return_value=workspace)),
+        patch("agent.lifecycle.scaffold.domain_architect.home_dir_for_task",
+              new=AsyncMock(return_value=None)),
+        patch("agent.lifecycle.scaffold.domain_architect.create_agent",
+              return_value=fake_agent),
+        patch("agent.lifecycle.scaffold.domain_grill.run", new=fake_grill),
+        patch("agent.lifecycle.scaffold.domain_architect._persist_current_domain_idx",
+              new=AsyncMock()),
+    ):
+        # Write a valid domain ADR up-front so validation does not loop.
+        with open(os.path.join(adrs_dir, "001-tasks.md"), "w") as fh:
+            fh.write(_VALID_DOMAIN_ADR)
+        await domain_architect.run(task)
+
+    # Only one architect prompt should have fired (1 domain), and it must not
+    # contain inlined doc bodies.
+    assert captured["prompts"], "domain_architect did not invoke the agent"
+    arch_prompt = captured["prompts"][0]
+    assert "UNIQUE_INTENT_SENTINEL" not in arch_prompt
+    assert "UNIQUE_GRILL_SUMMARY_SENTINEL" not in arch_prompt
+    # The root ADR text is small here; assert by the verbatim shape header.
+    assert "----- BEGIN ROOT ADR -----" not in arch_prompt
+    # And the prompt should point the agent at the files instead.
+    assert ".auto-agent/intent.md" in arch_prompt
+    assert ".auto-agent/adrs/000-system.md" in arch_prompt
+    assert "001-tasks.grill.md" in arch_prompt
+
+
+_VALID_DOMAIN_ADR = """\
+# 001 — Tasks ADR
+
+## Scope
+This domain owns user TODO items, including their lifecycle, ownership,
+and the invariants around completed vs open. It enforces that an item
+belongs to exactly one owner and that completion is monotonic — once
+done, an item cannot revert. The ubiquitous language is Task, Owner,
+Completion, plus the lifecycle events Created, Completed, and Deleted.
+
+## Aggregates
+- Task — one user-owned todo item.
+
+## Public surface
+- Routes: GET /tasks
+- Events: TaskCompleted
+- Public types: Task
+
+## Integration points
+- (none)
+
+## Affected routes
+- /tasks
+
+## Justification
+Tasks are the primary domain — no other domain owns this state.
+"""
