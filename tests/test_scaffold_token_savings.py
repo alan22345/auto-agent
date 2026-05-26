@@ -86,3 +86,53 @@ domains:
     scope_summary: Stores and exposes user TODO items.
 ```
 """
+
+
+@pytest.mark.asyncio
+async def test_domain_grill_prompt_does_not_inline_intent_or_root_adr(tmp_path):
+    """The domain-grill prompt must not embed intent.md or root ADR bodies."""
+
+    from agent.lifecycle.scaffold import domain_grill
+
+    workspace = str(tmp_path)
+    adrs_dir = os.path.join(workspace, ".auto-agent", "adrs")
+    os.makedirs(adrs_dir, exist_ok=True)
+    with open(os.path.join(workspace, ".auto-agent", "intent.md"), "w") as fh:
+        fh.write("UNIQUE_INTENT_SENTINEL")
+    with open(os.path.join(adrs_dir, "000-system.md"), "w") as fh:
+        fh.write("UNIQUE_ROOT_ADR_SENTINEL")
+
+    task = SimpleNamespace(
+        id=1,
+        title="x",
+        description="x",
+        organization_id=7,
+        repo=None,
+        freeform_mode=True,
+        created_by_user_id=None,
+    )
+    domain = {"name": "Tasks", "slug": "tasks", "scope_summary": "TODO items", "index": 1}
+
+    captured: dict = {}
+
+    async def fake_run(prompt, system=None, resume=False):
+        captured["prompt"] = prompt
+        captured["system"] = system
+
+    fake_agent = SimpleNamespace(run=fake_run)
+
+    with (
+        patch("agent.lifecycle.scaffold.domain_grill.prepare_scaffold_workspace",
+              new=AsyncMock(return_value=workspace)),
+        patch("agent.lifecycle.scaffold.domain_grill.home_dir_for_task",
+              new=AsyncMock(return_value=None)),
+        patch("agent.lifecycle.scaffold.domain_grill.create_agent",
+              return_value=fake_agent),
+    ):
+        await domain_grill.run(task, domain)
+
+    prompt = captured["prompt"]
+    assert "UNIQUE_INTENT_SENTINEL" not in prompt, "intent.md still embedded"
+    assert "UNIQUE_ROOT_ADR_SENTINEL" not in prompt, "root ADR still embedded"
+    assert ".auto-agent/intent.md" in prompt
+    assert ".auto-agent/adrs/000-system.md" in prompt
