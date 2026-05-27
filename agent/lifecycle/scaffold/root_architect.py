@@ -47,20 +47,17 @@ async def run(task: Task) -> str:
     home_dir = await home_dir_for_task(task)
 
     intent_path = os.path.join(workspace, INTENT_PATH)
-    intent_text = ""
-    if os.path.isfile(intent_path):
-        try:
-            with open(intent_path) as fh:
-                intent_text = fh.read()
-        except OSError:
-            log.warning(
-                "scaffold.root_architect.intent_read_failed",
-                task_id=task.id,
-                path=intent_path,
-            )
+    intent_present = os.path.isfile(intent_path)
 
+    # Allocate a deterministic session_id so the validator-retry runs below
+    # can actually --resume the prior CLI session instead of paying the full
+    # system-prompt reload cost (see plans/2026-05-26-scaffold-token-savings.md
+    # Phase 2). The session_id is per-phase per-task; on retry we pass
+    # resume=True and AgentLoop._run_passthrough wires it through.
+    session_id = f"scaffold-{task.id}-root-architect"
     agent = create_agent(
         workspace=workspace,
+        session_id=session_id,
         task_id=task.id,
         task_description=task.description or "",
         repo_name=task.repo.name if task.repo else None,
@@ -69,13 +66,20 @@ async def run(task: Task) -> str:
         max_turns=40,
     )
 
+    if intent_present:
+        intent_hint = (
+            f"Read `{INTENT_PATH}` from the workspace — it is the canonical "
+            "statement of what the user wants. Do not skip it."
+        )
+    else:
+        intent_hint = (
+            f"`{INTENT_PATH}` is missing — improvise from the task title and "
+            "description below."
+        )
+
     prompt = (
         "You are running the root-architect phase for a scaffold task.\n\n"
-        "The intent grill produced this canonical statement of what the "
-        "user wants:\n\n"
-        "----- BEGIN INTENT -----\n"
-        f"{intent_text or '(intent.md missing — improvise from the description below)'}\n"
-        "----- END INTENT -----\n\n"
+        f"{intent_hint}\n\n"
         f"Task title: {task.title}\n\n"
         "Now write the system-level ADR. Use the `submit-root-adr` "
         "skill to produce `.auto-agent/adrs/000-system.md`. Remember the "

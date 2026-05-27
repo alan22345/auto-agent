@@ -547,15 +547,21 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     # the SAME invocation. Without this, freeform-mode children deadlock:
     # nothing else re-invokes the trio dispatcher (the trio recovery hook
     # only picks TRIO_EXECUTING, and on_design_approved only fires after a
-    # verdict that the standin would have written). Recursion depth is
-    # bounded — case B either approves+returns True, rejects+returns False,
-    # or fails the verdict file lookup+returns False; none recurse back.
+    # verdict that the standin would have written). If the design pass
+    # didn't park at AWAITING_DESIGN_APPROVAL (test mock / bug), do NOT
+    # recurse — branch (A) would re-transition ARCHITECT_DESIGNING →
+    # ARCHITECT_DESIGNING and raise InvalidTransition.
     async with async_session() as _s:
         live_after_design = (
             await _s.execute(select(Task).where(Task.id == parent.id))
         ).scalar_one()
     if live_after_design.status == TaskStatus.AWAITING_DESIGN_APPROVAL:
         return await _advance_through_design_gate(live_after_design)
+    log.info(
+        "trio.parent.design_pass_did_not_park",
+        parent_id=parent.id,
+        status=live_after_design.status.value,
+    )
     return False
 
 

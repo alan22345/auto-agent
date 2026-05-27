@@ -34,8 +34,14 @@ def promote_adr_to_docs(workspace: str, src_rel: str) -> str | None:
     filename = os.path.basename(src_rel)
     dst_abs = os.path.join(workspace, docs_decision_path(filename))
     os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+    overwrite = os.path.isfile(dst_abs)
     shutil.copyfile(src_abs, dst_abs)
-    log.info("scaffold.adr_promotion.copied", src=src_abs, dst=dst_abs)
+    log.info(
+        "scaffold.adr_promotion.copied",
+        src=src_abs,
+        dst=dst_abs,
+        overwrite=overwrite,
+    )
     return dst_abs
 
 

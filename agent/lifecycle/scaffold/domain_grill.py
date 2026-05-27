@@ -157,23 +157,8 @@ async def run(task: Task, domain: dict[str, Any]) -> dict[str, Any]:
         )
         return {"status": "summary_written", "summary_path": summary_rel}
 
-    intent_text = ""
-    intent_path = os.path.join(workspace, INTENT_PATH)
-    if os.path.isfile(intent_path):
-        try:
-            with open(intent_path) as fh:
-                intent_text = fh.read()
-        except OSError:
-            pass
-
-    root_adr_text = ""
-    root_adr_abs = os.path.join(workspace, ROOT_ADR_PATH)
-    if os.path.isfile(root_adr_abs):
-        try:
-            with open(root_adr_abs) as fh:
-                root_adr_text = fh.read()
-        except OSError:
-            pass
+    intent_present = os.path.isfile(os.path.join(workspace, INTENT_PATH))
+    root_adr_present = os.path.isfile(os.path.join(workspace, ROOT_ADR_PATH))
 
     # If there's a fresh answer file from a previous pause, surface it to
     # the agent's prompt; otherwise the agent runs as a first-pass grill.
@@ -223,16 +208,21 @@ async def run(task: Task, domain: dict[str, Any]) -> dict[str, Any]:
         else ""
     )
 
+    intent_line = (
+        f"Read `{INTENT_PATH}` — it states what the user wants for the overall product."
+        if intent_present else f"`{INTENT_PATH}` is missing."
+    )
+    root_adr_line = (
+        f"Read `{ROOT_ADR_PATH}` — it places this domain in the wider system."
+        if root_adr_present else f"`{ROOT_ADR_PATH}` is missing."
+    )
+
     prompt = (
         f"You are running the per-domain grill for **{name}** "
         f"(slug `{slug}`, index {index}).\n\n"
         f"Your domain's scope summary from the root ADR:\n> {scope_summary}\n\n"
-        "----- BEGIN INTENT -----\n"
-        f"{intent_text or '(intent.md missing)'}\n"
-        "----- END INTENT -----\n\n"
-        "----- BEGIN ROOT ADR -----\n"
-        f"{root_adr_text or '(000-system.md missing)'}\n"
-        "----- END ROOT ADR -----"
+        f"{intent_line}\n"
+        f"{root_adr_line}\n"
         + prior_answer_block
         + standin_hint
         + "\n\nGrill the user (or freeform standin) until you can write a "

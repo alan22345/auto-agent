@@ -51,8 +51,27 @@ class ClaudeCLIProvider(LLMProvider):
         self._home_dir = home_dir
 
     def set_session(self, session_id: str, resume: bool = False) -> None:
-        """Configure session for multi-phase tasks."""
-        self._session_id = session_id
+        """Configure session for multi-phase tasks.
+
+        Claude CLI requires ``--session-id <uuid>`` to be a valid UUID and
+        rejects anything else instantly — which the rotate-recovery doesn't
+        catch (it only triggers on "already in use"). A non-UUID caller
+        leaks ``[ERROR] CLI exited N`` back as the model response and trips
+        downstream emptiness checks (task 28, 2026-05-27). Coerce non-UUID
+        IDs to a deterministic UUID5 so the (caller, label) mapping stays
+        stable and ``--resume`` still works for the same logical session.
+        """
+        try:
+            uuid.UUID(session_id)
+            coerced = session_id
+        except (TypeError, ValueError, AttributeError):
+            coerced = str(uuid.uuid5(uuid.NAMESPACE_URL, f"claude-cli-{session_id}"))
+            log.warning(
+                "ClaudeCLIProvider received non-UUID session_id %r; coerced to %s",
+                session_id,
+                coerced,
+            )
+        self._session_id = coerced
         self._resume = resume
 
     async def complete(
@@ -76,11 +95,40 @@ class ClaudeCLIProvider(LLMProvider):
                 stop_reason="error",
             )
 
-        output = await self._run_cli(prompt)
+        import json as _json
+
+        raw = await self._run_cli(prompt)
+        text = raw
+        usage = TokenUsage()
+        try:
+            envelope = _json.loads(raw)
+            if isinstance(envelope, dict):
+                # Final-result envelope shape:
+                # {"type":"result","result":"...","usage":{"input_tokens":N,"output_tokens":M, ...}}
+                result_text = envelope.get("result")
+                if isinstance(result_text, str):
+                    text = result_text
+                u = envelope.get("usage")
+                if isinstance(u, dict):
+                    in_tok = int(u.get("input_tokens") or 0)
+                    out_tok = int(u.get("output_tokens") or 0)
+                    # Cache reads are billed at a fraction; we surface them as input
+                    # tokens for now (UsageSink doesn't distinguish yet).
+                    cache_read = int(u.get("cache_read_input_tokens") or 0)
+                    usage = TokenUsage(
+                        input_tokens=in_tok + cache_read,
+                        output_tokens=out_tok,
+                    )
+        except (ValueError, TypeError):
+            # Non-JSON output (older Claude Code, or an error path). Surface the
+            # raw text and leave usage at zero — emit_usage_event will record a
+            # zero-token event rather than crash.
+            pass
+
         return LLMResponse(
-            message=Message(role="assistant", content=output),
+            message=Message(role="assistant", content=text),
             stop_reason="end_turn",
-            usage=TokenUsage(),  # CLI doesn't report token usage
+            usage=usage,
         )
 
     async def count_tokens(
@@ -105,7 +153,7 @@ class ClaudeCLIProvider(LLMProvider):
         stdin path has no practical ceiling (Linux pipe buffer is 64KB but
         ``communicate(input=...)`` drains it as the CLI reads).
         """
-        cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+        cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
 
         if self._session_id:
             if self._resume:
@@ -166,7 +214,8 @@ class ClaudeCLIProvider(LLMProvider):
             self._session_id = str(uuid.uuid4())
             log.warning(
                 "Claude CLI session %s already in use; rotated to %s and retrying",
-                stale, self._session_id,
+                stale,
+                self._session_id,
             )
             output, errors, returncode = await self._invoke_cli_once(prompt)
             if returncode is None:

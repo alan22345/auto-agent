@@ -24,8 +24,19 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_gap_fix_resumes_persisted_session(tmp_path: Path) -> None:
-    """The architect's persisted Session is loaded and resume=True passed in."""
+async def test_gap_fix_runs_architect_fresh_not_resume(tmp_path: Path) -> None:
+    """Gap-fix must NOT try to --resume the architect session.
+
+    The architect's original design pass runs without a --session-id flag
+    (claude_cli provider generates its own UUID we never capture), so
+    --resume <auto-agent-session-id> fails instantly on a non-existent
+    session and the architect never writes decision.json. The pinned
+    artefacts in the checkpoint system prompt (design.md, backlog.json,
+    decision.json) plus the gap list in the user prompt give the
+    architect all the context it needs without resume.
+
+    Task 28 hit this on 2026-05-27.
+    """
 
     workspace = tmp_path
 
@@ -64,14 +75,7 @@ async def test_gap_fix_resumes_persisted_session(tmp_path: Path) -> None:
         captured_session.append(session)
         return _Agent()
 
-    # gap_fix now requires the session blob to exist on disk before passing
-    # resume=True to the architect (the in-DB session_blob_path can be stale —
-    # see harpoon #25, 2026-05-24, gap-fix architect silent failure). Provide
-    # both the session object and a real blob file at the conventional path.
-    fake_session = type("S", (), {"session_id": "trio-42"})()
-    (workspace / "trio-42.json").write_text("{}")
     with (
-        patch.object(gap_fix, "_load_architect_session", AsyncMock(return_value=fake_session)),
         patch.object(gap_fix, "create_architect_agent", fake_create_arch_agent),
         patch.object(gap_fix, "_prepare_parent_workspace", AsyncMock(return_value=str(workspace))),
         patch.object(
@@ -96,8 +100,8 @@ async def test_gap_fix_resumes_persisted_session(tmp_path: Path) -> None:
         )
 
     assert decision["action"] == "dispatch_new"
-    assert captured_session == [fake_session], "architect session was not resumed"
-    assert any(captured_resume), "agent.run must be called with resume=True"
+    assert captured_session == [None], "architect must run fresh, not resume"
+    assert captured_resume == [False], "agent.run must be called with resume=False"
     assert decision.get("items") or decision.get("payload", {}).get("items")
 
 

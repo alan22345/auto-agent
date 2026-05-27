@@ -46,6 +46,9 @@ async def resume_all_trio_parents() -> None:
                     select(Task).where(
                         or_(
                             Task.status == TaskStatus.TRIO_EXECUTING,
+                            # Freeform tasks parked at the design gate need
+                            # re-entry so the standin can fire; non-freeform
+                            # tasks legitimately wait for a human verdict.
                             (Task.status == TaskStatus.AWAITING_DESIGN_APPROVAL)
                             & (Task.freeform_mode.is_(True)),
                             Task.status == TaskStatus.ARCHITECT_BACKLOG_EMIT,

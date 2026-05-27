@@ -157,8 +157,6 @@ async def run(task: Task) -> dict[str, Any]:
         )
         return {"status": "all_complete", "results": []}
 
-    intent_text = _read_text(os.path.join(workspace, INTENT_PATH))
-
     start_idx = _get_current_domain_idx(task)
     if start_idx < 0:
         start_idx = 0
@@ -225,7 +223,7 @@ async def run(task: Task) -> dict[str, Any]:
 
         grill_summary_rel = domain_grill_path(idx, slug)
         grill_summary_abs = os.path.join(workspace, grill_summary_rel)
-        grill_summary_text = _read_text(grill_summary_abs)
+        grill_summary_present = os.path.isfile(grill_summary_abs)
 
         # -- Collect repo-secret state so the prompt can show what's already set.
         workspace_path = _workspace_as_path(workspace)
@@ -256,28 +254,33 @@ async def run(task: Task) -> dict[str, Any]:
             already_declared=already_declared,
         )
 
+        grill_hint = (
+            f"Read `{grill_summary_rel}` — it is authoritative for this domain "
+            "and is the user's voice. Where it conflicts with your instinct, "
+            "follow the grill summary."
+            if grill_summary_present
+            else f"`{grill_summary_rel}` is missing — fall back to the scope summary below."
+        )
+
         prompt = (
             f"You are the domain architect for **{name}** "
             f"(slug `{slug}`, index {idx}).\n\n"
-            "The root ADR placed this domain in the system as:\n\n"
-            "----- BEGIN ROOT ADR -----\n"
-            f"{root_adr_md}\n"
-            "----- END ROOT ADR -----\n\n"
-            "----- BEGIN INTENT -----\n"
-            f"{intent_text or '(intent.md missing)'}\n"
-            "----- END INTENT -----\n\n"
-            "----- BEGIN DOMAIN GRILL SUMMARY (authoritative for this domain) -----\n"
-            f"{grill_summary_text or '(grill summary missing — fall back to root scope_summary)'}\n"
-            "----- END DOMAIN GRILL SUMMARY -----\n\n"
+            f"Read `{ROOT_ADR_PATH}` for the system decomposition and "
+            f"`{INTENT_PATH}` for the original user intent.\n\n"
+            f"{grill_hint}\n\n"
             f"Your domain's scope summary from the root ADR:\n"
             f"> {domain.get('scope_summary') or ''}\n\n"
-            "Treat the grill summary as the user's voice. Where it conflicts "
-            "with your instinct, follow the grill summary. Write the domain "
-            f"ADR via the `submit-domain-adr` skill. Target path: `{target_rel}`."
+            "Write the domain ADR via the `submit-domain-adr` skill. "
+            f"Target path: `{target_rel}`."
         )
 
+        # Allocate a per-domain session_id so validation retries below
+        # (and the secrets-manifest retry) actually --resume the prior CLI
+        # session. See plans/2026-05-26-scaffold-token-savings.md Phase 2.
+        session_id = f"scaffold-{task.id}-domain-architect-{slug}"
         agent = create_agent(
             workspace=workspace,
+            session_id=session_id,
             task_id=task.id,
             task_description=task.description or "",
             repo_name=task.repo.name if task.repo else None,

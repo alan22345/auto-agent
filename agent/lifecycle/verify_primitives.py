@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib as _hashlib
 import json as _json
 import os
 import re
@@ -565,25 +566,63 @@ async def _judge_screenshot(
     )
 
 
-async def inspect_ui(
-    *,
-    route: str,
-    intent: str,
-    base_url: str,
-) -> UIResult:
-    """Screenshot ``base_url + route`` and ask the model to PASS/FAIL it.
+# Module-level cache for inspect_ui verdicts.
+# Key: SHA-256 of f"{route}\x00{intent}\x00<screenshot-bytes>".
+# Value: a UIResult (same shape inspect_ui returns).
+# Soft-capped at _INSPECT_UI_CACHE_MAX entries; oldest insertion evicted on
+# overflow (insertion order via dict). The cache is keyed on the screenshot
+# bytes so a pixel-different render (i.e. the UI actually changed) misses
+# and re-judges.
+_INSPECT_UI_CACHE: dict[str, UIResult] = {}
+_INSPECT_UI_CACHE_MAX = 256
 
-    Gracefully degrades:
-      - Playwright import failure → ``UIResult(ok=False, reason="playwright_not_installed")``.
-      - LLM judge errors (parse failure, network) → ``UIResult(ok=False, reason="judge_error: <detail>")``.
+
+def _inspect_ui_cache_key(route: str, intent: str, screenshot: bytes) -> str:
+    h = _hashlib.sha256()
+    h.update(route.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(intent.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(screenshot)
+    return h.hexdigest()
+
+
+async def _capture_route_screenshot(
+    *, route: str, base_url: str
+) -> tuple[bytes | None, str | None]:
+    """Capture ``base_url + route`` as PNG bytes.
+
+    Returns ``(screenshot, None)`` on success, ``(None, reason)`` on
+    failure. ``reason`` is ``"playwright_not_installed"`` when the
+    Playwright import fails, or ``"screenshot_error: <detail>"`` for
+    any other capture error. Returning the reason inline (rather than
+    via a module-level side channel) makes concurrent calls safe.
     """
     url = base_url.rstrip("/") + "/" + route.lstrip("/")
     try:
-        screenshot = await _screenshot_route(url=url)
+        return await _screenshot_route(url=url), None
     except ImportError:
-        return UIResult(ok=False, reason="playwright_not_installed")
+        return None, "playwright_not_installed"
     except Exception as exc:
-        return UIResult(ok=False, reason=f"screenshot_error: {exc}")
+        return None, f"screenshot_error: {exc}"
+
+
+async def _vision_judge_screenshot(
+    *,
+    route: str,
+    intent: str,
+    screenshot: bytes | None,
+    capture_error: str | None = None,
+) -> UIResult:
+    """One vision-LLM call returning a :class:`UIResult`.
+
+    When ``screenshot is None``, returns the graceful-degrade verdict
+    (no LLM call) using ``capture_error`` as the reason — preserves the
+    original :func:`inspect_ui` behaviour for the Playwright-not-installed
+    / capture-failed paths.
+    """
+    if screenshot is None:
+        return UIResult(ok=False, reason=capture_error or "playwright_not_installed")
 
     try:
         verdict_payload = await _judge_screenshot(
@@ -599,6 +638,51 @@ async def inspect_ui(
     if verdict == "PASS":
         return UIResult(ok=True, reason=reason or "looks correct")
     return UIResult(ok=False, reason=reason or "verdict=FAIL")
+
+
+async def inspect_ui(
+    *,
+    route: str,
+    intent: str,
+    base_url: str,
+) -> UIResult:
+    """Screenshot ``base_url + route`` and ask the model to PASS/FAIL it.
+
+    Cached by ``(route, intent, screenshot-bytes)`` hash — a second call
+    with identical inputs short-circuits the vision-LLM. This matters for
+    the scaffold parent, which loops final-verification up to
+    ``MAX_FINAL_VERIFY_ROUNDS`` (=3) times; without the cache every route
+    pays a vision call per round even when the UI hasn't changed.
+
+    Gracefully degrades:
+      - Playwright import failure → ``UIResult(ok=False, reason="playwright_not_installed")``.
+      - LLM judge errors (parse failure, network) → ``UIResult(ok=False, reason="judge_error: <detail>")``.
+    """
+    screenshot, capture_error = await _capture_route_screenshot(route=route, base_url=base_url)
+    if screenshot is None:
+        # Playwright unavailable / capture failed — preserve existing behaviour.
+        # Do NOT cache these: a missing dependency may be installed mid-run,
+        # and a transient capture error should be retried on the next round.
+        return await _vision_judge_screenshot(
+            route=route, intent=intent, screenshot=None, capture_error=capture_error
+        )
+
+    cache_key = _inspect_ui_cache_key(route, intent, screenshot)
+    cached = _INSPECT_UI_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = await _vision_judge_screenshot(route=route, intent=intent, screenshot=screenshot)
+    # Soft-cap: evict oldest insertion when over the limit. dict preserves
+    # insertion order in Python 3.7+, so iter(...) gives us the oldest key.
+    if len(_INSPECT_UI_CACHE) >= _INSPECT_UI_CACHE_MAX:
+        try:
+            oldest = next(iter(_INSPECT_UI_CACHE))
+            _INSPECT_UI_CACHE.pop(oldest, None)
+        except StopIteration:
+            pass
+    _INSPECT_UI_CACHE[cache_key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------

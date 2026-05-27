@@ -20,6 +20,8 @@ Five behaviours pinned here:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -128,6 +130,133 @@ async def test_finalize_design_reads_skill_written_file(tmp_path: Path) -> None:
 
     _, kwargs = transition_mock.call_args
     assert "Skill-written design" in kwargs["design_md"]
+
+
+# ---------------------------------------------------------------------------
+# 2b. finalize_design commits design.md so it survives a workspace re-prep
+# that runs `git reset --hard origin/<base_branch>`.
+#
+# Root cause of task-28 blockage: clone_repo's reuse path resets to
+# origin/<base_branch> before re-checking out the integration branch. If
+# the architect wrote design.md but never committed it, the reset wipes
+# the file. The gate then approves whatever .auto-agent/design.md
+# happens to live in main — often a leftover from a prior merged PR.
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> str:
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+    )
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def _seed_repo_with_stale_design(repo: Path, stale_design: str) -> None:
+    """Init a repo on main with a pre-existing .auto-agent/design.md.
+
+    Models the iot-apartment-simulator state: a prior task committed
+    .auto-agent/design.md to main, and a new task's branch is cut off main.
+    Without the fix, the architect's overwrite of design.md is a modified
+    tracked file — and `git reset --hard main` reverts it to the stale
+    content.
+    """
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / ".auto-agent").mkdir()
+    (repo / ".auto-agent" / "design.md").write_text(stale_design)
+    _git(repo, "add", ".auto-agent/design.md")
+    _git(repo, "commit", "-q", "-m", "leftover from prior task")
+
+
+@pytest.mark.asyncio
+async def test_finalize_design_commits_so_design_survives_workspace_reset(
+    tmp_path: Path,
+) -> None:
+    from agent.lifecycle.trio import design_approval
+    from agent.lifecycle.workspace_paths import DESIGN_PATH
+
+    # Stale leftover on main mimics task 5's design.md committed to the
+    # iot-apartment-simulator main branch.
+    _seed_repo_with_stale_design(
+        tmp_path,
+        "<!-- auto-agent: task_id=5 -->\n\n# Old task 5 design\n",
+    )
+    _git(tmp_path, "checkout", "-q", "-b", "auto-agent/task-42")
+
+    transition_mock = AsyncMock()
+    with patch.object(design_approval, "transition_task", transition_mock):
+        await design_approval.finalize_design(
+            task_id=42,
+            workspace=str(tmp_path),
+            design_text="# Task 42 design\n\nbody for task 42\n",
+        )
+
+    # Simulate the workspace re-prep that wiped design.md in production:
+    # clone_repo reuses the workspace, resets to origin/<base>, then
+    # create_branch re-checks out the integration branch.
+    _git(tmp_path, "checkout", "-q", "main")
+    _git(tmp_path, "reset", "--hard", "main")
+    _git(tmp_path, "checkout", "-q", "auto-agent/task-42")
+
+    target = tmp_path / DESIGN_PATH
+    assert target.is_file(), "design.md must survive workspace re-prep"
+    body = target.read_text()
+    assert "Task 42 design" in body, (
+        f"design.md was reverted to the stale main-branch content: {body!r}"
+    )
+    assert "Old task 5 design" not in body
+
+
+@pytest.mark.asyncio
+async def test_finalize_design_commits_skill_written_file(
+    tmp_path: Path,
+) -> None:
+    """When the architect wrote design.md via the ``submit-design`` skill
+    (design_text=None), finalize_design must still commit the on-disk file
+    so it survives a workspace re-prep against a main branch that carries
+    a stale design.md from a prior task.
+    """
+    from agent.lifecycle.trio import design_approval
+    from agent.lifecycle.workspace_paths import DESIGN_PATH
+
+    _seed_repo_with_stale_design(
+        tmp_path,
+        "<!-- auto-agent: task_id=5 -->\n\n# Old task 5 design\n",
+    )
+    _git(tmp_path, "checkout", "-q", "-b", "auto-agent/task-99")
+
+    # Skill wrote the file directly (modifies the tracked file from main).
+    (tmp_path / DESIGN_PATH).write_text(
+        "<!-- auto-agent: task_id=99 -->\n\n# Skill-written design for 99\n"
+    )
+
+    transition_mock = AsyncMock()
+    with patch.object(design_approval, "transition_task", transition_mock):
+        await design_approval.finalize_design(
+            task_id=99,
+            workspace=str(tmp_path),
+            design_text=None,
+        )
+
+    _git(tmp_path, "checkout", "-q", "main")
+    _git(tmp_path, "reset", "--hard", "main")
+    _git(tmp_path, "checkout", "-q", "auto-agent/task-99")
+
+    body = (tmp_path / DESIGN_PATH).read_text()
+    assert "Skill-written design for 99" in body
+    assert "Old task 5 design" not in body
 
 
 # ---------------------------------------------------------------------------

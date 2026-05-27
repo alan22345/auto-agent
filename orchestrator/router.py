@@ -184,7 +184,7 @@ AREA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$")
 
 class CreateTaskRequest(BaseModel):
     title: str = Field(max_length=256)
-    description: str = Field(default="", max_length=10000)
+    description: str = ""
     source: TaskSource = TaskSource.MANUAL
     source_id: str = Field(default="", max_length=512)
     repo_name: str | None = Field(default=None, max_length=256)
