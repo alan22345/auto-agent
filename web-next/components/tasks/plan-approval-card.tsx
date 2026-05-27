@@ -1,11 +1,13 @@
 'use client';
 import { useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useApprovePlan, useGateArtefact } from '@/hooks/useGateApproval';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 // ADR-015 §2 Phase 12 — design/plan approval surface.
 //
@@ -35,6 +37,9 @@ export function PlanApprovalCard({ taskId }: { taskId: number }) {
   const [comments, setComments] = useState('');
   const [submitting, setSubmitting] = useState<'approved' | 'rejected' | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  // Collapse the markdown by default so the chat below stays visible —
+  // the design doc can be very long (architecture tables etc).
+  const [bodyOpen, setBodyOpen] = useState(false);
 
   async function submit(verdict: 'approved' | 'rejected') {
     if (submitting) return;
@@ -80,14 +85,28 @@ export function PlanApprovalCard({ taskId }: { taskId: number }) {
 
   return (
     <div className="rounded border bg-muted/30">
-      <div className="border-b px-3 py-2">
-        <div className="text-sm font-medium">{heading.title}</div>
-        <div className="text-[11px] text-muted-foreground">{heading.sub}</div>
-        <div className="mt-0.5 text-[10px] text-muted-foreground">
-          <code>{data.path}</code>
-        </div>
-      </div>
-      <div className="prose prose-sm max-h-[50vh] max-w-none overflow-y-auto px-3 pb-3 pt-2 text-xs leading-relaxed">
+      <button
+        type="button"
+        onClick={() => setBodyOpen((v) => !v)}
+        className="flex w-full items-start gap-1 border-b px-3 py-2 text-left hover:bg-muted/50"
+      >
+        <span className="mt-0.5 shrink-0">
+          {bodyOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </span>
+        <span className="flex-1">
+          <span className="block text-sm font-medium">{heading.title}</span>
+          <span className="block text-[11px] text-muted-foreground">{heading.sub}</span>
+          <span className="mt-0.5 block text-[10px] text-muted-foreground">
+            <code>{data.path}</code>
+          </span>
+        </span>
+      </button>
+      <div
+        className={cn(
+          'prose prose-sm max-h-[40vh] max-w-none overflow-y-auto px-3 pb-3 pt-2 text-xs leading-relaxed',
+          !bodyOpen && 'hidden',
+        )}
+      >
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.body}</ReactMarkdown>
       </div>
       <div className="space-y-2 border-t bg-background/60 p-3">

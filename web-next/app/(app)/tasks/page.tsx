@@ -45,7 +45,7 @@ export default function TasksPage() {
           <TaskList tasks={visibleTasks} selectedId={selectedId} onSelect={setSelectedId} />
         </div>
       </div>
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
         {selected ? (
           <>
             <div className="border-b p-3 text-sm font-medium">{selected.title}</div>

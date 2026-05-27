@@ -514,7 +514,12 @@ async def _advance_through_design_gate(parent: Task) -> bool:
         await s.commit()
     await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
     await architect.run_design(parent.id)
-    return False
+    # The design pass parked the task at AWAITING_DESIGN_APPROVAL. Re-enter
+    # the gate function so branch (B) gets a chance to fire the freeform
+    # standin in this same invocation — otherwise the task waits for
+    # external re-entry (on_design_approved fires only AFTER approval, so
+    # without this recursion a fresh freeform task hangs at the gate).
+    return await _advance_through_design_gate(parent)
 
 
 async def _try_freeform_design_standin(

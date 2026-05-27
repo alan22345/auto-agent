@@ -25,7 +25,21 @@ async def resume_all_trio_parents() -> None:
 
     async with async_session() as s:
         rows = (
-            (await s.execute(select(Task).where(Task.status == TaskStatus.TRIO_EXECUTING)))
+            (
+                await s.execute(
+                    select(Task).where(
+                        Task.status.in_(
+                            [
+                                TaskStatus.TRIO_EXECUTING,
+                                # Freeform tasks parked at the design gate
+                                # need re-entry so the standin can fire;
+                                # there is no other hook on this state.
+                                TaskStatus.AWAITING_DESIGN_APPROVAL,
+                            ]
+                        )
+                    )
+                )
+            )
             .scalars()
             .all()
         )
