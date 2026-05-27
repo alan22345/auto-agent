@@ -1390,6 +1390,28 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
 
     if not new_items:
         return
+
+    # Fingerprint id:null arrivals so the next stall has a trail back to
+    # the source (architect skill vs. some other writer). Captures title
+    # + key set per offending item so a single grep finds the emitter.
+    idless = [
+        {
+            "index": i,
+            "title": str(it.get("title", ""))[:80],
+            "keys": sorted(it.keys()),
+            "id_repr": repr(it.get("id")),
+        }
+        for i, it in enumerate(new_items)
+        if not isinstance(it.get("id"), str) or not it.get("id", "").strip()
+    ]
+    if idless:
+        log.warning(
+            "trio.parent.append_idless_items",
+            parent_id=parent_id,
+            count=len(idless),
+            items=idless,
+        )
+
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])

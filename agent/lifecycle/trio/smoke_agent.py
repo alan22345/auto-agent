@@ -231,6 +231,7 @@ def _build_prompt(
 
 
 _AUTO_ROUTE_CAP = 20  # don't curl more than this many routes per run
+_ROUTE_BLOCK_CHAR_CAP = 6000  # hard ceiling on the prompt block size
 
 
 async def _run_auto_route_checks(
@@ -322,7 +323,12 @@ async def _run_auto_route_checks(
             if body_preview:
                 line += f" body={body_preview!r}"
             lines.append(line)
-        return ("\n".join(lines), failures)
+        block = "\n".join(lines)
+        if len(block) > _ROUTE_BLOCK_CHAR_CAP:
+            block = (
+                block[:_ROUTE_BLOCK_CHAR_CAP] + f"\n… [truncated at {_ROUTE_BLOCK_CHAR_CAP} chars]"
+            )
+        return (block, failures)
     except Exception as exc:
         log.warning(
             "trio.smoke_agent.auto_route_checks_crashed",

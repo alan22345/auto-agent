@@ -53,24 +53,23 @@ async def test_subprocess_starts_new_session():
 
 @pytest.mark.asyncio
 async def test_killpg_runs_on_timeout():
-    """On timeout, the process group is SIGKILLed before returning."""
+    """On timeout, the process group is SIGKILLed before returning.
+
+    We simulate the timeout by having ``proc.communicate`` raise
+    ``TimeoutError`` directly. ``asyncio.wait_for`` propagates that to
+    the ``except TimeoutError`` branch in ``_invoke_cli_once`` — no
+    need to patch ``wait_for`` itself, which would be broader than the
+    behavior under test.
+    """
     provider = ClaudeCLIProvider(timeout=1)
     fake_proc = MagicMock()
     fake_proc.pid = 22222
-    # First communicate blocks past the deadline; second (after kill) returns.
+    # First communicate raises (the wait_for timeout); second (after kill) returns.
     fake_proc.communicate = AsyncMock(side_effect=[TimeoutError(), (b"", b"")])
     fake_proc.returncode = None
 
-    async def fake_wait_for(coro, timeout):
-        # Drain the coroutine so AsyncMock advances side_effect.
-        try:
-            return await coro
-        except TimeoutError:
-            raise
-
     with (
         patch("asyncio.create_subprocess_exec", AsyncMock(return_value=fake_proc)),
-        patch("asyncio.wait_for", side_effect=fake_wait_for),
         patch("agent.llm.claude_cli._killpg") as killpg,
     ):
         _out, _err, rc = await provider._invoke_cli_once("hi")

@@ -36,12 +36,26 @@ def _killpg(pid: int | None) -> None:
     already gone (no leader, no descendants) — ``ProcessLookupError`` is
     swallowed. Used to nuke detached children (smoke-agent dev servers)
     that claude spawned and didn't reap.
+
+    Pid-recycle guard: we only signal when ``getpgid(pid) == pid`` —
+    i.e. the original process (which we spawned with
+    ``start_new_session=True``, making it its own group leader) is still
+    around. If the kernel has recycled ``pid`` between claude's exit and
+    this call, the new process is almost never its own group leader (it
+    would have had to ``setsid`` itself), so the check fails and we
+    skip the signal. The narrow remaining race — recycled pid that
+    happens to be a session leader of an unrelated group — is
+    theoretical; if it ever bites we'll see it in the logs.
     """
     if pid is None:
         return
     try:
         pgid = os.getpgid(pid)
     except (ProcessLookupError, PermissionError):
+        return
+    if pgid != pid:
+        # Original leader is gone; whatever's at this pid now is some
+        # other process's child, not the claude we spawned. Don't signal.
         return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, signal.SIGKILL)
