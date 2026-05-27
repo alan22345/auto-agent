@@ -84,14 +84,21 @@ async def test_open_integration_pr_pushes_then_creates_with_workspace_cwd():
 
     assert url == "https://github.com/o/r/pull/9"
 
+    # The strip step ("git ls-files .auto-agent") may fire before push — it's
+    # a precondition that runs but is a no-op when nothing is tracked. Filter
+    # it out so this test focuses on the push → PR ordering.
+    relevant = [
+        (argv, kw) for argv, kw in calls if argv[0:2] not in (("git", "ls-files"),)
+    ]
+
     # git push fires first, with the workspace cwd and the branch name.
-    push_call, push_kw = calls[0]
+    push_call, push_kw = relevant[0]
     assert push_call[0:2] == ("git", "push")
     assert "auto-agent/parallel-universe-screen-7" in push_call
     assert push_kw["cwd"] == "/tmp/ws/7"
 
     # gh pr create fires after, also with the workspace cwd.
-    pr_call, pr_kw = calls[1]
+    pr_call, pr_kw = relevant[1]
     assert pr_call[0:3] == ("gh", "pr", "create")
     assert pr_kw["cwd"] == "/tmp/ws/7"
     assert "--head" in pr_call

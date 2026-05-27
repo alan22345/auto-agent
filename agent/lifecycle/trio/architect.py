@@ -111,6 +111,7 @@ def create_architect_agent(
         base_prompt,
         ws_root,
         slice_name=slice_name,
+        task_id=task_id,
     )
     return agent
 
@@ -441,29 +442,48 @@ def _result_tool_calls(result: Any, agent: Any) -> list:
 async def _emit_clarification(
     *,
     parent_task_id: int,
-    agent,  # AgentLoop
+    agent,  # AgentLoop — retained for backwards-compat; messages live on run_result.
     workspace,
     output: str,
     tool_calls: list[dict],
     question: str,
     phase: ArchitectPhase,
+    run_result=None,  # AgentResult from agent.run() — required for session persistence.
 ) -> None:
     """Persist the AgentLoop session, write the question row, transition
     the parent to AWAITING_CLARIFICATION, publish *_NEEDED.
 
     Called from run_initial / checkpoint / run_revision when the architect
     output contains an awaiting_clarification JSON block.
+
+    ``run_result`` must be the AgentResult returned by ``agent.run()`` —
+    its ``messages`` / ``api_messages`` are what get persisted. The
+    earlier code accessed ``agent.messages`` directly, which never
+    existed on AgentLoop and raised AttributeError silently inside the
+    fire-and-forget orchestrator task (task 29, 2026-05-27). The bug
+    was masked because exceptions in fire-and-forget asyncio tasks were
+    swallowed; PR #59's background-task retention surfaces them now.
     """
     from agent.session import Session
     from orchestrator.state_machine import transition
     from shared.events import Event, TaskEventType, publish
 
     # 1. Persist the AgentLoop messages + api_messages so resume() can
-    #    pick up exactly where the architect left off.
+    #    pick up exactly where the architect left off. Pull from the
+    #    run result; fall back to empty if a caller hasn't been updated
+    #    yet (the resume path will just lack history, not crash).
     session_id = f"trio-{parent_task_id}"
     session_blob_dir = workspace.root if hasattr(workspace, "root") else str(workspace)
     file_session = Session(session_id=session_id, storage_dir=session_blob_dir)
-    await file_session.save(agent.messages, agent.api_messages)
+    messages = getattr(run_result, "messages", []) or []
+    api_messages = getattr(run_result, "api_messages", []) or []
+    if run_result is None:
+        log.warning(
+            "architect.clarification.missing_run_result",
+            task_id=parent_task_id,
+            phase=phase.value,
+        )
+    await file_session.save(messages, api_messages)
     # session_blob_path is the file Session.save() wrote — relative path
     # under the workspace dir so the architect.resume() side can locate it
     # from any reconstructed workspace path.
@@ -809,6 +829,7 @@ async def run_initial(parent_task_id: int) -> None:
                 tool_calls=tool_calls,
                 question=extracted["question"],
                 phase=ArchitectPhase.INITIAL,
+                run_result=run_result,
             )
             return
         backlog = extracted["items"]
@@ -849,6 +870,7 @@ async def run_initial(parent_task_id: int) -> None:
                     tool_calls=tool_calls,
                     question=clarification,
                     phase=ArchitectPhase.INITIAL,
+                    run_result=retry_result,
                 )
                 return
             backlog = _extract_backlog(retry_output)
@@ -1333,6 +1355,7 @@ async def checkpoint(
             tool_calls=tool_calls,
             question=question,
             phase=ArchitectPhase.CHECKPOINT,
+            run_result=run_result,
         )
         return decision
 
@@ -1428,6 +1451,7 @@ async def run_revision(parent_task_id: int) -> None:
             tool_calls=tool_calls,
             question=clarification,
             phase=ArchitectPhase.REVISION,
+            run_result=run_result,
         )
         return
 
@@ -1603,6 +1627,7 @@ async def resume(parent_task_id: int) -> None:
             tool_calls=tool_calls,
             question=clarification,
             phase=phase_for_resume,
+            run_result=run_result,
         )
         return
 

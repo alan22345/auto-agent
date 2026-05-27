@@ -8,7 +8,10 @@ This gives a clean baseline to compare against direct API providers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
 import uuid
 
 from agent.llm.base import LLMProvider
@@ -26,6 +29,36 @@ log = logging.getLogger(__name__)
 # detects this and rotates to a fresh UUID so the caller doesn't get a
 # CLI-error string back as if it were an LLM response.
 _SESSION_ALREADY_IN_USE = "already in use"
+
+
+def _killpg(pid: int | None) -> None:
+    """SIGKILL the process group led by ``pid``. Safe if the group is
+    already gone (no leader, no descendants) — ``ProcessLookupError`` is
+    swallowed. Used to nuke detached children (smoke-agent dev servers)
+    that claude spawned and didn't reap.
+
+    Pid-recycle guard: we only signal when ``getpgid(pid) == pid`` —
+    i.e. the original process (which we spawned with
+    ``start_new_session=True``, making it its own group leader) is still
+    around. If the kernel has recycled ``pid`` between claude's exit and
+    this call, the new process is almost never its own group leader (it
+    would have had to ``setsid`` itself), so the check fails and we
+    skip the signal. The narrow remaining race — recycled pid that
+    happens to be a session leader of an unrelated group — is
+    theoretical; if it ever bites we'll see it in the logs.
+    """
+    if pid is None:
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return
+    if pgid != pid:
+        # Original leader is gone; whatever's at this pid now is some
+        # other process's child, not the claude we spawned. Don't signal.
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 class ClaudeCLIProvider(LLMProvider):
@@ -161,15 +194,22 @@ class ClaudeCLIProvider(LLMProvider):
             else:
                 cmd.extend(["--session-id", self._session_id])
 
+        # ``start_new_session=True`` makes the claude child a process-group
+        # leader. Any descendants it spawns (smoke-agent dev servers — vite,
+        # uvicorn, npm, esbuild, the bash wrappers around them) inherit the
+        # group. On exit/timeout we ``killpg(SIGKILL)`` the whole group so a
+        # detached dev server can't keep ``proc.communicate()`` blocked
+        # forever. Task 28 (2026-05-27) wedged twice in one session because
+        # the smoke agent's bash kept the parent's stdio fds alive after
+        # claude itself was done. (handover: smoke-agent wedges claude)
         kwargs: dict = dict(
             cwd=self._cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         if self._home_dir is not None:
-            import os
-
             kwargs["env"] = {**os.environ, "HOME": self._home_dir}
 
         proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
@@ -178,16 +218,22 @@ class ClaudeCLIProvider(LLMProvider):
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=prompt.encode()), timeout=self._timeout
             )
+            return (
+                (stdout or b"").decode(),
+                (stderr or b"").decode(),
+                proc.returncode,
+            )
         except TimeoutError:
-            proc.kill()
-            await proc.communicate()
+            _killpg(getattr(proc, "pid", None))
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.communicate(), timeout=2.0)
             return ("", "", None)
-
-        return (
-            (stdout or b"").decode(),
-            (stderr or b"").decode(),
-            proc.returncode,
-        )
+        finally:
+            # Even on the happy path, claude may have spawned a detached
+            # process (smoke-agent dev server) that's still holding the pgid.
+            # Nuke the whole group; the claude leader has already exited so
+            # this only reaps stragglers.
+            _killpg(getattr(proc, "pid", None))
 
     async def _run_cli(self, prompt: str) -> str:
         """Run the Claude Code CLI, recovering from session-already-in-use collisions.

@@ -37,20 +37,32 @@ import pytest
 
 
 def test_assign_missing_ids_fills_blank_id_field():
-    """Items without an ``id`` (missing or empty) get auto-assigned IDs."""
+    """Items without an ``id`` (missing, empty string, or explicit None)
+    get auto-assigned IDs.
+
+    The ``None`` case matters: the architect's submit-architect-decision
+    skill writes items as JSON, and ``"id": null`` deserialises to
+    ``{"id": None}`` — a key that exists with a None value. Task 28
+    (2026-05-27) stalled because a backlog item appended via this path
+    survived with ``id: null`` and the dispatcher then dispatched it
+    with ``item_id=None`` (uuid5 of ``trio-coder-28-None``) instead of
+    a healed id.
+    """
     from agent.lifecycle.trio import _assign_missing_ids
 
     existing: list[dict] = []
     new_items = [
         {"title": "Create funnel models", "description": "..."},
         {"id": "", "title": "Create funnel repo", "description": "..."},
+        {"id": None, "title": "Gap-fix item (id: null in JSON)", "description": "..."},
         {"id": "F3", "title": "Add tests", "description": "..."},
     ]
     out = _assign_missing_ids(existing, new_items)
 
     assert out[0]["id"] == "G1"
     assert out[1]["id"] == "G2"
-    assert out[2]["id"] == "F3"  # explicit id preserved
+    assert out[2]["id"] == "G3"
+    assert out[3]["id"] == "F3"  # explicit id preserved
 
 
 def test_assign_missing_ids_skips_existing_g_indices():
@@ -101,7 +113,10 @@ def test_assign_missing_ids_renames_colliding_explicit_ids():
     assert out_ids[0] != "G1", out
     assert all((o.get("id") or "").strip() for o in out)
     existing_ids = {e["id"] for e in existing}
-    assert existing_ids.isdisjoint(set(out_ids)) or existing_ids - set(out_ids) == existing_ids - {"T1", "G1"}
+    assert existing_ids.isdisjoint(set(out_ids)) or existing_ids - set(out_ids) == existing_ids - {
+        "T1",
+        "G1",
+    }
     # Every id ends up unique across existing + new.
     assert len(set(existing_ids | set(out_ids))) == len(existing) + len(out)
 
@@ -172,9 +187,7 @@ async def test_append_backlog_items_assigns_ids_to_idless_items():
 
     class FakeTask:
         def __init__(self) -> None:
-            self.trio_backlog: list[dict] = [
-                {"id": "T1", "title": "x", "status": "done"}
-            ]
+            self.trio_backlog: list[dict] = [{"id": "T1", "title": "x", "status": "done"}]
 
     fake_task = FakeTask()
 

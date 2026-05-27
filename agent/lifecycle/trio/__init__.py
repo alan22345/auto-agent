@@ -94,6 +94,72 @@ async def _resolve_target_branch(parent_id: int) -> str:
         return cfg.dev_branch or "main"
 
 
+async def _strip_auto_agent_dir(workspace_path: str, *, parent_id: int) -> None:
+    """Remove ``.auto-agent/`` from the integration branch's tracked
+    files and amend a single cleanup commit.
+
+    Why: the design phase calls ``_commit_design_md`` mid-flow so the
+    file survives a ``git reset --hard origin/<base>`` between phases.
+    By integration time that reason is gone, but the commit is still
+    in the branch's history and would be merged into ``main`` along
+    with the rest of the PR — contaminating the base branch with
+    per-task workspace artefacts. The next task that clones ``main``
+    inherits a stale ``design.md`` and the architect reads it as its
+    own contract (task 29, 2026-05-27).
+
+    Idempotent: silently no-op when ``.auto-agent/`` isn't tracked.
+    Failure here is non-fatal — we log and continue so a workspace
+    quirk can't block PR creation.
+    """
+    from agent import sh
+
+    ls = await sh.run(
+        ["git", "ls-files", ".auto-agent"],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    tracked = (ls.stdout or "").strip()
+    if not tracked:
+        return
+
+    rm_res = await sh.run(
+        ["git", "rm", "-r", "--cached", "--ignore-unmatch", ".auto-agent"],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    if rm_res.failed:
+        log.warning(
+            "trio.parent.strip_auto_agent_failed",
+            parent_id=parent_id,
+            stderr=(rm_res.stderr or "")[:400],
+        )
+        return
+
+    commit_res = await sh.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            "chore: strip .auto-agent/ workspace artefacts from integration",
+        ],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    if commit_res.failed:
+        log.warning(
+            "trio.parent.strip_auto_agent_commit_failed",
+            parent_id=parent_id,
+            stderr=(commit_res.stderr or "")[:400],
+        )
+        return
+
+    log.info(
+        "trio.parent.stripped_auto_agent_dir",
+        parent_id=parent_id,
+        files_stripped=len(tracked.splitlines()),
+    )
+
+
 async def _open_integration_pr(parent: Task, target_branch: str) -> str:
     """Open the final ``<integration_branch> → target_branch`` PR via gh CLI.
 
@@ -144,7 +210,17 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
 
     gh_env = {"GH_TOKEN": token} if token else {}
 
-    # 1. Push the integration branch upstream. Prior to Phase 7.7 this
+    # 1a. Strip ``.auto-agent/`` from the integration branch before push.
+    #    The design phase commits ``design.md`` mid-flow (so workspace
+    #    resets don't lose it) but by integration time the trio is
+    #    done — committing the per-task workspace artefacts into the
+    #    PR pollutes ``main`` and causes the NEXT task's clone to
+    #    inherit a stale design (task 29, 2026-05-27: PR #53 merged
+    #    task-28's counterfactual ``design.md`` into main, so task 29's
+    #    architect read it as its own contract).
+    await _strip_auto_agent_dir(workspace_path, parent_id=parent.id)
+
+    # 1b. Push the integration branch upstream. Prior to Phase 7.7 this
     #    step was missing — the production run for task 1 lost the
     #    integration commits because nothing pushed them.
     push_res = await sh.run(
@@ -470,6 +546,32 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     # Already has a backlog → idempotent re-entry; preserve dispatcher
     # progress and skip both run_design + run_initial.
     if has_backlog:
+        # If the status is still ARCHITECT_BACKLOG_EMIT (the recovery
+        # hook re-entered a task whose backlog was emitted but never
+        # flipped — same drift as the run_initial path below) flip it
+        # to TRIO_EXECUTING so the per-item loop runs under the right
+        # outer state and ``trio_recovery`` can find it again on a
+        # second restart.
+        if status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+            async with async_session() as _s:
+                live2 = (
+                    await _s.execute(select(Task).where(Task.id == parent.id))
+                ).scalar_one()
+                if live2.status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+                    try:
+                        await transition(
+                            _s,
+                            live2,
+                            TaskStatus.TRIO_EXECUTING,
+                            message="trio: backlog already emitted; entering per-item loop",
+                        )
+                        await _s.commit()
+                    except Exception as exc:
+                        log.warning(
+                            "trio.parent.resume_status_flip_failed",
+                            parent_id=parent.id,
+                            error=str(exc)[:200],
+                        )
         log.info(
             "trio.parent.resume_skipping_run_initial",
             parent_id=parent.id,
@@ -519,6 +621,33 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     if status == TaskStatus.ARCHITECT_BACKLOG_EMIT or _design_md_exists(workspace_root, parent.id):
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         await architect.run_initial(parent.id)
+        # Flip the outer status from ARCHITECT_BACKLOG_EMIT to
+        # TRIO_EXECUTING so the per-item dispatch loop runs under the
+        # right outer state. Without this, the task sits at
+        # ARCHITECT_BACKLOG_EMIT for the entire build phase: the UI
+        # shows a stale label, and (more importantly) the
+        # ``trio_recovery`` hook — which only picks TRIO_EXECUTING
+        # tasks — won't resume the parent on container restart.
+        # ``run_initial`` may have already transitioned to BLOCKED
+        # (invalid JSON) or AWAITING_CLARIFICATION (clarification
+        # path); leave those alone.
+        async with async_session() as _s:
+            live3 = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            if live3.status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+                try:
+                    await transition(
+                        _s,
+                        live3,
+                        TaskStatus.TRIO_EXECUTING,
+                        message="trio: backlog emitted; entering per-item loop",
+                    )
+                    await _s.commit()
+                except Exception as exc:
+                    log.warning(
+                        "trio.parent.backlog_emit_status_flip_failed",
+                        parent_id=parent.id,
+                        error=str(exc)[:200],
+                    )
         return True
 
     # A) Fresh complex_large parent with no design.md and no backlog —
@@ -744,7 +873,9 @@ async def _try_freeform_pr_review_standin(
         return
 
     verdict = (verdict_payload or {}).get("verdict") if isinstance(verdict_payload, dict) else None
-    comments = (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+    comments = (
+        (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+    )
 
     if verdict == "approved":
         await _freeform_auto_merge_and_done(
@@ -1294,7 +1425,7 @@ def _assign_missing_ids(
             continue
         established_ids.add(item_id)
         if item_id.startswith(prefix):
-            suffix = item_id[len(prefix):]
+            suffix = item_id[len(prefix) :]
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
 
@@ -1375,10 +1506,41 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     up on the next per-item loop. Items lacking an ``id`` get one
     auto-assigned (see :func:`_assign_missing_ids`) so downstream tiebreak
     prompts always have a unique item handle.
+
+    Task 28 (2026-05-27): backlog row appended via this path showed up
+    with ``id: null`` despite ``_assign_missing_ids`` running. Root cause
+    unclear (architect skill side-effect, schema validation drift, or
+    parallel write). Belt-and-suspenders: after the append, re-run the
+    backfill so any null/duplicate ids that slip through still get
+    healed before the dispatcher picks the item up. Also warn loudly if
+    we observe null ids post-append — single grep diagnoses the next
+    stall.
     """
 
     if not new_items:
         return
+
+    # Fingerprint id:null arrivals so the next stall has a trail back to
+    # the source (architect skill vs. some other writer). Captures title
+    # + key set per offending item so a single grep finds the emitter.
+    idless = [
+        {
+            "index": i,
+            "title": str(it.get("title", ""))[:80],
+            "keys": sorted(it.keys()),
+            "id_repr": repr(it.get("id")),
+        }
+        for i, it in enumerate(new_items)
+        if not isinstance(it.get("id"), str) or not it.get("id", "").strip()
+    ]
+    if idless:
+        log.warning(
+            "trio.parent.append_idless_items",
+            parent_id=parent_id,
+            count=len(idless),
+            items=idless,
+        )
+
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
@@ -1389,6 +1551,15 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
             backlog.append(ni)
         p.trio_backlog = backlog
         await s.commit()
+
+    # Defensive heal: catches anything that landed with id: null despite
+    # _assign_missing_ids. Cheap (only writes when something is wrong).
+    if await _backfill_backlog_ids(parent_id):
+        log.warning(
+            "trio.parent.append_required_backfill",
+            parent_id=parent_id,
+            appended=len(new_items),
+        )
 
 
 async def _open_integration_pr_and_transition(
@@ -1458,9 +1629,7 @@ async def _open_integration_pr_and_transition(
         async with async_session() as s:
             p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             workspace = await _prepare_parent_workspace(p)
-        workspace_root = (
-            workspace.root if hasattr(workspace, "root") else str(workspace)
-        )
+        workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
         await _try_freeform_pr_review_standin(
             parent=parent, workspace_root=workspace_root, pr_url=pr_url
         )

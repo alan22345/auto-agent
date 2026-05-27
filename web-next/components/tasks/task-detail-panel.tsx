@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import type { TaskData } from '@/types/api';
 import { cn } from '@/lib/utils';
 import { AttemptsPanel } from './attempts-panel';
+import { BacklogPanel } from './backlog-panel';
 import { PlanApprovalCard } from './plan-approval-card';
 import { ArchitectAttemptsPanel } from '@/components/trio/ArchitectAttemptsPanel';
 import { GateHistoryPanel } from '@/components/trio/GateHistoryPanel';
@@ -246,6 +247,8 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
               <> · Backlog: {task.trio_backlog.filter((w) => (w as { status?: string }).status === 'done').length} / {task.trio_backlog.length} done</>
             )}
           </div>
+          <h3 className="text-xs font-medium">Backlog</h3>
+          <BacklogPanel backlog={task.trio_backlog} />
           <h3 className="text-xs font-medium">Architect activity</h3>
           <ArchitectAttemptsPanel taskId={task.id} />
           <h3 className="text-xs font-medium">Decisions (ADRs)</h3>

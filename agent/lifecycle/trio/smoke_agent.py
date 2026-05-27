@@ -75,64 +75,71 @@ _SMOKE_AGENT_MAX_TURNS = 40
 
 
 SMOKE_AGENT_SYSTEM = """\
-You are the smoke-test agent. Your only job is to actually run the
-code in this workspace and prove that the diff under review works
-end-to-end. You are NOT a code reviewer; you do not judge style or
-correctness by reading. You run the code.
+You are the smoke-test agent. Your job is to verify the diff under
+review actually runs. You are NOT a code reviewer; you do not judge
+style or correctness by reading. You exercise the code.
+
+**Dev-server lifecycle is owned by auto-agent, not by you.** Before
+this turn the orchestrator already booted the project's dev server,
+curled the affected routes, and tore it down. The route check results
+are in your prompt below — treat them as ground truth. DO NOT run
+``npm run dev``, ``vite``, ``next dev``, ``uvicorn``, ``python3
+run.py``, ``make dev`` or any other long-lived foreground command:
+your Bash tool waits for the command to exit, dev servers don't exit,
+and the whole orchestrator wedges for an hour. If your bash tool
+blocks more than ~15s on a single command, you've made a mistake —
+kill it (Ctrl-C / kill the process) and run something else.
 
 You write your verdict to ``.auto-agent/smoke_result.json`` via the
 ``submit-smoke-result`` skill before stopping. If you do not write the
 file, the orchestrator records the run as a hard fail.
 
 Your toolkit:
-- Bash — install dependencies, boot the dev server, curl routes, run
-  tests, run type-checkers, run build commands.
+- Bash — install dependencies, run the test suite, run type-checkers,
+  run build commands. **Only run commands that exit on their own.**
 - Read — inspect the diff, the design doc, package.json / pyproject /
-  Makefile to discover how to run this project.
+  Makefile to understand the project.
 
 Order of operations (use as many as apply to this diff):
 
-1. **Read ``auto-agent.smoke.yml`` if present.** It tells you the
-   project's canonical boot command, health URL, and per-route POST
-   bodies / expected response shapes. Use it.
-2. **Install dependencies.** ``pip install -e .`` / ``pip install -r
-   requirements.txt`` / ``npm install --no-audit --no-fund`` /
-   whatever the project uses. A failed install IS a smoke failure.
+1. **Read the auto-agent route-check section in this prompt.** If the
+   orchestrator booted the server and any route returned non-2xx or a
+   runtime-stub shape (null/{}/empty-list/NotImplementedError), that
+   IS a smoke failure — record it in ``failures`` and you may stop
+   after running the test suite. If routes are all 2xx, runtime
+   correctness for HTTP surfaces is already proven; move on to tests.
+2. **Install dependencies if needed.** ``pip install -e .`` / ``pip
+   install -r requirements.txt`` / ``npm install --no-audit
+   --no-fund``. A failed install IS a smoke failure. Skip if already
+   installed (idempotent).
 3. **Run the project's test suite.** ``pytest -q`` / ``npm test`` /
-   ``go test ./...``. If the suite previously passed and now fails, the
-   change broke something. ALWAYS run this if a test suite exists, even
-   when there are routes to exercise — broken tests are smoke
-   failures.
-4. **Boot the dev server** (when there is one). Pre-allocate a port,
-   set ``$PORT``, run the boot command from smoke.yml or the
-   auto-detected one (``package.json`` ``dev`` script → ``python3
-   run.py`` → ``make dev``). Wait for a health URL to return 2xx with
-   a non-empty body.
-5. **Hit each affected route.** For every route in the work item's
-   ``affected_routes`` and every route you can identify in the diff
-   (FastAPI / Flask / Next.js page.tsx etc.), curl it. Validate the
-   status code is 2xx and the body is not a runtime-stub shape
-   (``null``, ``{}``, empty list, ``NotImplementedError`` traceback).
-6. **Build / typecheck** for compiled / typed projects. ``tsc
-   --noEmit``, ``npm run build``, ``cargo build``.
-7. **Kill the dev server** when you're done. Don't leak processes.
+   ``go test ./...``. ALWAYS run this if a test suite exists — broken
+   tests are smoke failures. The test suite exits on its own; safe to
+   run in the foreground.
+4. **Build / typecheck** for compiled / typed projects. ``tsc
+   --noEmit``, ``npm run build``, ``cargo build``. Also safe in
+   foreground — they exit.
 
 Verdict rules:
 
 - ``"pass"`` — at least one *real* runtime check ran and succeeded
-  (boot + route hit, test suite green, or build/typecheck green). The
-  diff demonstrably runs.
-- ``"fail"`` — a runtime check ran and failed. Set ``failures`` to a
-  list of one-line summaries of what broke; include ``output_preview``
-  in each attempt so the next coder retry has the stderr to fix from.
+  (auto-agent's route checks all 2xx, test suite green, or
+  build/typecheck green). The diff demonstrably runs.
+- ``"fail"`` — a runtime check ran and failed: auto-agent's route
+  checks include a non-2xx or runtime-stub response, the test suite
+  failed, or build/typecheck failed. Set ``failures`` to a list of
+  one-line summaries of what broke; include ``output_preview`` in each
+  attempt so the next coder retry has the stderr to fix from.
 - ``"skipped"`` — only legal when the diff is documentation / markdown
   / comments only AND there is no test suite to run. The orchestrator
   rewrites any ``"skipped"`` you emit to ``"fail"`` by default — so if
   you are tempted to skip, run *something* (at minimum, the test
   suite). Reading the code does not count as running it.
 
-Never declare ``"pass"`` without having run at least one shell
-command. "I read the code, looks correct" is a fail.
+Never declare ``"pass"`` without either (a) reading auto-agent's route
+checks and finding them green, or (b) running at least one shell
+command (tests / build / typecheck). "I read the code, looks correct"
+is a fail.
 """
 
 
@@ -160,12 +167,17 @@ def _build_prompt(
     diff: str,
     smoke_yml: str,
     workspace_root: str,
+    route_check_block: str,
 ) -> str:
     """Compose the smoke agent's user prompt.
 
-    All four context blocks (item / design / diff / smoke.yml) are
-    pre-trimmed so the prompt stays within a sane token budget. The
+    All context blocks (item / design / diff / smoke.yml / route checks)
+    are pre-trimmed so the prompt stays within a sane token budget. The
     agent is free to re-read any of them from disk if it needs more.
+
+    ``route_check_block`` is the auto-agent-owned boot+curl summary —
+    embedded here so the agent doesn't need (and isn't allowed) to
+    boot dev servers itself. See module docstring.
     """
 
     item = item or {}
@@ -182,28 +194,158 @@ def _build_prompt(
     smoke_yml_block = (
         f"\n== auto-agent.smoke.yml (project canonical) ==\n{smoke_yml}\n"
         if smoke_yml
-        else "\n(no auto-agent.smoke.yml present — auto-detect the boot command)\n"
+        else "\n(no auto-agent.smoke.yml present)\n"
     )
 
     routes_block = (
         "\n".join(f"- {r}" for r in affected_routes)
         if affected_routes
-        else "(none declared — infer from the diff if there are any)"
+        else "(none declared on the work item)"
     )
 
     return (
         f"== Workspace ==\n{workspace_root}\n\n"
         f"== Work item ({item_id}) ==\n"
         f"Title: {item_title}\n"
-        f"Affected routes:\n{routes_block}\n\n"
+        f"Declared affected routes:\n{routes_block}\n\n"
         f"Description:\n{item_description}\n\n"
+        f"== Auto-agent route checks ==\n{route_check_block}\n\n"
         f"== Design context ==\n{design_block}\n"
         f"{smoke_yml_block}\n"
         f"== Diff under verification ==\n```diff\n{diff_block}\n```\n\n"
-        "Run the code. Write your verdict to "
+        "Verify the code. Run tests / build / typecheck as applicable. "
+        "Do NOT boot dev servers — auto-agent has already done that and "
+        "the results are above. Write your verdict to "
         "`.auto-agent/smoke_result.json` via the `submit-smoke-result` "
         "skill, then stop."
     )
+
+
+# ---------------------------------------------------------------------------
+# Auto-agent-owned dev-server lifecycle (replaces the LLM-driven boot/curl
+# /kill that wedged claude when the dev server didn't exit). The smoke
+# primitives in ``agent.lifecycle.verify_primitives`` already use
+# ``preexec_fn=os.setsid`` + ``killpg`` teardown — we just call them here
+# and embed the results in the prompt so claude only needs to interpret.
+# ---------------------------------------------------------------------------
+
+
+_AUTO_ROUTE_CAP = 20  # don't curl more than this many routes per run
+_ROUTE_BLOCK_CHAR_CAP = 6000  # hard ceiling on the prompt block size
+
+
+async def _run_auto_route_checks(
+    *,
+    workspace_root: str,
+    item: dict | None,
+    diff: str,
+    repo_id: int | None,
+) -> tuple[str, list[str]]:
+    """Boot the dev server, curl declared + inferred routes, tear down.
+
+    Returns ``(prompt_block, failures)``. ``prompt_block`` is the
+    human-readable section embedded in the smoke-agent prompt;
+    ``failures`` is a list of one-line failure summaries the caller
+    can use to short-circuit to ``verdict="fail"`` without invoking
+    claude (e.g. when the server fails to boot).
+    """
+
+    # Late imports — verify_primitives pulls in httpx/yaml/SQLAlchemy
+    # which we don't want at module-import time for the unit tests.
+    from agent.lifecycle.route_inference import infer_routes_from_diff
+    from agent.lifecycle.verify_primitives import boot_dev_server, exercise_routes
+
+    declared = list((item or {}).get("affected_routes") or [])
+    inferred = list(infer_routes_from_diff(diff or ""))
+    seen: set[str] = set()
+    routes: list[str] = []
+    for r in declared + inferred:
+        if r and r not in seen:
+            routes.append(r)
+            seen.add(r)
+        if len(routes) >= _AUTO_ROUTE_CAP:
+            break
+
+    smoke_yml_path = Path(workspace_root) / "auto-agent.smoke.yml"
+    has_smoke_yml = smoke_yml_path.is_file()
+
+    if not routes and not has_smoke_yml:
+        return (
+            "(no routes declared, none inferable from the diff, no "
+            "auto-agent.smoke.yml — auto-agent did not boot a dev "
+            "server. Runtime correctness for this diff hinges on the "
+            "test suite / build / typecheck below.)",
+            [],
+        )
+
+    handle = None
+    try:
+        handle = await boot_dev_server(workspace=workspace_root, repo_id=repo_id)
+
+        if handle.state == "disabled":
+            return (
+                "(auto-agent could not find a boot command "
+                "[auto-agent.smoke.yml absent and no package.json `dev` "
+                "script / run.py / Makefile `dev` target detected]. "
+                "No dev server was started. Verify via tests / build / "
+                "typecheck below.)",
+                [],
+            )
+
+        if handle.state == "failed":
+            reason = handle.failure_reason or "boot or health probe failed"
+            failure = f"dev server failed to boot: {reason}"
+            return (
+                f"AUTO-AGENT BOOT FAILED: {reason}. This is a smoke "
+                "failure independent of whatever you check below.",
+                [failure],
+            )
+
+        if not routes:
+            return (
+                f"Dev server booted at {handle.base_url} but no routes "
+                "to curl (no work-item affected_routes, none inferred "
+                "from diff). Verify via tests / build / typecheck.",
+                [],
+            )
+
+        results = await exercise_routes(routes, handle=handle)
+
+        failures: list[str] = []
+        lines: list[str] = [f"Dev server booted at {handle.base_url}."]
+        for route, rr in results.items():
+            tag = "OK" if rr.ok else "FAIL"
+            body_preview = (rr.body or "").strip()[:200].replace("\n", " ")
+            line = f"  [{tag}] {route} → status={rr.status}"
+            if not rr.ok:
+                line += f" reason={rr.reason}"
+                failures.append(f"route {route} returned status={rr.status} ({rr.reason})")
+            if body_preview:
+                line += f" body={body_preview!r}"
+            lines.append(line)
+        block = "\n".join(lines)
+        if len(block) > _ROUTE_BLOCK_CHAR_CAP:
+            block = (
+                block[:_ROUTE_BLOCK_CHAR_CAP] + f"\n… [truncated at {_ROUTE_BLOCK_CHAR_CAP} chars]"
+            )
+        return (block, failures)
+    except Exception as exc:
+        log.warning(
+            "trio.smoke_agent.auto_route_checks_crashed",
+            error=str(exc)[:300],
+        )
+        # A crash in the primitives mustn't break the smoke flow —
+        # claude can still run tests/build/typecheck. Surface the crash
+        # in the prompt but don't synthesise a hard failure.
+        return (
+            f"(auto-agent route check crashed: {exc!r}. Boot/curl was "
+            "not completed; rely on tests/build/typecheck below.)",
+            [],
+        )
+    finally:
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                await handle.teardown()
 
 
 def _clear_stale_result(workspace_root: str) -> None:
@@ -289,41 +431,74 @@ async def run_smoke_agent(
     repo_name: str | None = None,
     home_dir: str | None = None,
     org_id: int | None = None,
+    repo_id: int | None = None,
     task_id: int = 0,
 ) -> SmokeAgentResult:
     """Run the smoke agent over the workspace and return its verdict.
+
+    Two phases:
+
+    1. **Auto-agent route checks** (Python-side, no LLM). Boot the dev
+       server via ``boot_dev_server``, curl declared + inferred routes
+       via ``exercise_routes``, tear down via ``ServerHandle.teardown``.
+       This owns the dev-server lifecycle — the LLM is forbidden from
+       running long-lived foreground commands because claude's Bash
+       tool blocks until the command exits, wedging the orchestrator
+       (task 28, 2026-05-27).
+    2. **LLM verifier** (claude). Receives the route-check results in
+       the prompt and is responsible only for commands that exit:
+       installing deps, running the test suite, build/typecheck. Writes
+       the final verdict to ``.auto-agent/smoke_result.json``.
+
+    If the dev server fails to boot AND there are routes to check, we
+    short-circuit to ``verdict="fail"`` without invoking claude — a
+    boot failure is definitive.
 
     Args:
         workspace_root: Absolute path to the workspace where the
             builder's changes are checked out.
         item: The backlog item dict the builder just shipped. ``None``
-            when this is the final-reviewer's integration-level smoke
-            (no per-item scope).
+            when this is the final-reviewer's integration-level smoke.
         design: ``.auto-agent/design.md`` text, for context.
         diff: The unified diff being smoke-tested.
-        repo_name / home_dir / org_id / task_id: Standard plumbing
-            forwarded to ``create_agent`` — task_id≠0 enables
-            heartbeat/streaming.
+        repo_name / home_dir / org_id / repo_id / task_id: Standard
+            plumbing. ``repo_id`` is required to inject project secrets
+            into the dev-server env (ADR-019 §6); when ``None`` the
+            server boots without them.
 
     Returns:
         :class:`SmokeAgentResult` with ``verdict`` always ∈
         ``{"pass", "fail"}``.
-
-    Behaviour on missing output: the agent gets up to
-    ``_MAX_MISSING_OUTPUT_RETRIES`` attempts to write the result file.
-    If the file is still missing after the last attempt, returns
-    ``verdict="fail"`` with a clear ``summary`` so the dispatcher's
-    coder-retry loop has something concrete to feed back.
     """
 
     _clear_stale_result(workspace_root)
     smoke_yml = _smoke_yml_excerpt(workspace_root)
+
+    route_check_block, route_failures = await _run_auto_route_checks(
+        workspace_root=workspace_root,
+        item=item,
+        diff=diff,
+        repo_id=repo_id,
+    )
+
+    if route_failures:
+        # A definitive boot/curl failure short-circuits the LLM step:
+        # the diff demonstrably does not run, no test-suite victory can
+        # change that. Return now so the coder retry loop sees a clear
+        # failure reason.
+        return SmokeAgentResult(
+            verdict="fail",
+            summary=route_failures[0][:200],
+            failures=route_failures,
+        )
+
     prompt = _build_prompt(
         item=item,
         design=design,
         diff=diff,
         smoke_yml=smoke_yml,
         workspace_root=workspace_root,
+        route_check_block=route_check_block,
     )
 
     last_summary = ""

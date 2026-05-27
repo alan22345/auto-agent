@@ -77,6 +77,78 @@ async def _load_architect_session(parent_task_id: int):
     return Session(session_id=session_id, storage_dir="<placeholder>")
 
 
+# Title connectives that almost always indicate a multi-subsystem item
+# stitched into one ("Wire X + Y + Z"). Kept as lowercase word boundaries.
+_OVERSIZED_TITLE_CONNECTIVES = (" + ", " and ", " with ", " plus ")
+
+# Token thresholds for the size heuristic. Calibrated from task 28's
+# G3 ("Wire CounterfactualSession + REST endpoints + WebSocket sibling
+# streaming") which had 3 connectives, ~6 file paths across 4 layers,
+# and stalled the coder for 30+ minutes in one item.
+_MAX_FILE_PATHS_IN_DESCRIPTION = 4
+_MAX_CONNECTIVES_IN_TITLE = 1
+
+
+def _file_path_hits(text: str) -> int:
+    """Count tokens that look like concrete file paths (foo/bar.py,
+    src/x/y.ts, etc.). Cheap heuristic — false positives are fine; this
+    is a warning signal, not a gate."""
+    import re as _re
+
+    return len(_re.findall(r"[\w./-]+\.(?:py|ts|tsx|js|jsx|sql|yml|yaml|md|go|rs)", text or ""))
+
+
+def _validate_item_size(item: dict) -> str | None:
+    """Return a one-line oversize reason, or ``None`` if the item passes.
+
+    Heuristic — see ``_GAP_FIX_PROMPT``'s sizing rule. Soft check: we
+    warn and surface in attempt logs but don't block dispatch, because
+    re-rolling the architect is expensive and the validator can have
+    false positives. The warning shows up in the parent's
+    ArchitectAttempt row and in the UI backlog viewer.
+    """
+    title = (item.get("title") or "").lower()
+    description = item.get("description") or ""
+
+    connectives = sum(title.count(c) for c in _OVERSIZED_TITLE_CONNECTIVES)
+    if connectives > _MAX_CONNECTIVES_IN_TITLE:
+        return (
+            f"title stitches {connectives + 1} subsystems "
+            f"({_OVERSIZED_TITLE_CONNECTIVES!r}); should be split"
+        )
+
+    file_paths = _file_path_hits(description)
+    if file_paths > _MAX_FILE_PATHS_IN_DESCRIPTION:
+        return (
+            f"description names {file_paths} file paths "
+            f"(>{_MAX_FILE_PATHS_IN_DESCRIPTION}); likely spans multiple subsystems"
+        )
+
+    return None
+
+
+def validate_backlog_items(items: list[dict]) -> list[dict]:
+    """Run the size heuristic over a list of dispatch_new items.
+
+    Returns a list of ``{"id": str, "title": str, "reason": str}`` for
+    every item that looks oversized. Empty list = all-clean. Called by
+    ``run_gap_fix`` and surfaced in the dispatch log + decision payload
+    so the UI can flag the items for human review.
+    """
+    warnings: list[dict] = []
+    for it in items or []:
+        reason = _validate_item_size(it)
+        if reason:
+            warnings.append(
+                {
+                    "id": str(it.get("id") or ""),
+                    "title": str(it.get("title") or ""),
+                    "reason": reason,
+                }
+            )
+    return warnings
+
+
 def _render_gaps(gaps: list[dict]) -> str:
     if not gaps:
         return "(no gaps)"
@@ -93,10 +165,26 @@ pinned in this system prompt — re-read them and decide how to close
 the gaps below.
 
 You MUST use the ``submit-architect-decision`` skill to write
-``.auto-agent/decision.json``. The preferred action is
-``"dispatch_new"`` with new backlog items in the payload. If you
-believe the gaps can't be closed without escalation, use
-``"escalate"`` instead.
+``.auto-agent/decision.json``.
+
+== Scope check FIRST (ADR-020 — non-negotiable) ==
+For EACH gap below, before considering ``dispatch_new``, ask:
+**Is this gap inside design.md's declared scope?**
+
+- If the gap names files, routes, modules, or features design.md does
+  NOT cover, emit ``{{"action": "escalate", "reason": "<one-line: gap
+  is out-of-scope; design covers X, gap is about Y>"}}``. Do NOT
+  dispatch_new. The orchestrator will surface the gap to the operator
+  or improvement-agent as a separate task. **Unrelated pre-existing
+  bugs in the codebase (e.g. stubs from an abandoned earlier task)
+  are NEVER yours to fix inside this run.**
+
+- If the gap IS in-scope (design.md promised X, codebase doesn't have
+  X), ``dispatch_new`` with items that build X.
+
+If only SOME gaps are in-scope, dispatch_new for the in-scope ones AND
+mention the out-of-scope ones in your decision's ``reason`` field for
+the operator log.
 
 This is gap-fix round {round_idx} of {max_rounds}. After {max_rounds}
 rounds the orchestrator blocks the task automatically.
@@ -112,18 +200,42 @@ without ever building the target domain). Read ``.auto-agent/design.md``
 for the canonical module layout and emit one item per file or per
 tight group of files.
 
+== Sizing rule (mandatory) ==
+**Never defer; split aggressively.** Each item must be implementable
+by ONE coder turn in a healthy context window — that means
+approximately one cohesive subsystem (e.g. one set of related files
+in a single layer: models OR routes OR a single React component +
+its hook, NOT all three together).
+
+Forbidden item shapes:
+- Titles containing "+", "and", "with" stitching multiple subsystems
+  (e.g. "Wire X + REST endpoints + WebSocket streaming + tests").
+- Descriptions naming files across 3+ distinct layers (model + route
+  + UI + e2e test in one item).
+- Items that defer work to "later", "phase N", "v2", or "follow-up".
+
+If a gap is genuinely too large to close in one cohesive item, split
+it into 3-6 smaller items in this same ``dispatch_new`` (e.g. one
+item for the model + repo, one for REST routes, one for the
+WebSocket layer, one for the UI shell, one for integration tests).
+Prefer 5 small items over 1 fat item — the per-item reviewer and
+smoke gate work much better on focused diffs.
+
 == Item contract ==
 Every dispatch_new item MUST include three fields:
 - ``id``: a unique handle (e.g. ``G1``, ``G2``, ... — the orchestrator
   will auto-assign one if you omit it, but explicit IDs make logs and
   the per-item tiebreak prompts traceable)
-- ``title``: one-line imperative summary
+- ``title``: one-line imperative summary, **single cohesive subsystem**
+  (no "+"-stitched scopes — split instead)
 - ``description``: 1-3 sentences naming the SPECIFIC files to create
   or modify (e.g. ``src/harpoon/funnel/repositories.py``). Concrete
   file paths matter: the orchestrator verifies the named paths exist
   before accepting an item as done. An item whose description names
   no concrete file paths is at high risk of being marked done without
-  any real work having happened.
+  any real work having happened. **If you find yourself listing more
+  than ~4 file paths spanning 3+ subsystems, split into multiple
+  items instead.**
 
 == Final reviewer's gaps ==
 {gaps}
@@ -217,14 +329,29 @@ async def run_gap_fix(
     if isinstance(inner_items, list):
         decision["items"] = list(inner_items)
 
+    size_warnings = validate_backlog_items(decision.get("items") or [])
+    if size_warnings:
+        decision["size_warnings"] = size_warnings
+        log.warning(
+            "trio.gap_fix.oversized_items",
+            parent_id=parent_task_id,
+            round_idx=round_idx,
+            warnings=size_warnings,
+        )
+
     log.info(
         "trio.gap_fix.decision",
         parent_id=parent_task_id,
         round_idx=round_idx,
         action=decision.get("action"),
         item_count=len(decision.get("items") or []),
+        oversized_count=len(size_warnings),
     )
     return decision
 
 
-__all__ = ["MAX_GAP_FIX_ROUNDS", "run_gap_fix"]
+__all__ = [
+    "MAX_GAP_FIX_ROUNDS",
+    "run_gap_fix",
+    "validate_backlog_items",
+]
