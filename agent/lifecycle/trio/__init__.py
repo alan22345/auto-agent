@@ -595,6 +595,33 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     if status == TaskStatus.ARCHITECT_BACKLOG_EMIT or _design_md_exists(workspace_root, parent.id):
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         await architect.run_initial(parent.id)
+        # Flip the outer status from ARCHITECT_BACKLOG_EMIT to
+        # TRIO_EXECUTING so the per-item dispatch loop runs under the
+        # right outer state. Without this, the task sits at
+        # ARCHITECT_BACKLOG_EMIT for the entire build phase: the UI
+        # shows a stale label, and (more importantly) the
+        # ``trio_recovery`` hook — which only picks TRIO_EXECUTING
+        # tasks — won't resume the parent on container restart.
+        # ``run_initial`` may have already transitioned to BLOCKED
+        # (invalid JSON) or AWAITING_CLARIFICATION (clarification
+        # path); leave those alone.
+        async with async_session() as _s:
+            live3 = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            if live3.status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+                try:
+                    await transition(
+                        _s,
+                        live3,
+                        TaskStatus.TRIO_EXECUTING,
+                        message="trio: backlog emitted; entering per-item loop",
+                    )
+                    await _s.commit()
+                except Exception as exc:
+                    log.warning(
+                        "trio.parent.backlog_emit_status_flip_failed",
+                        parent_id=parent.id,
+                        error=str(exc)[:200],
+                    )
         return True
 
     # A) Fresh complex_large parent with no design.md and no backlog —
