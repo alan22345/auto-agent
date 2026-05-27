@@ -1,0 +1,155 @@
+{
+  "capabilities": [
+    {
+      "id": "cap_auth",
+      "flow_ids": [
+        "flow_google_login",
+        "flow_email_signup"
+      ],
+      "flow_membership_hash": "sha256:demo-cap-auth",
+      "name": "Authentication",
+      "description": "OAuth + email-password login and session creation.",
+      "labeled_at_commit": "demo1234"
+    },
+    {
+      "id": "cap_carbon",
+      "flow_ids": [
+        "flow_carbon_calc"
+      ],
+      "flow_membership_hash": "sha256:demo-cap-carbon",
+      "name": "Carbon Calc Engine",
+      "description": "Background workers that compute and store carbon-emission records.",
+      "labeled_at_commit": "demo1234"
+    }
+  ],
+  "flows": [
+    {
+      "id": "flow_google_login",
+      "entry_point": {
+        "node_id": "app/auth/google.py::login",
+        "kind": "http"
+      },
+      "terminal_node_id": "lib/sessions.py::create",
+      "terminal_kind": "db_write",
+      "steps": [
+        {
+          "node_id": "app/auth/google.py::login",
+          "depth": 0,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/oauth.py::validate_token",
+          "depth": 1,
+          "is_branch_root": true,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/sessions.py::create",
+          "depth": 2,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        }
+      ],
+      "file_set": [
+        "app/auth/google.py",
+        "lib/oauth.py",
+        "lib/sessions.py"
+      ],
+      "file_set_hash": "sha256:demo-flow-google",
+      "name": "Google OAuth Login",
+      "description": "Validates the Google OAuth token, then creates a session row in the database.",
+      "labeled_at_commit": "demo1234"
+    },
+    {
+      "id": "flow_email_signup",
+      "entry_point": {
+        "node_id": "app/auth/email.py::signup",
+        "kind": "http"
+      },
+      "terminal_node_id": "lib/sessions.py::create",
+      "terminal_kind": "db_write",
+      "steps": [
+        {
+          "node_id": "app/auth/email.py::signup",
+          "depth": 0,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/hash.py::hash_password",
+          "depth": 1,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/sessions.py::create",
+          "depth": 2,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        }
+      ],
+      "file_set": [
+        "app/auth/email.py",
+        "lib/hash.py",
+        "lib/sessions.py"
+      ],
+      "file_set_hash": "sha256:demo-flow-email",
+      "name": "Email Signup",
+      "description": "Hashes the password and creates a session row.",
+      "labeled_at_commit": "demo1234"
+    },
+    {
+      "id": "flow_carbon_calc",
+      "entry_point": {
+        "node_id": "app/carbon/calc.py::compute_emissions",
+        "kind": "queue"
+      },
+      "terminal_node_id": "lib/db.py::write_record",
+      "terminal_kind": "db_write",
+      "steps": [
+        {
+          "node_id": "app/carbon/calc.py::compute_emissions",
+          "depth": 0,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/formulas.py::burn_factor",
+          "depth": 1,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "lib/db.py::write_record",
+          "depth": 2,
+          "is_branch_root": false,
+          "is_cycle_back": false
+        },
+        {
+          "node_id": "app/carbon/calc.py::compute_emissions",
+          "depth": 3,
+          "is_branch_root": false,
+          "is_cycle_back": true
+        }
+      ],
+      "file_set": [
+        "app/carbon/calc.py",
+        "lib/formulas.py",
+        "lib/db.py"
+      ],
+      "file_set_hash": "sha256:demo-flow-carbon",
+      "name": "Compute Emissions",
+      "description": "Worker reads a job from the queue, computes carbon emissions, and persists the result.",
+      "labeled_at_commit": "demo1234"
+    }
+  ],
+  "unreached": [
+    "lib/dead/legacy.py::old_handler",
+    "lib/dead/legacy.py::stub_helper",
+    "tests/test_old.py::test_thing"
+  ],
+  "derived_at_commit": "demo1234",
+  "deriver_version": "demo",
+  "labeler_model": "demo-stand-in"
+}

@@ -64,7 +64,12 @@ async def test_gap_fix_resumes_persisted_session(tmp_path: Path) -> None:
         captured_session.append(session)
         return _Agent()
 
-    fake_session = object()
+    # gap_fix now requires the session blob to exist on disk before passing
+    # resume=True to the architect (the in-DB session_blob_path can be stale —
+    # see harpoon #25, 2026-05-24, gap-fix architect silent failure). Provide
+    # both the session object and a real blob file at the conventional path.
+    fake_session = type("S", (), {"session_id": "trio-42"})()
+    (workspace / "trio-42.json").write_text("{}")
     with (
         patch.object(gap_fix, "_load_architect_session", AsyncMock(return_value=fake_session)),
         patch.object(gap_fix, "create_architect_agent", fake_create_arch_agent),

@@ -61,6 +61,52 @@ async def _remote_branch_exists(repo_url: str, branch: str) -> bool:
     return rc == 0 and bool(out.strip())
 
 
+# Paths that the agent writes into a workspace but the user repo doesn't
+# track: the per-task artefact directory, venvs, and Python caches. We mark
+# them as locally-ignored (via ``.git/info/exclude``) on every clone so
+# ``git stash push --include-untracked`` skips them (--include-untracked
+# stashes untracked-but-not-ignored files). Without this the architect's
+# ``.auto-agent/design.md`` gets stashed away on the next branch switch and
+# the coder runs with no design context — the "coder produces no diff" bug.
+_LOCAL_EXCLUDE_PATTERNS = (".auto-agent/", ".venv/", "__pycache__/")
+
+
+def _ensure_local_excludes(workspace: str) -> None:
+    """Append agent-artefact patterns to ``.git/info/exclude``.
+
+    Idempotent: re-runs leave already-present lines alone. Best-effort: any
+    OS error is logged and swallowed — a missing exclude entry must never
+    abort a clone (the stash logic in :func:`create_branch` is the fallback).
+    """
+
+    git_dir = os.path.join(workspace, ".git")
+    if not os.path.isdir(git_dir):
+        return
+    info_dir = os.path.join(git_dir, "info")
+    exclude_path = os.path.join(info_dir, "exclude")
+    try:
+        os.makedirs(info_dir, exist_ok=True)
+        existing = ""
+        if os.path.exists(exclude_path):
+            with open(exclude_path) as fh:
+                existing = fh.read()
+        existing_lines = {line.strip() for line in existing.splitlines()}
+        missing = [p for p in _LOCAL_EXCLUDE_PATTERNS if p not in existing_lines]
+        if not missing:
+            return
+        with open(exclude_path, "a") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            for entry in missing:
+                fh.write(entry + "\n")
+    except OSError as exc:
+        _log.warning(
+            "ensure_local_excludes_failed",
+            workspace=workspace,
+            error=str(exc),
+        )
+
+
 async def _safe_write_dotenv(workspace: str, repo_id: int) -> None:
     """Best-effort wrapper around ``write_repo_dotenv``.
 
@@ -131,7 +177,10 @@ async def clone_repo(
         )
 
     if os.path.isdir(os.path.join(workspace, ".git")):
-        # Reuse existing workspace — make sure we have the latest default branch
+        # Reuse existing workspace — make sure we have the latest default branch.
+        # Local-ignore the agent artefact dirs FIRST so the fetch + checkout don't
+        # trip over leftover ``.auto-agent/`` files from a prior task phase.
+        _ensure_local_excludes(workspace)
         await _run_git("fetch", "origin", default_branch, cwd=workspace)
         await _run_git("checkout", default_branch, cwd=workspace)
         await _run_git("reset", "--hard", f"origin/{default_branch}", cwd=workspace)
@@ -158,6 +207,7 @@ async def clone_repo(
             fallback=fallback_branch,
         )
         await _run_git("clone", "-b", fallback_branch, authed_url, workspace, check=True)
+        _ensure_local_excludes(workspace)
         await _run_git("config", "user.email", _AGENT_GIT_EMAIL, cwd=workspace)
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
         if user_id is not None:
@@ -176,6 +226,7 @@ async def clone_repo(
         return workspace
 
     await _run_git("clone", "-b", default_branch, authed_url, workspace, check=True)
+    _ensure_local_excludes(workspace)
 
     # Configure local git identity so the agent's commits work in containers
     # that have no global gitconfig. Local config overrides nothing upstream
@@ -202,7 +253,36 @@ async def clone_repo(
 
 
 async def create_branch(workspace: str, branch_name: str) -> None:
-    """Create and checkout a branch, reusing it if it already exists."""
+    """Create and checkout a branch, reusing it if it already exists.
+
+    Idempotency: if the workspace is already on ``branch_name``, skip the
+    ``git checkout`` entirely. If we must switch and untracked files
+    (e.g. ``.gitignore``, ``.auto-agent/``, ``.venv/``) would block the
+    switch, stash them with ``--include-untracked`` before the checkout.
+    Recovery hooks re-invoke the trio dispatcher on workspaces that already
+    have uncommitted agent work; without the stash the checkout fails with
+    ``error: untracked files would be overwritten``.
+
+    The stash is intentionally NOT popped. The agent's next phase will
+    re-create any artefacts it needs from disk (design.md is read by
+    file path, not via git), and a popped stash would re-introduce the
+    same conflict on the next branch switch.
+    """
+
+    current_out, _, _ = await _run_git(
+        "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace
+    )
+    if current_out.strip() == branch_name:
+        return
+
+    # Defensively stash any untracked / uncommitted state so the checkout
+    # doesn't fail on file-overwrite conflicts. Quiet exit code on empty
+    # stash is fine.
+    await _run_git(
+        "stash", "push", "--include-untracked", "-m", "auto-agent-pre-branch-switch",
+        cwd=workspace,
+    )
+
     _, _, returncode = await _run_git("rev-parse", "--verify", branch_name, cwd=workspace)
     if returncode == 0:
         await _run_git("checkout", branch_name, cwd=workspace, check=True)

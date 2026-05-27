@@ -705,13 +705,21 @@ async def test_dispatch_children_creates_one_complex_large_child_per_approved_do
 
     @asynccontextmanager
     async def fake_session_factory():
+        # Snapshot ``added`` at execute() time so the helper can see new
+        # rows after they're persisted (serial-dispatch helper queries
+        # children to pick the next pending one).
         class _Result:
-            def scalars(self):
-                class _S:
-                    def all(self):
-                        return []  # no existing children
+            def __init__(self, snapshot):
+                self._snapshot = snapshot
 
-                return _S()
+            def scalars(self):
+                snapshot = self._snapshot
+
+                class _Scalars:
+                    def all(self):
+                        return snapshot
+
+                return _Scalars()
 
             def scalar_one(self):
                 return task
@@ -720,7 +728,7 @@ async def test_dispatch_children_creates_one_complex_large_child_per_approved_do
 
         class _Session:
             async def execute(self, *_a, **_kw):
-                return _Result()
+                return _Result(list(added))
 
             def add(self, obj):
                 obj.id = next_id[0]

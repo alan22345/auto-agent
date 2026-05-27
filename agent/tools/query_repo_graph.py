@@ -45,7 +45,7 @@ from agent.graph_analyzer.staleness import compute_staleness
 from agent.tools.base import Tool, ToolContext, ToolResult
 from shared.database import async_session
 from shared.models import RepoGraph, RepoGraphConfig
-from shared.types import Edge, Node, RepoGraphBlob
+from shared.types import Edge, FlowJsonBlob, Node, RepoGraphBlob
 
 log = structlog.get_logger(__name__)
 
@@ -59,6 +59,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "public_surface",
         "path_between",
         "violates_boundaries",
+        "which_capability",
     },
 )
 
@@ -90,7 +91,8 @@ class QueryRepoGraphTool(Tool):
                     "with evidence; 'public_surface' returns nodes in an "
                     "area's public API; 'path_between' returns a list of "
                     "node ids; 'violates_boundaries' returns a single edge "
-                    "dict or null."
+                    "dict or null; 'which_capability' returns the flow(s) "
+                    "and capability group containing a node."
                 ),
             },
             "params": {
@@ -101,7 +103,8 @@ class QueryRepoGraphTool(Tool):
                     "take {node_id}; public_surface takes {area_name}; "
                     "path_between takes {source_id, target_id, "
                     "max_depth?=5}; violates_boundaries takes "
-                    "{source_id, target_id}."
+                    "{source_id, target_id}; which_capability takes "
+                    "{node: \"<node_id>\"}."
                 ),
             },
         },
@@ -187,12 +190,21 @@ class QueryRepoGraphTool(Tool):
 
         # 4. Dispatch to per-op handler.
         try:
-            payload = _dispatch(
-                op=op,
-                params=params,
-                blob=blob,
-                workspace_path=workspace_path,
-            )
+            if op == "which_capability":
+                payload = {
+                    "result": _which_capability(
+                        flow_json=graph_row.flow_json,
+                        graph_blob=blob,
+                        params=params,
+                    )
+                }
+            else:
+                payload = _dispatch(
+                    op=op,
+                    params=params,
+                    blob=blob,
+                    workspace_path=workspace_path,
+                )
         except _OpError as e:
             return ToolResult(output=f"Error: {e}", is_error=True)
 
@@ -515,6 +527,69 @@ def _node_exists(node: Node, workspace_path: str) -> bool:
         return False
     full = os.path.join(workspace_path, node.file)
     return os.path.exists(full)
+
+
+# ---------------------------------------------------------------------------
+# which_capability handler
+# ---------------------------------------------------------------------------
+
+
+def _which_capability(
+    flow_json: dict | None,
+    graph_blob: RepoGraphBlob,
+    params: dict,
+) -> dict:
+    """Return flows + capability that contain ``params["node"]``.
+
+    Returns one of four shapes:
+    * ``{"flows": [...], "capability": {...}, "unreached": False}`` — node in flow.
+    * ``{"flows": [], "capability": None, "unreached": True}`` — node in graph, not in any flow.
+    * ``{"error": "node_not_found"}`` — node id absent from the graph.
+    * ``{"flows": [], "capability": None, "unreached": True, "note": "..."}`` — flow_json null.
+    """
+    node_id = params.get("node")
+    if not node_id:
+        return {"error": "missing_param:node"}
+    if node_id not in {n.id for n in graph_blob.nodes}:
+        return {"error": "node_not_found"}
+    if flow_json is None:
+        return {
+            "flows": [],
+            "capability": None,
+            "unreached": True,
+            "note": "flow_json not computed yet — POST /graph/flows/recompute",
+        }
+    blob = FlowJsonBlob.model_validate(flow_json)
+    matching_flows = [
+        {
+            "id": f.id,
+            "name": f.name,
+            "entry_point_node_id": f.entry_point.node_id,
+            "terminal_kind": f.terminal_kind,
+        }
+        for f in blob.flows
+        if any(s.node_id == node_id for s in f.steps)
+    ]
+    if not matching_flows:
+        return {
+            "flows": [],
+            "capability": None,
+            "unreached": True,
+        }
+    matching_flow_ids = {f["id"] for f in matching_flows}
+    matching_cap = next(
+        (
+            {"id": c.id, "name": c.name, "description": c.description}
+            for c in blob.capabilities
+            if any(fid in c.flow_ids for fid in matching_flow_ids)
+        ),
+        None,
+    )
+    return {
+        "flows": matching_flows,
+        "capability": matching_cap,
+        "unreached": False,
+    }
 
 
 __all__ = ["QueryRepoGraphTool"]

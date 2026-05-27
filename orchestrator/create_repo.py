@@ -48,6 +48,44 @@ def _slug_fallback(description: str) -> str:
     return slug or "new-project"
 
 
+def _sanitize_description(text: str) -> str:
+    """Make a description safe for GitHub's repo `description` field.
+
+    GitHub rejects descriptions with control characters (newlines, tabs).
+    Replace them with spaces and collapse runs of whitespace.
+    """
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:350]
+
+
+_TITLE_SKIP_PREFIXES: tuple[str, ...] = ("#", ">", "```", "|", "---", "===")
+_TITLE_NUMBERED_RE = re.compile(r"^\d+[.)]")
+
+
+def _first_prose_line(description: str) -> str:
+    """Return the first non-structural line of ``description``, or ``""``.
+
+    Skips empty lines, markdown headers (``#``, ``##``…), blockquotes,
+    code fences, table rows, horizontal rules, and numbered section
+    markers (``1.``, ``2)``). The intent-grill agent reads the task title
+    verbatim; if it sees ``## 1. …`` it infers a "section of a series"
+    framing and under-scopes the whole build (ADR-018 regression observed
+    on the first harpoon attempt).
+    """
+
+    for raw in description.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(_TITLE_SKIP_PREFIXES):
+            continue
+        if _TITLE_NUMBERED_RE.match(line):
+            continue
+        return line
+    return ""
+
+
 def _sanitize_slug(name: str) -> str:
     """Force any name into a valid GitHub repo slug."""
     name = name.strip().lower()
@@ -131,24 +169,40 @@ async def _create_github_repo(
     url = f"{GITHUB_API}/orgs/{owner}/repos" if is_org else f"{GITHUB_API}/user/repos"
     payload = {
         "name": name,
-        "description": description[:350],
+        "description": _sanitize_description(description),
         "private": private,
         "auto_init": True,
     }
     resp = await client.post(url, headers=headers, json=payload)
-    if resp.status_code == 422:
-        raise CreateRepoError(
-            f"GitHub rejected the repo name '{name}' — "
-            f"it probably already exists. Try a different description."
-        )
     if resp.status_code == 403:
         raise CreateRepoError(
             "GitHub returned 403 — your token lacks permission to create repos. "
             "Make sure it has the 'repo' scope (and 'admin:org' if creating under an org)."
         )
     if resp.status_code not in (200, 201):
+        # Surface GitHub's actual validation errors instead of guessing.
+        # 422 from /user/repos can mean "name taken", "name reserved after
+        # deletion", "name violates rules", "free-plan private-repo limit",
+        # etc. — different fixes for each.
+        target = f"{owner}/{name}" if is_org else name
+        try:
+            body = resp.json()
+            top = body.get("message", "")
+            errs = body.get("errors", []) or []
+            parts: list[str] = []
+            for err in errs:
+                msg = err.get("message") or err.get("code")
+                field = err.get("field")
+                if msg and field:
+                    parts.append(f"{field}: {msg}")
+                elif msg:
+                    parts.append(msg)
+            detail = "; ".join(parts) if parts else top
+        except (ValueError, AttributeError):
+            detail = resp.text[:300]
         raise CreateRepoError(
-            f"GitHub repo creation failed: {resp.status_code} {resp.text[:300]}"
+            f"GitHub rejected the request for '{target}' "
+            f"(HTTP {resp.status_code}): {detail}"
         )
     return resp.json()
 
@@ -160,11 +214,25 @@ async def create_repo_and_scaffold_task(
     private: bool = True,
     loop: bool = True,
     *,
+    name_override: str = "",
     user_id: int | None = None,
     organization_id: int | None = None,
 ) -> tuple[Repo, Task]:
-    """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task."""
+    """End-to-end: pick a name, create the GitHub repo, register it, queue a scaffold task.
+
+    When ``name_override`` is provided, it's used as the repo slug (after
+    sanitisation) instead of the LLM-generated one. Empty string falls back
+    to Claude-picked names.
+    """
     from shared.github_auth import get_github_token
+
+    # repos.organization_id is NOT NULL (migration 027). Fail fast before
+    # we hit GitHub, otherwise a missing org leaves an orphan repo on the
+    # user's account when the DB insert later 500s.
+    if organization_id is None:
+        raise CreateRepoError(
+            "organization_id is required — caller must be authenticated."
+        )
 
     if not await get_github_token(user_id=user_id, organization_id=organization_id):
         raise CreateRepoError(
@@ -177,9 +245,18 @@ async def create_repo_and_scaffold_task(
     if not description:
         raise CreateRepoError("Description is required.")
 
-    # 1. Name generation
-    name = await _generate_name_via_claude(description)
-    log.info(f"Generated repo name '{name}' for description: {description[:80]}")
+    # 1. Name: caller-supplied (sanitised) wins; otherwise ask Claude.
+    if name_override.strip():
+        name = _sanitize_slug(name_override)
+        if not name or name == "new-project":
+            raise CreateRepoError(
+                f"'{name_override}' isn't a usable repo name — use letters, "
+                f"digits, and hyphens."
+            )
+        log.info(f"Using caller-supplied repo name '{name}'")
+    else:
+        name = await _generate_name_via_claude(description)
+        log.info(f"Generated repo name '{name}' for description: {description[:80]}")
 
     async with httpx.AsyncClient(timeout=30) as client:
         # 2. Resolve owner
@@ -200,9 +277,24 @@ async def create_repo_and_scaffold_task(
     await asyncio.sleep(2)
 
     # 4. Insert Repo rows (full name + short alias, mirroring repo_sync.py)
+    # ``mode='freeform'`` is critical for "Build something new": ``Repo.mode``
+    # is what the standin resolver (``resolve_effective_mode``) reads to
+    # decide whether the PO standin fires at every gate. Default DB value
+    # is ``human_in_loop`` (conservative for legacy repos), so without this
+    # the freeform standins never fire — children deadlock at the design
+    # gate even though ``Task.freeform_mode=True``.
+    # For "Build something new" runs the user-supplied description IS the
+    # product brief — it's the only product-shaped context the PO standin
+    # gets at every gate. Without it the standin falls back to deterministic
+    # defaults (logged as ``plan_approval:no_product_brief``) and approves
+    # designs without any grounding in what we're actually building. Stamp
+    # the brief on both repo rows here so the freeform standins running
+    # later read the real product context.
     full_repo = Repo(
         name=full_name, url=clone_url, default_branch=default_branch,
         organization_id=organization_id,
+        mode="freeform",
+        product_brief=description,
     )
     session.add(full_repo)
 
@@ -216,6 +308,8 @@ async def create_repo_and_scaffold_task(
         short_repo = Repo(
             name=name, url=clone_url, default_branch=default_branch,
             organization_id=organization_id,
+            mode="freeform",
+            product_brief=description,
         )
         session.add(short_repo)
 
@@ -240,8 +334,19 @@ async def create_repo_and_scaffold_task(
     )
     session.add(config)
 
-    # 6. Create the scaffold task
-    title = description.splitlines()[0][:120]
+    # 6. Create the scaffold task.
+    #
+    # Title selection: the title is read by the intent-grill agent + PO
+    # standin alongside the description. If we naively grab the first line
+    # of the description and that line is a markdown section header
+    # (e.g. ``## 1. What this service is, in one paragraph``), the agent
+    # treats the task as "section 1 of a series of scaffolds" and writes a
+    # foundation-only intent.md — leading to a trivial build (the user hit
+    # this on the first harpoon attempt). Prefer the caller-supplied repo
+    # ``name`` (which is what the user typed in the UI). Fall back to the
+    # first non-structural line of the description.
+    base_title = (name or _first_prose_line(description) or "new project").strip()
+    title = base_title[:120]
     if not title.lower().startswith(("scaffold", "build", "create")):
         title = f"Scaffold: {title}"
 

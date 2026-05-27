@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from agent.lifecycle.standin import run_freeform_gate
 from agent.lifecycle.trio import architect, design_approval, dispatcher
-from agent.lifecycle.workspace_paths import DESIGN_PATH
+from agent.lifecycle.workspace_paths import DESIGN_PATH, PR_REVIEW_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
 from shared.events import publish, task_iteration_complete, task_pr_created
@@ -217,18 +217,45 @@ async def _block_parent(parent_id: int, message: str) -> None:
 
 async def _mark_item_done(parent_id: int, item_id: str, head_sha: str | None) -> None:
     """Set an item's status to 'done' in tasks.trio_backlog. JSONB requires a
-    fresh list reference for SQLAlchemy to mark the column dirty."""
+    fresh list reference for SQLAlchemy to mark the column dirty.
+
+    Prefers the first PENDING item matching ``item_id`` — defends against
+    duplicate ids (task #26, 2026-05-25) where an already-done item with
+    the same id would otherwise be re-marked done (a no-op) and the
+    pending duplicate would be missed. ``_backfill_backlog_ids`` normally
+    eliminates duplicates on parent entry, but this is the last-line
+    guard.
+    """
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
+        target_idx: int | None = None
         for i, item in enumerate(backlog):
-            if item.get("id") == item_id:
-                new_item = dict(item)
-                new_item["status"] = "done"
-                if head_sha:
-                    new_item["head_sha"] = head_sha
-                backlog[i] = new_item
+            if item.get("id") == item_id and item.get("status") != "done":
+                target_idx = i
                 break
+        if target_idx is None:
+            # Fall back to any matching id (legacy behaviour).
+            for i, item in enumerate(backlog):
+                if item.get("id") == item_id:
+                    target_idx = i
+                    break
+        if target_idx is None:
+            # No item matched at all — silent no-op caused a 12-hr stall
+            # on task #26 (2026-05-25). Warn loudly so the next stall is
+            # diagnosable from a single grep.
+            log.warning(
+                "trio.parent.mark_done_no_match",
+                parent_id=parent_id,
+                item_id=item_id,
+                backlog_ids=[b.get("id") for b in backlog],
+            )
+            return
+        new_item = dict(backlog[target_idx])
+        new_item["status"] = "done"
+        if head_sha:
+            new_item["head_sha"] = head_sha
+        backlog[target_idx] = new_item
         p.trio_backlog = backlog
         await s.commit()
 
@@ -514,6 +541,21 @@ async def _advance_through_design_gate(parent: Task) -> bool:
         await s.commit()
     await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
     await architect.run_design(parent.id)
+
+    # ``run_design`` just transitioned the task to AWAITING_DESIGN_APPROVAL.
+    # Re-enter the helper so case B (the standin / verdict path) fires on
+    # the SAME invocation. Without this, freeform-mode children deadlock:
+    # nothing else re-invokes the trio dispatcher (the trio recovery hook
+    # only picks TRIO_EXECUTING, and on_design_approved only fires after a
+    # verdict that the standin would have written). Recursion depth is
+    # bounded — case B either approves+returns True, rejects+returns False,
+    # or fails the verdict file lookup+returns False; none recurse back.
+    async with async_session() as _s:
+        live_after_design = (
+            await _s.execute(select(Task).where(Task.id == parent.id))
+        ).scalar_one()
+    if live_after_design.status == TaskStatus.AWAITING_DESIGN_APPROVAL:
+        return await _advance_through_design_gate(live_after_design)
     return False
 
 
@@ -534,10 +576,25 @@ async def _try_freeform_design_standin(
     """
 
     repo = getattr(parent, "repo", None)
+    if repo is None and getattr(parent, "repo_id", None) is not None:
+        # The ``parent`` may have been loaded outside an active session
+        # (e.g. by the trio recovery hook on startup) so the lazy ``repo``
+        # relationship is unresolved. Fetch the row directly by
+        # ``repo_id``. Without this fallback the standin returns silently
+        # and every recovered freeform child deadlocks at the design gate.
+        from shared.models import Repo
+
+        async with async_session() as _s:
+            repo = (
+                await _s.execute(select(Repo).where(Repo.id == parent.repo_id))
+            ).scalar_one_or_none()
+
     if repo is None:
-        # No repo attached: standin selection can still run (the §6
-        # default is the PO standin), but the freeform mode hint comes
-        # off the repo. Skip the call rather than mis-classify.
+        log.warning(
+            "trio.parent.freeform_design_standin_no_repo",
+            parent_id=parent.id,
+            repo_id=getattr(parent, "repo_id", None),
+        )
         return
 
     design_path = os.path.join(workspace_root, DESIGN_PATH)
@@ -575,6 +632,205 @@ async def _try_freeform_design_standin(
             "trio.parent.freeform_design_standin_fired",
             parent_id=parent.id,
         )
+
+
+async def _try_freeform_pr_review_standin(
+    *,
+    parent: Task,
+    workspace_root: str,
+    pr_url: str,
+) -> None:
+    """In freeform mode, dispatch the architect/PO standin at the AWAITING_REVIEW gate.
+
+    User contract (2026-05-23): in a freeform repo, a code-review request
+    is a technical decision and should be auto-resolved by the standin
+    rather than waiting on a human. On approval we auto-merge the PR via
+    ``gh`` and transition the task to ``DONE`` (which fires
+    ``on_task_finished`` → bug-17 scaffold serial-dispatch picks the next
+    sibling). On rejection we log + leave the task parked at
+    ``AWAITING_REVIEW`` so iteration can be added later.
+
+    Best-effort: any error here is logged and swallowed — the task stays
+    at ``AWAITING_REVIEW`` and a human can intervene. The pre-PR
+    ``final_reviewer.run_final_review`` already gave the architect's
+    "passed" verdict (otherwise the PR wouldn't exist), so this gate is
+    structured to re-confirm + automate rather than re-architect.
+    """
+
+    import json as _json
+
+    from shared.events import task_done
+
+    repo = getattr(parent, "repo", None)
+    if repo is None and getattr(parent, "repo_id", None) is not None:
+        from shared.models import Repo
+
+        async with async_session() as _s:
+            repo = (
+                await _s.execute(select(Repo).where(Repo.id == parent.repo_id))
+            ).scalar_one_or_none()
+
+    if repo is None:
+        log.warning(
+            "trio.parent.freeform_pr_review_standin_no_repo",
+            parent_id=parent.id,
+            repo_id=getattr(parent, "repo_id", None),
+        )
+        return
+
+    target_branch = await _resolve_target_branch(parent.id)
+    pr_diff = ""
+    try:
+        from agent import sh
+
+        diff_res = await sh.run(
+            ["git", "diff", f"origin/{target_branch}..HEAD"],
+            cwd=workspace_root,
+            timeout=30,
+            max_output=400_000,
+        )
+        if not diff_res.failed:
+            pr_diff = diff_res.stdout or ""
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "trio.parent.freeform_pr_review_diff_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+
+    pr_metadata = {
+        "url": pr_url,
+        "title": f"trio: integration — {parent.title}",
+        "target_branch": target_branch,
+    }
+
+    try:
+        fired = await run_freeform_gate(
+            task=parent,
+            repo=repo,
+            gate="pr_review",
+            gate_input={"pr_diff": pr_diff, "pr_metadata": pr_metadata},
+            context={"workspace_root": workspace_root},
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "trio.parent.freeform_pr_review_standin_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+        return
+
+    if not fired:
+        # human_in_loop — wait for human review.
+        return
+
+    verdict_abs = os.path.join(workspace_root, PR_REVIEW_PATH)
+    try:
+        with open(verdict_abs) as fh:
+            verdict_payload = _json.load(fh)
+    except (OSError, _json.JSONDecodeError) as exc:
+        log.warning(
+            "trio.parent.freeform_pr_review_verdict_unreadable",
+            parent_id=parent.id,
+            path=verdict_abs,
+            error=str(exc),
+        )
+        return
+
+    verdict = (verdict_payload or {}).get("verdict") if isinstance(verdict_payload, dict) else None
+    comments = (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+
+    if verdict == "approved":
+        await _freeform_auto_merge_and_done(
+            parent=parent,
+            workspace_root=workspace_root,
+            pr_url=pr_url,
+            standin_comments=str(comments),
+        )
+        # Fire DONE so on_task_finished → bug-17 serial-dispatch picks next.
+        await publish(task_done(parent.id))
+        return
+
+    # changes_requested / rejected — leave at AWAITING_REVIEW for now. A
+    # follow-up should re-enter the trio with iteration_context, but the
+    # current scope is approval-path only.
+    log.info(
+        "trio.parent.freeform_pr_review_changes_requested",
+        parent_id=parent.id,
+        comments=str(comments)[:200],
+    )
+
+
+async def _freeform_auto_merge_and_done(
+    *,
+    parent: Task,
+    workspace_root: str,
+    pr_url: str,
+    standin_comments: str,
+) -> None:
+    """Auto-merge ``pr_url`` via ``gh`` and transition ``parent`` to DONE.
+
+    Failure to merge leaves the task at AWAITING_REVIEW with a log line —
+    the human can merge manually and the standard PR-merged webhook (or
+    a future recovery sweep) will finish the transition.
+    """
+
+    from agent import sh
+    from shared.github_auth import get_github_token
+
+    try:
+        token = await get_github_token(
+            user_id=parent.created_by_user_id,
+            organization_id=parent.organization_id,
+        )
+    except Exception as exc:  # pragma: no cover — env-dependent
+        log.warning(
+            "trio.parent.freeform_auto_merge_token_failed",
+            parent_id=parent.id,
+            error=str(exc),
+        )
+        return
+
+    gh_env = {"GH_TOKEN": token} if token else {}
+
+    merge_res = await sh.run(
+        ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
+        cwd=workspace_root,
+        timeout=60,
+        env=gh_env,
+    )
+    if merge_res.failed:
+        log.warning(
+            "trio.parent.freeform_auto_merge_failed",
+            parent_id=parent.id,
+            pr_url=pr_url,
+            stderr=(merge_res.stderr or "")[:500],
+        )
+        return
+
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        try:
+            await transition(
+                s,
+                p,
+                TaskStatus.DONE,
+                message=f"freeform PR auto-merged by standin: {standin_comments[:160]}",
+            )
+        except Exception as exc:  # pragma: no cover — narrow
+            log.warning(
+                "trio.parent.freeform_done_transition_failed",
+                parent_id=parent.id,
+                error=str(exc),
+            )
+            return
+        await s.commit()
+
+    log.info(
+        "trio.parent.freeform_pr_auto_merged",
+        parent_id=parent.id,
+        pr_url=pr_url,
+    )
 
 
 async def run_trio_parent(
@@ -635,6 +891,13 @@ async def run_trio_parent(
     # routes correctly without bouncing through the per-item loop first.
     if await _maybe_dispatch_sub_architects(parent):
         return
+
+    # Bug 22 (harpoon #25, 2026-05-24) heal: legacy backlogs whose items
+    # lack ``id`` cause an infinite dispatcher loop because
+    # ``_mark_item_done`` matches by id and silently no-ops on items with
+    # no id (item_id resolves to ``"(unknown)"``). Backfill IDs before
+    # the per-item loop so mark-done / replace-backlog work.
+    await _backfill_backlog_ids(parent.id)
 
     # Resolve once per cycle — re-cloning per item is wasteful and the
     # subagents share the workspace.
@@ -714,7 +977,10 @@ async def run_trio_parent(
             )
             return
 
-        # Coder↔reviewer didn't converge → architect tiebreak.
+        # Coder↔reviewer didn't converge → architect tiebreak. Also fires
+        # when the coder produced no diff for MAX_ROUNDS rounds — the
+        # architect decides whether the work is already done (accept) or
+        # the item is misguided (revise_backlog). See dispatcher.py.
         await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
         decision = await dispatcher.architect_tiebreak(
             parent_task_id=parent.id,
@@ -724,6 +990,7 @@ async def run_trio_parent(
             repo_name=repo_name,
             home_dir=home_dir,
             org_id=org_id,
+            no_diff_mode=(result.failure_reason == "coder_produced_no_diff"),
         )
         action = decision.get("action", "clarify")
         log.info(
@@ -977,11 +1244,131 @@ async def _drive_final_review_and_pr(
         return
 
 
+def _assign_missing_ids(
+    existing: list[dict],
+    new_items: list[dict],
+    *,
+    prefix: str = "G",
+) -> list[dict]:
+    """Return a fresh copy of ``new_items`` whose ids are unique.
+
+    Pure helper — does not mutate the caller's lists or dicts.
+
+    For each item in ``new_items``: if its ``id`` is missing/blank OR
+    collides with an id already in use (in ``existing``-but-not-``new_items``
+    or already assigned earlier in this pass), it gets renamed to the
+    next free ``{prefix}{N}`` slot. Non-colliding explicit ids are kept.
+
+    Bug 22 (harpoon #25, 2026-05-24): the gap-fix architect emitted items
+    WITHOUT ``id`` fields. Downstream tiebreak prompts rendered as
+    ``## Tiebreak — work item : <title>`` with no item handle and the
+    architect false-accepted every no-diff round.
+
+    Followup bug (task #26, 2026-05-25, 12-hr stall): the gap-fix
+    architect emitted NEW items with explicit ids ``G1``, ``G2`` that
+    collided with already-done items in the backlog. ``_mark_item_done``
+    matched the done G1 first, broke, and the pending duplicate never
+    got marked → dispatcher looped forever. This helper now renames
+    explicit collisions in addition to filling blanks.
+    """
+    # Identify which existing items are "established" (id stays put) vs
+    # which are being re-processed by this pass. ``_backfill_backlog_ids``
+    # passes the SAME list as both ``existing`` and ``new_items`` to heal
+    # a backlog in place — in that case every item is "new" for dedup
+    # purposes, so we identity-check against ``new_items``.
+    new_identities = {id(x) for x in new_items}
+
+    established_ids: set[str] = set()
+    max_n = 0
+    for it in existing:
+        if id(it) in new_identities:
+            continue
+        item_id = (it.get("id") or "").strip()
+        if not item_id:
+            continue
+        established_ids.add(item_id)
+        if item_id.startswith(prefix):
+            suffix = item_id[len(prefix):]
+            if suffix.isdigit():
+                max_n = max(max_n, int(suffix))
+
+    used: set[str] = set(established_ids)
+    next_n = max_n + 1
+    out: list[dict] = []
+    for item in new_items:
+        ni = dict(item)
+        item_id = (ni.get("id") or "").strip()
+        if not item_id or item_id in used:
+            while f"{prefix}{next_n}" in used:
+                next_n += 1
+            new_id = f"{prefix}{next_n}"
+            ni["id"] = new_id
+            used.add(new_id)
+            next_n += 1
+        else:
+            used.add(item_id)
+        out.append(ni)
+    return out
+
+
+async def _backfill_backlog_ids(parent_id: int) -> bool:
+    """Heal a parent's ``trio_backlog`` so every item has a unique id.
+    Idempotent.
+
+    Returns ``True`` iff the backlog was modified (and committed).
+
+    Heals two pathological shapes:
+
+    1. **Missing ids** (harpoon #25, 2026-05-24): items without an ``id``
+       key cause ``_mark_item_done(item_id="(unknown)")`` to silently
+       no-op, looping the dispatcher forever.
+
+    2. **Duplicate ids** (task #26, 2026-05-25): items with explicit ids
+       that collide with already-done items cause
+       ``_mark_item_done(item_id="G1")`` to match the done item first,
+       break, and never reach the pending duplicate. Same infinite-loop
+       shape, different trigger.
+    """
+    async with async_session() as s:
+        p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
+        backlog = list(p.trio_backlog or [])
+        if not backlog:
+            return False
+
+        idless = sum(1 for b in backlog if not (b.get("id") or "").strip())
+        seen: set[str] = set()
+        dupes = 0
+        for b in backlog:
+            iid = (b.get("id") or "").strip()
+            if not iid:
+                continue
+            if iid in seen:
+                dupes += 1
+            else:
+                seen.add(iid)
+
+        if idless == 0 and dupes == 0:
+            return False
+
+        rebuilt = _assign_missing_ids(backlog, backlog)
+        p.trio_backlog = rebuilt
+        await s.commit()
+        log.info(
+            "trio.parent.backfilled_backlog_ids",
+            parent_id=parent_id,
+            idless=idless,
+            dupes=dupes,
+        )
+        return True
+
+
 async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     """Append architect-emitted new items to the parent's trio_backlog.
 
     Items default to ``status="pending"`` so the dispatcher picks them
-    up on the next per-item loop.
+    up on the next per-item loop. Items lacking an ``id`` get one
+    auto-assigned (see :func:`_assign_missing_ids`) so downstream tiebreak
+    prompts always have a unique item handle.
     """
 
     if not new_items:
@@ -989,7 +1376,8 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     async with async_session() as s:
         p = (await s.execute(select(Task).where(Task.id == parent_id))).scalar_one()
         backlog = list(p.trio_backlog or [])
-        for item in new_items:
+        augmented = _assign_missing_ids(backlog, new_items)
+        for item in augmented:
             ni = dict(item)
             ni.setdefault("status", "pending")
             backlog.append(ni)
@@ -1040,6 +1428,7 @@ async def _open_integration_pr_and_transition(
         await transition(s, p, TaskStatus.AWAITING_REVIEW, message="trio: awaiting review/feedback")
         await s.commit()
         branch = p.integration_branch or ""
+        freeform_mode = bool(p.freeform_mode)
 
     await publish(
         task_pr_created(parent.id, pr_url=pr_url or "", branch=branch),
@@ -1051,3 +1440,21 @@ async def _open_integration_pr_and_transition(
         pr_url=pr_url,
         target_branch=target_branch,
     )
+
+    # Freeform AWAITING_REVIEW gate (user contract 2026-05-23): in freeform
+    # repos a code-review PR is a technical decision — invoke the standin to
+    # auto-resolve. Approval → gh pr merge + transition DONE → on_task_finished
+    # fires → bug-17 serial-dispatch kicks the next scaffold sibling. The
+    # standin internally skips when ``Repo.mode == 'human_in_loop'``.
+    if freeform_mode and pr_url:
+        from agent.lifecycle.trio.architect import _prepare_parent_workspace
+
+        async with async_session() as s:
+            p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+            workspace = await _prepare_parent_workspace(p)
+        workspace_root = (
+            workspace.root if hasattr(workspace, "root") else str(workspace)
+        )
+        await _try_freeform_pr_review_standin(
+            parent=parent, workspace_root=workspace_root, pr_url=pr_url
+        )

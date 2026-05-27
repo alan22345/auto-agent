@@ -285,9 +285,75 @@ async def run(task: Task) -> list[int]:
             except OSError:
                 pass
 
-        await publish(task_created(child_id))
+    # Bug 17 — child trios under a scaffold parent must build serially.
+    # Coding in parallel produces concurrent commits on per-task branches of
+    # the same repo and is, per the user's contract, "not correct
+    # functionality". Publishing ``task_created`` for every child here would
+    # race them through ``on_task_classified`` → TRIO_EXECUTING simultaneously
+    # because the per-repo concurrency cap doesn't count TRIO_EXECUTING as
+    # active. Instead we only kick the FIRST pending child; the fan-in handler
+    # (``_maybe_advance_scaffold_parent_on_child_finish`` in run.py) dispatches
+    # the next pending sibling on each terminal event. Re-entry safety: we
+    # look across ALL children (existing INTAKE + newly created) so a
+    # re-dispatch after a partial run still picks the right next one.
+    await _publish_next_scaffold_child(task.id)
 
     return created_ids
+
+
+async def _publish_next_scaffold_child(parent_id: int) -> int | None:
+    """Publish ``task_created`` for the next pending scaffold child if any.
+
+    Picks the lowest-id ``INTAKE`` child of ``parent_id`` and publishes a
+    ``task_created`` event for it. Skips if any sibling is already in a
+    non-terminal, non-INTAKE status (i.e. a build is already in flight) so
+    we don't accidentally fan out by re-firing during recovery.
+
+    Returns the child id we dispatched, or ``None`` if nothing was eligible.
+    """
+
+    # Local copy of the terminal statuses; importing from run.py would
+    # create a cycle (run.py imports from this module).
+    terminal = (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED)
+
+    async with async_session() as s:
+        children = (
+            (await s.execute(select(Task).where(Task.parent_task_id == parent_id)))
+            .scalars()
+            .all()
+        )
+
+    if not children:
+        return None
+
+    # If any child is mid-flight (not INTAKE, not terminal), do nothing —
+    # we serialize one-at-a-time.
+    in_flight = [
+        c for c in children if c.status != TaskStatus.INTAKE and c.status not in terminal
+    ]
+    if in_flight:
+        log.info(
+            "scaffold.dispatch.serial_in_flight",
+            parent_id=parent_id,
+            in_flight_ids=[c.id for c in in_flight],
+        )
+        return None
+
+    intake = sorted(
+        [c for c in children if c.status == TaskStatus.INTAKE], key=lambda c: c.id
+    )
+    if not intake:
+        return None
+
+    next_child = intake[0]
+    log.info(
+        "scaffold.dispatch.publish_next_child",
+        parent_id=parent_id,
+        child_id=next_child.id,
+        remaining_intake=len(intake) - 1,
+    )
+    await publish(task_created(next_child.id))
+    return next_child.id
 
 
 def _approved_slugs(

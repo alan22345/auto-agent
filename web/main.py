@@ -618,6 +618,7 @@ async def _handle_toggle_freeform(ws: WebSocket, data: dict) -> None:
 async def _handle_create_repo(ws: WebSocket, data: dict) -> None:
     description = data.get("description", "").strip()
     org = data.get("org", "").strip()
+    name = data.get("name", "").strip()
     # The "loop" toggle from the UI controls whether the new repo enters the
     # continuous-improvement loop after scaffolding. When False, freeform mode
     # is still enabled but auto_approve_suggestions is left off so the PO won't
@@ -629,7 +630,13 @@ async def _handle_create_repo(ws: WebSocket, data: dict) -> None:
     async with httpx.AsyncClient(cookies=_ws_session_cookie(ws), timeout=180) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/freeform/create-repo",
-            json={"description": description, "org": org, "private": True, "loop": loop},
+            json={
+                "description": description,
+                "name": name,
+                "org": org,
+                "private": True,
+                "loop": loop,
+            },
         )
         if resp.status_code == 200:
             payload = resp.json()

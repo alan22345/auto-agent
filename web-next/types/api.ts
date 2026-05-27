@@ -61,6 +61,23 @@ export interface CIStatus {
   state: "success" | "failure" | "pending" | "error";
   message?: string;
 }
+/**
+ * One named capability — a group of related flows.
+ *
+ * Phase 1 emits exactly one capability with ``id="unlabeled"`` covering
+ * every derived flow. Phase 2 groups flows into ~5-12 capabilities and
+ * populates ``name`` / ``description``. ``flow_membership_hash`` is the
+ * SHA-256 of the sorted ``flow_ids`` list; Phase 2 skips re-labelling
+ * capabilities whose membership hash matches the persisted value.
+ */
+export interface Capability {
+  id: string;
+  flow_ids: string[];
+  flow_membership_hash: string;
+  name?: string | null;
+  description?: string | null;
+  labeled_at_commit?: string | null;
+}
 export interface ChangeEmailRequest {
   email: string;
 }
@@ -135,12 +152,73 @@ export interface EdgeEvidence {
 export interface EnableRepoGraphRequest {
   analysis_branch?: string | null;
 }
+/**
+ * One node detected as a flow entry point — see spec §3 step 1.
+ */
+export interface EntryPoint {
+  node_id: string;
+  kind: "http" | "queue" | "cron" | "cli";
+}
 export interface FeedbackSummary {
   total_outcomes?: number;
   approved?: number;
   rejected?: number;
   approval_rate?: number;
   avg_review_rounds?: number;
+}
+/**
+ * One flow — entry point through forward trace to a terminal effect.
+ *
+ * ``name`` and ``description`` are produced by the Phase 2 LLM labeller;
+ * Phase 1 leaves them ``None``. ``file_set_hash`` is the SHA-256 over the
+ * file contents of ``file_set``, sorted by path and concatenated before
+ * hashing; Phase 2 uses it to skip re-labelling unchanged flows (spec §4).
+ */
+export interface Flow {
+  id: string;
+  entry_point: EntryPoint;
+  terminal_node_id: string;
+  terminal_kind: "response" | "queue_publish" | "external_http" | "db_write" | "none";
+  steps: FlowStep[];
+  file_set: string[];
+  file_set_hash: string;
+  name?: string | null;
+  description?: string | null;
+  labeled_at_commit?: string | null;
+}
+/**
+ * One node on a flow's forward trace.
+ *
+ * ``depth`` is the BFS distance from the entry point along the dominant
+ * path; branch nodes carry the branch root's depth. ``is_branch_root``
+ * flags a node that fans out into multiple outgoing call edges at the
+ * same depth (rendered as a branch fork in Phase 3). ``is_cycle_back``
+ * marks the back-edge target when a cycle was detected and the trace
+ * stopped without re-expanding (spec §3 step 4).
+ */
+export interface FlowStep {
+  node_id: string;
+  depth: number;
+  is_branch_root?: boolean;
+  is_cycle_back?: boolean;
+}
+/**
+ * Full capability/flow derivation result — payload of
+ * ``RepoGraph.flow_json``.
+ *
+ * ``unreached`` is the list of node ids in the underlying graph that
+ * no flow's forward trace touched. Surfaced as the Unreached tray in
+ * the Phase 3 UI (spec §3 step 6). Phase 2 added ``labeled_at_commit``
+ * (on ``Flow``/``Capability``) and ``labeler_model`` (on this blob) for
+ * LLM provenance tracking; they remain ``None`` on Phase 1-derived blobs.
+ */
+export interface FlowJsonBlob {
+  capabilities: Capability[];
+  flows: Flow[];
+  unreached: string[];
+  derived_at_commit: string;
+  deriver_version: string;
+  labeler_model?: string | null;
 }
 /**
  * Typed representation of a freeform mode config.
@@ -233,6 +311,22 @@ export interface IntentVerdict {
   tool_calls?: {
     [k: string]: unknown;
   }[];
+}
+/**
+ * ``GET /api/repos/{id}/graph/flows`` payload — the Phase 3 Map view
+ * consumes this directly. ``blob`` is ``None`` until a recompute lands.
+ *
+ * ``repo_graph_id`` and ``generated_at`` come from the graph row whose
+ * ``flow_json`` produced ``blob``; the UI uses them in the freshness
+ * banner / "Recompute map" button. The endpoint reads the row pointed
+ * to by ``RepoGraphConfig.last_analysis_id`` so it always matches the
+ * blob the agent op ``which_capability`` resolves against.
+ */
+export interface LatestFlowsData {
+  repo_id: number;
+  repo_graph_id?: number | null;
+  generated_at?: string | null;
+  blob?: FlowJsonBlob | null;
 }
 /**
  * ``GET /api/repos/{id}/graph/latest`` payload — the freshness banner
@@ -452,6 +546,17 @@ export interface ProposedFact {
   resolution?: ("keep_existing" | "replace" | "keep_both") | null;
 }
 /**
+ * ``POST /api/repos/{id}/graph/flows/recompute`` response body.
+ */
+export interface RecomputeFlowsResponse {
+  repo_id: number;
+  flow_count: number;
+  capability_count: number;
+  unreached_count: number;
+  derived_at_commit: string;
+  labeled_flow_count?: number;
+}
+/**
  * Passed to architect.checkpoint on parent re-entry after integration PR CI failure.
  */
 export interface RepairContext {
@@ -512,6 +617,44 @@ export interface RepoResponse {
   id: number;
   name: string;
   url: string;
+}
+/**
+ * One entry in the per-repo secrets list.  Values are never included.
+ */
+export interface RepoSecretListEntry {
+  key: string;
+  is_set: boolean;
+  source: string;
+  purpose?: string | null;
+  updated_at?: string | null;
+}
+/**
+ * Response body for GET /repos/{id}/secrets.
+ */
+export interface RepoSecretListResponse {
+  keys: RepoSecretListEntry[];
+}
+/**
+ * Body for PUT /repos/{id}/secrets/{key}.
+ *
+ * ``value=None`` or ``value=""`` clears the row (equivalent to DELETE).
+ */
+export interface RepoSecretPutRequest {
+  value?: string | null;
+}
+/**
+ * Response body for POST /repos/{id}/secrets/{key}/reveal.
+ */
+export interface RepoSecretRevealResponse {
+  value?: string | null;
+}
+/**
+ * Response body for POST /repos/{id}/secrets/{key}/test.
+ */
+export interface RepoSecretTestResponse {
+  ok: boolean;
+  kind?: string | null;
+  message?: string | null;
 }
 /**
  * API shape for a review attempt row.
@@ -707,6 +850,9 @@ export interface TaskData {
     | {
         [k: string]: unknown;
       }[]
+    | {
+        [k: string]: unknown;
+      }
     | null;
   current_subtask?: number | null;
   intake_qa?:
