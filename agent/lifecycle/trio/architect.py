@@ -111,6 +111,7 @@ def create_architect_agent(
         base_prompt,
         ws_root,
         slice_name=slice_name,
+        task_id=task_id,
     )
     return agent
 

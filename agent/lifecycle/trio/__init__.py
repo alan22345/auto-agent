@@ -94,6 +94,72 @@ async def _resolve_target_branch(parent_id: int) -> str:
         return cfg.dev_branch or "main"
 
 
+async def _strip_auto_agent_dir(workspace_path: str, *, parent_id: int) -> None:
+    """Remove ``.auto-agent/`` from the integration branch's tracked
+    files and amend a single cleanup commit.
+
+    Why: the design phase calls ``_commit_design_md`` mid-flow so the
+    file survives a ``git reset --hard origin/<base>`` between phases.
+    By integration time that reason is gone, but the commit is still
+    in the branch's history and would be merged into ``main`` along
+    with the rest of the PR — contaminating the base branch with
+    per-task workspace artefacts. The next task that clones ``main``
+    inherits a stale ``design.md`` and the architect reads it as its
+    own contract (task 29, 2026-05-27).
+
+    Idempotent: silently no-op when ``.auto-agent/`` isn't tracked.
+    Failure here is non-fatal — we log and continue so a workspace
+    quirk can't block PR creation.
+    """
+    from agent import sh
+
+    ls = await sh.run(
+        ["git", "ls-files", ".auto-agent"],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    tracked = (ls.stdout or "").strip()
+    if not tracked:
+        return
+
+    rm_res = await sh.run(
+        ["git", "rm", "-r", "--cached", "--ignore-unmatch", ".auto-agent"],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    if rm_res.failed:
+        log.warning(
+            "trio.parent.strip_auto_agent_failed",
+            parent_id=parent_id,
+            stderr=(rm_res.stderr or "")[:400],
+        )
+        return
+
+    commit_res = await sh.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            "chore: strip .auto-agent/ workspace artefacts from integration",
+        ],
+        cwd=workspace_path,
+        timeout=15,
+    )
+    if commit_res.failed:
+        log.warning(
+            "trio.parent.strip_auto_agent_commit_failed",
+            parent_id=parent_id,
+            stderr=(commit_res.stderr or "")[:400],
+        )
+        return
+
+    log.info(
+        "trio.parent.stripped_auto_agent_dir",
+        parent_id=parent_id,
+        files_stripped=len(tracked.splitlines()),
+    )
+
+
 async def _open_integration_pr(parent: Task, target_branch: str) -> str:
     """Open the final ``<integration_branch> → target_branch`` PR via gh CLI.
 
@@ -144,7 +210,17 @@ async def _open_integration_pr(parent: Task, target_branch: str) -> str:
 
     gh_env = {"GH_TOKEN": token} if token else {}
 
-    # 1. Push the integration branch upstream. Prior to Phase 7.7 this
+    # 1a. Strip ``.auto-agent/`` from the integration branch before push.
+    #    The design phase commits ``design.md`` mid-flow (so workspace
+    #    resets don't lose it) but by integration time the trio is
+    #    done — committing the per-task workspace artefacts into the
+    #    PR pollutes ``main`` and causes the NEXT task's clone to
+    #    inherit a stale design (task 29, 2026-05-27: PR #53 merged
+    #    task-28's counterfactual ``design.md`` into main, so task 29's
+    #    architect read it as its own contract).
+    await _strip_auto_agent_dir(workspace_path, parent_id=parent.id)
+
+    # 1b. Push the integration branch upstream. Prior to Phase 7.7 this
     #    step was missing — the production run for task 1 lost the
     #    integration commits because nothing pushed them.
     push_res = await sh.run(
