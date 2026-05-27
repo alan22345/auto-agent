@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   blobToCytoscapeElements,
   computeSearchClasses,
+  formatBundleLabel,
 } from '@/components/code-graph/graph-canvas';
 import type { RepoGraphBlob } from '@/types/api';
 
@@ -290,5 +291,29 @@ describe('computeSearchClasses', () => {
     for (const id of result.matches) {
       expect(result.fades.has(id)).toBe(false);
     }
+  });
+});
+
+// 2026-05-21 — bundled meta-edge label. Used on the
+// ``.cy-expand-collapse-collapsed-edge`` selector at high zoom-out
+// where the evidence popover is impractical.
+describe('formatBundleLabel', () => {
+  it('shows the kind alone for a singleton bundle', () => {
+    // Bundles of size 1 mean nothing was actually grouped — no need
+    // for a ``(×1)`` suffix that just adds noise.
+    expect(formatBundleLabel('calls', 1)).toBe('calls');
+    expect(formatBundleLabel('imports', 0)).toBe('imports');
+  });
+
+  it('appends `(×N)` for real bundles', () => {
+    expect(formatBundleLabel('calls', 27)).toBe('calls (×27)');
+    expect(formatBundleLabel('imports', 2)).toBe('imports (×2)');
+  });
+
+  it('tolerates an empty kind (defensive — extension shape may drift)', () => {
+    // Future-proofing: if the extension stops emitting ``kind`` on the
+    // meta-edge for some reason, the label should degrade gracefully
+    // rather than render ``undefined (×N)``.
+    expect(formatBundleLabel('', 3)).toBe(' (×3)');
   });
 });

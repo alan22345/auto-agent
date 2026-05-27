@@ -128,7 +128,11 @@ export function AreaRefreshOverlay({ repoId, blob, cy, layoutTick }: Props) {
   return (
     <div
       aria-hidden={false}
-      className="pointer-events-none absolute inset-0"
+      // z-index above 999: cytoscape-expand-collapse mounts its
+      // cue-icon canvas inside the cytoscape host at z-index 999,
+      // which would otherwise intercept clicks on every refresh
+      // badge in this overlay.
+      className="pointer-events-none absolute inset-0 z-[1000]"
       data-testid="area-refresh-overlay"
     >
       {positions.map((p) => {

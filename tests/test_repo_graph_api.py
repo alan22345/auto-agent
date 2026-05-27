@@ -20,7 +20,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.models import Repo, RepoGraphConfig
+from shared.models import Repo, RepoGraph, RepoGraphConfig
 
 
 def _make_repo(*, repo_id: int = 1, name: str = "demo", default_branch: str = "main"):
@@ -316,6 +316,36 @@ class TestDisableGraph:
         with pytest.raises(HTTPException) as exc:
             await disable_repo_graph(repo_id=1, session=session, org_id=1)
         assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    @patch("orchestrator.router._get_repo_in_org", new_callable=AsyncMock)
+    async def test_also_wipes_repo_graph_rows(self, mock_get_repo) -> None:
+        """Disable must clear stale `repo_graphs` rows so re-enable starts
+        with a clean slate. Without this, `/graph/progress` returns the
+        previous run's "complete" state even though the config is fresh."""
+        from sqlalchemy.sql import Delete
+
+        from orchestrator.router import disable_repo_graph
+
+        repo = _make_repo(repo_id=5)
+        cfg = _make_config(repo_id=repo.id)
+        mock_get_repo.return_value = repo
+        session = AsyncMock(spec=AsyncSession)
+        select_result = MagicMock()
+        select_result.scalar_one_or_none.return_value = cfg
+        session.execute.return_value = select_result
+
+        out = await disable_repo_graph(repo_id=repo.id, session=session, org_id=1)
+
+        # Two execute() calls: SELECT cfg, then DELETE FROM repo_graphs.
+        assert session.execute.await_count == 2
+        delete_stmt = session.execute.await_args_list[1].args[0]
+        assert isinstance(delete_stmt, Delete)
+        assert delete_stmt.table.name == RepoGraph.__tablename__
+
+        session.delete.assert_awaited_once_with(cfg)
+        session.commit.assert_awaited_once()
+        assert out == {"disabled": repo.id}
 
 
 # ---------------------------------------------------------------------------

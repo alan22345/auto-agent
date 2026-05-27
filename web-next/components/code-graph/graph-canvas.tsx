@@ -1,11 +1,25 @@
 'use client';
 // Cytoscape compound graph renderer (ADR-016 §11, Phase 2).
 //
-// Nodes nest: area → file → class → function. All areas start
-// collapsed; the cytoscape-expand-collapse extension provides the
-// toggle UI when the user clicks. Edge colours are keyed off ``kind``
-// (calls=blue, imports=grey, inherits=purple) — Phase 7 polishes this;
-// here we ship a usable default.
+// Nodes nest: area → file → class → function. Edge colours are keyed
+// off ``kind`` (calls=blue, imports=grey, inherits=purple). For graphs
+// large enough to be unreadable when fully expanded (e.g. 3k+ nodes),
+// the canvas starts with every area collapsed; the user expands areas
+// individually via the cytoscape-expand-collapse ``+`` cues or the
+// Collapse-all / Expand-all toolbar overlaid on the canvas.
+//
+// Layout uses ``fcose`` (cytoscape-fcose). cose was the original choice
+// but failed to space compound subgraphs cleanly once the graph had
+// more than ~50 nodes; fcose handles compound graphs natively and is
+// deterministic with ``randomize:false`` so successive expand/collapse
+// cycles don't shuffle the user's mental map.
+//
+// On collapse, edges of the same ``kind`` between the same two
+// compounds bundle into a single meta-edge labelled ``kind (×N)`` —
+// driven by the extension's ``groupEdgesOfSameTypeOnCollapse`` option
+// with ``edgeTypeInfo: 'kind'`` so the meta-edge carries the kind on
+// its data, and the ``expandcollapse.aftercollapseedge`` event hook
+// derives ``label`` + ``color`` from that.
 //
 // Phase 5 (ADR-016 §7) overlays a destructive style on edges with
 // ``boundary_violation === true``: thicker red dashed stroke that
@@ -13,11 +27,11 @@
 // the element data so a future side-panel can surface them.
 //
 // Phase 7 P3 (ADR-016 §11) overlays a dotted-line style on edges with
-// ``source_kind === 'llm'``: the kind colour stays the same so calls
-// remain blue / imports stay grey, but a slimmer dotted stroke reads as
-// "softer / less certain" than a tree-sitter-derived edge. Boundary
-// violations still win when both flags coincide — the dashed red
-// destructive overlay rule comes later in the style array.
+// ``source_kind === 'llm'``: the kind colour stays the same but a
+// slimmer dotted stroke reads as "softer / less certain" than a
+// tree-sitter-derived edge. Boundary violations still win when both
+// flags coincide — the dashed red destructive overlay rule comes
+// later in the style array.
 //
 // Failed areas (``AreaStatus.status === 'failed'``) get a red border
 // and surface their error through the node's tooltip data so users see
@@ -25,6 +39,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type cytoscape from 'cytoscape';
+import {
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Minus,
+  Plus,
+} from 'lucide-react';
 import type { RepoGraphBlob, AreaStatus, Edge, Node } from '@/types/api';
 import { AreaRefreshOverlay } from './area-refresh-overlay';
 
@@ -66,6 +86,12 @@ interface Props {
    * everything else gets ``.reachability-fade``. ``null`` / undefined =
    * no overlay. */
   reachabilityHighlight?: Set<string> | null;
+  /** Area names the user has chosen to hide. Every node whose ``area``
+   * field matches gets ``display: none`` — that covers the area parent
+   * + every descendant file / class / function. Edges with either
+   * endpoint in a hidden area are also hidden so dangling stubs don't
+   * litter the canvas. */
+  hiddenAreas?: Set<string>;
 }
 
 export function GraphCanvas({
@@ -78,9 +104,13 @@ export function GraphCanvas({
   searchQuery,
   hiddenEdgeKinds,
   reachabilityHighlight,
+  hiddenAreas,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  // Handle for the cytoscape-expand-collapse extension instance. Set
+  // once on mount; used by the toolbar buttons.
+  const expandCollapseApiRef = useRef<ExpandCollapseApi | null>(null);
   // ``cyState`` is the same instance as ``cyRef.current`` but tracked in
   // React state so child overlays re-render when cytoscape mounts.
   const [cyState, setCyState] = useState<cytoscape.Core | null>(null);
@@ -109,6 +139,17 @@ export function GraphCanvas({
         expandCollapse(cytoscape);
       } catch {
         // The extension throws if already registered — safe to ignore.
+      }
+      // fcose handles compound graphs cleanly and is deterministic with
+      // ``randomize:false``. Required so that expand-collapse re-layouts
+      // don't shuffle the rest of the graph.
+      const fcoseModule = await import('cytoscape-fcose');
+      const fcose = (fcoseModule as { default: unknown }).default;
+      try {
+        (cytoscape as unknown as { use: (ext: unknown) => void }).use(fcose);
+      } catch {
+        // Same idempotency note as expand-collapse: throws on second
+        // registration in the same browser session.
       }
       if (cancelled || !containerRef.current) return;
 
@@ -167,6 +208,23 @@ export function GraphCanvas({
               'target-arrow-color': 'data(color)',
             },
           },
+          // Bundled meta-edge produced by the expand-collapse extension
+          // when a compound is collapsed. ``data('label')`` is set by
+          // the ``expandcollapse.aftercollapseedge`` handler from the
+          // count of underlying edges.
+          {
+            selector: 'edge.cy-expand-collapse-collapsed-edge',
+            style: {
+              label: 'data(label)',
+              'font-size': 9,
+              color: '#1f2937',
+              'text-background-color': '#ffffff',
+              'text-background-opacity': 0.85,
+              'text-background-padding': '2px',
+              'text-background-shape': 'roundrectangle',
+              width: 2,
+            },
+          },
           // Phase 7 §11 — AST vs LLM visual distinction. LLM-deduced
           // edges render dotted + slimmer so they read as "softer /
           // less certain" than tree-sitter-derived edges. The
@@ -223,6 +281,18 @@ export function GraphCanvas({
             selector: 'edge.edge-kind-hidden-http',
             style: { display: 'none' as const },
           },
+          // 2026-05-21 — bulk per-area hide. Applied to nodes whose
+          // ``area`` data matches a hidden area, and to edges whose
+          // either endpoint is in a hidden area (so the canvas doesn't
+          // sprout dangling stubs).
+          {
+            selector: 'node.area-hidden',
+            style: { display: 'none' as const },
+          },
+          {
+            selector: 'edge.area-hidden',
+            style: { display: 'none' as const },
+          },
           // Phase 7 P2c §11 — ancestor / descendant reachability
           // overlay. Fade is stronger than the search fade so the two
           // overlays compose readably (search inside a reachability
@@ -238,26 +308,49 @@ export function GraphCanvas({
         ],
       });
 
-      // Register the expand-collapse extension so the user can toggle
-      // compounds via the UI. We previously called ``collapseAll()``
-      // immediately on mount, but that left the cose layout unable to
-      // position anything (all nodes ended up at the origin) and the
-      // canvas rendered blank. Leave compounds expanded by default —
-      // the layout runs cleanly, and the user can collapse manually if
-      // a large graph needs hiding.
-      (
+      // Register the expand-collapse extension. ``layoutBy`` runs after
+      // each toggle so the surrounding graph reflows around the new
+      // compound size. ``edgeTypeInfo: 'kind'`` makes the extension
+      // group edges of the same ``kind`` into a single meta-edge on
+      // collapse — the label is decorated by the
+      // ``aftercollapseedge`` handler below.
+      const api = (
         cy as unknown as {
-          expandCollapse: (opts: {
-            layoutBy: { name: string; padding?: number };
-            fisheye: boolean;
-            animate: boolean;
-          }) => unknown;
+          expandCollapse: (opts: ExpandCollapseOptions) => ExpandCollapseApi;
         }
       ).expandCollapse({
-        layoutBy: { name: 'cose', padding: 30 },
+        layoutBy: {
+          name: 'fcose',
+          randomize: false,
+          animate: false,
+          padding: 30,
+        } as ExpandCollapseLayout,
         fisheye: false,
         animate: false,
+        groupEdgesOfSameTypeOnCollapse: true,
+        edgeTypeInfo: 'kind',
       });
+      expandCollapseApiRef.current = api;
+
+      // Decorate the meta-edge with a ``label`` + ``color`` derived
+      // from its bundle so the existing ``data(label)`` / ``data(color)``
+      // style selectors render correctly.
+      const decorateCollapsedEdges = () => {
+        cy!
+          .edges('.cy-expand-collapse-collapsed-edge')
+          .forEach((edge) => {
+            const collapsed = edge.data('collapsedEdges');
+            const count =
+              collapsed && typeof collapsed.length === 'number'
+                ? collapsed.length
+                : 1;
+            const kind = (edge.data('kind') as string | undefined) ?? '';
+            edge.data('label', formatBundleLabel(kind, count));
+            edge.data('color', EDGE_COLOUR[kind] ?? '#9ca3af');
+          });
+      };
+      cy.on('expandcollapse.aftercollapseedge', decorateCollapsedEdges);
+
       // `cy.layout(...).run()` lays out asynchronously — fitting before
       // positions are final leaves nodes outside the viewport (canvas
       // looks empty on first render). Use the layout's documented
@@ -272,16 +365,52 @@ export function GraphCanvas({
           // cy may already be destroyed during unmount race — silent.
         }
       };
+      // Two-pass layout: run fcose with everything expanded so the
+      // engine has good positions to fold into, then collapse-all,
+      // then re-run fcose so the collapsed compounds get packed. cose
+      // collapsed-all before initial layout left every node at (0,0);
+      // fcose tolerates it better but the two-pass remains the safer
+      // path documented in the handover.
+      const collapseAndRelayout = () => {
+        try {
+          api.collapseAll();
+        } catch {
+          // Extension can throw if cytoscape was torn down during the
+          // async layout window. Silent — the canvas is gone anyway.
+        }
+        try {
+          cyInstance
+            .layout({
+              name: 'fcose',
+              randomize: false,
+              animate: false,
+              padding: 30,
+              stop: fitOnce,
+            } as cytoscape.LayoutOptions)
+            .run();
+        } catch {
+          // fcose registration races during unmount — silent.
+        }
+      };
       cyInstance
-        .layout({ name: 'cose', padding: 30, animate: false, stop: fitOnce } as cytoscape.LayoutOptions)
+        .layout({
+          name: 'fcose',
+          randomize: false,
+          animate: false,
+          padding: 30,
+          stop: collapseAndRelayout,
+        } as cytoscape.LayoutOptions)
         .run();
-      setTimeout(fitOnce, 250);
+      setTimeout(fitOnce, 500);
 
       // Tap handlers — drive the side panel + evidence popover. They
       // forward into refs (captured per render) so handler identity
       // doesn't churn the cytoscape binding on each re-render.
       cy.on('tap', 'node', (evt) => {
         const id = evt.target.id() as string;
+        // Skip the synthesised expand-collapse cue nodes if any sneak
+        // through — they have no id we care about.
+        if (!id) return;
         onNodeClickRef.current?.(id);
       });
       cy.on('tap', 'edge', (evt) => {
@@ -303,6 +432,13 @@ export function GraphCanvas({
         setLayoutTick((t) => t + 1);
       });
 
+      // Zoom-aware auto-LOD was tried here and removed — it fought the
+      // user during exploration (the canvas oscillated between
+      // expanded and collapsed states as the zoom level crossed the
+      // hysteresis thresholds during a layout reflow). The
+      // Collapse-all / Expand-all toolbar + per-compound +/- cues +
+      // per-area filter provide enough control without it.
+
       cyRef.current = cy;
       setCyState(cy);
       // Trigger one tick so the overlay computes initial positions
@@ -315,6 +451,7 @@ export function GraphCanvas({
       cancelled = true;
       if (cy) cy.destroy();
       cyRef.current = null;
+      expandCollapseApiRef.current = null;
       setCyState(null);
     };
   }, [blob, areaErrorById, highlightedEdgeId]);
@@ -383,12 +520,219 @@ export function GraphCanvas({
     });
   }, [cyState, reachabilityHighlight]);
 
+  // 2026-05-21 — per-area hide diff. Mirrors the edge-kind handler
+  // above but matches on ``data('area')`` so every descendant of the
+  // hidden area also drops out.
+  useEffect(() => {
+    const cy = cyState;
+    if (!cy) return;
+    const hidden = hiddenAreas ?? new Set<string>();
+    cy.batch(() => {
+      cy.nodes().forEach((n) => {
+        const area = n.data('area') as string | undefined;
+        n.toggleClass('area-hidden', !!area && hidden.has(area));
+      });
+      cy.edges().forEach((e) => {
+        const src = e.source();
+        const tgt = e.target();
+        const srcArea = src.data('area') as string | undefined;
+        const tgtArea = tgt.data('area') as string | undefined;
+        const hide =
+          (!!srcArea && hidden.has(srcArea)) ||
+          (!!tgtArea && hidden.has(tgtArea));
+        e.toggleClass('area-hidden', hide);
+      });
+    });
+  }, [cyState, blob, hiddenAreas]);
+
+  // Re-fit after a queued layout cycle. Small delay so we don't catch
+  // the extension's internal layout mid-flight; the same pattern was
+  // already used by the old binary Collapse/Expand all handlers.
+  const refit = (cy: cytoscape.Core) => {
+    setTimeout(() => {
+      try {
+        cy.fit(undefined, 30);
+      } catch {
+        /* unmounted */
+      }
+    }, 250);
+  };
+
+  // Tree depth helper — walks ``parent()`` chain until it hits the
+  // root. Areas live at depth 0, files at 1, classes at 2, functions
+  // at 3 (or wherever — the helper is generic). Used by the stepwise
+  // expansion handlers below.
+  const nodeTreeDepth = (n: cytoscape.NodeSingular): number => {
+    let d = 0;
+    let p = n.parent();
+    while (p.length > 0) {
+      d++;
+      p = p.parent();
+    }
+    return d;
+  };
+
+  const handleCollapseAll = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      api.collapseAll();
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  const handleExpandAll = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      api.expandAll();
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  // Stepwise: expand the SHALLOWEST currently-collapsed compounds —
+  // i.e. peel back exactly one layer of compression. Picking the
+  // shallowest set means the user sees the next ring of the
+  // hierarchy come into view (areas → files → classes → functions),
+  // not random pockets of detail at deeper levels.
+  const handleExpandOneLevel = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      const expandable = api.expandableNodes();
+      if (expandable.length === 0) return;
+      let minDepth = Infinity;
+      expandable.forEach((n) => {
+        const d = nodeTreeDepth(n);
+        if (d < minDepth) minDepth = d;
+      });
+      const toExpand = expandable.filter(
+        (n) => nodeTreeDepth(n) === minDepth,
+      );
+      if (toExpand.length === 0) return;
+      api.expand(toExpand);
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  // Stepwise: collapse the DEEPEST currently-expanded compounds —
+  // the mirror of expandOneLevel. Folds the innermost ring back in
+  // so the user can step out of detail layer by layer.
+  const handleCollapseOneLevel = () => {
+    const cy = cyRef.current;
+    const api = expandCollapseApiRef.current;
+    if (!cy || !api) return;
+    try {
+      const collapsible = api.collapsibleNodes();
+      if (collapsible.length === 0) return;
+      let maxDepth = -1;
+      collapsible.forEach((n) => {
+        const d = nodeTreeDepth(n);
+        if (d > maxDepth) maxDepth = d;
+      });
+      const toCollapse = collapsible.filter(
+        (n) => nodeTreeDepth(n) === maxDepth,
+      );
+      if (toCollapse.length === 0) return;
+      api.collapse(toCollapse);
+      refit(cy);
+    } catch {
+      /* extension swallowed */
+    }
+  };
+
+  // The cytoscape canvases live inside their own dedicated host div —
+  // ``cyHostRef`` below — and the toolbar / refresh-overlay live as
+  // SIBLINGS of that host inside the outer wrapper. Every previous
+  // attempt at making the toolbar a CHILD of the cytoscape host hit
+  // the same trap: cytoscape binds mousedown on its host element, and
+  // any click on a descendant bubbles into that listener — cytoscape
+  // projects the click into graph coords and emits a tap on the area
+  // node behind the button, which opens the side panel. The user
+  // perceives it as "the click went to the graph". Layered fixes
+  // (z-30, ``pointer-events-none`` wrapper, React stopPropagation,
+  // native stopPropagation on the button) either ran too late under
+  // React 17+ root delegation or just didn't fully cover the case.
+  //
+  // Sibling structure dodges the whole class of bug: cytoscape's
+  // listener is on cyHostRef, and the buttons are NOT descendants of
+  // cyHostRef, so the listener never fires for button clicks. ``z-50``
+  // + a wrapping ``isolate`` on the outer div pins the toolbar above
+  // the canvas's z-0 stacking context.
   return (
     <div
-      ref={containerRef}
       data-testid="code-graph-canvas"
-      className={`relative h-[calc(100vh-260px)] min-h-[400px] w-full rounded-md border bg-background ${className ?? ''}`}
+      className={`relative isolate h-[calc(100vh-260px)] min-h-[400px] w-full overflow-hidden rounded-md border bg-background ${className ?? ''}`}
     >
+      <div ref={containerRef} className="absolute inset-0" />
+      {/* Four stepped expansion controls — collapse all the way (◀◀),
+        * collapse one layer (◀), expand one layer (▶), expand all the
+        * way (▶▶). The two "all" extremes are still here because they
+        * are the most common shortcut on large graphs; the two
+        * single-step buttons let users peel back the hierarchy one
+        * ring at a time (areas → files → classes → functions).
+        *
+        * z-index 1000 is load-bearing: cytoscape-expand-collapse
+        * injects its OWN canvas inside the cytoscape host at z-index
+        * 999 to draw the per-compound +/- cue icons. That canvas
+        * normally captures pointer events for the entire host area —
+        * so any overlay at a lower z-index (z-50, the previous value)
+        * silently loses every click to the cue canvas. The toolbar
+        * has to live above z-999 to receive its own clicks. */}
+      <div
+        data-testid="graph-collapse-controls"
+        className="pointer-events-none absolute right-2 top-2 z-[1000] flex items-center gap-1 rounded-md border bg-card/95 p-1 shadow-sm"
+      >
+        <button
+          type="button"
+          onClick={handleCollapseAll}
+          data-testid="graph-collapse-all"
+          aria-label="Collapse all areas"
+          title="Collapse all areas"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <ChevronsDownUp size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={handleCollapseOneLevel}
+          data-testid="graph-collapse-one"
+          aria-label="Collapse one layer"
+          title="Collapse one layer (fold innermost ring)"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <Minus size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={handleExpandOneLevel}
+          data-testid="graph-expand-one"
+          aria-label="Expand one layer"
+          title="Expand one layer (peel back next ring)"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <Plus size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={handleExpandAll}
+          data-testid="graph-expand-all"
+          aria-label="Expand all areas"
+          title="Expand all areas"
+          className="pointer-events-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
+        >
+          <ChevronsUpDown size={14} />
+        </button>
+      </div>
       {repoId !== undefined && (
         <AreaRefreshOverlay
           repoId={repoId}
@@ -409,6 +753,41 @@ export function GraphCanvas({
 interface CyElement {
   data: Record<string, unknown>;
   classes?: string;
+}
+
+// Local shapes for the cytoscape-expand-collapse extension. The package
+// ships no .d.ts, so we type the surface we touch ourselves rather than
+// litter the call sites with ``as any``.
+interface ExpandCollapseLayout {
+  name: string;
+  randomize?: boolean;
+  animate?: boolean;
+  padding?: number;
+}
+
+interface ExpandCollapseOptions {
+  layoutBy: ExpandCollapseLayout;
+  fisheye: boolean;
+  animate: boolean;
+  groupEdgesOfSameTypeOnCollapse?: boolean;
+  /** Data key whose value is used to group edges on collapse. We pass
+   * ``'kind'`` so calls/imports/inherits/http each bundle separately. */
+  edgeTypeInfo?: string;
+}
+
+interface ExpandCollapseApi {
+  collapseAll: () => void;
+  expandAll: () => void;
+  /** Collapse a specific collection of compound nodes. */
+  collapse: (eles: cytoscape.NodeCollection) => void;
+  /** Expand a specific collection of compound nodes. */
+  expand: (eles: cytoscape.NodeCollection) => void;
+  /** Cytoscape collection of nodes that are currently expandable (i.e.
+   * collapsed compounds). */
+  expandableNodes: () => cytoscape.NodeCollection;
+  /** Cytoscape collection of nodes that are currently collapsible (i.e.
+   * expanded compounds with children). */
+  collapsibleNodes: () => cytoscape.NodeCollection;
 }
 
 function buildAreaErrorMap(areas: AreaStatus[]): Record<string, string | null> {
@@ -530,4 +909,21 @@ export function computeSearchClasses(
     }
   }
   return { matches, fades };
+}
+
+// ---------------------------------------------------------------------------
+// 2026-05-21 — bundled-edge label format.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the label rendered on a collapsed meta-edge.
+ *
+ * Singletons (count <= 1) render the kind alone — no ``(×1)`` noise.
+ * Bundles render ``kind (×N)`` so the user sees both the relationship
+ * and its weight at high zoom-out where the evidence popover is
+ * impractical.
+ */
+export function formatBundleLabel(kind: string, count: number): string {
+  if (count > 1) return `${kind} (×${count})`;
+  return kind;
 }

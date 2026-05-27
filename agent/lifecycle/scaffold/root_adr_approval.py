@@ -24,7 +24,9 @@ from typing import Any
 import structlog
 from sqlalchemy import select
 
+from agent.lifecycle.scaffold._promotion import promote_adr_to_docs
 from agent.lifecycle.scaffold._workspace import prepare_scaffold_workspace
+from agent.lifecycle.workspace_paths import ROOT_ADR_PATH
 from orchestrator.state_machine import transition
 from shared.database import async_session
 from shared.models import Task, TaskStatus
@@ -118,6 +120,15 @@ async def apply_verdict(task_id: int, verdict_payload: dict[str, Any]) -> TaskSt
             )
             await s.commit()
             log.info("scaffold.root_adr.approved", task_id=task_id)
+            try:
+                workspace = await prepare_scaffold_workspace(task)
+                promote_adr_to_docs(workspace, ROOT_ADR_PATH)
+            except Exception as exc:
+                log.warning(
+                    "scaffold.root_adr.promotion_failed",
+                    task_id=task_id,
+                    error=str(exc),
+                )
             return TaskStatus.BUILDING_DOMAIN_ADRS
 
         if verdict == "rejected":
@@ -182,7 +193,7 @@ async def request_po_verdict(task: Task) -> str:
     POST a verdict via the router instead.
     """
 
-    from agent.lifecycle.workspace_paths import ROOT_ADR_APPROVAL_PATH, ROOT_ADR_PATH
+    from agent.lifecycle.workspace_paths import ROOT_ADR_APPROVAL_PATH
     from agent.po_agent import po_approve_root_adr
 
     workspace = await prepare_scaffold_workspace(task)

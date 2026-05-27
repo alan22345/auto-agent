@@ -837,3 +837,205 @@ async def test_final_verification_writes_gaps_found_when_boot_fails(tmp_path: Pa
     assert payload["verdict"] == "gaps_found"
     assert payload["gaps"]
     assert payload["gaps"][0]["kind"] == "boot_failure"
+
+
+# ---------------------------------------------------------------------------
+# 6b. final_verification — route sourcing + inspect_ui layer
+# ---------------------------------------------------------------------------
+
+
+def _write_child_backlog(workspaces_dir: Path, *, org_id: int, child_id: int, items: list[dict]):
+    """Materialise <workspaces_dir>/<org>/task-<id>/.auto-agent/backlog.json."""
+
+    from agent.lifecycle.workspace_paths import BACKLOG_PATH
+
+    child_ws = workspaces_dir / str(org_id) / f"task-{child_id}"
+    (child_ws / ".auto-agent").mkdir(parents=True)
+    (child_ws / BACKLOG_PATH).write_text(json.dumps({"schema_version": "1", "items": items}))
+    return child_ws
+
+
+@pytest.mark.asyncio
+async def test_collect_union_routes_reads_children_backlogs(tmp_path: Path, monkeypatch):
+    """``_collect_union_routes`` should union routes across every child's
+    backlog.json, dedupe, and tolerate children whose backlog is missing.
+    """
+
+    from agent.lifecycle.scaffold import final_verification as fv_mod
+    from shared.models import TaskComplexity, TaskSource, TaskStatus
+
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+    # The module captured WORKSPACES_DIR at import time; patch the bound name.
+    monkeypatch.setattr("agent.workspace.WORKSPACES_DIR", str(tmp_path))
+
+    _write_child_backlog(
+        tmp_path,
+        org_id=7,
+        child_id=11,
+        items=[
+            {"affected_routes": ["/login", "/"]},
+            {"affected_routes": ["/campaigns", "/"]},  # `/` duplicate
+        ],
+    )
+    _write_child_backlog(
+        tmp_path,
+        org_id=7,
+        child_id=12,
+        items=[{"affected_routes": ["/leads/{id}", "/campaigns"]}],  # `/campaigns` dup
+    )
+    # child 13 has no backlog on disk — should be silently skipped.
+
+    children = [
+        SimpleNamespace(
+            id=cid,
+            organization_id=7,
+            status=TaskStatus.DONE,
+            complexity=TaskComplexity.COMPLEX_LARGE,
+            source=TaskSource.MANUAL,
+        )
+        for cid in (11, 12, 13)
+    ]
+
+    @asynccontextmanager
+    async def factory():
+        class _Result:
+            def scalars(self):
+                class _S:
+                    def all(self):
+                        return children
+
+                return _S()
+
+        class _Session:
+            async def execute(self, *_a, **_kw):
+                return _Result()
+
+        yield _Session()
+
+    with patch.object(fv_mod, "async_session", factory):
+        routes = await fv_mod._collect_union_routes(parent_id=99)
+
+    assert routes == ["/login", "/", "/campaigns", "/leads/{id}"]
+
+
+@pytest.mark.asyncio
+async def test_run_invokes_inspect_ui_with_intent_for_each_ui_route(tmp_path: Path):
+    """When boot succeeds and routes have UI entries, ``run()`` must call
+    ``inspect_ui`` for each UI route with the scaffold's ``intent.md``
+    body passed as the ``intent`` arg.
+    """
+
+    from agent.lifecycle.scaffold import final_verification as fv_mod
+    from agent.lifecycle.workspace_paths import INTENT_PATH
+
+    (tmp_path / ".auto-agent").mkdir(parents=True)
+    (tmp_path / INTENT_PATH).write_text("Build a campaign-management app.")
+
+    task = _make_scaffold_task(status="awaiting_final_verification")
+
+    running_handle = MagicMock()
+    running_handle.state = "running"
+    running_handle.base_url = "http://localhost:9999"
+    running_handle.teardown = AsyncMock()
+
+    # /login + /campaigns are UI; /api/health is not.
+    routes = ["/login", "/campaigns", "/api/health"]
+
+    def _ok_result():
+        r = MagicMock()
+        r.ok = True
+        r.status = 200
+        r.reason = ""
+        return r
+
+    route_results = {r: _ok_result() for r in routes}
+    inspect_calls: list[dict] = []
+
+    async def fake_inspect_ui(*, route, intent, base_url):
+        inspect_calls.append({"route": route, "intent": intent, "base_url": base_url})
+        ui = MagicMock()
+        ui.ok = True
+        ui.reason = ""
+        return ui
+
+    with (
+        patch.object(
+            fv_mod, "prepare_scaffold_workspace", new=AsyncMock(return_value=str(tmp_path))
+        ),
+        patch.object(fv_mod, "_collect_union_routes", new=AsyncMock(return_value=routes)),
+        patch.object(
+            fv_mod.verify_primitives, "boot_dev_server", new=AsyncMock(return_value=running_handle)
+        ),
+        patch.object(
+            fv_mod.verify_primitives, "exercise_routes", new=AsyncMock(return_value=route_results)
+        ),
+        patch.object(fv_mod.verify_primitives, "inspect_ui", new=fake_inspect_ui),
+    ):
+        verdict = await fv_mod.run(task)
+
+    assert verdict == "passed"
+    # Only the two UI routes — /api/health is not UI.
+    assert [c["route"] for c in inspect_calls] == ["/login", "/campaigns"]
+    assert all(c["intent"] == "Build a campaign-management app." for c in inspect_calls)
+    assert all(c["base_url"] == "http://localhost:9999" for c in inspect_calls)
+
+
+@pytest.mark.asyncio
+async def test_run_records_ui_mismatch_as_gap_but_ignores_missing_playwright(tmp_path: Path):
+    """An ``inspect_ui`` failure should be a gap, except when Playwright
+    is unavailable — that's an environment issue, not a UI mismatch.
+    """
+
+    from agent.lifecycle.scaffold import final_verification as fv_mod
+    from agent.lifecycle.workspace_paths import SCAFFOLD_FINAL_VERIFICATION_PATH
+
+    (tmp_path / ".auto-agent").mkdir(parents=True)
+
+    task = _make_scaffold_task(status="awaiting_final_verification")
+
+    running_handle = MagicMock()
+    running_handle.state = "running"
+    running_handle.base_url = "http://localhost:9999"
+    running_handle.teardown = AsyncMock()
+
+    routes = ["/broken", "/no-playwright"]
+
+    def _ok_result():
+        r = MagicMock()
+        r.ok = True
+        r.status = 200
+        r.reason = ""
+        return r
+
+    route_results = {r: _ok_result() for r in routes}
+
+    async def fake_inspect_ui(*, route, intent, base_url):
+        ui = MagicMock()
+        if route == "/broken":
+            ui.ok = False
+            ui.reason = "verdict=FAIL: no campaign list rendered"
+        else:
+            ui.ok = False
+            ui.reason = "playwright_not_installed"
+        return ui
+
+    with (
+        patch.object(
+            fv_mod, "prepare_scaffold_workspace", new=AsyncMock(return_value=str(tmp_path))
+        ),
+        patch.object(fv_mod, "_collect_union_routes", new=AsyncMock(return_value=routes)),
+        patch.object(
+            fv_mod.verify_primitives, "boot_dev_server", new=AsyncMock(return_value=running_handle)
+        ),
+        patch.object(
+            fv_mod.verify_primitives, "exercise_routes", new=AsyncMock(return_value=route_results)
+        ),
+        patch.object(fv_mod.verify_primitives, "inspect_ui", new=fake_inspect_ui),
+    ):
+        verdict = await fv_mod.run(task)
+
+    assert verdict == "gaps_found"
+    payload = json.loads((tmp_path / SCAFFOLD_FINAL_VERIFICATION_PATH).read_text())
+    kinds = [g["kind"] for g in payload["gaps"]]
+    assert kinds == ["ui_mismatch"]
+    assert payload["gaps"][0]["route"] == "/broken"

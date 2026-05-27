@@ -26,12 +26,15 @@ from typing import Any
 import structlog
 from sqlalchemy import select
 
+from agent.lifecycle.scaffold._promotion import promote_adr_to_docs
 from agent.lifecycle.scaffold._workspace import prepare_scaffold_workspace
 from agent.lifecycle.scaffold.validators import parse_domains
 from agent.lifecycle.workspace_paths import (
     DOMAIN_ADR_APPROVALS_DIR,
     ROOT_ADR_PATH,
     domain_adr_approval_path,
+    domain_adr_path,
+    domain_grill_path,
 )
 from orchestrator.state_machine import transition
 from shared.database import async_session
@@ -129,6 +132,23 @@ async def apply_verdict(
         else:
             domains = []
         expected_slugs = {d.get("slug") for d in domains if d.get("slug")}
+
+        if effective == "approved":
+            idx = next(
+                (i + 1 for i, d in enumerate(domains) if d.get("slug") == slug),
+                None,
+            )
+            if idx is not None:
+                try:
+                    promote_adr_to_docs(workspace, domain_adr_path(idx, slug))
+                    promote_adr_to_docs(workspace, domain_grill_path(idx, slug))
+                except Exception as exc:
+                    log.warning(
+                        "scaffold.domain_adr.promotion_failed",
+                        task_id=task_id,
+                        slug=slug,
+                        error=str(exc),
+                    )
 
         verdicts = _read_all_verdicts(workspace)
         any_revise = any(
