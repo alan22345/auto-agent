@@ -110,6 +110,49 @@ log = setup_logging("auto-agent")
 
 
 # ---------------------------------------------------------------------------
+# Background task retention. Without holding a reference to the asyncio
+# task object, CPython 3.8+ may GC it mid-execution — and that's exactly
+# what we observed on task 29 (2026-05-27): ``on_design_approved`` fired
+# its ``asyncio.create_task(run_trio_parent(task))`` but the orchestrator
+# never spawned claude. The task object got collected before run_trio_parent
+# could log anything, leaving the task wedged at ARCHITECT_BACKLOG_EMIT.
+#
+# Pattern: keep a module-level set of live background tasks and discard
+# entries when each one finishes (success OR exception). Also log any
+# exception that escaped — fire-and-forget shouldn't mean silent-failure.
+# ---------------------------------------------------------------------------
+
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro, *, label: str) -> asyncio.Task:
+    """Fire-and-forget a coroutine but retain its task object so the GC
+    can't collect it mid-execution, and surface any exception via the
+    structured logger. ``label`` is the log key used when the task
+    raises."""
+
+    task = asyncio.create_task(coro, name=label)
+    _BACKGROUND_TASKS.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error(
+                "background_task_failed",
+                label=label,
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+# ---------------------------------------------------------------------------
 # Unified FastAPI app — API + webhooks + web UI, all on one port
 # ---------------------------------------------------------------------------
 
@@ -366,7 +409,7 @@ async def on_task_classified(event: Event) -> None:
             )
             await session.commit()
             from agent.lifecycle.scaffold import run_scaffold_parent
-            asyncio.create_task(run_scaffold_parent(task))  # noqa: RUF006
+            _spawn_bg(run_scaffold_parent(task), label=f"scaffold_parent.start.{task.id}")
             return
 
         # Trio routing — tasks that are complex_large OR freeform_mode go to
@@ -399,7 +442,7 @@ async def on_task_classified(event: Event) -> None:
             await publish(task_start_coding(task.id))
         elif task.status == TaskStatus.TRIO_EXECUTING:
             from agent.lifecycle.trio import run_trio_parent
-            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+            _spawn_bg(run_trio_parent(task), label=f"trio_parent.start.{task.id}")
 
 
 async def on_clarification_resolved(event: Event) -> None:
@@ -440,8 +483,9 @@ async def on_architect_clarification_needed(event: Event) -> None:
             return
         if task.freeform_mode:
             import agent.po_agent as po_agent
-            asyncio.create_task(  # noqa: RUF006 fire-and-forget
-                po_agent.answer_architect_question(task.id)
+            _spawn_bg(
+                po_agent.answer_architect_question(task.id),
+                label=f"po_answer_architect.{task.id}",
             )
         else:
             await publish(Event(
@@ -468,9 +512,7 @@ async def on_architect_clarification_resolved(event: Event) -> None:
         )
         await session.commit()
         from agent.lifecycle.trio import architect
-        asyncio.create_task(  # noqa: RUF006
-            architect.resume(task.id)
-        )
+        _spawn_bg(architect.resume(task.id), label=f"architect.resume.{task.id}")
 
 
 async def on_design_approved(event: Event) -> None:
@@ -487,7 +529,7 @@ async def on_design_approved(event: Event) -> None:
         if not task:
             return
         from agent.lifecycle.trio import run_trio_parent
-        asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+        _spawn_bg(run_trio_parent(task), label=f"on_design_approved.{task.id}")
 
 
 async def on_task_approved(event: Event) -> None:
@@ -1233,7 +1275,7 @@ async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> 
     if parent is None:
         return
     from agent.lifecycle.scaffold import run_scaffold_parent
-    asyncio.create_task(run_scaffold_parent(parent))  # noqa: RUF006
+    _spawn_bg(run_scaffold_parent(parent), label=f"scaffold_parent.resume.{parent.id}")
 
 
 async def _try_start_queued(session) -> None:
@@ -1309,7 +1351,7 @@ async def _try_start_queued(session) -> None:
             )
             await session.commit()
             from agent.lifecycle.trio import run_trio_parent
-            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+            _spawn_bg(run_trio_parent(task), label=f"slot_opened.trio.{task.id}")
         elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(
                 session, task, TaskStatus.PLANNING, "Slot opened, starting planning"
@@ -1354,7 +1396,7 @@ async def on_start_queued_task(event: Event) -> None:
             await publish(task_start_coding(task.id))
         elif task.status == TaskStatus.TRIO_EXECUTING:
             from agent.lifecycle.trio import run_trio_parent
-            asyncio.create_task(run_trio_parent(task))  # noqa: RUF006  fire-and-forget
+            _spawn_bg(run_trio_parent(task), label=f"trio_parent.start.{task.id}")
         log.info(f"Started queued task #{task.id}")
 
 
