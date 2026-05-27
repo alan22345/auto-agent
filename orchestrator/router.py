@@ -86,6 +86,8 @@ from shared.types import (
     EnableRepoGraphRequest,
     FeedbackSummary,
     FreeformConfigData,
+    GapFixGap,
+    GapFixState,
     GateArtefact,
     GateDecisionOut,
     GraphCodePreviewResponse,
@@ -1986,6 +1988,97 @@ async def get_gate_artefact(
 
         body = strip_design_header(body)
     return GateArtefact(kind=kind, path=rel_path, body=body)
+
+
+@router.get("/tasks/{task_id}/gap-fix-state", response_model=GapFixState)
+async def get_gap_fix_state(
+    task_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> GapFixState:
+    """Snapshot of the trio parent's gap-fix activity for the UI panel.
+
+    Pulls from two sources:
+      - ``architect_attempts`` rows with phase=CHECKPOINT whose decision
+        ``action`` is one of ``dispatch_new``/``escalate``/``blocked``
+        (the gap-fix outcomes). Round count + latest decision come from
+        here.
+      - ``.auto-agent/final_review.json`` on disk. The reviewer's most
+        recent gap list comes from here.
+
+    Empty (zero rounds, no gaps) is a valid response — the UI hides the
+    panel in that case.
+    """
+    import json as _json
+
+    from agent.lifecycle.trio.gap_fix import MAX_GAP_FIX_ROUNDS
+    from agent.lifecycle.workspace_paths import FINAL_REVIEW_PATH
+    from shared.models import ArchitectAttempt, ArchitectPhase
+
+    task = await _get_task_in_org(session, task_id, org_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    # Latest gap-fix attempt — phase=CHECKPOINT with a non-null decision
+    # whose action was one of the gap-fix outcomes.
+    gap_fix_actions = {"dispatch_new", "escalate", "blocked"}
+    attempts = (
+        await session.execute(
+            select(ArchitectAttempt)
+            .where(ArchitectAttempt.task_id == task_id)
+            .where(ArchitectAttempt.phase == ArchitectPhase.CHECKPOINT)
+            .where(ArchitectAttempt.decision.is_not(None))
+            .order_by(ArchitectAttempt.id.desc())
+        )
+    ).scalars().all()
+
+    rounds_completed = 0
+    latest_action: str | None = None
+    latest_item_count = 0
+    latest_oversized_count = 0
+    for att in attempts:
+        action = (att.decision or {}).get("action")
+        if action not in gap_fix_actions:
+            continue
+        rounds_completed += 1
+        if latest_action is None:
+            latest_action = action
+            items = (att.decision or {}).get("items") or []
+            latest_item_count = len(items) if isinstance(items, list) else 0
+            warnings = (att.decision or {}).get("size_warnings") or []
+            latest_oversized_count = len(warnings) if isinstance(warnings, list) else 0
+
+    # Final reviewer's gap list — read off disk; the file is the source
+    # of truth and is overwritten each final-review round.
+    gaps: list[GapFixGap] = []
+    fr_path = os.path.join(_task_workspace_root(task), FINAL_REVIEW_PATH)
+    try:
+        with open(fr_path) as fh:
+            payload = _json.loads(fh.read())
+        if isinstance(payload, dict):
+            for g in payload.get("gaps") or []:
+                if not isinstance(g, dict):
+                    continue
+                gaps.append(
+                    GapFixGap(
+                        description=str(g.get("description", "")),
+                        affected_routes=[
+                            str(r) for r in (g.get("affected_routes") or [])
+                        ],
+                    )
+                )
+    except (OSError, ValueError):
+        # No file yet, or unparseable — UI just renders zero gaps.
+        pass
+
+    return GapFixState(
+        rounds_completed=rounds_completed,
+        max_rounds=MAX_GAP_FIX_ROUNDS,
+        latest_action=latest_action,
+        latest_item_count=latest_item_count,
+        latest_oversized_count=latest_oversized_count,
+        gaps=gaps,
+    )
 
 
 @router.post("/tasks/{task_id}/approve-plan", response_model=TaskData)

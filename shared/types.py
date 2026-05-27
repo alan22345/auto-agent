@@ -1011,6 +1011,29 @@ class GateArtefact(BaseModel):
     body: str
 
 
+class GapFixGap(BaseModel):
+    """One gap the final reviewer reported on a trio parent."""
+
+    description: str
+    affected_routes: list[str] = []
+
+
+class GapFixState(BaseModel):
+    """Gap-fix activity snapshot for a trio parent — UI panel data.
+
+    Returned by GET /api/tasks/{id}/gap-fix-state. When no gap-fix
+    rounds have run, all fields are empty / zero and the UI hides the
+    panel.
+    """
+
+    rounds_completed: int  # count of architect attempts with action=dispatch_new/escalate/blocked on the gap-fix path
+    max_rounds: int  # MAX_GAP_FIX_ROUNDS from agent.lifecycle.trio.gap_fix
+    latest_action: str | None  # "dispatch_new" | "escalate" | "blocked" | None
+    latest_item_count: int  # items dispatched in the latest round
+    latest_oversized_count: int  # size-warning count from the latest round
+    gaps: list[GapFixGap]  # the final reviewer's most recent gap list
+
+
 # --- Scaffold (ADR-018) gate types ---
 
 

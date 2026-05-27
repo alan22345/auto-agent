@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getArchitectAttempts,
   getDecisions,
+  getGapFixState,
   getTrioReviewAttempts,
   pauseTrio,
 } from '@/lib/trio';
@@ -10,6 +11,7 @@ import { useWS } from './useWS';
 import type {
   ArchitectAttemptOut,
   DecisionOut,
+  GapFixState,
   TrioReviewAttemptOut,
 } from '@/types/api';
 
@@ -25,6 +27,43 @@ const REVIEW_TRIGGERS = new Set([
   'task.trio_review_attempt',
   'task.trio_review_complete',
 ]);
+
+// Refresh the gap-fix panel whenever the architect emits a new
+// checkpoint attempt (= gap-fix round landed), or the trio phase /
+// status moves through the review→gap-fix→executing cycle.
+const GAP_FIX_TRIGGERS = new Set([
+  'task.trio_architect_attempt',
+  'task.trio_phase_changed',
+  'task.trio_checkpoint',
+]);
+
+export function useGapFixState(taskId: number | null) {
+  const qc = useQueryClient();
+  const query = useQuery<GapFixState>({
+    queryKey: ['gap-fix-state', taskId],
+    queryFn: () =>
+      taskId
+        ? getGapFixState(taskId)
+        : Promise.resolve({
+            rounds_completed: 0,
+            max_rounds: 0,
+            latest_action: null,
+            latest_item_count: 0,
+            latest_oversized_count: 0,
+            gaps: [],
+          }),
+    enabled: taskId !== null,
+    staleTime: 5_000,
+  });
+
+  useWS('event', (e) => {
+    if (!taskId || e.task_id !== taskId) return;
+    if (!GAP_FIX_TRIGGERS.has(e.event_type)) return;
+    qc.invalidateQueries({ queryKey: ['gap-fix-state', taskId] });
+  });
+
+  return query;
+}
 
 export function useArchitectAttempts(taskId: number | null) {
   const qc = useQueryClient();

@@ -242,6 +242,28 @@ export interface FreeformConfigData {
   created_at?: string | null;
 }
 /**
+ * One gap the final reviewer reported on a trio parent.
+ */
+export interface GapFixGap {
+  description: string;
+  affected_routes?: string[];
+}
+/**
+ * Gap-fix activity snapshot for a trio parent — UI panel data.
+ *
+ * Returned by GET /api/tasks/{id}/gap-fix-state. When no gap-fix
+ * rounds have run, all fields are empty / zero and the UI hides the
+ * panel.
+ */
+export interface GapFixState {
+  rounds_completed: number;
+  max_rounds: number;
+  latest_action: string | null;
+  latest_item_count: number;
+  latest_oversized_count: number;
+  gaps: GapFixGap[];
+}
+/**
  * Markdown content the human or standin is being asked to approve.
  *
  * Returned by GET /api/tasks/{id}/gate-artefact so the web-next UI can

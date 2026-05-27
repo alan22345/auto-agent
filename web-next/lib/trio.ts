@@ -2,6 +2,7 @@ import { api } from './api';
 import type {
   ArchitectAttemptOut,
   DecisionOut,
+  GapFixState,
   TrioReviewAttemptOut,
 } from '@/types/api';
 
@@ -19,4 +20,8 @@ export async function getDecisions(taskId: number): Promise<DecisionOut[]> {
 
 export async function pauseTrio(taskId: number): Promise<{ ok: true }> {
   return api<{ ok: true }>(`/api/tasks/${taskId}/pause-trio`, { method: 'POST' });
+}
+
+export async function getGapFixState(taskId: number): Promise<GapFixState> {
+  return api<GapFixState>(`/api/tasks/${taskId}/gap-fix-state`);
 }
