@@ -88,7 +88,9 @@ def _render_gaps(gaps: list[dict]) -> str:
 
 _GAP_FIX_PROMPT = """\
 The final reviewer found the following gaps after the per-item loop
-drained. Resume your architect session and decide how to close them.
+drained. Your design.md, backlog.json and current decision.json are
+pinned in this system prompt — re-read them and decide how to close
+the gaps below.
 
 You MUST use the ``submit-architect-decision`` skill to write
 ``.auto-agent/decision.json``. The preferred action is
@@ -138,17 +140,13 @@ async def run_gap_fix(
     workspace = await _prepare_parent_workspace(fields.get("__parent"))
     workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
 
-    session = await _load_architect_session(parent_task_id)
-    if session is not None and getattr(session, "storage_dir", None) == "<placeholder>":
-        # The loader returned a placeholder; rebind storage to the real
-        # workspace path now that we have it.
-        from agent.session import Session
-
-        session = Session(
-            session_id=f"trio-{parent_task_id}",
-            storage_dir=workspace_root,
-        )
-
+    # The architect ran originally without a --session-id (claude_cli
+    # provider generates its own UUID), so we cannot --resume it from the
+    # auto-agent Session blob — claude CLI doesn't know that UUID. Run
+    # fresh: the checkpoint system prompt pins design.md + backlog.json +
+    # decision.json so the architect has full load-bearing context, and
+    # the gap list comes in via the prompt. The auto-agent Session blob
+    # is still saved for diagnostics but not used for resume here.
     agent = create_architect_agent(
         workspace=workspace,
         task_id=parent_task_id,
@@ -157,7 +155,7 @@ async def run_gap_fix(
         repo_name=fields["repo_name"],
         home_dir=fields["home_dir"],
         org_id=fields["org_id"],
-        session=session,
+        session=None,
     )
 
     prompt = _GAP_FIX_PROMPT.format(
@@ -171,7 +169,7 @@ async def run_gap_fix(
     if os.path.isfile(decision_abs):
         os.remove(decision_abs)
 
-    await agent.run(prompt, resume=session is not None)
+    await agent.run(prompt, resume=False)
 
     payload = read_gate_file(workspace_root, DECISION_PATH, schema_version="1")
     if not isinstance(payload, dict):
