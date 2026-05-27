@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from agent import sh
 from agent.lifecycle._orchestrator_api import transition_task
 from agent.lifecycle.workspace_paths import (
     AUTO_AGENT_DIR,
@@ -34,6 +35,74 @@ from agent.lifecycle.workspace_reader import read_gate_file
 from shared.logging import setup_logging
 
 log = setup_logging("agent.lifecycle.trio.design_approval")
+
+
+async def _commit_design_md(workspace_root: str, task_id: int) -> None:
+    """Commit ``.auto-agent/design.md`` to the current branch.
+
+    Without this, the design lives only in the working tree. When the
+    orchestrator restarts and ``clone_repo`` re-prepares the workspace,
+    its reuse path runs ``git reset --hard origin/<base_branch>`` before
+    re-checking out the integration branch — and any uncommitted (or
+    locally-modified-tracked) file on disk gets reverted. If the base
+    branch carries a stale ``.auto-agent/design.md`` from a prior task's
+    merged PR, the reset replaces the fresh design with the leftover.
+    Committing here makes the file part of the integration branch's
+    history so it survives any later reset.
+
+    Best-effort. A failure to commit is logged but never raised — the
+    gate's primary contract is the state transition, and re-running
+    ``run_design`` is recoverable.
+    """
+    target = os.path.join(workspace_root, DESIGN_PATH)
+    if not os.path.isfile(target):
+        return
+    try:
+        add = await sh.run(
+            ["git", "add", "--", DESIGN_PATH],
+            cwd=workspace_root,
+            timeout=15,
+        )
+        if add.failed:
+            log.warning(
+                "design_approval.commit_design_add_failed",
+                task_id=task_id,
+                stderr=(add.stderr or "")[:300],
+            )
+            return
+        # `git diff --cached --quiet` exits 0 when there is nothing
+        # staged. Skip the commit in that case so we don't fail on the
+        # "nothing to commit" path (idempotent re-runs of run_design).
+        diff = await sh.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=workspace_root,
+            timeout=15,
+        )
+        if diff.returncode == 0:
+            return
+        commit = await sh.run(
+            [
+                "git",
+                "commit",
+                "-q",
+                "-m",
+                f"trio({task_id}): design.md for approval gate",
+            ],
+            cwd=workspace_root,
+            timeout=30,
+        )
+        if commit.failed:
+            log.warning(
+                "design_approval.commit_design_failed",
+                task_id=task_id,
+                stderr=(commit.stderr or "")[:300],
+            )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "design_approval.commit_design_exception",
+            task_id=task_id,
+            error=str(exc),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +169,12 @@ async def finalize_design(
             task_id=task_id,
             path=target,
         )
+
+    # Commit the design before parking the task. Without this, a workspace
+    # re-prep (clone_repo's reuse path runs `git reset --hard
+    # origin/<base>`) reverts the file to whatever lives on main —
+    # frequently a stale design.md committed by a prior task's PR.
+    await _commit_design_md(workspace, task_id)
 
     await transition_task(
         task_id,
