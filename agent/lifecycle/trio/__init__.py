@@ -744,7 +744,9 @@ async def _try_freeform_pr_review_standin(
         return
 
     verdict = (verdict_payload or {}).get("verdict") if isinstance(verdict_payload, dict) else None
-    comments = (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+    comments = (
+        (verdict_payload or {}).get("comments", "") if isinstance(verdict_payload, dict) else ""
+    )
 
     if verdict == "approved":
         await _freeform_auto_merge_and_done(
@@ -1294,7 +1296,7 @@ def _assign_missing_ids(
             continue
         established_ids.add(item_id)
         if item_id.startswith(prefix):
-            suffix = item_id[len(prefix):]
+            suffix = item_id[len(prefix) :]
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
 
@@ -1375,6 +1377,15 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
     up on the next per-item loop. Items lacking an ``id`` get one
     auto-assigned (see :func:`_assign_missing_ids`) so downstream tiebreak
     prompts always have a unique item handle.
+
+    Task 28 (2026-05-27): backlog row appended via this path showed up
+    with ``id: null`` despite ``_assign_missing_ids`` running. Root cause
+    unclear (architect skill side-effect, schema validation drift, or
+    parallel write). Belt-and-suspenders: after the append, re-run the
+    backfill so any null/duplicate ids that slip through still get
+    healed before the dispatcher picks the item up. Also warn loudly if
+    we observe null ids post-append — single grep diagnoses the next
+    stall.
     """
 
     if not new_items:
@@ -1389,6 +1400,15 @@ async def _append_backlog_items(parent_id: int, new_items: list[dict]) -> None:
             backlog.append(ni)
         p.trio_backlog = backlog
         await s.commit()
+
+    # Defensive heal: catches anything that landed with id: null despite
+    # _assign_missing_ids. Cheap (only writes when something is wrong).
+    if await _backfill_backlog_ids(parent_id):
+        log.warning(
+            "trio.parent.append_required_backfill",
+            parent_id=parent_id,
+            appended=len(new_items),
+        )
 
 
 async def _open_integration_pr_and_transition(
@@ -1458,9 +1478,7 @@ async def _open_integration_pr_and_transition(
         async with async_session() as s:
             p = (await s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
             workspace = await _prepare_parent_workspace(p)
-        workspace_root = (
-            workspace.root if hasattr(workspace, "root") else str(workspace)
-        )
+        workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
         await _try_freeform_pr_review_standin(
             parent=parent, workspace_root=workspace_root, pr_url=pr_url
         )
