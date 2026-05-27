@@ -87,8 +87,18 @@ async def test_coder_reuses_session_id_across_rounds_and_resumes_after_round_one
     assert len(set(session_ids)) == 1, (
         f"coder session_id must be stable across rounds, got {session_ids}"
     )
-    # Sanity-check the shape — must include both parent_task_id and item_id.
-    assert "170" in session_ids[0] and "cf-1" in session_ids[0]
+    # Must be a valid UUID — Claude CLI rejects --session-id <non-uuid> with
+    # an instant error, which would silently return [ERROR CLI exited N] as
+    # the coder's "result" and trip coder_produced_no_diff (task 28, 2026-05-27).
+    import uuid as _uuid
+
+    _uuid.UUID(session_ids[0])  # raises if not a valid UUID
+    # Same (parent, item) → same UUID; different inputs → different UUID.
+    from agent.lifecycle.trio.dispatcher import _coder_session_id
+
+    assert session_ids[0] == _coder_session_id(170, "cf-1")
+    assert _coder_session_id(170, "cf-1") != _coder_session_id(170, "cf-2")
+    assert _coder_session_id(170, "cf-1") != _coder_session_id(171, "cf-1")
 
     assert captured_run_calls[0]["resume"] is False, "round 1 starts a fresh session"
     assert captured_run_calls[1]["resume"] is True, "round 2 must --resume"

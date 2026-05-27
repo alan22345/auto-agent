@@ -30,6 +30,7 @@ coder↔reviewer state machine without a Postgres fixture.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +46,18 @@ log = structlog.get_logger()
 # Per-item cap on coder→reviewer round-trips before escalating to the
 # architect tiebreak. Module-level so tests can shrink it.
 MAX_ROUNDS = 3
+
+
+def _coder_session_id(parent_task_id: int, item_id: str) -> str:
+    """Deterministic UUID for a coder session, stable across rounds.
+
+    Claude CLI requires ``--session-id`` to be a valid UUID and rejects
+    non-UUID strings instantly — which leaks back as ``[ERROR] CLI exited
+    N`` and trips ``coder_produced_no_diff`` after MAX_ROUNDS no-op rounds
+    (task 28 on 2026-05-27). UUID5 keeps the (parent, item) → session
+    mapping deterministic so rounds 2+ can ``--resume`` the same session.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"trio-coder-{parent_task_id}-{item_id}"))
 
 
 @dataclass
@@ -281,9 +294,10 @@ async def _run_coder(
     stays fresh per round for independence; only the coder resumes.
     """
     item_id = work_item.get("id", "item")
-    # Deterministic session_id per (parent_task_id, item_id); round_idx is
+    # Deterministic UUID per (parent_task_id, item_id); round_idx is
     # intentionally NOT in the key so rounds resume the same CLI session.
-    session_id = f"trio-coder-{parent_task_id}-{item_id}"
+    # Claude CLI rejects non-UUID --session-id values instantly.
+    session_id = _coder_session_id(parent_task_id, item_id)
     agent = create_agent(
         workspace=workspace,
         session_id=session_id,

@@ -111,6 +111,30 @@ async def test_run_cli_succeeds_first_time_no_retry(monkeypatch):
     assert provider._session_id == original, "session ID must NOT rotate on success"
 
 
+def test_set_session_coerces_non_uuid_to_deterministic_uuid():
+    """Non-UUID session IDs must be coerced — Claude CLI rejects them otherwise.
+
+    Pins the fix for task 28 (2026-05-27): the trio dispatcher (and any
+    other caller) used to pass ``trio-coder-28-T1`` to ``--session-id``,
+    which Claude CLI rejected instantly because the flag requires a valid
+    UUID. The error string then leaked back as the model's response,
+    leaving the diff empty and tripping coder_produced_no_diff.
+    """
+    p = ClaudeCLIProvider()
+    p.set_session("trio-coder-28-T1", resume=False)
+    coerced = p._session_id
+    # Must be a real UUID now.
+    uuid.UUID(coerced)
+    # Deterministic — same input → same output across instances.
+    p2 = ClaudeCLIProvider()
+    p2.set_session("trio-coder-28-T1", resume=True)
+    assert p._session_id == p2._session_id, "coercion must be deterministic so --resume hits the same session"
+    # Already-UUID inputs pass through unchanged.
+    p3 = ClaudeCLIProvider()
+    p3.set_session("ab624c01-83a1-5f18-aeb3-5d50bbf53b0f", resume=False)
+    assert p3._session_id == "ab624c01-83a1-5f18-aeb3-5d50bbf53b0f"
+
+
 @pytest.mark.asyncio
 async def test_run_cli_handles_timeout(monkeypatch):
     """Timeout (returncode is None) returns the timeout marker, no retry."""

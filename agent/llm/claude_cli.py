@@ -51,8 +51,27 @@ class ClaudeCLIProvider(LLMProvider):
         self._home_dir = home_dir
 
     def set_session(self, session_id: str, resume: bool = False) -> None:
-        """Configure session for multi-phase tasks."""
-        self._session_id = session_id
+        """Configure session for multi-phase tasks.
+
+        Claude CLI requires ``--session-id <uuid>`` to be a valid UUID and
+        rejects anything else instantly — which the rotate-recovery doesn't
+        catch (it only triggers on "already in use"). A non-UUID caller
+        leaks ``[ERROR] CLI exited N`` back as the model response and trips
+        downstream emptiness checks (task 28, 2026-05-27). Coerce non-UUID
+        IDs to a deterministic UUID5 so the (caller, label) mapping stays
+        stable and ``--resume`` still works for the same logical session.
+        """
+        try:
+            uuid.UUID(session_id)
+            coerced = session_id
+        except (TypeError, ValueError, AttributeError):
+            coerced = str(uuid.uuid5(uuid.NAMESPACE_URL, f"claude-cli-{session_id}"))
+            log.warning(
+                "ClaudeCLIProvider received non-UUID session_id %r; coerced to %s",
+                session_id,
+                coerced,
+            )
+        self._session_id = coerced
         self._resume = resume
 
     async def complete(
