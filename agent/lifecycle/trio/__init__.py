@@ -546,6 +546,32 @@ async def _advance_through_design_gate(parent: Task) -> bool:
     # Already has a backlog → idempotent re-entry; preserve dispatcher
     # progress and skip both run_design + run_initial.
     if has_backlog:
+        # If the status is still ARCHITECT_BACKLOG_EMIT (the recovery
+        # hook re-entered a task whose backlog was emitted but never
+        # flipped — same drift as the run_initial path below) flip it
+        # to TRIO_EXECUTING so the per-item loop runs under the right
+        # outer state and ``trio_recovery`` can find it again on a
+        # second restart.
+        if status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+            async with async_session() as _s:
+                live2 = (
+                    await _s.execute(select(Task).where(Task.id == parent.id))
+                ).scalar_one()
+                if live2.status == TaskStatus.ARCHITECT_BACKLOG_EMIT:
+                    try:
+                        await transition(
+                            _s,
+                            live2,
+                            TaskStatus.TRIO_EXECUTING,
+                            message="trio: backlog already emitted; entering per-item loop",
+                        )
+                        await _s.commit()
+                    except Exception as exc:
+                        log.warning(
+                            "trio.parent.resume_status_flip_failed",
+                            parent_id=parent.id,
+                            error=str(exc)[:200],
+                        )
         log.info(
             "trio.parent.resume_skipping_run_initial",
             parent_id=parent.id,
