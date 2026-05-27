@@ -144,6 +144,14 @@ class ClaudeCLIProvider(LLMProvider):
         """Run the Claude Code CLI as a subprocess once. Returns (stdout, stderr, returncode).
 
         Returncode is None on timeout. Caller decides whether to retry.
+
+        The prompt is piped via stdin (not argv). Large grill summaries (>~100KB)
+        used to blow past the kernel's ``ARG_MAX`` and produce
+        ``OSError: [Errno 7] Argument list too long`` when ``claude`` was
+        spawned with the prompt as a trailing positional. ``claude --print``
+        reads its prompt from stdin when no positional is provided, so the
+        stdin path has no practical ceiling (Linux pipe buffer is 64KB but
+        ``communicate(input=...)`` drains it as the CLI reads).
         """
         cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
 
@@ -153,10 +161,9 @@ class ClaudeCLIProvider(LLMProvider):
             else:
                 cmd.extend(["--session-id", self._session_id])
 
-        cmd.append(prompt)
-
         kwargs: dict = dict(
             cwd=self._cwd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -168,7 +175,9 @@ class ClaudeCLIProvider(LLMProvider):
         proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode()), timeout=self._timeout
+            )
         except TimeoutError:
             proc.kill()
             await proc.communicate()

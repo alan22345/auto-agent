@@ -48,9 +48,9 @@ class TaskStatus(str, enum.Enum):
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"  # ADR-015 §5 Phase 5 — complex-flow plan gate
     AWAITING_CLARIFICATION = "awaiting_clarification"
     CODING = "coding"
-    VERIFYING = "verifying"          # freeform self-verification — runs after CODING, before PR_CREATED
+    VERIFYING = "verifying"  # freeform self-verification — runs after CODING, before PR_CREATED
     PR_CREATED = "pr_created"
-    PR_REVIEW = "pr_review"          # ADR-015 §5 — self-PR-review gate (Phase 4: simple flow)
+    PR_REVIEW = "pr_review"  # ADR-015 §5 — self-PR-review gate (Phase 4: simple flow)
     ADDRESSING_COMMENTS = "addressing_comments"  # ADR-015 §5 Phase 5 — one round of self-fixups
     AWAITING_CI = "awaiting_ci"
     AWAITING_REVIEW = "awaiting_review"
@@ -60,43 +60,43 @@ class TaskStatus(str, enum.Enum):
     BLOCKED = "blocked"
     FAILED = "failed"
     TRIO_EXECUTING = "trio_executing"
-    TRIO_REVIEW    = "trio_review"
+    TRIO_REVIEW = "trio_review"
     # ADR-015 §2 / Phase 6 — complex_large design-doc gate + backlog emit.
-    ARCHITECT_DESIGNING       = "architect_designing"
-    AWAITING_DESIGN_APPROVAL  = "awaiting_design_approval"
-    ARCHITECT_BACKLOG_EMIT    = "architect_backlog_emit"
+    ARCHITECT_DESIGNING = "architect_designing"
+    AWAITING_DESIGN_APPROVAL = "awaiting_design_approval"
+    ARCHITECT_BACKLOG_EMIT = "architect_backlog_emit"
     # ADR-015 §4 / Phase 7 — final review + architect gap-fix loop.
-    FINAL_REVIEW              = "final_review"
-    ARCHITECT_GAP_FIX         = "architect_gap_fix"
+    FINAL_REVIEW = "final_review"
+    ARCHITECT_GAP_FIX = "architect_gap_fix"
     # ADR-015 §9 / Phase 8 — parent architect spawned sub-architects; the
     # parent's main session is paused while they run serially. Only resumed
     # briefly for the parent-answers-grill relay (§10).
-    AWAITING_SUB_ARCHITECTS   = "awaiting_sub_architects"
+    AWAITING_SUB_ARCHITECTS = "awaiting_sub_architects"
     ITERATING = "iterating"  # ADR-017: trio is re-iterating a PR on user feedback
     # ADR-018 — scaffold parent state machine (freeform build-something-new flow).
-    AWAITING_INTENT_GRILL        = "awaiting_intent_grill"
-    BUILDING_ROOT_ADR            = "building_root_adr"
-    AWAITING_ROOT_ADR_APPROVAL   = "awaiting_root_adr_approval"
-    BUILDING_DOMAIN_ADRS         = "building_domain_adrs"
+    AWAITING_INTENT_GRILL = "awaiting_intent_grill"
+    BUILDING_ROOT_ADR = "building_root_adr"
+    AWAITING_ROOT_ADR_APPROVAL = "awaiting_root_adr_approval"
+    BUILDING_DOMAIN_ADRS = "building_domain_adrs"
     # ADR-018 Stage 8 — per-domain grill round between BUILDING_DOMAIN_ADRS
     # and the domain architect's ADR write. Parked here while waiting for
     # the user to answer the domain-grill agent's pending question.
-    AWAITING_DOMAIN_GRILL        = "awaiting_domain_grill"
+    AWAITING_DOMAIN_GRILL = "awaiting_domain_grill"
     AWAITING_DOMAIN_ADR_APPROVAL = "awaiting_domain_adr_approval"
     # ADR-019 T7 — gate between Phase C (domain ADR approval) and Phase D
     # (child trio dispatch). Parent parks here until every architect-required
     # secret has a populated value_enc in repo_secrets.
-    AWAITING_REQUIRED_SECRETS    = "awaiting_required_secrets"
-    DISPATCHING_DOMAIN_BUILDS    = "dispatching_domain_builds"
-    BUILDING_DOMAINS             = "building_domains"
-    AWAITING_FINAL_VERIFICATION  = "awaiting_final_verification"
+    AWAITING_REQUIRED_SECRETS = "awaiting_required_secrets"
+    DISPATCHING_DOMAIN_BUILDS = "dispatching_domain_builds"
+    BUILDING_DOMAINS = "building_domains"
+    AWAITING_FINAL_VERIFICATION = "awaiting_final_verification"
 
 
 class TrioPhase(str, enum.Enum):
-    ARCHITECTING         = "architecting"
-    AWAITING_BUILDER     = "awaiting_builder"
+    ARCHITECTING = "architecting"
+    AWAITING_BUILDER = "awaiting_builder"
     ARCHITECT_CHECKPOINT = "architect_checkpoint"
-    ARCHITECT_ITERATING  = "architect_iterating"  # ADR-017
+    ARCHITECT_ITERATING = "architect_iterating"  # ADR-017
 
 
 class TaskSource(str, enum.Enum):
@@ -174,9 +174,7 @@ class Repo(Base):
     __tablename__ = "repos"
     # Uniqueness moves from global Repo.name to (organization_id, name) so
     # two orgs can each have a repo called "backend" without colliding.
-    __table_args__ = (
-        UniqueConstraint("organization_id", "name", name="ix_repos_org_name"),
-    )
+    __table_args__ = (UniqueConstraint("organization_id", "name", name="ix_repos_org_name"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), nullable=False)
@@ -185,7 +183,9 @@ class Repo(Base):
     summary = Column(Text, nullable=True)  # Cached repo summary for context injection
     summary_updated_at = Column(DateTime(timezone=True), nullable=True)
     ci_checks = Column(Text, nullable=True)  # Extracted CI check commands from workflow files
-    harness_onboarded = Column(Boolean, default=False)  # Whether harness engineering PR has been raised
+    harness_onboarded = Column(
+        Boolean, default=False
+    )  # Whether harness engineering PR has been raised
     harness_pr_url = Column(String(512), nullable=True)  # URL of the harness onboarding PR
     # Product Owner context — repo-scoped, free-text markdown.
     # Describes the product mission, requirements, non-goals. Injected
@@ -198,11 +198,16 @@ class Repo(Base):
     # a repo created before the column existed routes through the
     # human-in-loop path.
     mode = Column(
-        String(32), nullable=False, default="human_in_loop",
+        String(32),
+        nullable=False,
+        default="human_in_loop",
         server_default="human_in_loop",
     )
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -243,13 +248,19 @@ class Task(Base):
     intake_qa = Column(JSONB, nullable=True)
     affected_routes = Column(JSONB, nullable=False, server_default="[]")
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     # Trio (architect/builder/reviewer) columns
     parent_task_id = Column(
-        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True,
+        Integer,
+        ForeignKey("tasks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     trio_phase = Column(SAEnum(TrioPhase, name="triophase"), nullable=True)
     trio_backlog = Column(JSONB, nullable=True)
@@ -263,10 +274,14 @@ class Task(Base):
     repo = relationship("Repo", back_populates="tasks", lazy="selectin")
     history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")
     verify_attempts = relationship(
-        "VerifyAttempt", back_populates="task", order_by="VerifyAttempt.cycle",
+        "VerifyAttempt",
+        back_populates="task",
+        order_by="VerifyAttempt.cycle",
     )
     review_attempts = relationship(
-        "ReviewAttempt", back_populates="task", order_by="ReviewAttempt.cycle",
+        "ReviewAttempt",
+        back_populates="task",
+        order_by="ReviewAttempt.cycle",
     )
 
 
@@ -305,7 +320,10 @@ class GateDecision(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     task_id = Column(
-        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True,
+        Integer,
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     # Domain: "grill" | "plan_approval" | "design_approval" | "pr_review".
     # Kept as a free-form String so a future gate can land without a
@@ -328,6 +346,7 @@ class GateDecision(Base):
 class TaskMessage(Base):
     """User-posted feedback on a running task. The agent reads unread
     messages between turns and injects them into the conversation."""
+
     __tablename__ = "task_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -354,11 +373,15 @@ class UsageEvent(Base):
 
 class TaskOutcome(Base):
     """Tracks PR outcomes for the learning/feedback loop."""
+
     __tablename__ = "task_outcomes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     task_id = Column(
-        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, unique=True,
+        Integer,
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
     )
     pr_approved = Column(Boolean, nullable=True)  # True=merged, False=closed/rejected
     review_rounds = Column(Integer, default=0)  # How many review iterations
@@ -372,19 +395,23 @@ class TaskOutcome(Base):
 
 class MessengerConversation(Base):
     """Durable per-(user, source, focus) chat history for messenger DMs."""
+
     __tablename__ = "messenger_conversations"
     __table_args__ = (
         UniqueConstraint(
-            "user_id", "source", "focus_kind", "focus_id",
+            "user_id",
+            "source",
+            "focus_kind",
+            "focus_id",
             name="uq_msgconv_user_source_focus",
         ),
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    source = Column(String(32), nullable=False)            # 'slack' | 'telegram' | ...
-    focus_kind = Column(String(32), nullable=False)        # 'draft' | 'task' (v1)
-    focus_id = Column(BigInteger, nullable=True)           # NULL for 'draft'; task.id for 'task'
+    source = Column(String(32), nullable=False)  # 'slack' | 'telegram' | ...
+    focus_kind = Column(String(32), nullable=False)  # 'draft' | 'task' (v1)
+    focus_id = Column(BigInteger, nullable=True)  # NULL for 'draft'; task.id for 'task'
     messages_json = Column(JSONB, nullable=False, default=list)
     last_active_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -395,10 +422,11 @@ class UserFocus(Base):
     Not keyed on source — switching focus on Slack also takes effect on
     Telegram (and any future messenger).
     """
+
     __tablename__ = "user_focus"
 
     user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    focus_kind = Column(String(32), nullable=False)        # 'draft' | 'task' | 'none'
+    focus_kind = Column(String(32), nullable=False)  # 'draft' | 'task' | 'none'
     focus_id = Column(BigInteger, nullable=True)
     set_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
@@ -406,6 +434,7 @@ class UserFocus(Base):
 
 class ScheduledTask(Base):
     """Recurring tasks triggered on a cron schedule."""
+
     __tablename__ = "scheduled_tasks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -417,13 +446,17 @@ class ScheduledTask(Base):
     enabled = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
 class User(Base):
     """Authenticated team member."""
+
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -432,9 +465,7 @@ class User(Base):
     display_name = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     last_login = Column(DateTime(timezone=True), nullable=True)
-    claude_auth_status = Column(
-        String(32), nullable=False, default="never_paired"
-    )
+    claude_auth_status = Column(String(32), nullable=False, default="never_paired")
     claude_paired_at = Column(DateTime(timezone=True), nullable=True)
     # Per-user messaging-platform identifiers. When set, notifications about
     # tasks owned by this user are routed here instead of fanning out to a
@@ -453,7 +484,10 @@ class User(Base):
     # "home" org for backwards-compatible queries that haven't been
     # migrated to the membership table.
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
     )
 
 
@@ -466,21 +500,30 @@ class UserSecret(Base):
     ``(user_id, organization_id, key)`` so a user in two orgs can carry
     different credentials per org without collision.
     """
+
     __tablename__ = "user_secrets"
 
     user_id = Column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True, nullable=False,
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
     )
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"),
-        primary_key=True, nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        primary_key=True,
+        nullable=False,
+        index=True,
     )
     key = Column(String(64), primary_key=True, nullable=False)
     value_enc = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
     )
 
 
@@ -490,8 +533,10 @@ class SlackInstallation(Base):
     __tablename__ = "slack_installations"
 
     org_id = Column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
-        primary_key=True, nullable=False,
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
     )
     team_id = Column(String(32), nullable=False, unique=True)
     team_name = Column(String(255), nullable=True)
@@ -499,9 +544,7 @@ class SlackInstallation(Base):
     bot_user_id = Column(String(32), nullable=False)
     app_token_enc = Column(LargeBinary, nullable=True)
     installed_by_slack_user_id = Column(String(32), nullable=True)
-    installed_at = Column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    installed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class GitHubInstallation(Base):
@@ -510,15 +553,15 @@ class GitHubInstallation(Base):
     __tablename__ = "github_installations"
 
     org_id = Column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
-        primary_key=True, nullable=False,
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
     )
     installation_id = Column(BigInteger, nullable=False, unique=True)
     account_login = Column(String(128), nullable=False)
     account_type = Column(String(32), nullable=False)
-    installed_at = Column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    installed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class WebhookSecret(Base):
@@ -527,30 +570,32 @@ class WebhookSecret(Base):
     __tablename__ = "webhook_secrets"
 
     org_id = Column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"),
-        primary_key=True, nullable=False,
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
     )
     source = Column(String(32), primary_key=True, nullable=False)
     secret_enc = Column(LargeBinary, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class SearchSession(Base):
     """A multi-turn search/research conversation owned by a user."""
+
     __tablename__ = "search_sessions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     organization_id = Column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
     )
     title = Column(String(512), nullable=False, default="New search")
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
-    )
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
     user = relationship("User")
 
@@ -563,12 +608,15 @@ class SearchMessage(Base):
     is a list of {tool, args, result_summary, ts} captured during the turn,
     plus 'sources' and 'memory_hits' arrays.
     """
+
     __tablename__ = "search_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(
-        Integer, ForeignKey("search_sessions.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        Integer,
+        ForeignKey("search_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     role = Column(String(16), nullable=False)  # "user" | "assistant"
     content = Column(Text, nullable=False, default="")
@@ -630,7 +678,10 @@ class RepoGraphConfig(Base):
     )
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
     )
 
 
@@ -677,6 +728,10 @@ class RepoGraph(Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
+    # Capability/flow derivation (Phase 1 of capability-flow map spec).
+    # Nullable: a freshly-completed analysis has graph_json but no
+    # flow_json until the recompute endpoint is hit.
+    flow_json = Column(JSONB, nullable=True)
 
 
 # --- Per-repo project secrets vault (ADR-019) ---------------------------------
@@ -703,24 +758,33 @@ class RepoSecret(Base):
     """
 
     __tablename__ = "repo_secrets"
-    __table_args__ = (
-        UniqueConstraint("repo_id", "key", name="uq_repo_secrets_repo_key"),
-    )
+    __table_args__ = (UniqueConstraint("repo_id", "key", name="uq_repo_secrets_repo_key"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     repo_id = Column(
-        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True,
+        Integer,
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     organization_id = Column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True,
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     key = Column(String(255), nullable=False)
     value_enc = Column(LargeBinary, nullable=True)
     source = Column(String(32), nullable=False, default="user", server_default="user")
     purpose = Column(Text, nullable=True)
     created_at = Column(
-        DateTime(timezone=True), default=_utcnow, nullable=False,
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
     )
     updated_at = Column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False,
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
     )

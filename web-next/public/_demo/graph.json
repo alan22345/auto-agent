@@ -1,0 +1,118 @@
+{
+  "commit_sha": "demo1234",
+  "generated_at": "2026-05-22T12:00:00+00:00",
+  "analyser_version": "demo",
+  "areas": [
+    {
+      "name": "auth",
+      "status": "ok",
+      "error": null,
+      "unresolved_dynamic_sites": 0
+    },
+    {
+      "name": "carbon",
+      "status": "ok",
+      "error": null,
+      "unresolved_dynamic_sites": 0
+    },
+    {
+      "name": "shared",
+      "status": "ok",
+      "error": null,
+      "unresolved_dynamic_sites": 0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "app/auth/google.py::login",
+      "kind": "function",
+      "label": "login",
+      "file": "app/auth/google.py",
+      "line_start": 12,
+      "line_end": 28,
+      "area": "auth",
+      "parent": null
+    },
+    {
+      "id": "lib/oauth.py::validate_token",
+      "kind": "function",
+      "label": "validate_token",
+      "file": "lib/oauth.py",
+      "line_start": 40,
+      "line_end": 70,
+      "area": "auth",
+      "parent": null
+    },
+    {
+      "id": "lib/sessions.py::create",
+      "kind": "function",
+      "label": "create",
+      "file": "lib/sessions.py",
+      "line_start": 5,
+      "line_end": 30,
+      "area": "auth",
+      "parent": null
+    },
+    {
+      "id": "app/auth/email.py::signup",
+      "kind": "function",
+      "label": "signup",
+      "file": "app/auth/email.py",
+      "line_start": 8,
+      "line_end": 40,
+      "area": "auth",
+      "parent": null
+    },
+    {
+      "id": "lib/hash.py::hash_password",
+      "kind": "function",
+      "label": "hash_password",
+      "file": "lib/hash.py",
+      "line_start": 12,
+      "line_end": 25,
+      "area": "auth",
+      "parent": null
+    },
+    {
+      "id": "app/carbon/calc.py::compute_emissions",
+      "kind": "function",
+      "label": "compute_emissions",
+      "file": "app/carbon/calc.py",
+      "line_start": 20,
+      "line_end": 80,
+      "area": "carbon",
+      "parent": null
+    },
+    {
+      "id": "lib/formulas.py::burn_factor",
+      "kind": "function",
+      "label": "burn_factor",
+      "file": "lib/formulas.py",
+      "line_start": 4,
+      "line_end": 16,
+      "area": "carbon",
+      "parent": null
+    },
+    {
+      "id": "lib/db.py::write_record",
+      "kind": "function",
+      "label": "write_record",
+      "file": "lib/db.py",
+      "line_start": 100,
+      "line_end": 130,
+      "area": "shared",
+      "parent": null
+    },
+    {
+      "id": "lib/dead/legacy.py::old_handler",
+      "kind": "function",
+      "label": "old_handler",
+      "file": "lib/dead/legacy.py",
+      "line_start": 1,
+      "line_end": 8,
+      "area": "shared",
+      "parent": null
+    }
+  ],
+  "edges": []
+}

@@ -30,6 +30,8 @@ rsync -avz \
   --exclude='node_modules' \
   --exclude='.next' \
   --exclude='.claude/settings.local.json' \
+  --exclude='.claude/worktrees' \
+  --exclude='.claude/scheduled_tasks.lock' \
   "$SCRIPT_DIR/" "$VM:$REMOTE_DIR/"
 
 echo "==> Building image + running migrations..."

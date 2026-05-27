@@ -33,6 +33,7 @@ class ClassificationResult(BaseModel):
 
 class TaskData(BaseModel):
     """Typed representation of a task from the orchestrator API."""
+
     id: int
     title: str
     description: str
@@ -54,9 +55,11 @@ class TaskData(BaseModel):
     # resolution rule. ``None`` when no repo is attached (legacy rows).
     effective_mode: Literal["freeform", "human_in_loop"] | None = None
     priority: int = 100
-    # Multi-purpose JSONB column: trio parents store a list of child
-    # entries; scaffold parents store a dict keyed by phase. Both shapes
-    # show up in /api/tasks listings, so the wire schema accepts either.
+    # ``subtasks`` is a multi-purpose JSONB column. Trio parents store a list
+    # of child-task descriptors here; SCAFFOLD parents (ADR-018) store a dict
+    # of round counters / progress markers (e.g. ``{"scaffold":
+    # {"current_domain_idx": 4, "final_verify_rounds": 1}}``). Wire schema
+    # accepts both so a scaffold task with populated state still serialises.
     subtasks: list[dict] | dict | None = None
     current_subtask: int | None = None
     # Grill-before-planning Q&A — list of {question, answer} pairs accumulated
@@ -69,10 +72,10 @@ class TaskData(BaseModel):
     # flips the DB column to NOT NULL, so legacy rows still serialize cleanly.
     organization_id: int | None = None
     # Structured intent (extracted by LLM after classification)
-    change_type: str | None = None          # "bugfix", "feature", "refactor", "config", "docs"
-    target_areas: str | None = None         # comma-separated file paths or module areas
-    acceptance_criteria: str | None = None   # what "done" looks like
-    constraints: str | None = None          # what NOT to do
+    change_type: str | None = None  # "bugfix", "feature", "refactor", "config", "docs"
+    target_areas: str | None = None  # comma-separated file paths or module areas
+    acceptance_criteria: str | None = None  # what "done" looks like
+    constraints: str | None = None  # what NOT to do
     # Trio (architect/builder/reviewer) — parent points to the trio parent
     # task when this is a child work item; otherwise None.
     parent_task_id: int | None = None
@@ -83,6 +86,7 @@ class TaskData(BaseModel):
 
 class TaskMessageData(BaseModel):
     """A user-posted feedback message on a task."""
+
     id: int
     task_id: int
     sender: str
@@ -92,11 +96,13 @@ class TaskMessageData(BaseModel):
 
 class TaskMessagePost(BaseModel):
     """Inbound body for POST /api/tasks/{id}/messages."""
+
     content: str
 
 
 class RepoData(BaseModel):
     """Typed representation of a repo from the orchestrator API."""
+
     id: int
     name: str
     url: str
@@ -118,6 +124,7 @@ class RepoData(BaseModel):
 
 class PRReviewComment(BaseModel):
     """A review comment from a GitHub PR."""
+
     author: str
     body: str
     type: Literal["review", "inline"]
@@ -127,6 +134,7 @@ class PRReviewComment(BaseModel):
 
 class CIStatus(BaseModel):
     """CI status for a commit."""
+
     sha: str
     state: Literal["success", "failure", "pending", "error"]
     message: str = ""
@@ -415,6 +423,141 @@ class GraphStalenessResponse(BaseModel):
     drifted: bool
 
 
+# --- Capability / flow derivation (Phase 1 of capability-flow map spec) ---
+#
+# A *flow* is one forward-trace from a detected entry point to a terminal
+# side effect, recorded over the nodes/edges in `RepoGraphBlob`. A
+# *capability* is a named group of flows. Phase 1 derives flows; Phase 2
+# labels them via an LLM call. The shape supports both phases: name and
+# description fields are nullable so Phase 1 blobs round-trip through a
+# Phase 2-aware deserialiser.
+
+EntryPointKind = Literal["http", "queue", "cron", "cli"]
+TerminalKind = Literal["response", "queue_publish", "external_http", "db_write", "none"]
+
+
+class EntryPoint(BaseModel):
+    """One node detected as a flow entry point — see spec §3 step 1."""
+
+    node_id: str
+    kind: EntryPointKind
+
+
+class FlowStep(BaseModel):
+    """One node on a flow's forward trace.
+
+    ``depth`` is the BFS distance from the entry point along the dominant
+    path; branch nodes carry the branch root's depth. ``is_branch_root``
+    flags a node that fans out into multiple outgoing call edges at the
+    same depth (rendered as a branch fork in Phase 3). ``is_cycle_back``
+    marks the back-edge target when a cycle was detected and the trace
+    stopped without re-expanding (spec §3 step 4).
+    """
+
+    node_id: str
+    depth: int
+    is_branch_root: bool = False
+    is_cycle_back: bool = False
+
+
+class Flow(BaseModel):
+    """One flow — entry point through forward trace to a terminal effect.
+
+    ``name`` and ``description`` are produced by the Phase 2 LLM labeller;
+    Phase 1 leaves them ``None``. ``file_set_hash`` is the SHA-256 over the
+    file contents of ``file_set``, sorted by path and concatenated before
+    hashing; Phase 2 uses it to skip re-labelling unchanged flows (spec §4).
+    """
+
+    id: str
+    entry_point: EntryPoint
+    terminal_node_id: str
+    terminal_kind: TerminalKind
+    steps: list[FlowStep]
+    file_set: list[str]
+    file_set_hash: str
+    name: str | None = None
+    description: str | None = None
+    labeled_at_commit: str | None = None
+    """Commit SHA at which this flow's name+description were generated by
+    the Phase 2 labeller. ``None`` until the first label. Reused on
+    subsequent recomputes when ``file_set_hash`` matches the prior blob."""
+
+
+class Capability(BaseModel):
+    """One named capability — a group of related flows.
+
+    Phase 1 emits exactly one capability with ``id="unlabeled"`` covering
+    every derived flow. Phase 2 groups flows into ~5-12 capabilities and
+    populates ``name`` / ``description``. ``flow_membership_hash`` is the
+    SHA-256 of the sorted ``flow_ids`` list; Phase 2 skips re-labelling
+    capabilities whose membership hash matches the persisted value.
+    """
+
+    id: str
+    flow_ids: list[str]
+    flow_membership_hash: str
+    name: str | None = None
+    description: str | None = None
+    labeled_at_commit: str | None = None
+    """Commit SHA at which this capability's name+description were
+    generated. ``None`` until the first label. Reused when
+    ``flow_membership_hash`` matches the prior blob."""
+
+
+class FlowJsonBlob(BaseModel):
+    """Full capability/flow derivation result — payload of
+    ``RepoGraph.flow_json``.
+
+    ``unreached`` is the list of node ids in the underlying graph that
+    no flow's forward trace touched. Surfaced as the Unreached tray in
+    the Phase 3 UI (spec §3 step 6). Phase 2 added ``labeled_at_commit``
+    (on ``Flow``/``Capability``) and ``labeler_model`` (on this blob) for
+    LLM provenance tracking; they remain ``None`` on Phase 1-derived blobs.
+    """
+
+    capabilities: list[Capability]
+    flows: list[Flow]
+    unreached: list[str]
+    derived_at_commit: str
+    deriver_version: str
+    labeler_model: str | None = None
+    """Identifier of the LLM model that produced the most recent labels
+    (e.g. ``"claude-haiku-4-5"``). ``None`` if no labelling has happened
+    yet (Phase 1 emits this as ``None``)."""
+
+
+class RecomputeFlowsResponse(BaseModel):
+    """``POST /api/repos/{id}/graph/flows/recompute`` response body."""
+
+    repo_id: int
+    flow_count: int
+    capability_count: int
+    unreached_count: int
+    derived_at_commit: str
+    labeled_flow_count: int = 0
+    """Number of flows that received a non-null name from the Phase 2
+    labeller. 0 in Phase 1; matches ``flow_count`` once all flows label
+    successfully."""
+
+
+class LatestFlowsData(BaseModel):
+    """``GET /api/repos/{id}/graph/flows`` payload — the Phase 3 Map view
+    consumes this directly. ``blob`` is ``None`` until a recompute lands.
+
+    ``repo_graph_id`` and ``generated_at`` come from the graph row whose
+    ``flow_json`` produced ``blob``; the UI uses them in the freshness
+    banner / "Recompute map" button. The endpoint reads the row pointed
+    to by ``RepoGraphConfig.last_analysis_id`` so it always matches the
+    blob the agent op ``which_capability`` resolves against.
+    """
+
+    repo_id: int
+    repo_graph_id: int | None = None
+    generated_at: str | None = None
+    blob: FlowJsonBlob | None = None
+
+
 # --- Linear types ---
 
 
@@ -423,6 +566,7 @@ class GraphStalenessResponse(BaseModel):
 
 class SuggestionData(BaseModel):
     """Typed representation of a PO suggestion."""
+
     id: int
     repo_id: int | None = None
     repo_name: str | None = None
@@ -454,6 +598,7 @@ class MarketBriefResponse(BaseModel):
 
 class FreeformConfigData(BaseModel):
     """Typed representation of a freeform mode config."""
+
     id: int
     repo_name: str | None = None
     enabled: bool = False
@@ -478,6 +623,7 @@ class FreeformConfigData(BaseModel):
 
 class LinearIssue(BaseModel):
     """A Linear issue returned from the GraphQL API."""
+
     id: str
     identifier: str
     title: str
@@ -491,6 +637,7 @@ class LinearIssue(BaseModel):
 
 class UserData(BaseModel):
     """Typed representation of a user."""
+
     id: int
     username: str
     display_name: str
@@ -531,6 +678,7 @@ class SignupResponse(BaseModel):
     """Response for POST /api/auth/signup. Always returns 201 with the new
     user's id; the client should display "check your email" — never assume
     the email was actually delivered."""
+
     user_id: int
     email: str
     verification_sent: bool
@@ -545,11 +693,13 @@ class ChangeEmailRequest(BaseModel):
 
 class SecretListResponse(BaseModel):
     """Names only — values never leave the server."""
+
     keys: list[str]
 
 
 class SecretPutRequest(BaseModel):
     """``value=None`` clears the secret (equivalent to DELETE)."""
+
     value: str | None = None
 
 
@@ -658,6 +808,7 @@ class MemorySaveResult(BaseModel):
 
 class MemoryEntitySummary(BaseModel):
     """Lightweight entity card for search results / recent list."""
+
     id: str
     name: str
     type: str
@@ -668,6 +819,7 @@ class MemoryEntitySummary(BaseModel):
 
 class MemoryFact(BaseModel):
     """A fact row as seen in the browser detail view."""
+
     id: str
     content: str
     kind: str
@@ -710,6 +862,7 @@ class ReviewCombinedVerdict(BaseModel):
 
 class VerifyAttemptOut(BaseModel):
     """API shape for a verify attempt row."""
+
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
@@ -725,6 +878,7 @@ class VerifyAttemptOut(BaseModel):
 
 class ReviewAttemptOut(BaseModel):
     """API shape for a review attempt row."""
+
     id: int
     cycle: int
     status: Literal["pass", "fail", "error"]
@@ -743,6 +897,7 @@ class ReviewAttemptOut(BaseModel):
 
 class WorkItem(BaseModel):
     """One backlog item the architect dispatches to a builder child task."""
+
     id: str
     title: str
     description: str
@@ -753,12 +908,14 @@ class WorkItem(BaseModel):
 
 class RepairContext(BaseModel):
     """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
+
     ci_log: str
     failed_pr_url: str
 
 
 class ArchitectDecision(BaseModel):
     """The decision field on an ArchitectAttempt row when phase=checkpoint."""
+
     action: Literal["continue", "revise", "done", "awaiting_clarification", "blocked"]
     reason: str | None = None
     question: str | None = None  # only when action=awaiting_clarification
@@ -766,6 +923,7 @@ class ArchitectDecision(BaseModel):
 
 class ArchitectAttemptOut(BaseModel):
     """API shape for an architect_attempts row."""
+
     id: int
     task_id: int
     phase: Literal["initial", "consult", "checkpoint", "revision"]
@@ -787,6 +945,7 @@ class ArchitectAttemptOut(BaseModel):
 
 class TrioReviewAttemptOut(BaseModel):
     """API shape for a trio_review_attempts row."""
+
     id: int
     task_id: int
     cycle: int
@@ -798,6 +957,7 @@ class TrioReviewAttemptOut(BaseModel):
 
 class DecisionOut(BaseModel):
     """API shape for one ADR file under ``docs/decisions/``."""
+
     filename: str
     title: str
     url: str

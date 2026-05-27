@@ -90,6 +90,7 @@ from shared.types import (
     GateDecisionOut,
     GraphCodePreviewResponse,
     GraphStalenessResponse,
+    LatestFlowsData,
     LatestRepoGraphData,
     LoginRequest,
     LoginResponse,
@@ -97,6 +98,7 @@ from shared.types import (
     OutcomeResponse,
     PlanApprovalRequest,
     PlanRead,
+    RecomputeFlowsResponse,
     RepoData,
     RepoGraphConfigData,
     RepoGraphProgressData,
@@ -1027,9 +1029,7 @@ async def probe_repo_secret(
                 raise ValueError("bad scheme or missing host")
             return RepoSecretTestResponse(ok=True, kind=kind, message=None)
         except Exception:
-            return RepoSecretTestResponse(
-                ok=False, kind=kind, message="Malformed PostgreSQL URL"
-            )
+            return RepoSecretTestResponse(ok=False, kind=kind, message="Malformed PostgreSQL URL")
 
     if kind == "stripe":
         try:
@@ -2570,10 +2570,7 @@ async def scaffold_domain_grill_answer(
         session,
         task,
         TaskStatus.BUILDING_DOMAIN_ADRS,
-        message=(
-            f"Domain grill answer received for `{req.domain_slug}`; "
-            "resuming domain loop"
-        ),
+        message=(f"Domain grill answer received for `{req.domain_slug}`; resuming domain loop"),
     )
     await session.commit()
 
@@ -3295,7 +3292,8 @@ async def enable_repo_graph(
     branch = req.analysis_branch or repo.default_branch or "main"
     if not BRANCH_NAME_RE.match(branch):
         raise HTTPException(
-            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+            400,
+            "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
         )
 
     cfg = RepoGraphConfig(
@@ -3345,7 +3343,8 @@ async def update_repo_graph_config(
 
     if not BRANCH_NAME_RE.match(req.analysis_branch):
         raise HTTPException(
-            400, "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
+            400,
+            "Invalid branch name: only alphanumeric, '.', '_', '/', '-' allowed",
         )
 
     result = await session.execute(
@@ -3452,9 +3451,7 @@ async def refresh_repo_graph(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
-    if area is not None and (
-        not AREA_NAME_RE.match(area) or ".." in area
-    ):
+    if area is not None and (not AREA_NAME_RE.match(area) or ".." in area):
         raise HTTPException(
             400,
             "Invalid area name: alphanumeric + '.', '_', '-' (no '..' or '/')",
@@ -3473,6 +3470,159 @@ async def refresh_repo_graph(
     # downstream openapi clarity.
     response.status_code = 202
     return RepoGraphRefreshResponse(request_id=request_id, status="accepted")
+
+
+@router.post(
+    "/repos/{repo_id}/graph/flows/recompute",
+    response_model=RecomputeFlowsResponse,
+)
+async def recompute_graph_flows(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> RecomputeFlowsResponse:
+    """Derive capability/flow data from the latest completed RepoGraph row.
+
+    Loads the latest completed analysis, runs the pure-Python derivation
+    pipeline (``derive_flow_blob``), and persists the result to
+    ``RepoGraph.flow_json``.  Returns a summary so callers can confirm
+    the derivation ran without fetching the full blob.
+
+    Phase 1 of the capability-flow map spec (ADR-016 §capability-flow).
+    """
+    from agent.graph_analyzer.flows import derive_flow_blob
+    from agent.graph_workspace import graph_workspace_path
+    from shared.types import RepoGraphBlob
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    result = await session.execute(
+        select(RepoGraph)
+        .where(RepoGraph.repo_id == repo.id, RepoGraph.is_complete.is_(True))
+        .order_by(RepoGraph.generated_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404,
+            "No completed graph found for this repo. Run /graph/refresh first.",
+        )
+
+    blob = RepoGraphBlob.model_validate(row.graph_json)
+
+    # Phase 3 alignment fix: also bump RepoGraphConfig.last_analysis_id to
+    # this row id so the agent op (which_capability) and the Map view GET
+    # both read the row whose flow_json we just wrote. Without this, an
+    # agent calling which_capability could see "flow_json not computed yet"
+    # right after a successful recompute when the config points at an older
+    # analysis row.
+    from pathlib import Path as _Path
+
+    from agent.graph_analyzer.flow_labeler import label_flow_blob
+    from agent.llm import get_structured_extractor_provider
+    from shared.types import FlowJsonBlob
+
+    workspace_path = _Path(graph_workspace_path(repo_id=repo.id))
+    flow_blob = derive_flow_blob(
+        blob,
+        workspace_root=workspace_path if workspace_path.exists() else None,
+    )
+
+    # Phase 2: LLM labelling.
+    prior_blob: FlowJsonBlob | None = None
+    if row.flow_json is not None:
+        try:
+            prior_blob = FlowJsonBlob.model_validate(row.flow_json)
+        except Exception:  # defensive against stale Phase 1 shapes
+            prior_blob = None
+
+    nodes_by_id = {n.id: n for n in blob.nodes}
+    provider = get_structured_extractor_provider()
+    labelled = await label_flow_blob(
+        flow_blob,
+        prior_blob=prior_blob,
+        workspace_root=workspace_path if workspace_path.exists() else _Path("."),
+        nodes_by_id=nodes_by_id,
+        provider=provider,
+    )
+
+    row.flow_json = labelled.model_dump(mode="json")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is not None and cfg.last_analysis_id != row.id:
+        cfg.last_analysis_id = row.id
+
+    await session.commit()
+
+    return RecomputeFlowsResponse(
+        repo_id=repo_id,
+        flow_count=len(labelled.flows),
+        capability_count=len(labelled.capabilities),
+        unreached_count=len(labelled.unreached),
+        derived_at_commit=labelled.derived_at_commit,
+        labeled_flow_count=sum(1 for f in labelled.flows if f.name is not None),
+    )
+
+
+@router.get(
+    "/repos/{repo_id}/graph/flows",
+    response_model=LatestFlowsData,
+)
+async def get_repo_graph_flows(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> LatestFlowsData:
+    """Return the persisted ``flow_json`` for ``repo_id`` (Phase 3 Map view).
+
+    Reads the row pointed to by ``RepoGraphConfig.last_analysis_id`` so a
+    successful recompute (which keeps that pointer in sync) is visible
+    immediately. ``blob`` is ``None`` when no recompute has produced a
+    ``flow_json`` yet — the UI surfaces a "Compute capability map" empty
+    state in that case.
+    """
+    from shared.types import FlowJsonBlob
+
+    repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
+    if not repo:
+        raise HTTPException(404, "Repo not found")
+
+    cfg_result = await session.execute(
+        select(RepoGraphConfig).where(RepoGraphConfig.repo_id == repo.id)
+    )
+    cfg = cfg_result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(404, "Code graph not enabled for this repo")
+
+    if cfg.last_analysis_id is None:
+        return LatestFlowsData(repo_id=repo.id)
+
+    row_result = await session.execute(
+        select(RepoGraph).where(RepoGraph.id == cfg.last_analysis_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        return LatestFlowsData(repo_id=repo.id)
+
+    blob: FlowJsonBlob | None = None
+    if row.flow_json is not None:
+        try:
+            blob = FlowJsonBlob.model_validate(row.flow_json)
+        except Exception:
+            blob = None
+
+    return LatestFlowsData(
+        repo_id=repo.id,
+        repo_graph_id=row.id,
+        generated_at=row.generated_at.isoformat() if row.generated_at else None,
+        blob=blob,
+    )
 
 
 import time as _time
@@ -3604,10 +3754,7 @@ async def get_repo_graph_progress(
         raise HTTPException(404, "Repo not found")
 
     result = await session.execute(
-        select(RepoGraph)
-        .where(RepoGraph.repo_id == repo.id)
-        .order_by(RepoGraph.id.desc())
-        .limit(1)
+        select(RepoGraph).where(RepoGraph.repo_id == repo.id).order_by(RepoGraph.id.desc()).limit(1)
     )
     row = result.scalar_one_or_none()
     if row is None:
@@ -3627,9 +3774,7 @@ async def get_repo_graph_progress(
     from agent.graph_workspace import lock_is_held
 
     status: str = (
-        "unchanged"
-        if row.is_complete
-        else ("running" if lock_is_held(repo_id) else "idle")
+        "unchanged" if row.is_complete else ("running" if lock_is_held(repo_id) else "idle")
     )
     return RepoGraphProgressData(
         is_complete=row.is_complete,
@@ -3976,6 +4121,9 @@ async def delete_freeform_config(
 
 class CreateRepoRequest(BaseModel):
     description: str
+    # Optional caller-supplied repo name. Sanitised server-side; empty falls
+    # back to Claude-picked names.
+    name: str = ""
     org: str = ""
     private: bool = True
     # When True (default), the new repo enters the continuous-improvement loop
@@ -4001,15 +4149,15 @@ async def create_repo_from_description(
     if not req.description.strip():
         raise HTTPException(400, "description is required")
 
-    user_id: int | None = None
-    caller_org_id: int | None = None
-    if auto_agent_session or authorization:
-        try:
-            payload = _verify_cookie_or_header(auto_agent_session, authorization)
-            user_id = payload.get("user_id")
-            caller_org_id = payload.get("current_org_id")
-        except HTTPException:
-            user_id = None
+    # Auth is required: the new Repo row must be stamped with the caller's
+    # organization_id (NOT NULL since migration 027). Resolve identity
+    # before any side-effects — otherwise a failed DB insert leaves an
+    # orphan repo on the user's GitHub account.
+    payload = _verify_cookie_or_header(auto_agent_session, authorization)
+    user_id = payload.get("user_id")
+    caller_org_id = payload.get("current_org_id")
+    if not user_id or not caller_org_id:
+        raise HTTPException(401, "Authentication required to create a repo")
 
     try:
         repo, task = await create_repo_and_scaffold_task(
@@ -4018,6 +4166,7 @@ async def create_repo_from_description(
             org_override=req.org,
             private=req.private,
             loop=req.loop,
+            name_override=req.name,
             user_id=user_id,
             organization_id=caller_org_id,
         )

@@ -106,6 +106,12 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.PLANNING,
         TaskStatus.FAILED,
         TaskStatus.DONE,
+        # Recovery: allow re-driving a stuck trio child after a dispatcher
+        # fix lands. Observed on harpoon task #25 (2026-05-24) — coder
+        # repeatedly produced no diff because the architect's items were
+        # already-done state changes; without BLOCKED → TRIO_EXECUTING we
+        # had no way to re-attempt with the patched no-diff escalation.
+        TaskStatus.TRIO_EXECUTING,
     },
     TaskStatus.BLOCKED_ON_AUTH: {
         TaskStatus.QUEUED,

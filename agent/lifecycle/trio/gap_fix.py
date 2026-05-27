@@ -101,6 +101,30 @@ believe the gaps can't be closed without escalation, use
 This is gap-fix round {round_idx} of {max_rounds}. After {max_rounds}
 rounds the orchestrator blocks the task automatically.
 
+== Hard rule ==
+If a gap says "domain X was never built" or "module Y is absent",
+the dispatch_new items MUST be the work to BUILD that module (create
+files, schemas, migrations, routes, services, tests). Do NOT emit
+"fix references in other domains" / "rename methods" / "verify
+upstream signatures" — that pattern produced the gap in the first
+place (the per-item loop drained a backlog of preparatory pin-tests
+without ever building the target domain). Read ``.auto-agent/design.md``
+for the canonical module layout and emit one item per file or per
+tight group of files.
+
+== Item contract ==
+Every dispatch_new item MUST include three fields:
+- ``id``: a unique handle (e.g. ``G1``, ``G2``, ... — the orchestrator
+  will auto-assign one if you omit it, but explicit IDs make logs and
+  the per-item tiebreak prompts traceable)
+- ``title``: one-line imperative summary
+- ``description``: 1-3 sentences naming the SPECIFIC files to create
+  or modify (e.g. ``src/harpoon/funnel/repositories.py``). Concrete
+  file paths matter: the orchestrator verifies the named paths exist
+  before accepting an item as done. An item whose description names
+  no concrete file paths is at high risk of being marked done without
+  any real work having happened.
+
 == Final reviewer's gaps ==
 {gaps}
 """
@@ -145,8 +169,9 @@ async def run_gap_fix(
     # auto-agent Session blob — claude CLI doesn't know that UUID. Run
     # fresh: the checkpoint system prompt pins design.md + backlog.json +
     # decision.json so the architect has full load-bearing context, and
-    # the gap list comes in via the prompt. The auto-agent Session blob
-    # is still saved for diagnostics but not used for resume here.
+    # the gap list comes in via the prompt. Even with the blob present,
+    # the harpoon #25 + #28 incidents showed resume is unreliable across
+    # workspace recreates / stashes — fresh-run is the safer default.
     agent = create_architect_agent(
         workspace=workspace,
         task_id=parent_task_id,

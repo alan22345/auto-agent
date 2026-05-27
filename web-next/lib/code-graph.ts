@@ -9,7 +9,9 @@ import { api, ApiError } from './api';
 import type {
   EnableRepoGraphRequest,
   GraphStalenessResponse,
+  LatestFlowsData,
   LatestRepoGraphData,
+  RecomputeFlowsResponse,
   RepoData,
   RepoGraphConfigData,
   RepoGraphProgressData,
@@ -134,4 +136,26 @@ export async function getRepoGraphProgress(
   repoId: number,
 ): Promise<RepoGraphProgressData> {
   return api<RepoGraphProgressData>(`/api/repos/${repoId}/graph/progress`);
+}
+
+// Capability / flow map (Phase 3+ of the capability-flow map spec).
+//
+// ``blob`` is null until a recompute lands; the Map tab shows the
+// "Compute capability map" empty state in that case.
+export async function getRepoGraphFlows(
+  repoId: number,
+): Promise<LatestFlowsData> {
+  return api<LatestFlowsData>(`/api/repos/${repoId}/graph/flows`);
+}
+
+// Trigger derivation + LLM labelling. Returns counts so the caller can
+// invalidate the GET and report progress. Phase 2's file-hash cache
+// keeps repeat calls cheap when nothing on a flow has changed.
+export async function recomputeRepoGraphFlows(
+  repoId: number,
+): Promise<RecomputeFlowsResponse> {
+  return api<RecomputeFlowsResponse>(
+    `/api/repos/${repoId}/graph/flows/recompute`,
+    { method: 'POST' },
+  );
 }
