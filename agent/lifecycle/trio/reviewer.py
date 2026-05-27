@@ -561,6 +561,7 @@ async def run_heavy_review(
         repo_name=repo_name,
         home_dir=home_dir,
         org_id=org_id,
+        repo_id=repo_id,
     )
     if smoke_result.verdict != "pass":
         first_failure = (

@@ -198,6 +198,7 @@ async def _smoke_and_ui(
         repo_name=repo_name,
         home_dir=home_dir,
         org_id=org_id,
+        repo_id=repo_id,
     )
     if smoke_result.verdict != "pass":
         # The smoke agent already itemised failures; surface each as a gap.

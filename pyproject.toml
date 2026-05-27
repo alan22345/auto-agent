@@ -48,6 +48,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "slow: slow tests (real Playwright / network) — deselect with -m 'not slow'",
+    "real_route_checks: opts out of the smoke-agent test fixture that stubs _run_auto_route_checks",
 ]
 
 [tool.ruff]
