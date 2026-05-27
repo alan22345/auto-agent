@@ -254,6 +254,28 @@ builder/review loop has finished; every item shipped with a passing
 heavy-review. Your job: look at the whole change end-to-end and decide
 whether the original design's goals are met or whether gaps remain.
 
+**Scope filter (ADR-020 — load-bearing):**
+
+> A "gap" is **only** something the design.md promised but the
+> integrated diff doesn't deliver. Pre-existing bugs in the codebase
+> (unrelated stubs, broken routes the design doesn't mention, modules
+> from abandoned earlier tasks) are NOT gaps for this run — they are
+> diagnostics. Reporting them as gaps causes the gap-fix architect to
+> dispatch work outside scope, and the run ships a PR that does the
+> wrong thing.
+>
+> For each candidate gap, ask: **Is this gap inside design.md's
+> declared scope?**
+>
+> - In-scope (design promised X, diff doesn't have X) → emit as a gap.
+> - Out-of-scope (broken thing in code the design doesn't cover) →
+>   DO NOT emit as a gap. Mention it once in the ``comments`` field
+>   for the operator log, and move on.
+>
+> If the smoke + UI primitive report includes a failure on a route
+> design.md doesn't mention, that's diagnostic noise — note it in
+> ``comments``, don't promote it to a gap.
+
 **No-defer rule (Rules — ADR-015 §8):**
 
 > Treat any `raise NotImplementedError`, `# TODO(phase`, `# Phase 1` /

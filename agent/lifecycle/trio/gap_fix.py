@@ -165,10 +165,26 @@ pinned in this system prompt — re-read them and decide how to close
 the gaps below.
 
 You MUST use the ``submit-architect-decision`` skill to write
-``.auto-agent/decision.json``. The preferred action is
-``"dispatch_new"`` with new backlog items in the payload. If you
-believe the gaps can't be closed without escalation, use
-``"escalate"`` instead.
+``.auto-agent/decision.json``.
+
+== Scope check FIRST (ADR-020 — non-negotiable) ==
+For EACH gap below, before considering ``dispatch_new``, ask:
+**Is this gap inside design.md's declared scope?**
+
+- If the gap names files, routes, modules, or features design.md does
+  NOT cover, emit ``{{"action": "escalate", "reason": "<one-line: gap
+  is out-of-scope; design covers X, gap is about Y>"}}``. Do NOT
+  dispatch_new. The orchestrator will surface the gap to the operator
+  or improvement-agent as a separate task. **Unrelated pre-existing
+  bugs in the codebase (e.g. stubs from an abandoned earlier task)
+  are NEVER yours to fix inside this run.**
+
+- If the gap IS in-scope (design.md promised X, codebase doesn't have
+  X), ``dispatch_new`` with items that build X.
+
+If only SOME gaps are in-scope, dispatch_new for the in-scope ones AND
+mention the out-of-scope ones in your decision's ``reason`` field for
+the operator log.
 
 This is gap-fix round {round_idx} of {max_rounds}. After {max_rounds}
 rounds the orchestrator blocks the task automatically.
