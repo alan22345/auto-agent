@@ -103,11 +103,29 @@ Order of operations (use as many as apply to this diff):
    change broke something. ALWAYS run this if a test suite exists, even
    when there are routes to exercise — broken tests are smoke
    failures.
-4. **Boot the dev server** (when there is one). Pre-allocate a port,
-   set ``$PORT``, run the boot command from smoke.yml or the
-   auto-detected one (``package.json`` ``dev`` script → ``python3
-   run.py`` → ``make dev``). Wait for a health URL to return 2xx with
-   a non-empty body.
+4. **Boot the dev server** (when there is one). NEVER run the boot
+   command in the foreground — your Bash tool waits for the command to
+   exit, and a dev server doesn't exit. You MUST detach it using the
+   exact pattern below, or your run will wedge the entire orchestrator
+   for an hour (this has happened — see task 28, 2026-05-27).
+
+   Boot template (copy verbatim, replace ``<CMD>`` and ``<PORT>``):
+   ```bash
+   setsid sh -c '<CMD>' >/tmp/devserver.log 2>&1 </dev/null &
+   echo $! > /tmp/devserver.pid
+   disown
+   # Wait for health — up to 60s — never block longer.
+   for i in $(seq 1 60); do
+     curl -fsS http://localhost:<PORT>/ >/dev/null 2>&1 && break
+     sleep 1
+   done
+   ```
+
+   ``setsid`` puts the dev server in its own session so closing your
+   bash tool doesn't kill it; ``</dev/null`` and ``>/tmp/devserver.log
+   2>&1`` detach its stdio so your bash command returns immediately;
+   ``disown`` removes it from your shell's job table; the bounded curl
+   loop ensures you never wait more than 60s on a stuck boot.
 5. **Hit each affected route.** For every route in the work item's
    ``affected_routes`` and every route you can identify in the diff
    (FastAPI / Flask / Next.js page.tsx etc.), curl it. Validate the
@@ -115,7 +133,26 @@ Order of operations (use as many as apply to this diff):
    (``null``, ``{}``, empty list, ``NotImplementedError`` traceback).
 6. **Build / typecheck** for compiled / typed projects. ``tsc
    --noEmit``, ``npm run build``, ``cargo build``.
-7. **Kill the dev server** when you're done. Don't leak processes.
+7. **Kill the dev server BEFORE WRITING smoke_result.json.** This is
+   non-negotiable. If you skip the kill, the orchestrator wedges for
+   an hour waiting for your claude process to exit, because the dev
+   server holds its process group open. Kill template:
+   ```bash
+   if [ -f /tmp/devserver.pid ]; then
+     PID=$(cat /tmp/devserver.pid)
+     # Kill the whole session (dev server + any children it spawned).
+     kill -TERM -$(ps -o sid= -p "$PID" | tr -d ' ') 2>/dev/null || kill -TERM "$PID" 2>/dev/null
+     sleep 2
+     kill -KILL -$(ps -o sid= -p "$PID" | tr -d ' ') 2>/dev/null || kill -KILL "$PID" 2>/dev/null
+     rm -f /tmp/devserver.pid
+   fi
+   # Belt-and-suspenders: nothing on the port should remain.
+   pkill -KILL -f 'vite|next dev|npm run dev|uvicorn|esbuild' 2>/dev/null || true
+   ```
+   After running the kill block, verify with
+   ``pgrep -af 'vite|next dev|npm run dev|uvicorn|esbuild' || echo clean``.
+   If anything is still listed, retry the kill. Do NOT call
+   ``submit-smoke-result`` until that check prints ``clean``.
 
 Verdict rules:
 
