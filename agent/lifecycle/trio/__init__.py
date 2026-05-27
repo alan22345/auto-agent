@@ -514,12 +514,25 @@ async def _advance_through_design_gate(parent: Task) -> bool:
         await s.commit()
     await _set_trio_phase(parent.id, TrioPhase.ARCHITECTING)
     await architect.run_design(parent.id)
-    # The design pass parked the task at AWAITING_DESIGN_APPROVAL. Re-enter
-    # the gate function so branch (B) gets a chance to fire the freeform
-    # standin in this same invocation — otherwise the task waits for
-    # external re-entry (on_design_approved fires only AFTER approval, so
-    # without this recursion a fresh freeform task hangs at the gate).
-    return await _advance_through_design_gate(parent)
+    # The design pass should have parked the task at
+    # AWAITING_DESIGN_APPROVAL via ``finalize_design``. If it did, re-enter
+    # the gate so branch (B) can fire the freeform standin in the same
+    # invocation — otherwise a fresh freeform task hangs at the gate
+    # waiting for an external trigger that never fires (the design-approved
+    # handler only re-runs AFTER the verdict lands). If the status did not
+    # advance, do NOT recurse: re-entering branch (A) re-transitions
+    # ARCHITECT_DESIGNING → ARCHITECT_DESIGNING and raises InvalidTransition.
+    async with async_session() as _s:
+        post = (await _s.execute(select(Task).where(Task.id == parent.id))).scalar_one()
+        post_status = post.status
+    if post_status == TaskStatus.AWAITING_DESIGN_APPROVAL:
+        return await _advance_through_design_gate(parent)
+    log.info(
+        "trio.parent.design_pass_did_not_park",
+        parent_id=parent.id,
+        status=post_status.value,
+    )
+    return False
 
 
 async def _try_freeform_design_standin(

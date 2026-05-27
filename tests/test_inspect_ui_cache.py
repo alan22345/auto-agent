@@ -20,7 +20,7 @@ async def test_inspect_ui_uses_cached_result_when_inputs_unchanged(tmp_path, mon
     vision_calls = {"n": 0}
 
     async def fake_screenshot(*_a, **_kw):
-        return screenshot_bytes
+        return screenshot_bytes, None
 
     async def fake_vision_judge(*_a, **_kw):
         vision_calls["n"] += 1
@@ -63,7 +63,7 @@ async def test_inspect_ui_does_not_cache_across_different_intent(tmp_path):
     vision_calls = {"n": 0}
 
     async def fake_screenshot(*_a, **_kw):
-        return b"fake-png"
+        return b"fake-png", None
 
     async def fake_vision_judge(*_a, **_kw):
         vision_calls["n"] += 1

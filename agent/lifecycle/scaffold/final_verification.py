@@ -66,7 +66,12 @@ def _load_child_routes(child_workspace: str) -> list[str]:
     try:
         with open(backlog_path) as fh:
             payload = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "scaffold.final_verification.backlog_unreadable",
+            backlog_path=backlog_path,
+            error=str(exc),
+        )
         return []
     if isinstance(payload, dict):
         items = payload.get("items")
