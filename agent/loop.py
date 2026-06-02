@@ -6,8 +6,9 @@ Supports pass-through mode for CLI providers that manage their own tools.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -165,6 +166,7 @@ class AgentLoop:
         dev_server_log_path: str | None = None,
         repo_id: int | None = None,
         organization_id: int | None = None,
+        with_mcp: bool = True,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -192,6 +194,8 @@ class AgentLoop:
         self._dev_server_log_path = dev_server_log_path  # path to dev-server log when server is active
         self._repo_id = repo_id             # repo this agent is operating inside (ADR-019)
         self._organization_id = organization_id  # org for repo_secrets calls (ADR-019)
+        self._with_mcp = with_mcp           # register external MCP tools (off for readonly/review agents)
+        self._mcp_registered = False        # guard so native MCP discovery runs at most once per loop
 
     @property
     def tools(self) -> ToolRegistry:
@@ -205,6 +209,38 @@ class AgentLoop:
     @tools.setter
     def tools(self, registry: ToolRegistry) -> None:
         self._tools = registry
+
+    # ------------------------------------------------------------------
+    # MCP wiring
+    # ------------------------------------------------------------------
+
+    def _cli_mcp_servers(self) -> list:
+        """MCP specs to expose to the claude_cli ``--mcp-config`` (cli targets)."""
+        from agent.mcp.servers import build_mcp_servers, cli_specs
+        from shared.config import settings
+
+        return cli_specs(build_mcp_servers(settings))
+
+    async def _ensure_native_mcp_tools(self) -> None:
+        """Register external HTTP MCP tools into the registry (native path).
+
+        Runs at most once per loop, only when ``with_mcp`` is set (off for
+        readonly/review agents). Discovery is cached per-process and failures
+        degrade gracefully, so this never blocks a task.
+        """
+        if self._mcp_registered or not self._with_mcp:
+            return
+        self._mcp_registered = True
+        try:
+            from agent.mcp.servers import build_mcp_servers, native_http_specs
+            from agent.mcp.tool_adapter import register_mcp_tools
+            from shared.config import settings
+
+            specs = native_http_specs(build_mcp_servers(settings))
+            if specs:
+                await register_mcp_tools(self._tools, specs)
+        except Exception as e:
+            logger.warning("native_mcp_registration_failed", error=str(e))
 
     async def run(
         self,
@@ -239,6 +275,8 @@ class AgentLoop:
                 self._provider.set_home_dir(self._home_dir)
             if self._session:
                 self._provider.set_session(self._session.session_id, resume=resume)
+            if self._with_mcp:
+                self._provider.set_mcp_servers(self._cli_mcp_servers())
 
         response = await self._provider.complete(
             messages=[Message(role="user", content=prompt)],
@@ -308,6 +346,7 @@ class AgentLoop:
         )
         total_tool_calls = 0
         cumulative_usage = TokenUsage()
+        await self._ensure_native_mcp_tools()
         tool_defs = self._tools.definitions()
         consecutive_reads = 0  # Exploration budget tracker
         nudge_injected = False

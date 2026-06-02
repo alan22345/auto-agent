@@ -165,4 +165,5 @@ def create_agent(
         dev_server_log_path=dev_server_log_path,
         repo_id=repo_id,
         organization_id=org_id,
+        with_mcp=not readonly,
     )

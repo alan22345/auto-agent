@@ -74,10 +74,44 @@ class ClaudeCLIProvider(LLMProvider):
         self._cwd: str | None = None
         self._home_dir: str | None = home_dir
         self._resume: bool = False
+        self._mcp_servers: list = []
 
     def set_cwd(self, cwd: str) -> None:
         """Set the working directory for CLI invocations."""
         self._cwd = cwd
+
+    def set_mcp_servers(self, specs: list) -> None:
+        """Set the MCP servers to expose to the CLI via ``--mcp-config``.
+
+        Each spec must provide ``name`` and ``to_cli_entry()`` (see
+        ``agent/mcp/servers.py``). Empty list disables MCP for the CLI.
+        """
+        self._mcp_servers = list(specs or [])
+
+    def _mcp_config_args(self) -> tuple[list[str], str | None]:
+        """Return (extra cmd args, temp config path) for the configured servers.
+
+        Writes a ``{"mcpServers": {...}}`` file and returns the flags pointing
+        at it. ``--strict-mcp-config`` keeps behaviour independent of whatever
+        MCP config the container's HOME happens to carry. Returns ([], None)
+        when no servers are configured.
+        """
+        if not self._mcp_servers:
+            return [], None
+        import json as _json
+        import tempfile
+
+        config = {
+            "mcpServers": {s.name: s.to_cli_entry() for s in self._mcp_servers}
+        }
+        tf = tempfile.NamedTemporaryFile(  # noqa: SIM115 — must outlive this fn; cleaned up by caller
+            mode="w", suffix=".mcp.json", prefix="auto-agent-", delete=False
+        )
+        try:
+            _json.dump(config, tf)
+        finally:
+            tf.close()
+        return ["--mcp-config", tf.name, "--strict-mcp-config"], tf.name
 
     def set_home_dir(self, home_dir: str) -> None:
         """Set HOME for CLI invocations — selects the user's credential vault."""
@@ -194,6 +228,10 @@ class ClaudeCLIProvider(LLMProvider):
             else:
                 cmd.extend(["--session-id", self._session_id])
 
+        # Expose configured MCP servers (ergodic-ui, team-memory) to the CLI.
+        mcp_args, mcp_config_path = self._mcp_config_args()
+        cmd.extend(mcp_args)
+
         # ``start_new_session=True`` makes the claude child a process-group
         # leader. Any descendants it spawns (smoke-agent dev servers — vite,
         # uvicorn, npm, esbuild, the bash wrappers around them) inherit the
@@ -234,6 +272,9 @@ class ClaudeCLIProvider(LLMProvider):
             # Nuke the whole group; the claude leader has already exited so
             # this only reaps stragglers.
             _killpg(getattr(proc, "pid", None))
+            if mcp_config_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(mcp_config_path)
 
     async def _run_cli(self, prompt: str) -> str:
         """Run the Claude Code CLI, recovering from session-already-in-use collisions.

@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     # Search tab — Brave Search API key. /search endpoints return 503 if unset.
     brave_api_key: str = ""
+
+    # MCP — external Model Context Protocol servers the agent connects to.
+    # Master switch; per-server config is assembled in agent/mcp/servers.py.
+    mcp_enabled: bool = True
+    # ergodic-ui design-system MCP (HTTP). Token from env enables it.
+    ergodic_ui_mcp_url: str = "https://ergodic-ui-mcp.fly.dev/mcp"
+    ergodic_ui_mcp_token: str = ""
     # Bedrock — explicit credentials for VM deployment (optional).
     # Preferred: AWS Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) — simpler, no IAM setup.
     # Alternative: IAM access keys (aws_access_key_id + aws_secret_access_key).
