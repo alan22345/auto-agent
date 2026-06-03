@@ -38,11 +38,31 @@ ORCHESTRATOR_URL = settings.orchestrator_url
 
 
 async def get_task(task_id: int) -> TaskData | None:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
-        if resp.status_code == 200:
-            return TaskData.model_validate(resp.json())
-    return None
+    """Fetch a task as ``TaskData`` directly from the DB (in-process).
+
+    This used to call ``GET /tasks/{id}`` over the HTTP loopback, but that
+    endpoint requires ``current_org_id_dep`` (org-scoped auth) and the agent
+    has no session cookie or bearer token — so the call 401'd and returned
+    ``None``, silently dropping every inbound message in
+    ``route_human_message`` (clarification replies, PR-review routing, …).
+    Reading in-process via the DB — the same fix ``transition_task`` already
+    applies — sidesteps auth entirely. Reuses the canonical ORM→TaskData
+    mapping so the wire shape (``repo_name``/``effective_mode``/…) is identical
+    to the HTTP endpoint.
+    """
+    from sqlalchemy.orm import selectinload
+
+    from orchestrator.router import _task_to_response
+
+    async with async_session() as s:
+        task = (
+            await s.execute(
+                select(Task).options(selectinload(Task.repo)).where(Task.id == task_id)
+            )
+        ).scalar_one_or_none()
+        if task is None:
+            return None
+        return _task_to_response(task)
 
 
 async def get_repo(repo_name: str) -> RepoData | None:

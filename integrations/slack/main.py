@@ -30,6 +30,8 @@ from shared.events import (
     Event,
     POEventType,
     TaskEventType,
+    human_message,
+    publish,
 )
 from shared.redis_client import (
     ack_event,
@@ -196,16 +198,18 @@ async def _slack_user_id_for_task(task_id: int | None) -> str | None:
 
 
 async def _post_task_feedback(task_id: int, content: str, sender: str) -> None:
-    """POST a Slack DM message to the task's chat stream."""
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{ORCHESTRATOR_URL}/tasks/{task_id}/messages",
-                json={"content": content},
-                headers={"X-Sender": sender},
-            )
-    except Exception:
-        log.exception("Failed to post task feedback via Slack reply")
+    """Route a Slack thread reply to the task as human feedback.
+
+    Publishes a ``human.message`` event directly on the in-process bus rather
+    than POSTing to the org-scoped ``/tasks/{id}/messages`` endpoint. That
+    endpoint requires an authenticated session/token; the bridge sends only an
+    ``X-Sender`` header, so the call 401'd and was silently swallowed — the
+    user's clarification answer was dropped while the bot still confirmed
+    delivery. The bus path reaches route_human_message -> handle_clarification_inbound
+    with no auth, mirroring the messenger_router thread fast-path.
+    """
+    source = sender.split(":", 1)[0] if ":" in sender else "slack"
+    await publish(human_message(task_id=task_id, message=content, source=source))
 
 
 # ---------------------------------------------------------------------------
