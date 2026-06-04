@@ -1,5 +1,4 @@
 # tests/test_record_decision.py
-import os
 import pytest
 
 from agent.tools.base import ToolContext

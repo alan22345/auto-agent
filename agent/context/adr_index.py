@@ -52,7 +52,7 @@ def parse_adr(path: str) -> AdrMeta:
     summary: str | None = None
     status = ""
     in_status = False
-    for i, line in enumerate(lines):
+    for line in lines:
         h1 = _H1_RE.match(line)
         if h1 and title == name:
             title = h1.group(1)

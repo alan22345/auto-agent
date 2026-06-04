@@ -1,6 +1,6 @@
 # tests/test_adr_supersede.py
-from agent.tools.adr_supersede import retire_adr
 from agent.context.adr_index import parse_adr, status_kind
+from agent.tools.adr_supersede import retire_adr
 
 
 def test_retire_adr_flips_status_and_keeps_file(tmp_path):

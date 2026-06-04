@@ -1,7 +1,12 @@
 import textwrap
 from pathlib import Path
 
-from agent.context.adr_index import parse_adr, status_kind
+from agent.context.adr_index import (
+    active_adrs,
+    build_index,
+    parse_adr,
+    status_kind,
+)
 
 
 def _write(tmp_path: Path, name: str, body: str) -> Path:
@@ -48,10 +53,6 @@ def test_parse_adr_reads_superseded_status(tmp_path):
     assert status_kind(meta.status) == "superseded"
     assert meta.superseded_by == 15
     assert meta.summary is None
-
-
-from agent.context.adr_index import active_adrs, build_index
-
 
 def test_build_index_is_status_aware(tmp_path):
     d = tmp_path / "decisions"
