@@ -80,3 +80,40 @@ def parse_adr(path: str) -> AdrMeta:
         number=number, path=path, title=title,
         status=status, summary=summary, superseded_by=superseded_by,
     )
+
+
+_ADR_FILE_RE = re.compile(r"^\d{3}-.*\.md$")
+_ACTIVE = {"accepted", "proposed"}
+
+
+def _adr_paths(adr_dir: str) -> list[str]:
+    if not os.path.isdir(adr_dir):
+        return []
+    out = []
+    for name in sorted(os.listdir(adr_dir)):
+        if _ADR_FILE_RE.match(name) and not name.startswith("000-"):
+            out.append(os.path.join(adr_dir, name))
+    return out
+
+
+def active_adrs(adr_dir: str) -> list[AdrMeta]:
+    """Accepted/Proposed ADRs, sorted by number. Superseded/Deprecated omitted."""
+    metas = [parse_adr(p) for p in _adr_paths(adr_dir)]
+    active = [m for m in metas if status_kind(m.status) in _ACTIVE]
+    return sorted(active, key=lambda m: m.number)
+
+
+def build_index(adr_dir: str) -> str:
+    """Render the active ADR index as markdown. Deterministic, no I/O side effects."""
+    lines = [
+        "# Architecture Decision Index",
+        "",
+        "_Active decisions only. Superseded/Deprecated ADRs are intentionally "
+        "omitted — read the file's `## Status` before treating any ADR as binding._",
+        "",
+    ]
+    for m in active_adrs(adr_dir):
+        summary = m.summary or "(no summary)"
+        lines.append(f"- ADR-{m.number:03d} {m.title} — {summary}")
+    lines.append("")
+    return "\n".join(lines)
