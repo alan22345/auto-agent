@@ -42,6 +42,7 @@ from agent.lifecycle.verify_primitives import (
     StubResult,
     UIResult,
     boot_dev_server,
+    check_adr_consistency,
     exercise_routes,
     grep_diff_for_stubs,
     inspect_ui,
@@ -220,6 +221,15 @@ Apply this rubric (ADR-015 §5):
 > must carry `# auto-agent: allow-stub` and explain why; only then is
 > it acceptable.
 
+**ADR check (active architecture decisions for this repo):**
+
+If this diff contradicts an Accepted decision below and does NOT retire that
+ADR (set its ``## Status`` to Superseded) in the same diff, return
+``changes_requested`` and name the ADR. Only Accepted/Proposed decisions are
+binding; the index below already omits Superseded/Deprecated ones.
+
+{adr_index}
+
 Output your verdict by calling the ``submit-pr-review`` skill. The skill
 writes ``.auto-agent/pr_review.json`` with the verdict + comments. Use
 ``verdict="approved"`` only when the rubric passes; otherwise
@@ -292,10 +302,37 @@ async def _run_artefact_review(
         )
         return result
 
+    # ADR retire-in-same-change backstop (deterministic). Runs before the LLM:
+    # a diff that overwrites a still-Accepted ADR's decision without retiring it
+    # is a contradiction the no-defer-style gate catches without burning a turn.
+    adr_dir = os.path.join(workspace_root, "docs", "decisions")
+    adr_check = check_adr_consistency(diff, adr_dir)
+    if not adr_check.ok:
+        result = PRReviewResult(
+            verdict="changes_requested",
+            comments=[
+                {"path": "docs/decisions/", "line": 0, "comment": v}
+                for v in adr_check.violations
+            ],
+            summary=(
+                f"ADR consistency: {len(adr_check.violations)} issue(s); "
+                f"LLM review skipped."
+            ),
+        )
+        _write_pr_review_json(workspace_root, result)
+        log.info(
+            "pr_review.artefact.adr_consistency_backstop_triggered",
+            count=len(adr_check.violations),
+        )
+        return result
+
+    from agent.context.adr_index import build_index
+
     prompt = _ARTEFACT_REVIEW_PROMPT.format(
         task_title=getattr(task, "title", "") or "",
         task_description=getattr(task, "description", "") or "",
         pr_url=getattr(task, "pr_url", "") or "",
+        adr_index=build_index(adr_dir),
         diff=diff,
     )
 
