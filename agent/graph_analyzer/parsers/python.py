@@ -309,17 +309,23 @@ class PythonParser(Parser):
         if name is None:
             return
         node_id = f"{rel_path}::{qualifier}{name}"
+        line_start = node.start_point[0] + 1
+        line_end = node.end_point[0] + 1
+        cyclomatic, cognitive = _compute_complexity(node)
         result.nodes.append(
             Node(
                 id=node_id,
                 kind="function",
                 label=f"{qualifier}{name}" if qualifier else name,
                 file=rel_path,
-                line_start=node.start_point[0] + 1,
-                line_end=node.end_point[0] + 1,
+                line_start=line_start,
+                line_end=line_end,
                 area=area,
                 parent=parent_id,
                 decorators=list(decorators) if decorators else [],
+                cyclomatic=cyclomatic,
+                cognitive=cognitive,
+                loc=line_end - line_start + 1,
             ),
         )
 
@@ -701,6 +707,88 @@ class PythonParser(Parser):
             if c.type == "identifier":
                 return _node_text(c, source)
         return None
+
+
+# ----------------------------------------------------------------------
+# Complexity metrics (Phase 8)
+# ----------------------------------------------------------------------
+
+# Node types that are decision points for cyclomatic complexity.
+_CYCLOMATIC_DECISION_TYPES: frozenset[str] = frozenset(
+    {
+        "if_statement",
+        "elif_clause",
+        "for_statement",
+        "while_statement",
+        "except_clause",
+        "conditional_expression",
+        "boolean_operator",
+        "case_clause",
+        "if_clause",
+        "for_in_clause",
+    }
+)
+
+# Node types that contribute to cognitive complexity with a nesting bonus.
+# Note: ``case_clause`` (match/case) is intentionally absent — match/case contributes 0
+# to cognitive complexity in this implementation. This is a documented limitation
+# deferred to a follow-up task.
+_COGNITIVE_NESTING_TYPES: frozenset[str] = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "except_clause",
+        "conditional_expression",
+    }
+)
+
+# Node types that mark a nested definition boundary — do NOT recurse into them.
+# lambda intentionally absent — lambdas aren't separate graph nodes, so their branches count toward the enclosing function.
+_NESTED_DEF_TYPES: frozenset[str] = frozenset({"function_definition", "class_definition"})
+
+
+def _compute_complexity(func_node) -> tuple[int, int]:
+    """Return ``(cyclomatic, cognitive)`` for *func_node*.
+
+    Walks the function's subtree but **stops at nested function/class
+    definitions** — those are emitted as their own nodes and scored
+    separately.
+
+    cyclomatic = 1 + count of decision-point nodes.
+    cognitive  = sum of per-node contributions (nesting-sensitive).
+    """
+    cyclomatic = 1
+    cognitive = 0
+
+    def _walk_cyclomatic(node: object) -> None:
+        nonlocal cyclomatic
+        for child in node.children:  # type: ignore[attr-defined]
+            if child.type in _NESTED_DEF_TYPES:
+                continue  # don't descend into nested defs
+            if child.type in _CYCLOMATIC_DECISION_TYPES:
+                cyclomatic += 1
+            _walk_cyclomatic(child)
+
+    def _walk_cognitive(node: object, nesting: int) -> None:
+        nonlocal cognitive
+        for child in node.children:  # type: ignore[attr-defined]
+            t = child.type
+            if t in _NESTED_DEF_TYPES:
+                continue  # stop at nested defs
+            if t in _COGNITIVE_NESTING_TYPES:
+                cognitive += 1 + nesting
+                _walk_cognitive(child, nesting + 1)
+            elif t in ("elif_clause", "else_clause", "boolean_operator"):
+                cognitive += 1
+                _walk_cognitive(child, nesting)
+            else:
+                _walk_cognitive(child, nesting)
+
+    _walk_cyclomatic(func_node)
+    _walk_cognitive(func_node, nesting=0)
+
+    return cyclomatic, cognitive
 
 
 # ----------------------------------------------------------------------
