@@ -833,3 +833,65 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
         return body
     suffix = "\n\n" + section if not body.endswith("\n") else "\n" + section
     return body + suffix
+
+
+# ---------------------------------------------------------------------------
+# Public: check_adr_consistency — deterministic retire-in-same-change gate.
+# ---------------------------------------------------------------------------
+
+
+# An ADR file touched in the diff is detected from the ``+++ b/`` header so we
+# can scope supersession claims to the change. The "Supersedes [ADR-X]" claim
+# is matched on ADDED lines (leading ``+``).
+_ADDED_SUPERSEDES_RE = re.compile(
+    r"^\+.*supersedes\s+\[?ADR-(\d+)\]?", re.IGNORECASE | re.MULTILINE
+)
+
+
+@dataclass
+class AdrConsistencyResult:
+    ok: bool
+    violations: list[str] = field(default_factory=list)
+
+
+def check_adr_consistency(diff: str, adr_dir: str) -> AdrConsistencyResult:
+    """Deterministic ADR retire-in-same-change gate.
+
+    Flags when the diff introduces a 'Supersedes [ADR-X]' claim but ADR-X is
+    still Accepted/Proposed in the working tree, and when a 'Superseded by
+    [ADR-Y]' points at a Y that does not exist. No governs metadata required.
+    """
+    # Imported lazily to keep the agent-context dependency local to this gate.
+    from agent.context.adr_index import _adr_paths, parse_adr, status_kind
+
+    violations: list[str] = []
+
+    # Current state of every ADR in the tree, keyed by number.
+    by_num: dict[int, Any] = {}
+    for p in _adr_paths(adr_dir):
+        m = parse_adr(p)
+        by_num[m.number] = m
+
+    # Every "Supersedes [ADR-X]" added in this diff must leave X retired.
+    for sx in _ADDED_SUPERSEDES_RE.finditer(diff):
+        x = int(sx.group(1))
+        target = by_num.get(x)
+        if target is None:
+            violations.append(
+                f"diff claims to supersede ADR-{x:03d}, which does not exist"
+            )
+        elif status_kind(target.status) in {"accepted", "proposed"}:
+            violations.append(
+                f"diff supersedes ADR-{x:03d} but it is still '{target.status}' — "
+                f"retire it (set its ## Status to Superseded) in this change"
+            )
+
+    # Any 'Superseded by [ADR-Y]' in the tree must point at an existing Y.
+    for m in by_num.values():
+        if m.superseded_by is not None and m.superseded_by not in by_num:
+            violations.append(
+                f"ADR-{m.number:03d} is 'Superseded by [ADR-{m.superseded_by:03d}]' "
+                f"but ADR-{m.superseded_by:03d} does not exist"
+            )
+
+    return AdrConsistencyResult(ok=not violations, violations=violations)
