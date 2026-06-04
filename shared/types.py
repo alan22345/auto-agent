@@ -132,14 +132,6 @@ class PRReviewComment(BaseModel):
     line: int | None = None
 
 
-class CIStatus(BaseModel):
-    """CI status for a commit."""
-
-    sha: str
-    state: Literal["success", "failure", "pending", "error"]
-    message: str = ""
-
-
 # --- Metrics types ---
 
 
@@ -281,6 +273,24 @@ class Node(BaseModel):
     ``["@router.get(\"/api/repos\")"]``). Captured by the parser; consumed
     by the Phase 4 HTTP-matching stage to find FastAPI/Flask route handlers.
     Always ``[]`` for non-Python nodes and for undecorated defs."""
+
+    cyclomatic: int | None = Field(default=None, ge=0)
+    """McCabe cyclomatic complexity for this node. Only populated on
+    ``kind="function"`` nodes (including methods, which are function-kind);
+    ``None`` for area, file, and class nodes. Populated by the Phase 8
+    complexity pass."""
+
+    cognitive: int | None = Field(default=None, ge=0)
+    """Cognitive complexity (Sonarqube/SonarSource metric) for this node.
+    Same applicability as ``cyclomatic`` — only set on function-kind nodes
+    (including methods, which are function-kind). Populated by the Phase 8
+    complexity pass."""
+
+    loc: int | None = Field(default=None, ge=0)
+    """Lines of code for this node (``line_end - line_start + 1``). Used
+    by downstream consumers to compute complexity density. Only populated
+    on ``kind="function"`` nodes (including methods) by the Phase 8
+    complexity pass; ``None`` for area, file, and class nodes (deferred)."""
 
 
 class EdgeEvidence(BaseModel):

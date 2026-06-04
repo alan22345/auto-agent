@@ -80,8 +80,9 @@ _GAP_FILL_CONCURRENCY = 8
 # (per-area) refresh on top of Phase 5/6. Even when ``provider=None``
 # is passed the analyser version still records that the binary is
 # *capable* of LLM gap-fill — useful for downstream consumers to tell
-# graphs apart across phases.
-_ANALYSER_VERSION = "phase7-multi-0.7.0"
+# graphs apart across phases. Phase 8 adds per-function complexity fields
+# (cyclomatic/cognitive/loc) to Node.
+_ANALYSER_VERSION = "phase8-complexity-0.8.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
