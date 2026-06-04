@@ -42,14 +42,19 @@ def retire_adr(adr_dir: str, number: int, *, by_number: int) -> bool:
             while i < len(lines) and not lines[i].strip():
                 out.append(lines[i])
                 i += 1
-            # replace the first status value line
+            # replace the first status value line (only mark done if one exists)
             if i < len(lines):
                 out.append(f"Superseded by [ADR-{by_number:03d}]")
                 i += 1
-            replaced = True
+                replaced = True
             continue
         i += 1
 
+    # Malformed ADR (no status value line under '## Status') — report honestly
+    # and leave the file untouched rather than claiming a retirement.
+    if not replaced:
+        return False
+
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
-    return replaced
+    return True

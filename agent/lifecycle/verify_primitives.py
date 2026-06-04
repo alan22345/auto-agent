@@ -840,12 +840,38 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-# An ADR file touched in the diff is detected from the ``+++ b/`` header so we
-# can scope supersession claims to the change. The "Supersedes [ADR-X]" claim
-# is matched on ADDED lines (leading ``+``).
-_ADDED_SUPERSEDES_RE = re.compile(
-    r"^\+.*supersedes\s+\[?ADR-(\d+)\]?", re.IGNORECASE | re.MULTILINE
-)
+# Supersession claims are scoped to ADR files: a "Supersedes [ADR-X]" line only
+# counts when it is an ADDED line inside a ``docs/decisions/NNN-*.md`` hunk. This
+# prevents false positives from code comments, PR-description echoes, test
+# fixtures, or diff metadata that merely mention "supersedes [ADR-X]" elsewhere.
+_DIFF_ADR_PLUS_HDR_RE = re.compile(r"^\+\+\+ b/docs/decisions/\d{3}-.*\.md$")
+_DIFF_ADR_GIT_HDR_RE = re.compile(r"^diff --git .* b/docs/decisions/\d{3}-[^ ]*\.md$")
+_SUPERSEDES_CLAIM_RE = re.compile(r"supersedes\s+\[?ADR-(\d+)\]?", re.IGNORECASE)
+
+
+def _supersedes_claims_in_adr_hunks(diff: str) -> list[int]:
+    """ADR numbers claimed as superseded by ADDED lines inside ADR-file hunks.
+
+    Scoped to ``docs/decisions/NNN-*.md`` (detected from either the
+    ``diff --git`` or ``+++ b/`` header) so a "supersedes [ADR-X]" mention in a
+    code comment, PR description, or diff header never trips the gate.
+    """
+    nums: list[int] = []
+    in_adr_file = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            in_adr_file = bool(_DIFF_ADR_GIT_HDR_RE.match(line))
+            continue
+        if line.startswith("+++ "):
+            in_adr_file = bool(_DIFF_ADR_PLUS_HDR_RE.match(line))
+            continue
+        if line.startswith("--- "):
+            continue
+        if in_adr_file and line.startswith("+"):
+            m = _SUPERSEDES_CLAIM_RE.search(line)
+            if m:
+                nums.append(int(m.group(1)))
+    return nums
 
 
 @dataclass
@@ -872,9 +898,8 @@ def check_adr_consistency(diff: str, adr_dir: str) -> AdrConsistencyResult:
         m = parse_adr(p)
         by_num[m.number] = m
 
-    # Every "Supersedes [ADR-X]" added in this diff must leave X retired.
-    for sx in _ADDED_SUPERSEDES_RE.finditer(diff):
-        x = int(sx.group(1))
+    # Every "Supersedes [ADR-X]" added in an ADR-file hunk must leave X retired.
+    for x in _supersedes_claims_in_adr_hunks(diff):
         target = by_num.get(x)
         if target is None:
             violations.append(
