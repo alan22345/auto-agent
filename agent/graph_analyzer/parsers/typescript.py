@@ -327,16 +327,22 @@ class TypeScriptParser(Parser):
                 if mname is None:
                     continue
                 func_id = f"{cls_id}.{mname}"
+                m_line_start = member.start_point[0] + 1
+                m_line_end = member.end_point[0] + 1
+                m_cyclomatic, m_cognitive = _compute_complexity(member)
                 result.nodes.append(
                     Node(
                         id=func_id,
                         kind="function",
                         label=f"{cls_name}.{mname}",
                         file=rel_path,
-                        line_start=member.start_point[0] + 1,
-                        line_end=member.end_point[0] + 1,
+                        line_start=m_line_start,
+                        line_end=m_line_end,
                         area=area,
                         parent=cls_id,
+                        cyclomatic=m_cyclomatic,
+                        cognitive=m_cognitive,
+                        loc=m_line_end - m_line_start + 1,
                     ),
                 )
                 scope.class_methods[cls_id].add(mname)
@@ -356,18 +362,71 @@ class TypeScriptParser(Parser):
         if name is None:
             return
         node_id = f"{rel_path}::{qualifier}{name}"
+        line_start = node.start_point[0] + 1
+        line_end = node.end_point[0] + 1
+        cyclomatic, cognitive = _compute_complexity(node)
         result.nodes.append(
             Node(
                 id=node_id,
                 kind="function",
                 label=f"{qualifier}{name}" if qualifier else name,
                 file=rel_path,
-                line_start=node.start_point[0] + 1,
-                line_end=node.end_point[0] + 1,
+                line_start=line_start,
+                line_end=line_end,
                 area=area,
                 parent=parent_id,
+                cyclomatic=cyclomatic,
+                cognitive=cognitive,
+                loc=line_end - line_start + 1,
             ),
         )
+        # Collect nested function declarations inside this function body so
+        # they surface as their own graph nodes (scored independently).
+        self._collect_nested(
+            node,
+            rel_path,
+            area,
+            source,
+            result,
+            qualifier=f"{qualifier}{name}.",
+        )
+
+    def _collect_nested(
+        self,
+        func_node,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+        qualifier: str,
+    ) -> None:
+        """Recurse into a function/method body and emit nested
+        ``function_declaration`` nodes as their own graph nodes.
+
+        Only ``function_declaration`` children are collected here (the TS
+        parser does not currently model anonymous ``function_expression`` or
+        ``arrow_function`` assignments as first-class nodes — those are
+        out of scope for Phase 8 and left for a future pass).
+        """
+        body = _named_child(func_node, "statement_block")
+        if body is None:
+            return
+        for child in body.children:
+            if child.type == _FUNC_NODE:
+                name = _identifier_of(child, source)
+                if name is None:
+                    continue
+                parent_qual = qualifier.rstrip(".")
+                parent_id = f"{rel_path}::{parent_qual}"
+                self._emit_function_node(
+                    child,
+                    rel_path,
+                    area,
+                    source,
+                    result,
+                    parent_id=parent_id,
+                    qualifier=qualifier,
+                )
 
     def _emit_const_node(
         self,
@@ -855,6 +914,167 @@ class TypeScriptParser(Parser):
             source=source,
             pattern_hint="unknown",
         )
+
+
+# ----------------------------------------------------------------------
+# Complexity metrics (Phase 8)
+# ----------------------------------------------------------------------
+
+# Tree-sitter TypeScript node types that are decision points for cyclomatic
+# complexity.  Each occurrence adds 1 to the base count of 1.
+#
+# Confirmed empirically from tree-sitter-typescript 0.x:
+#   if_statement       — if / else-if (else-if is a nested if_statement)
+#   for_statement      — traditional for(;;)
+#   for_in_statement   — for-of AND for-in share this node type
+#   while_statement    — while
+#   do_statement       — do-while
+#   catch_clause       — catch block
+#   ternary_expression — ternary (?:)
+#   switch_case        — non-default case label
+#   binary_expression operators '&&' / '||' are handled inline (not by type)
+_TS_CYCLOMATIC_DECISION_TYPES: frozenset[str] = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "for_in_statement",
+        "while_statement",
+        "do_statement",
+        "catch_clause",
+        "ternary_expression",
+        "switch_case",
+    }
+)
+
+# Node types that contribute to cognitive complexity with a nesting bonus.
+# ``if_statement`` is handled separately by ``_walk_if_chain`` (see below).
+# ``switch_case`` / ``switch_default`` are intentionally absent — switch/case
+# contributes 0 to cognitive complexity in this implementation.  This is a
+# documented limitation deferred to a follow-up task (mirrors the Python
+# parser's treatment of match/case).
+_TS_COGNITIVE_NESTING_TYPES: frozenset[str] = frozenset(
+    {
+        "for_statement",
+        "for_in_statement",
+        "while_statement",
+        "do_statement",
+        "catch_clause",
+        "ternary_expression",
+    }
+)
+
+# Node types that mark a nested function-like boundary — do NOT recurse into
+# them when walking a function body for complexity; they are emitted as their
+# own nodes and scored separately.
+_NESTED_FUNC_TYPES: frozenset[str] = frozenset(
+    {
+        "function_declaration",
+        "function_expression",
+        "arrow_function",
+        "method_definition",
+    }
+)
+
+
+def _compute_complexity(func_node) -> tuple[int, int]:
+    """Return ``(cyclomatic, cognitive)`` for *func_node*.
+
+    Walks the function's subtree but **stops at nested function-like
+    definitions** (function_declaration, function_expression, arrow_function,
+    method_definition) — those are emitted as their own nodes and scored
+    separately.
+
+    cyclomatic = 1 + count of decision-point nodes + count of '&&'/'||' operators.
+    cognitive  = sum of per-node contributions (nesting-sensitive); each logical
+                 '&&' / '||' operator adds flat 1.
+
+    If/else-if/else chains are handled specially in the cognitive walk:
+      * A standalone ``if_statement`` adds (1 + nesting) and increments nesting.
+      * An ``else_clause`` whose sole child is another ``if_statement`` is an
+        else-if — adds flat 1 (no nesting bonus, no increment), then recurses the
+        chain.
+      * A plain ``else_clause`` (non-if body) adds flat 1, body walked at same
+        nesting.
+    """
+    cyclomatic = 1
+    cognitive = 0
+
+    def _walk_cyclomatic(node: object) -> None:
+        nonlocal cyclomatic
+        for child in node.children:  # type: ignore[attr-defined]
+            if child.type in _NESTED_FUNC_TYPES:
+                continue  # do not descend into nested definitions
+            if child.type in _TS_CYCLOMATIC_DECISION_TYPES:
+                cyclomatic += 1
+            # Each '&&' or '||' operator child of a binary_expression adds 1.
+            if child.type in ("&&", "||"):
+                cyclomatic += 1
+            _walk_cyclomatic(child)
+
+    def _walk_cognitive(node: object, nesting: int) -> None:
+        nonlocal cognitive
+        for child in node.children:  # type: ignore[attr-defined]
+            t = child.type
+            if t in _NESTED_FUNC_TYPES:
+                continue  # stop at nested definitions
+            if t == "if_statement":
+                # Walk the if/else-if/else chain.
+                _walk_if_chain(child, nesting, is_else_if=False)
+            elif t in _TS_COGNITIVE_NESTING_TYPES:
+                # for / while / do / catch / ternary: +1+nesting, increment.
+                cognitive += 1 + nesting
+                _walk_cognitive(child, nesting + 1)
+            elif t in ("&&", "||"):
+                # Logical operators: flat +1.
+                cognitive += 1
+                _walk_cognitive(child, nesting)
+            else:
+                _walk_cognitive(child, nesting)
+
+    def _walk_if_chain(if_node: object, nesting: int, *, is_else_if: bool) -> None:
+        """Walk one if_statement in an if/else-if/else chain.
+
+        is_else_if=True  → this if was an else-if: add flat 1, no increment.
+        is_else_if=False → standalone if: add (1+nesting), increment nesting.
+        """
+        nonlocal cognitive
+        if is_else_if:
+            cognitive += 1
+            effective_nesting = nesting  # else-if does not deepen nesting
+        else:
+            cognitive += 1 + nesting
+            effective_nesting = nesting + 1
+
+        # Walk all children of the if_statement, but handle else_clause specially.
+        for child in if_node.children:  # type: ignore[attr-defined]
+            t = child.type
+            if t in _NESTED_FUNC_TYPES:
+                continue
+            if t == "else_clause":
+                # Find the body inside the else_clause (skip the 'else' keyword child).
+                body = None
+                for c in child.children:  # type: ignore[attr-defined]
+                    if c.type == "if_statement":
+                        # else-if: recurse the chain.
+                        _walk_if_chain(c, effective_nesting, is_else_if=True)
+                        body = None  # handled
+                        break
+                    if c.type not in ("else",):
+                        body = c
+                if body is not None:
+                    # plain else: flat +1, walk body at effective_nesting.
+                    cognitive += 1
+                    _walk_cognitive(body, effective_nesting)
+            elif t == "if_statement":
+                # Should not happen at top of if_statement, but guard it.
+                _walk_if_chain(child, effective_nesting, is_else_if=False)
+            else:
+                _walk_cognitive(child, effective_nesting)
+
+    _walk_cyclomatic(func_node)
+    _walk_cognitive(func_node, nesting=0)
+
+    return cyclomatic, cognitive
 
 
 # ----------------------------------------------------------------------
