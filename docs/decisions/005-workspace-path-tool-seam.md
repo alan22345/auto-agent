@@ -1,5 +1,7 @@
 # [ADR-005] Workspace path resolution as a single tool seam
 
+> **Summary:** All file tools resolve paths through one ToolContext.resolve() seam owning the sandbox invariant — kills five divergent copies and the /work→/workshop escape bug.
+
 ## Status
 
 Accepted

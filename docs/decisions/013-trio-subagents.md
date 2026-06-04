@@ -1,5 +1,7 @@
 # [ADR-013] Trio drives its backlog via subagents, not child task rows
 
+> **Summary:** Trio drives its backlog with the subagent tool inside the parent's slot — no child Task rows, no per-item Redis round-trips; the architect holds cross-item context.
+
 ## Status
 
 Superseded by [ADR-015] — the trio's per-item reviewer reshape and the

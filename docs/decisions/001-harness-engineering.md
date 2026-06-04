@@ -1,5 +1,7 @@
 # [ADR-001] Add Harness Engineering Infrastructure
 
+> **Summary:** Bootstrap the harness — CLAUDE.md, ruff lint, pre-commit hooks, docs/decisions/, and entropy.yml idle checks — so agents and humans share enforced guardrails.
+
 ## Status
 
 Accepted

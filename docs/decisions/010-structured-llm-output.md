@@ -1,5 +1,7 @@
 # [ADR-010] Single owner of "LLM text reply → dict"
 
+> **Summary:** agent/llm/structured.py is the single owner of "LLM text reply → dict" (parse_json_response + complete_json with bounded retry); callers pick the fallback policy.
+
 ## Status
 Accepted
 

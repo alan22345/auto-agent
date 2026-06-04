@@ -1,5 +1,7 @@
 # [ADR-019] Per-repo project secrets vault — architect-declared, user-managed, build-gating
 
+> **Summary:** Per-repo encrypted secret vault — architect declares a required-secrets manifest, a hard gate blocks the build until they're populated, injected into the project runtime at boot.
+
 ## Status
 
 Accepted

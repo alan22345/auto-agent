@@ -1,5 +1,7 @@
 # [ADR-018] Scaffold flow rewrite — intent grill, ADR-driven decomposition, per-domain trios
 
+> **Summary:** Scaffold = four-phase pipeline (intent grill → root architect → per-domain architects → per-domain trios) with a project-level verification gate after all domain trios finish.
+
 ## Status
 
 Accepted

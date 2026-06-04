@@ -1,5 +1,7 @@
 # [ADR-015] Task flow redesign — three classifications, freeform mode, no-defer enforcement
 
+> **Summary:** Three flows (simple/complex/complex_large) on one classifier with conditional grill, a single design.md approval artefact, heavy per-item review, and four-layer no-defer enforcement.
+
 ## Status
 
 Accepted

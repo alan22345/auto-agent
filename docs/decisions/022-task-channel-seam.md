@@ -1,5 +1,7 @@
 # [ADR-022] Per-task Redis state as a real seam (TaskChannel)
 
+> **Summary:** shared/task_channel.py is the per-task Redis seam (TaskChannel protocol: guidance/heartbeat/stream verbs), mirroring the Publisher shape.
+
 ## Status
 
 Accepted

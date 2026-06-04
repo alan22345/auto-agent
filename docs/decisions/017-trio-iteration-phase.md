@@ -1,5 +1,7 @@
 # [ADR-017] Trio iteration phase — post-PR feedback loop
 
+> **Summary:** Add a long-lived AWAITING_REVIEW phase + ITERATING sub-state for post-PR feedback; PR_CREATED becomes a one-shot transit event, not a resting status.
+
 ## Status
 
 Accepted
