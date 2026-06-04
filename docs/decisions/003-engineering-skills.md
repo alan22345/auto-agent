@@ -1,4 +1,4 @@
-[ADR-003] Vendor Matt Pocock's Engineering Skills + Grill Loop + Architecture Mode
+# [ADR-003] Vendor Matt Pocock's Engineering Skills + Grill Loop + Architecture Mode
 
 ## Status
 

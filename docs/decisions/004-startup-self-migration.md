@@ -1,4 +1,4 @@
-[ADR-004] Run Alembic Migrations at Lifespan Startup
+# [ADR-004] Run Alembic Migrations at Lifespan Startup
 
 ## Status
 

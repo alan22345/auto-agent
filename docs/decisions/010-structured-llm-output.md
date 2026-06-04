@@ -1,4 +1,4 @@
-# 010 — Single owner of "LLM text reply → dict"
+# [ADR-010] Single owner of "LLM text reply → dict"
 
 ## Status
 Accepted

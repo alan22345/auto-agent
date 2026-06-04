@@ -77,7 +77,7 @@ async def test_returns_first_open_pr_if_multiple(tmp_path):
 async def test_returns_none_on_timeout(tmp_path):
     """Network stall → gh pr list times out, returns None instead of hanging.
 
-    Regression for the no-timeout bug fixed by ADR-010: ``find_existing_pr_url``
+    Regression for the no-timeout bug fixed by ADR-021: ``find_existing_pr_url``
     used to call ``create_subprocess_exec`` without ``wait_for``, so a stalled
     GitHub API would block the agent loop indefinitely. Routing through
     ``agent/sh.py`` bounds it at 20s and surfaces ``timed_out=True``, which we

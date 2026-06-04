@@ -86,7 +86,7 @@ _MAX_MISSING_OUTPUT_RETRIES = 2
 
 
 # ---------------------------------------------------------------------------
-# PR diff loader — uses the shared subprocess seam (ADR-010).
+# PR diff loader — uses the shared subprocess seam (ADR-021).
 # ---------------------------------------------------------------------------
 
 

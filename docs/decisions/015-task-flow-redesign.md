@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 Supersedes ADR-013 (trio drives backlog via subagents). Extends ADR-014 (split decision contract — prose by heavy model, schema by Haiku) by generalising its skills-bridge pattern from "trio submit-X tools" to all gated agent actions across all three flows.
 

@@ -2185,7 +2185,7 @@ async def lifespan(app: FastAPI):
 
     # Wire the production task-channel factory alongside the publisher —
     # symmetric seam for the per-task Redis surface (heartbeat, guidance,
-    # streaming, telegram reply-binding). See ADR-011.
+    # streaming, telegram reply-binding). See ADR-022.
     redis_task_channel_factory = RedisTaskChannelFactory(settings.redis_url)
     set_task_channel_factory(redis_task_channel_factory)
 

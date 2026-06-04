@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 Extends ADR-018 §6 (per-domain ADR approval) and ADR-015 §11 (verify primitives). Does not supersede any existing ADR.
 

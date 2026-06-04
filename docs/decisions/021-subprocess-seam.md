@@ -1,4 +1,4 @@
-# [ADR-010] Subprocess execution as a single seam
+# [ADR-021] Subprocess execution as a single seam
 
 ## Status
 

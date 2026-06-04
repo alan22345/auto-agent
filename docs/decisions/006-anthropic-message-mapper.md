@@ -1,4 +1,4 @@
-# 006 — Extract Anthropic message mapper as the LLM provider seam
+# [ADR-006] Extract Anthropic message mapper as the LLM provider seam
 
 ## Status
 Accepted

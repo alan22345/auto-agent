@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 Supersedes the scaffold portion of ADR-015 (single design doc, complex_large pre-classification of `/freeform/create-repo` tasks). ADR-015 still governs the trio that runs per-domain. ADR-017 (trio iteration phase) applies unchanged to each domain's PR.
 
