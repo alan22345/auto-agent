@@ -42,6 +42,13 @@ class ParseResult:
     files in an area to compute the area's public surface, then flags
     cross-area edges that reach non-public symbols.
 
+    ``tokens`` (Phase 11 — ADR-016 §2 clone detection) maps each
+    function-node id to the ordered list of ``(token_type, token_text)``
+    leaf tokens collected from the function's tree-sitter subtree.  This
+    is *transient pipeline data* — it is never persisted in
+    ``RepoGraphBlob``; the pipeline accumulates it across areas and hands
+    it off to ``compute_clones`` before discarding it.
+
     Phase 2 callers that only need the count can read
     ``len(parse_result.unresolved_sites)``.
     """
@@ -50,6 +57,7 @@ class ParseResult:
     edges: list[Edge] = field(default_factory=list)
     unresolved_sites: list[UnresolvedSite] = field(default_factory=list)
     public_symbols: set[str] = field(default_factory=set)
+    tokens: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
     @property
     def unresolved_dynamic_sites(self) -> int:
@@ -92,6 +100,52 @@ class Parser(ABC):
                 so query callers can filter without walking parents.
             source: Raw file bytes (parsers do their own decode).
         """
+
+
+# ----------------------------------------------------------------------
+# collect_leaf_tokens — defined here (before the submodule imports) so
+# that PythonParser and TypeScriptParser can import it from this package
+# without triggering a circular-import error.  The function has no
+# dependencies on the submodules.
+# ----------------------------------------------------------------------
+
+
+def collect_leaf_tokens(
+    func_node: object,
+    source: bytes,
+) -> list[tuple[str, str]]:
+    """Collect ``(token_type, token_text)`` for every LEAF node in
+    *func_node*'s subtree, in source order.
+
+    A *leaf* is a tree-sitter node with no children (``node.child_count
+    == 0``).  This covers identifiers, literals, operators, keywords, and
+    punctuation — everything that constitutes the raw token stream for the
+    function body.
+
+    The helper is language-agnostic: it only inspects ``.children`` and
+    the ``.start_byte``/``.end_byte`` byte offsets, which are available
+    on every tree-sitter node regardless of grammar.
+
+    Used by Phase 11 clone detection (``duplication.py``) to build a
+    normalised token sequence for each function before the suffix-array
+    pass.
+    """
+    out: list[tuple[str, str]] = []
+
+    def _walk(node: object) -> None:
+        children = node.children  # type: ignore[attr-defined]
+        if not children:
+            # Leaf node.
+            text: str = source[
+                node.start_byte : node.end_byte  # type: ignore[attr-defined]
+            ].decode("utf-8", errors="replace")
+            out.append((node.type, text))  # type: ignore[attr-defined]
+            return
+        for child in children:
+            _walk(child)
+
+    _walk(func_node)
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -151,15 +205,13 @@ def parse_file_for_nodes(workspace: str, rel_path: str) -> list[dict]:
     # lightweight stand-in so the parsers don't raise on a missing kwarg.
     area = os.path.dirname(rel_path) or "."
     result = parser.parse_file(rel_path=rel_path, area=area, source=source)
-    return [
-        {"id": n.id, "file": n.file}
-        for n in result.nodes
-    ]
+    return [{"id": n.id, "file": n.file} for n in result.nodes]
 
 
 __all__ = [
     "ParseResult",
     "Parser",
+    "collect_leaf_tokens",
     "parse_file_for_nodes",
     "parser_for",
     "supported_extensions",

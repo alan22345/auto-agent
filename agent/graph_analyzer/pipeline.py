@@ -40,7 +40,13 @@ import structlog
 import yaml
 
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
+from agent.graph_analyzer.churn import collect_git_churn, compute_hotspots, count_loc
+from agent.graph_analyzer.cycles import compute_cycles
+from agent.graph_analyzer.dead_code import compute_dead_code
+from agent.graph_analyzer.dependencies import compute_dependency_dead_code
+from agent.graph_analyzer.duplication import compute_clones
 from agent.graph_analyzer.gap_fill import gap_fill_site
+from agent.graph_analyzer.health import compute_health
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
 from agent.graph_analyzer.test_filter import is_test_file
@@ -80,25 +86,55 @@ _GAP_FILL_CONCURRENCY = 8
 # (per-area) refresh on top of Phase 5/6. Even when ``provider=None``
 # is passed the analyser version still records that the binary is
 # *capable* of LLM gap-fill — useful for downstream consumers to tell
-# graphs apart across phases.
-_ANALYSER_VERSION = "phase7-multi-0.7.0"
+# graphs apart across phases. Phase 8 adds per-function complexity fields
+# (cyclomatic/cognitive/loc) to Node. Phase 9 adds import-cycle detection
+# (Tarjan SCC over imports edges) and the DependencyCycle schema.
+# Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
+# Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
+# Phase 13 adds per-file maintainability index + repo health score.
+_ANALYSER_VERSION = "phase13-health-0.13.0"
 
-# Directories always excluded from area discovery. Matches the spec —
+# Directories always excluded from area discovery and file walking at any
+# depth. Covers: VCS internals and worktrees (.git, .claude/worktrees,
+# worktrees, .worktrees), package managers (node_modules), Python envs
+# and caches (.venv, venv, __pycache__, .pytest_cache, .mypy_cache,
+# .ruff_cache, .tox, .cache), build output (dist, build, target, out,
+# .next, .svelte-kit, .turbo), editor state (.idea, .vscode), JVM builds
+# (.gradle), and project-internal dirs (.auto-agent).
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
 # directory; the user can exclude it via graph.yml).
 _DEFAULT_EXCLUDE_DIRS = frozenset(
     {
+        # VCS and harness worktrees
         ".git",
+        ".claude",
+        "worktrees",
+        ".worktrees",
+        # Package managers
         "node_modules",
+        # Python envs and caches
         ".venv",
         "venv",
         "__pycache__",
-        "dist",
-        "build",
-        ".next",
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",
+        ".tox",
+        ".cache",
+        # Build output
+        "build",
+        "dist",
+        "out",
+        "target",
+        ".next",
+        ".svelte-kit",
+        ".turbo",
+        # Editor state
+        ".idea",
+        ".vscode",
+        # JVM build
+        ".gradle",
+        # Project-internal
         ".auto-agent",
     }
 )
@@ -243,15 +279,24 @@ async def _analyse_area(
     processed_files: dict | None = None,
     failed_sites: list | None = None,
     on_file_checkpoint: CheckpointFlush | None = None,
-) -> tuple[list[Node], list[Edge], list[UnresolvedSite], set[str], AreaStatus]:
+) -> tuple[
+    list[Node],
+    list[Edge],
+    list[UnresolvedSite],
+    set[str],
+    AreaStatus,
+    dict[str, list[tuple[str, str]]],
+]:
     """Run the parser dispatch over one area.
 
     Returns the area's nodes, AST edges, unresolved sites, the union of
     public-symbol ids contributed by every parsed file (Phase 5 — used
-    by the boundary-flagging stage), and an :class:`AreaStatus` (``ok``
-    on success; ``failed`` if a parser exception bubbled up). Individual
-    files the parser handled gracefully (e.g. tree-sitter ERROR-node
-    recovery) do NOT fail the area — only an unhandled exception does.
+    by the boundary-flagging stage), an :class:`AreaStatus` (``ok``
+    on success; ``failed`` if a parser exception bubbled up), and a
+    per-function token map (Phase 11 — ``{node_id: [(type, text), ...]}``)
+    used by the clone-detection stage.  Individual files the parser
+    handled gracefully (e.g. tree-sitter ERROR-node recovery) do NOT
+    fail the area — only an unhandled exception does.
 
     Unresolved sites are returned to the pipeline so the gap-fill
     stage can run against them. ``AreaStatus.unresolved_dynamic_sites``
@@ -266,6 +311,7 @@ async def _analyse_area(
     edges: list[Edge] = []
     unresolved_sites: list[UnresolvedSite] = []
     public_symbols: set[str] = set()
+    tokens: dict[str, list[tuple[str, str]]] = {}
 
     # Area node — every area gets one root compound box.
     nodes.append(
@@ -337,6 +383,7 @@ async def _analyse_area(
             edges.extend(pr.edges)
             unresolved_sites.extend(pr.unresolved_sites)
             public_symbols.update(pr.public_symbols)
+            tokens.update(pr.tokens)
 
             # Update checkpoint state for this file.
             if processed_files is not None and failed_sites is not None:
@@ -372,6 +419,7 @@ async def _analyse_area(
                 error=str(e) or e.__class__.__name__,
                 unresolved_dynamic_sites=len(unresolved_sites),
             ),
+            tokens,
         )
 
     return (
@@ -385,6 +433,7 @@ async def _analyse_area(
             error=None,
             unresolved_dynamic_sites=len(unresolved_sites),
         ),
+        tokens,
     )
 
 
@@ -467,6 +516,9 @@ async def run_pipeline(
     # check reads this to decide whether a cross-area edge's target is
     # part of the destination area's public surface.
     all_public_symbols: set[str] = set()
+    # Phase 11 — per-function token map for clone detection. Transient;
+    # never persisted in RepoGraphBlob.
+    all_tokens: dict[str, list[tuple[str, str]]] = {}
 
     # Resume: seed the accumulators from inherited checkpoint state so
     # files we skip in the area loop still contribute to the returned
@@ -483,7 +535,7 @@ async def run_pipeline(
         all_public_symbols.update(initial_blob.get("public_symbols") or [])
 
     for name, patterns in areas:
-        nodes, edges, sites, public_symbols, status = await _analyse_area(
+        nodes, edges, sites, public_symbols, status, area_tokens = await _analyse_area(
             workspace=workspace,
             area_name=name,
             patterns=patterns,
@@ -496,6 +548,7 @@ async def run_pipeline(
         all_edges.extend(edges)
         per_area_sites.append((name, sites))
         all_public_symbols.update(public_symbols)
+        all_tokens.update(area_tokens)
         statuses.append(status)
 
     # Gap-fill stage. Skipped when no provider is supplied.
@@ -543,6 +596,29 @@ async def run_pipeline(
     # expect.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
+    # Capture pre-resolution import targets for dependency analysis.
+    # External ``module:<pkg>`` targets are DROPPED by the resolution step
+    # below; they must be captured here before that happens.
+    # Each entry is (source_file, module_target) so compute_dependency_dead_code
+    # can route by language rather than applying cross-language heuristics.
+    pre_resolution_imports = sorted(
+        {(e.evidence.file, e.target) for e in all_edges if e.kind == "imports"}
+    )
+
+    # Compute first-party top-level module names from file nodes.
+    # We add BOTH the top-level segment (e.g. "svc" from "svc.models") AND
+    # the leaf segment (e.g. "models") so that legacy bare-name imports such
+    # as ``import models`` — which resolve to ``module:models`` — are
+    # recognised as first-party and not falsely flagged as undeclared.
+    first_party_top_levels: set[str] = set()
+    for _n in all_nodes:
+        if _n.kind == "file" and _n.file:
+            _mod = _file_to_module(_n.file)
+            if _mod:
+                _parts = _mod.split(".")
+                first_party_top_levels.add(_parts[0])  # top-level package/dir
+                first_party_top_levels.add(_parts[-1])  # leaf name (bare-name imports)
+
     # Resolve bare ``module:<dotted>`` endpoints on import edges to the
     # corresponding ``file:`` node id, and drop edges whose endpoints
     # still don't resolve to a real node. Per-file parsers emit import
@@ -564,7 +640,7 @@ async def run_pipeline(
         rules=rules,
     )
 
-    return RepoGraphBlob(
+    blob = RepoGraphBlob(
         commit_sha=commit_sha,
         generated_at=datetime.now(UTC),
         analyser_version=_ANALYSER_VERSION,
@@ -572,7 +648,44 @@ async def run_pipeline(
         nodes=all_nodes,
         edges=all_edges,
         public_symbols=sorted(all_public_symbols),
+        cycles=compute_cycles(all_edges),
     )
+    blob.dead_code = compute_dead_code(blob)
+    blob.dead_code = sorted(
+        blob.dead_code
+        + compute_dependency_dead_code(pre_resolution_imports, workspace, first_party_top_levels),
+        key=lambda f: (f.kind, f.target),
+    )
+    blob.clones = compute_clones(all_tokens, {n.id: n for n in blob.nodes})
+
+    # Phase 12 — churn x complexity hotspot ranking.
+    # Build file_cyclomatic_total from function nodes (reused by Phase 13).
+    file_cyclomatic_total: dict[str, int] = {}
+    for n in blob.nodes:
+        if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+            file_cyclomatic_total[n.file] = file_cyclomatic_total.get(n.file, 0) + n.cyclomatic
+    # Build file_loc for every file that has function/class nodes (reused by Phase 13).
+    _health_files: set[str] = {
+        n.file for n in blob.nodes if n.kind in {"function", "class"} and n.file is not None
+    }
+    file_loc: dict[str, int] = {f: count_loc(workspace, f) for f in _health_files}
+    ref_ts, file_commits = collect_git_churn(workspace)
+    if ref_ts is None:
+        blob.hotspots = []
+    else:
+        blob.hotspots = compute_hotspots(
+            file_commits,
+            file_loc,
+            file_cyclomatic_total,
+            reference_ts=ref_ts,
+        )
+
+    # Phase 13 — per-file maintainability index + repo health score.
+    fh, rh = compute_health(blob, file_loc, file_cyclomatic_total)
+    blob.file_health = fh
+    blob.health = rh
+
+    return blob
 
 
 async def run_partial_pipeline(
@@ -641,6 +754,7 @@ async def run_partial_pipeline(
     target_public_symbols: set[str] = set()
     target_status: AreaStatus
 
+    target_tokens: dict[str, list[tuple[str, str]]] = {}
     if target_area in discovered_by_name:
         (
             target_nodes,
@@ -648,6 +762,7 @@ async def run_partial_pipeline(
             target_sites,
             target_public_symbols,
             target_status,
+            target_tokens,
         ) = await _analyse_area(
             workspace=workspace,
             area_name=target_area,
@@ -707,7 +822,30 @@ async def run_partial_pipeline(
     # symbols via ``module:`` placeholders.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
-    # 6b. Resolve bare ``module:<dotted>`` import endpoints to real
+    # 6b. Capture pre-resolution import targets for dependency analysis.
+    # External ``module:<pkg>`` targets are DROPPED by the resolution step
+    # below; they must be captured here before that happens.
+    # Each entry is (source_file, module_target) so compute_dependency_dead_code
+    # can route by language.
+    pre_resolution_imports_partial = sorted(
+        {(e.evidence.file, e.target) for e in all_edges if e.kind == "imports"}
+    )
+
+    # Compute first-party top-level module names from file nodes.
+    # We add BOTH the top-level segment (e.g. "svc" from "svc.models") AND
+    # the leaf segment (e.g. "models") so that legacy bare-name imports such
+    # as ``import models`` — which resolve to ``module:models`` — are
+    # recognised as first-party and not falsely flagged as undeclared.
+    first_party_top_levels_partial: set[str] = set()
+    for _n in all_nodes:
+        if _n.kind == "file" and _n.file:
+            _mod = _file_to_module(_n.file)
+            if _mod:
+                _parts = _mod.split(".")
+                first_party_top_levels_partial.add(_parts[0])  # top-level package/dir
+                first_party_top_levels_partial.add(_parts[-1])  # leaf name (bare-name imports)
+
+    # 6c. Resolve bare ``module:<dotted>`` import endpoints to real
     # ``file:`` nodes (and drop edges that still don't resolve). See the
     # full-pipeline path for the rationale — the partial path needs the
     # same hygiene step so re-analysed areas don't reintroduce phantom
@@ -730,7 +868,7 @@ async def run_partial_pipeline(
     statuses = [*inherited_statuses, target_status]
     _ = inherited_node_ids  # silence "assigned but unused" linters
 
-    return RepoGraphBlob(
+    partial_blob = RepoGraphBlob(
         commit_sha=commit_sha,
         generated_at=datetime.now(UTC),
         analyser_version=_ANALYSER_VERSION,
@@ -738,7 +876,55 @@ async def run_partial_pipeline(
         nodes=all_nodes,
         edges=all_edges,
         public_symbols=sorted(all_public_symbols),
+        cycles=compute_cycles(all_edges),
     )
+    partial_blob.dead_code = compute_dead_code(partial_blob)
+    partial_blob.dead_code = sorted(
+        partial_blob.dead_code
+        + compute_dependency_dead_code(
+            pre_resolution_imports_partial, workspace, first_party_top_levels_partial
+        ),
+        key=lambda f: (f.kind, f.target),
+    )
+    # Phase 11 — clone detection. Only tokens from the freshly-analysed
+    # target area are available; inherited tokens from previous runs are not
+    # persisted. Cross-area clones that span an inherited + target area
+    # are therefore not detected in partial-pipeline runs.
+    log.debug(
+        "clone_detection_partial_mode",
+        area=target_status,
+        note="only covers freshly-analysed area; cross-area clones may be absent",
+    )
+    partial_blob.clones = compute_clones(target_tokens, {n.id: n for n in partial_blob.nodes})
+
+    # Phase 12 — churn x complexity hotspot ranking (partial pipeline).
+    # Build file_cyclomatic_total from function nodes (reused by Phase 13).
+    file_cyclomatic_total_p: dict[str, int] = {}
+    for n in partial_blob.nodes:
+        if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+            file_cyclomatic_total_p[n.file] = file_cyclomatic_total_p.get(n.file, 0) + n.cyclomatic
+    # Build file_loc for every file that has function/class nodes (reused by Phase 13).
+    _health_files_p: set[str] = {
+        n.file for n in partial_blob.nodes if n.kind in {"function", "class"} and n.file is not None
+    }
+    file_loc_p: dict[str, int] = {f: count_loc(workspace, f) for f in _health_files_p}
+    ref_ts_p, file_commits_p = collect_git_churn(workspace)
+    if ref_ts_p is None:
+        partial_blob.hotspots = []
+    else:
+        partial_blob.hotspots = compute_hotspots(
+            file_commits_p,
+            file_loc_p,
+            file_cyclomatic_total_p,
+            reference_ts=ref_ts_p,
+        )
+
+    # Phase 13 — per-file maintainability index + repo health score (partial pipeline).
+    fh_p, rh_p = compute_health(partial_blob, file_loc_p, file_cyclomatic_total_p)
+    partial_blob.file_health = fh_p
+    partial_blob.health = rh_p
+
+    return partial_blob
 
 
 def _resolve_cross_area_module_targets(
