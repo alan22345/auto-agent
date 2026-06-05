@@ -9,6 +9,7 @@ import { AttemptsPanel } from './attempts-panel';
 import { BacklogPanel } from './backlog-panel';
 import { PlanApprovalCard } from './plan-approval-card';
 import { ArchitectAttemptsPanel } from '@/components/trio/ArchitectAttemptsPanel';
+import { GapFixPanel } from '@/components/trio/GapFixPanel';
 import { GateHistoryPanel } from '@/components/trio/GateHistoryPanel';
 import { TrioReviewAttemptsPanel } from '@/components/trio/TrioReviewAttemptsPanel';
 import { DecisionsPanel } from '@/components/trio/DecisionsPanel';
@@ -247,6 +248,7 @@ export function TaskDetailPanel({ task }: { task: TaskData }) {
               <> · Backlog: {task.trio_backlog.filter((w) => (w as { status?: string }).status === 'done').length} / {task.trio_backlog.length} done</>
             )}
           </div>
+          <GapFixPanel taskId={task.id} />
           <h3 className="text-xs font-medium">Backlog</h3>
           <BacklogPanel backlog={task.trio_backlog} />
           <h3 className="text-xs font-medium">Architect activity</h3>

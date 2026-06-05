@@ -473,7 +473,14 @@ async def on_architect_clarification_needed(event: Event) -> None:
     CLARIFICATION_NEEDED event with phase='trio_architect' so the
     existing per-integration formatters in integrations/* surface the
     question via the right channel.
+
+    "Freeform" is the *effective* mode (``resolve_effective_mode``), not the
+    legacy ``Task.freeform_mode`` boolean: a task made freeform via
+    ``Task.mode_override`` (with the column left False) must still be
+    auto-answered by the PO standin instead of escaping to the user.
     """
+    from agent.lifecycle.mode_resolver import resolve_effective_mode
+
     async with async_session() as session:
         task = await get_task(session, event.task_id)
         if not task or task.status != TaskStatus.AWAITING_CLARIFICATION:
@@ -481,21 +488,24 @@ async def on_architect_clarification_needed(event: Event) -> None:
         if task.trio_phase is None:
             # Not a trio clarification. Ignore.
             return
-        if task.freeform_mode:
-            import agent.po_agent as po_agent
-            _spawn_bg(
-                po_agent.answer_architect_question(task.id),
-                label=f"po_answer_architect.{task.id}",
-            )
-        else:
-            await publish(Event(
-                type=TaskEventType.CLARIFICATION_NEEDED,
-                task_id=task.id,
-                payload={
-                    "question": event.payload.get("question", ""),
-                    "phase": "trio_architect",
-                },
-            ))
+        repo = await session.get(Repo, task.repo_id) if task.repo_id else None
+        effective_mode = resolve_effective_mode(task, repo)
+
+    if effective_mode == "freeform":
+        import agent.po_agent as po_agent
+        _spawn_bg(
+            po_agent.answer_architect_question(task.id),
+            label=f"po_answer_architect.{task.id}",
+        )
+    else:
+        await publish(Event(
+            type=TaskEventType.CLARIFICATION_NEEDED,
+            task_id=task.id,
+            payload={
+                "question": event.payload.get("question", ""),
+                "phase": "trio_architect",
+            },
+        ))
 
 
 async def on_architect_clarification_resolved(event: Event) -> None:
@@ -511,8 +521,32 @@ async def on_architect_clarification_resolved(event: Event) -> None:
             "Architect resuming after clarification",
         )
         await session.commit()
-        from agent.lifecycle.trio import architect
-        _spawn_bg(architect.resume(task.id), label=f"architect.resume.{task.id}")
+    _spawn_bg(
+        _resume_architect_and_drive(event.task_id),
+        label=f"architect.resume.{event.task_id}",
+    )
+
+
+async def _resume_architect_and_drive(task_id: int) -> None:
+    """Resume the architect after a clarification answer, then drive the
+    per-item builder loop.
+
+    ``architect.resume`` only (re)emits the backlog and returns — it does not
+    run the per-item loop (that lives in ``run_trio_parent``). Without this
+    follow-on, a clarified trio parent stranded at backlog-emit
+    (trio_phase=ARCHITECTING, backlog populated, zero builders dispatched).
+    Once resume has produced a backlog (status stays TRIO_EXECUTING), re-enter
+    ``run_trio_parent`` — the same idempotent driver startup-recovery uses — so
+    the builders dispatch. Skipped when resume re-asked (→ AWAITING_CLARIFICATION)
+    or blocked, since neither should advance to the build phase.
+    """
+    from agent.lifecycle.trio import architect, run_trio_parent
+
+    await architect.resume(task_id)
+    async with async_session() as session:
+        task = await get_task(session, task_id)
+        if task and task.status == TaskStatus.TRIO_EXECUTING and task.trio_backlog:
+            await run_trio_parent(task)
 
 
 async def on_design_approved(event: Event) -> None:

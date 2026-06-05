@@ -34,6 +34,15 @@ function isOversized(title: string | undefined): boolean {
   return count > MAX_CONNECTIVES;
 }
 
+// Items added via the gap-fix architect path get IDs prefixed with "G"
+// (see agent/lifecycle/trio/gap_fix.py — _assign_missing_ids defaults
+// to ``G{N}`` for gap-fix dispatch_new). Original-backlog items use
+// "T{N}". Surface the distinction so operators can see at a glance
+// which work was promised in the design vs added later to close gaps.
+function isGapFixItem(id: string | undefined): boolean {
+  return !!id && /^G\d+$/i.test(id);
+}
+
 export function BacklogPanel({ backlog }: Props) {
   if (!backlog || backlog.length === 0) {
     return (
@@ -64,6 +73,14 @@ export function BacklogPanel({ backlog }: Props) {
             <span className={`shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground`}>
               {status}
             </span>
+            {isGapFixItem(item.id) && (
+              <span
+                className="shrink-0 rounded border border-purple-500/40 bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-700"
+                title="Added by the gap-fix architect to close a final-review gap"
+              >
+                gap-fix
+              </span>
+            )}
             <span className="grow break-words">
               {item.title ?? '(no title)'}
               {oversized && (
