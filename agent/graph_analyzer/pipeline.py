@@ -599,7 +599,11 @@ async def run_pipeline(
     # Capture pre-resolution import targets for dependency analysis.
     # External ``module:<pkg>`` targets are DROPPED by the resolution step
     # below; they must be captured here before that happens.
-    pre_resolution_imports = sorted({e.target for e in all_edges if e.kind == "imports"})
+    # Each entry is (source_file, module_target) so compute_dependency_dead_code
+    # can route by language rather than applying cross-language heuristics.
+    pre_resolution_imports = sorted(
+        {(e.evidence.file, e.target) for e in all_edges if e.kind == "imports"}
+    )
 
     # Compute first-party top-level module names from file nodes.
     first_party_top_levels: set[str] = set()
@@ -815,7 +819,11 @@ async def run_partial_pipeline(
     # 6b. Capture pre-resolution import targets for dependency analysis.
     # External ``module:<pkg>`` targets are DROPPED by the resolution step
     # below; they must be captured here before that happens.
-    pre_resolution_imports_partial = sorted({e.target for e in all_edges if e.kind == "imports"})
+    # Each entry is (source_file, module_target) so compute_dependency_dead_code
+    # can route by language.
+    pre_resolution_imports_partial = sorted(
+        {(e.evidence.file, e.target) for e in all_edges if e.kind == "imports"}
+    )
 
     # Compute first-party top-level module names from file nodes.
     first_party_top_levels_partial: set[str] = set()

@@ -58,7 +58,7 @@ def test_declared_and_imported_not_flagged(tmp_path: Path) -> None:
     """Declared 'requests', imported 'module:requests.adapters' -> neither flagged."""
     write_pyproject(tmp_path, ["requests>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:requests.adapters"],
+        imported=[("src/app.py", "module:requests.adapters")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -72,10 +72,10 @@ def test_declared_but_not_imported_flagged_unused(tmp_path: Path) -> None:
     """Declared 'unusedpkg' not imported -> unused_dependency."""
     write_pyproject(tmp_path, ["unusedpkg>=1.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=[],
+        imported=[],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
-    )
+    )  # empty list — unused detection still works
     unused = findings_of_kind(result, "unused_dependency")
     assert "unusedpkg" in unused, f"Expected unusedpkg in unused, got {unused}"
 
@@ -84,7 +84,7 @@ def test_imported_but_not_declared_flagged_undeclared(tmp_path: Path) -> None:
     """Imported 'module:somepkg' not declared (not stdlib/first-party) -> undeclared."""
     write_pyproject(tmp_path, ["requests>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:somepkg"],
+        imported=[("src/app.py", "module:somepkg")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -96,7 +96,11 @@ def test_stdlib_import_not_flagged(tmp_path: Path) -> None:
     """Stdlib import 'module:os' -> neither unused nor undeclared."""
     write_pyproject(tmp_path, ["requests>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:os", "module:sys", "module:collections"],
+        imported=[
+            ("src/app.py", "module:os"),
+            ("src/app.py", "module:sys"),
+            ("src/app.py", "module:collections"),
+        ],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -110,7 +114,7 @@ def test_first_party_import_not_flagged(tmp_path: Path) -> None:
     """First-party 'module:myapp.utils' -> neither flagged."""
     write_pyproject(tmp_path, ["requests>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:myapp.utils"],
+        imported=[("src/app.py", "module:myapp.utils")],
         workspace=str(tmp_path),
         first_party_top_levels={"myapp"},
     )
@@ -122,7 +126,7 @@ def test_alias_pyyaml_declared_yaml_imported(tmp_path: Path) -> None:
     """Declared 'pyyaml', imported 'module:yaml' -> NOT unused (alias match)."""
     write_pyproject(tmp_path, ["pyyaml>=6.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:yaml"],
+        imported=[("src/app.py", "module:yaml")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -141,7 +145,7 @@ def test_tooling_packages_not_flagged_unused(tmp_path: Path) -> None:
     """pip, setuptools, wheel are declared but never imported -> NOT unused."""
     write_pyproject(tmp_path, ["pip", "setuptools", "wheel"])
     result = compute_dependency_dead_code(
-        imported_module_targets=[],
+        imported=[],  # empty — tooling skip tested here
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -155,7 +159,7 @@ def test_types_stub_not_flagged_unused(tmp_path: Path) -> None:
     """types-requests declared, not imported -> NOT flagged unused (stub skip)."""
     write_pyproject(tmp_path, ["types-requests>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=[],
+        imported=[],  # stubs are never imported
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -172,7 +176,7 @@ def test_js_declared_react_not_unused(tmp_path: Path) -> None:
     """package.json deps react; imported module:react -> react not unused."""
     write_package_json(tmp_path, deps={"react": "^18.0.0"})
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:react"],
+        imported=[("src/app.tsx", "module:react")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -188,7 +192,7 @@ def test_js_devdeps_not_flagged_unused(tmp_path: Path) -> None:
         dev_deps={"jest": "^29.0.0"},
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:react"],
+        imported=[("src/app.tsx", "module:react")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -200,7 +204,11 @@ def test_js_relative_import_skipped(tmp_path: Path) -> None:
     """module:./local relative import -> skipped (not flagged undeclared)."""
     write_package_json(tmp_path, deps={"react": "^18.0.0"})
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:./local", "module:../sibling", "module:/absolute"],
+        imported=[
+            ("src/app.tsx", "module:./local"),
+            ("src/app.tsx", "module:../sibling"),
+            ("src/app.tsx", "module:/absolute"),
+        ],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -213,7 +221,7 @@ def test_js_types_at_types_not_flagged_unused(tmp_path: Path) -> None:
     """@types/node declared in deps, not imported -> NOT flagged unused."""
     write_package_json(tmp_path, deps={"@types/node": "^20.0.0", "react": "^18.0.0"})
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:react"],
+        imported=[("src/app.tsx", "module:react")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -225,7 +233,7 @@ def test_js_scoped_package_subpath(tmp_path: Path) -> None:
     """@scope/pkg/sub imported -> top-level @scope/pkg extracted."""
     write_package_json(tmp_path, deps={"@scope/pkg": "^1.0.0"})
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:@scope/pkg/sub"],
+        imported=[("src/app.tsx", "module:@scope/pkg/sub")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -243,7 +251,7 @@ def test_js_scoped_package_subpath(tmp_path: Path) -> None:
 def test_no_manifest_returns_empty(tmp_path: Path) -> None:
     """When no manifest exists, return empty list."""
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:requests"],
+        imported=[("src/app.py", "module:requests")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -258,7 +266,12 @@ def test_no_manifest_returns_empty(tmp_path: Path) -> None:
 def test_output_is_deterministic(tmp_path: Path) -> None:
     """Calling twice with the same inputs produces identical results."""
     write_pyproject(tmp_path, ["requests>=2.0", "unusedpkg>=1.0", "pyyaml>=6.0"])
-    imports = ["module:requests.adapters", "module:yaml", "module:somepkg", "module:os"]
+    imports = [
+        ("src/app.py", "module:requests.adapters"),
+        ("src/app.py", "module:yaml"),
+        ("src/app.py", "module:somepkg"),
+        ("src/app.py", "module:os"),
+    ]
     first = compute_dependency_dead_code(imports, str(tmp_path), set())
     second = compute_dependency_dead_code(imports, str(tmp_path), set())
     assert first == second, "compute_dependency_dead_code must be deterministic"
@@ -281,7 +294,7 @@ def test_poetry_pyproject_deps_read(tmp_path: Path) -> None:
         'unusedpoetrypkg = "^1.0"\n'
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:requests"],
+        imported=[("src/app.py", "module:requests")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -314,12 +327,12 @@ def test_ts_path_alias_not_undeclared(tmp_path: Path) -> None:
         deps={"react": "^18.0.0", "@scope/pkg": "^1.0.0"},
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=[
-            "module:@/components/Button",
-            "module:@/lib",
-            "module:@scope/pkg",
-            "module:@scope/other",
-            "module:react",
+        imported=[
+            ("src/app.tsx", "module:@/components/Button"),
+            ("src/app.tsx", "module:@/lib"),
+            ("src/app.tsx", "module:@scope/pkg"),
+            ("src/app.tsx", "module:@scope/other"),
+            ("src/app.tsx", "module:react"),
         ],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
@@ -355,7 +368,7 @@ def test_google_namespace_no_double_fp(tmp_path: Path) -> None:
     """
     write_pyproject(tmp_path, ["google-cloud-storage>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:google.cloud.storage"],
+        imported=[("src/app.py", "module:google.cloud.storage")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -378,7 +391,7 @@ def test_namespace_root_unused_suppressed(tmp_path: Path) -> None:
     """
     write_pyproject(tmp_path, ["google-auth>=2.0", "google-cloud-storage>=2.0"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:google.cloud.storage"],
+        imported=[("src/app.py", "module:google.cloud.storage")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -401,7 +414,7 @@ def test_python_pptx_alias(tmp_path: Path) -> None:
     """Declares python-pptx; imports module:pptx -> neither unused nor undeclared."""
     write_pyproject(tmp_path, ["python-pptx>=0.6"])
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:pptx"],
+        imported=[("src/app.py", "module:pptx")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -432,7 +445,10 @@ def test_nested_package_json_dep_not_undeclared(tmp_path: Path) -> None:
         json.dumps({"name": "web-next", "dependencies": {"next": "*", "clsx": "*"}})
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:next", "module:clsx"],
+        imported=[
+            ("web-next/app.tsx", "module:next"),
+            ("web-next/app.tsx", "module:clsx"),
+        ],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -456,7 +472,7 @@ def test_nested_pyproject_dep_not_undeclared(tmp_path: Path) -> None:
         '[project]\nname = "pkg_a"\nversion = "0.1.0"\ndependencies = ["requests>=2.0"]\n'
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:requests"],
+        imported=[("pkg_a/app.py", "module:requests")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -474,7 +490,11 @@ def test_node_builtin_prefix_not_undeclared(tmp_path: Path) -> None:
     """
     write_package_json(tmp_path, deps={"react": "^18.0.0"})
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:node:path", "module:node:fs", "module:react"],
+        imported=[
+            ("src/app.tsx", "module:node:path"),
+            ("src/app.tsx", "module:node:fs"),
+            ("src/app.tsx", "module:react"),
+        ],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
@@ -506,11 +526,173 @@ def test_excluded_dir_manifests_ignored(tmp_path: Path) -> None:
         json.dumps({"name": "somepkg", "dependencies": {"junkdep-only-in-node-modules": "*"}})
     )
     result = compute_dependency_dead_code(
-        imported_module_targets=["module:junkdep-only-in-node-modules"],
+        imported=[("web/app.tsx", "module:junkdep-only-in-node-modules")],
         workspace=str(tmp_path),
         first_party_top_levels=set(),
     )
     undeclared = findings_of_kind(result, "undeclared_dependency")
     assert "junkdep-only-in-node-modules" in undeclared, (
         f"dep only declared inside node_modules must be flagged undeclared; got {undeclared}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Language routing (new in Phase 10b fix)
+# ---------------------------------------------------------------------------
+
+
+def test_python_import_not_flagged_as_js_undeclared(tmp_path: Path) -> None:
+    """Monorepo: root pyproject.toml declares alembic; nested web-next/package.json declares next.
+
+    Call with alembic from .py and next from .tsx — NEITHER must be flagged undeclared.
+    (This was the original cross-language false-positive bug.)
+    """
+    write_pyproject(tmp_path, ["alembic>=1.0"])
+    nested_dir = tmp_path / "web-next"
+    nested_dir.mkdir()
+    (nested_dir / "package.json").write_text(
+        json.dumps({"name": "web-next", "dependencies": {"next": "*"}})
+    )
+    result = compute_dependency_dead_code(
+        imported=[
+            ("agent/x.py", "module:alembic"),
+            ("web-next/y.tsx", "module:next"),
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "alembic" not in undeclared, (
+        f"alembic is declared in pyproject, must not be undeclared; got {undeclared}"
+    )
+    assert "next" not in undeclared, (
+        f"next is declared in nested package.json, must not be undeclared; got {undeclared}"
+    )
+
+
+def test_js_import_not_flagged_as_python_undeclared(tmp_path: Path) -> None:
+    """Monorepo: root pyproject.toml present; nested web-next/package.json declares next.
+
+    JS import 'next' from a .tsx file must NOT be flagged as python undeclared.
+    """
+    write_pyproject(tmp_path, ["requests>=2.0"])
+    nested_dir = tmp_path / "web-next"
+    nested_dir.mkdir()
+    (nested_dir / "package.json").write_text(
+        json.dumps({"name": "web-next", "dependencies": {"next": "*"}})
+    )
+    result = compute_dependency_dead_code(
+        imported=[("web-next/y.tsx", "module:next")],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "next" not in undeclared, (
+        f"next declared in nested package.json must not be undeclared; got {undeclared}"
+    )
+
+
+def test_truly_undeclared_routed_by_language(tmp_path: Path) -> None:
+    """Undeclared Python pkg flagged for python, undeclared JS pkg flagged for JS.
+
+    Each finding must be attributed to the correct manifest.
+    """
+    write_pyproject(tmp_path, ["requests>=2.0"])
+    write_package_json(tmp_path, deps={"react": "^18.0.0"})
+    result = compute_dependency_dead_code(
+        imported=[
+            ("a.py", "module:requests_undeclared"),
+            ("b.tsx", "module:lodash"),
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    reasons = {f.target: f.reason for f in result if f.kind == "undeclared_dependency"}
+    assert "requests_undeclared" in undeclared, (
+        f"requests_undeclared not in pyproject, must be undeclared (python); got {undeclared}"
+    )
+    assert "lodash" in undeclared, (
+        f"lodash not in package.json, must be undeclared (js); got {undeclared}"
+    )
+    assert "pyproject" in reasons.get("requests_undeclared", ""), (
+        f"reason for requests_undeclared must mention pyproject; got {reasons}"
+    )
+    assert "package.json" in reasons.get("lodash", ""), (
+        f"reason for lodash must mention package.json; got {reasons}"
+    )
+    # Each flagged exactly once
+    assert undeclared.count("requests_undeclared") == 1
+    assert undeclared.count("lodash") == 1
+
+
+def test_requirements_txt_dep_recognized(tmp_path: Path) -> None:
+    """requirements.txt declaring httpx must prevent undeclared finding for .py imports."""
+    (tmp_path / "requirements.txt").write_text("# comment\nhttpx==0.27.0\nrequests>=2.0\n")
+    result = compute_dependency_dead_code(
+        imported=[("a.py", "module:httpx")],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "httpx" not in undeclared, (
+        f"httpx declared in requirements.txt, must not be undeclared; got {undeclared}"
+    )
+
+
+def test_requirements_txt_extras_and_specifiers_stripped(tmp_path: Path) -> None:
+    """requirements.txt with extras/version specifiers are parsed correctly."""
+    (tmp_path / "requirements.txt").write_text(
+        "Pillow[jpeg]>=9.0\npydantic[email]~=2.0\n-r other.txt\n-e .\n"
+    )
+    result = compute_dependency_dead_code(
+        imported=[
+            ("a.py", "module:PIL"),
+            ("a.py", "module:pydantic"),
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    # PIL maps to pillow via alias
+    assert "PIL" not in undeclared, (
+        f"PIL (from Pillow in requirements.txt) must not be undeclared; got {undeclared}"
+    )
+    assert "pydantic" not in undeclared, (
+        f"pydantic declared in requirements.txt, must not be undeclared; got {undeclared}"
+    )
+
+
+def test_unknown_source_ext_skipped(tmp_path: Path) -> None:
+    """Imports with None source or unknown extension (.md) are skipped — no finding."""
+    write_pyproject(tmp_path, ["requests>=2.0"])
+    write_package_json(tmp_path, deps={"react": "^18.0.0"})
+    result = compute_dependency_dead_code(
+        imported=[
+            (None, "module:whatever"),
+            ("x.md", "module:whatever"),
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "whatever" not in undeclared, (
+        f"imports with unknown ext must be skipped, not flagged; got {undeclared}"
+    )
+
+
+def test_findings_deduped(tmp_path: Path) -> None:
+    """Same undeclared package imported from two .py files -> exactly ONE finding."""
+    write_pyproject(tmp_path, ["requests>=2.0"])
+    result = compute_dependency_dead_code(
+        imported=[
+            ("a.py", "module:undeclaredpkg"),
+            ("b.py", "module:undeclaredpkg"),
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert undeclared.count("undeclaredpkg") == 1, (
+        f"undeclaredpkg must appear exactly once, got {undeclared}"
     )

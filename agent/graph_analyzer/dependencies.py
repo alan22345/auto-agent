@@ -4,17 +4,31 @@
 Exposes one pure function:
 
     compute_dependency_dead_code(
-        imported_module_targets, workspace, first_party_top_levels
+        imported, workspace, first_party_top_levels
     ) -> list[DeadCodeFinding]
+
+where ``imported`` is a list of ``(source_file, module_target)`` pairs.
+Language is routed by the source-file extension:
+
+* ``.py`` / ``.pyi`` → Python manifest check only (pyproject.toml / requirements*.txt)
+* ``.ts`` / ``.tsx`` / ``.js`` / ``.jsx`` / ``.mjs`` / ``.cjs`` / ``.vue`` / ``.svelte`` →
+  JS manifest check only (package.json)
+* Unknown / ``None`` extension → skipped (conservative — never guess language)
+
+This prevents cross-language false positives in monorepos that have BOTH a
+``pyproject.toml`` AND a ``package.json``: a Python import is NEVER checked
+against ``package.json`` and a JS import is NEVER checked against
+``pyproject.toml``.
 
 Two finding kinds are produced:
 
 ``undeclared_dependency``
     An external package that is imported in source files but whose
     normalised name does not appear in the workspace's dependency manifest
-    (``pyproject.toml`` dependencies or ``package.json`` dependencies +
-    devDependencies).  This is the *higher-confidence* finding because a
-    missing declaration is very likely a real problem.
+    (``pyproject.toml`` / ``requirements*.txt`` dependencies or
+    ``package.json`` dependencies + devDependencies).  This is the
+    *higher-confidence* finding because a missing declaration is very likely
+    a real problem.
 
 ``unused_dependency``
     A *runtime* declared dependency (``[project.dependencies]`` / Poetry
@@ -40,15 +54,15 @@ b) **Plugin / entry-point dependencies** — packages like ``pytest``,
    the most common instances, but runtime plugins (e.g. SQLAlchemy dialect
    packages) may still be falsely flagged.
 
-c) **Nested manifests are read and unioned** — all ``pyproject.toml`` and
-   ``package.json`` files found anywhere in the workspace (excluding
-   ``node_modules``, ``.git``, ``.venv``, build/cache dirs — see
-   ``_DEFAULT_EXCLUDE_DIRS`` in ``pipeline.py``) are read, and their declared
-   deps are unioned into a single declared set.  A dep declared in *any*
-   manifest (root or nested) counts as declared.  Trade-off: this is a
-   conservative union across all packages in the monorepo — a dep declared in
-   one sub-package suppresses undeclared findings for all sub-packages.  This
-   accepts false negatives (cross-package precision lost) to eliminate
+c) **Nested manifests are read and unioned** — all ``pyproject.toml``,
+   ``requirements*.txt``, and ``package.json`` files found anywhere in the
+   workspace (excluding ``node_modules``, ``.git``, ``.venv``, build/cache
+   dirs — see ``_DEFAULT_EXCLUDE_DIRS`` in ``pipeline.py``) are read, and
+   their declared deps are unioned into a single declared set.  A dep declared
+   in *any* manifest (root or nested) counts as declared.  Trade-off: this is
+   a conservative union across all packages in the monorepo — a dep declared
+   in one sub-package suppresses undeclared findings for all sub-packages.
+   This accepts false negatives (cross-package precision lost) to eliminate
    cross-package false positives, which is the right bias for an autonomous
    task proposer.
 
@@ -68,6 +82,10 @@ f) **Namespace-package roots** (``google``, ``azure``, etc.) — these roots
    them, and no ``unused_dependency`` is emitted for any declared package whose
    normalised name starts with ``<root>-`` (e.g. ``google-cloud-storage``,
    ``google-auth``).  This accepts false negatives to eliminate double FPs.
+
+g) **Language routing** — each import is routed to ONLY the manifest matching
+   its source-file language.  Cross-language routing (e.g. checking a Python
+   import against package.json) is never performed.
 """
 
 from __future__ import annotations
@@ -76,6 +94,14 @@ import re
 import sys
 
 from shared.types import DeadCodeFinding
+
+# ---------------------------------------------------------------------------
+# Source-file extension sets for language routing
+# ---------------------------------------------------------------------------
+_PY_EXTS: frozenset[str] = frozenset({".py", ".pyi"})
+_JS_EXTS: frozenset[str] = frozenset(
+    {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"}
+)
 
 # ---------------------------------------------------------------------------
 # Node built-ins that are never third-party packages
@@ -267,19 +293,21 @@ def _top_level_js(module_target: str) -> str | None:
 
 
 def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
-    """Read Python deps from ALL ``pyproject.toml`` files found under *workspace*.
+    """Read Python deps from ALL ``pyproject.toml`` and ``requirements*.txt`` files
+    found under *workspace*.
 
     Walks the workspace directory tree, skipping excluded dirs (``node_modules``,
     ``.git``, ``.venv``, build/cache dirs — same set used by
     ``pipeline.walk_files``), and unions the declared deps from every
-    ``pyproject.toml`` found.
+    ``pyproject.toml`` and ``requirements*.txt`` found.
 
     Returns ``(runtime_deps, all_deps)`` as sets of PEP-503-normalised
     names.  ``runtime_deps`` comes from ``[project].dependencies`` and
-    ``[tool.poetry.dependencies]`` (Python key excluded).  ``all_deps``
-    is the same set (extras/groups are not read in v1).
+    ``[tool.poetry.dependencies]`` (Python key excluded) and from
+    ``requirements*.txt`` files.  ``all_deps`` is the same set (extras/groups
+    are not read in v1).
 
-    Returns ``(set(), set())`` if no ``pyproject.toml`` is found anywhere.
+    Returns ``(set(), set())`` if no Python manifest is found anywhere.
     """
     import os
 
@@ -291,9 +319,11 @@ def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
-            return set(), set()
+            tomllib = None  # type: ignore[assignment]
 
-    def _parse_one(toml_path: str) -> set[str]:
+    def _parse_pyproject(toml_path: str) -> set[str]:
+        if tomllib is None:
+            return set()
         try:
             with open(toml_path, "rb") as f:
                 data = tomllib.load(f)
@@ -327,12 +357,53 @@ def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
                 normalized.add(_pep503_normalize(name))
         return normalized
 
+    def _parse_requirements(req_path: str) -> set[str]:
+        """Parse a requirements*.txt file and return normalised package names.
+
+        Skips:
+        - Comment lines (# ...)
+        - Include flags (-r, -c)
+        - Editable installs (-e)
+        - Blank lines
+
+        For each valid line, strips everything from the first of
+        `` ; < > = ! ~ [ `` to get the bare package name, then PEP-503-normalises.
+        """
+        normalized: set[str] = set()
+        try:
+            with open(req_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Skip -r / -c / -e flags
+                    if line.startswith("-"):
+                        continue
+                    # Strip inline comments
+                    line = line.split("#")[0].strip()
+                    if not line:
+                        continue
+                    # Split at first version/extras/env-marker delimiter
+                    # delimiters: space ; < > = ! ~ [
+                    import re as _re
+
+                    bare = _re.split(r"[\s;<>=!~\[]", line, maxsplit=1)[0].strip()
+                    if bare:
+                        normalized.add(_pep503_normalize(bare))
+        except Exception:
+            pass
+        return normalized
+
     union: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(workspace):
         # Prune excluded dirs in-place so os.walk doesn't descend into them
         dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
         if "pyproject.toml" in filenames:
-            union |= _parse_one(os.path.join(dirpath, "pyproject.toml"))
+            union |= _parse_pyproject(os.path.join(dirpath, "pyproject.toml"))
+        # Read any requirements*.txt files in this directory
+        for fname in filenames:
+            if fname.startswith("requirements") and fname.endswith(".txt"):
+                union |= _parse_requirements(os.path.join(dirpath, fname))
 
     return union, union.copy()
 
@@ -438,7 +509,7 @@ def _is_python_stdlib(name: str) -> bool:
 
 
 def compute_dependency_dead_code(
-    imported_module_targets: list[str],
+    imported: list[tuple[str | None, str]],
     workspace: str,
     first_party_top_levels: set[str],
 ) -> list[DeadCodeFinding]:
@@ -446,13 +517,19 @@ def compute_dependency_dead_code(
 
     Parameters
     ----------
-    imported_module_targets:
-        Pre-resolution list of ``module:<specifier>`` import-edge targets
-        captured **before** ``_resolve_module_imports_to_files`` drops
-        external targets from the graph.
+    imported:
+        Pre-resolution list of ``(source_file, module_target)`` pairs captured
+        **before** ``_resolve_module_imports_to_files`` drops external targets
+        from the graph.  ``source_file`` may be ``None`` if the edge has no
+        file provenance.  Language is inferred from the source-file extension:
+        - Python (``.py`` / ``.pyi``) → checked against pyproject.toml /
+          requirements*.txt only.
+        - JS/TS (``.ts`` / ``.tsx`` / ``.js`` / ``.jsx`` / ``.mjs`` / ``.cjs``
+          / ``.vue`` / ``.svelte``) → checked against package.json only.
+        - Unknown / ``None`` → skipped (conservative).
     workspace:
         Absolute path to the workspace root.  Used to read
-        ``pyproject.toml`` and/or ``package.json``.
+        ``pyproject.toml``, ``requirements*.txt``, and/or ``package.json``.
     first_party_top_levels:
         Top-level module names that are first-party (i.e. they map to a
         file node in the graph).  These are never flagged as undeclared
@@ -462,18 +539,23 @@ def compute_dependency_dead_code(
     -------
     list[DeadCodeFinding]
         Deterministically sorted by ``(kind, target)``.  May be empty.
+        Deduplicated: the same ``(kind, target)`` pair appears at most once.
     """
     import os
 
     from agent.graph_analyzer.pipeline import _DEFAULT_EXCLUDE_DIRS
 
-    # Determine whether ANY pyproject.toml / package.json exists anywhere in
-    # the workspace (nested manifests count — monorepos may have no root manifest).
+    # Determine whether ANY pyproject.toml / requirements*.txt / package.json
+    # exists anywhere in the workspace (nested manifests count — monorepos may
+    # have no root manifest).
     has_pyproject = False
     has_package_json = False
     for _dirpath, dirnames, filenames in os.walk(workspace):
         dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
-        if not has_pyproject and "pyproject.toml" in filenames:
+        if not has_pyproject and (
+            "pyproject.toml" in filenames
+            or any(f.startswith("requirements") and f.endswith(".txt") for f in filenames)
+        ):
             has_pyproject = True
         if not has_package_json and "package.json" in filenames:
             has_package_json = True
@@ -492,35 +574,36 @@ def compute_dependency_dead_code(
     js_runtime_deps, js_all_deps = _read_js_deps(workspace)
 
     # ------------------------------------------------------------------
-    # Collect imported external top-levels
+    # Collect imported external top-levels, routed by SOURCE FILE language
     # ------------------------------------------------------------------
-    # For Python: top-level segment, after alias resolution + normalisation
-    # For JS: top-level specifier (as-is for declared check; normalised for Python)
-
-    # We track two sets:
-    # imported_py_normalized: PEP-503-normalised package names
-    # imported_js_raw: raw JS specifiers
-    imported_py_raw: set[str] = set()  # before alias + normalize
+    # imported_py_raw: Python imports (from .py/.pyi files) before alias + normalize
+    # imported_js_raw: JS imports (from .ts/.tsx/.js/.jsx/etc.) raw specifiers
+    imported_py_raw: set[str] = set()
     imported_js_raw: set[str] = set()
 
-    for target in imported_module_targets:
+    for source_file, target in imported:
         if not target.startswith("module:"):
             continue
         specifier = target[len("module:") :]
 
-        # Heuristic: if the workspace has a pyproject.toml treat bare
-        # Python-like identifiers as Python; if it has package.json treat
-        # npm-style specifiers (including @scope/) as JS.  When both
-        # manifests are present, apply both heuristics and let the sets
-        # deduplicate naturally.
+        # Determine language from source file extension.
+        # None or unrecognised extension → skip (conservative — never guess).
+        if source_file is None:
+            continue
+        _dot_idx = source_file.rfind(".")
+        ext = source_file[_dot_idx:].lower() if _dot_idx >= 0 else ""
+        if not ext:
+            continue
 
-        # Python heuristic: no @ prefix, no ./ or /
-        if has_pyproject and not specifier.startswith("@") and not specifier.startswith("/"):
+        if ext in _PY_EXTS:
+            # Python import — check against pyproject.toml / requirements*.txt only
+            if not has_pyproject:
+                continue
+            # Skip absolute or relative specifiers
+            if specifier.startswith("/") or specifier.startswith("."):
+                continue
             top = specifier.split(".")[0]
             if not top:
-                continue
-            # Skip relative (unlikely in module: targets, but guard anyway)
-            if top.startswith("."):
                 continue
             # Skip stdlib
             if _is_python_stdlib(top):
@@ -530,8 +613,10 @@ def compute_dependency_dead_code(
                 continue
             imported_py_raw.add(top)
 
-        # JS heuristic: scoped packages, or explicitly JS workspace
-        if has_package_json:
+        elif ext in _JS_EXTS:
+            # JS/TS import — check against package.json only
+            if not has_package_json:
+                continue
             js_top = _top_level_js(target)
             if js_top is None:
                 continue
@@ -540,6 +625,7 @@ def compute_dependency_dead_code(
             if js_top in first_party_top_levels:
                 continue
             imported_js_raw.add(js_top)
+        # else: unknown extension → skip
 
     # Determine which namespace roots are present among imported top-levels.
     # Used below to suppress undeclared findings for namespace roots and
@@ -671,10 +757,17 @@ def compute_dependency_dead_code(
             )
 
     # ------------------------------------------------------------------
-    # Sort deterministically and return.
+    # Dedup by (kind, target) and sort deterministically.
     # ------------------------------------------------------------------
-    findings.sort(key=lambda f: (f.kind, f.target))
-    return findings
+    seen: set[tuple[str, str]] = set()
+    deduped: list[DeadCodeFinding] = []
+    for f in findings:
+        key = (f.kind, f.target)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(f)
+    deduped.sort(key=lambda f: (f.kind, f.target))
+    return deduped
 
 
 __all__ = ["compute_dependency_dead_code"]
