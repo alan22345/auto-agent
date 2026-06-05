@@ -86,7 +86,8 @@ _GAP_FILL_CONCURRENCY = 8
 # (cyclomatic/cognitive/loc) to Node. Phase 9 adds import-cycle detection
 # (Tarjan SCC over imports edges) and the DependencyCycle schema.
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
-_ANALYSER_VERSION = "phase10-deadcode-0.10.0"
+# Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
+_ANALYSER_VERSION = "phase11-duplication-0.11.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level

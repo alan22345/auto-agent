@@ -365,6 +365,30 @@ class DeadCodeFinding(BaseModel):
     reason: str
 
 
+class CloneInstance(BaseModel):
+    """One occurrence of a duplicated code block (ADR-016 quality layer §2)."""
+
+    node_id: str
+    file: str
+    line_start: int
+    line_end: int
+
+
+class CloneGroup(BaseModel):
+    """A group of >= 2 duplicated code blocks (a "clone group").
+
+    ``token_len`` is the length of the duplicated token sequence.
+    ``mode`` is the normalization level that detected it (strict ->
+    semantic, increasing recall). ``family_id`` links clone groups that
+    involve the same files (systematic copy-paste) when set."""
+
+    id: str
+    token_len: int
+    mode: Literal["strict", "mild", "weak", "semantic"]
+    instances: list[CloneInstance]
+    family_id: str | None = None
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -400,6 +424,9 @@ class RepoGraphBlob(BaseModel):
     pre-Phase-10 blobs (backward-compatible default). v1 populates
     ``unused_export`` and ``unused_file`` kinds; ``unused_dependency``
     and ``undeclared_dependency`` are reserved for a follow-up."""
+    clones: list[CloneGroup] = Field(default_factory=list)
+    """Clone-group records from the Phase 11 duplication pass; empty on
+    pre-Phase-11 blobs (backward-compatible default)."""
 
 
 class RepoGraphRefreshResponse(BaseModel):
