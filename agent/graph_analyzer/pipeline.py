@@ -40,6 +40,7 @@ import structlog
 import yaml
 
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
+from agent.graph_analyzer.churn import collect_git_churn, compute_hotspots, count_loc
 from agent.graph_analyzer.cycles import compute_cycles
 from agent.graph_analyzer.dead_code import compute_dead_code
 from agent.graph_analyzer.dependencies import compute_dependency_dead_code
@@ -620,6 +621,26 @@ async def run_pipeline(
         key=lambda f: (f.kind, f.target),
     )
     blob.clones = compute_clones(all_tokens, {n.id: n for n in blob.nodes})
+
+    # Phase 12 — churn x complexity hotspot ranking.
+    ref_ts, file_commits = collect_git_churn(workspace)
+    if ref_ts is None:
+        blob.hotspots = []
+    else:
+        # Build file_cyclomatic_total: sum cyclomatic over function nodes per file.
+        file_cyclomatic_total: dict[str, int] = {}
+        for n in blob.nodes:
+            if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+                file_cyclomatic_total[n.file] = file_cyclomatic_total.get(n.file, 0) + n.cyclomatic
+        # Build file_loc for every file that has function nodes.
+        file_loc: dict[str, int] = {f: count_loc(workspace, f) for f in file_cyclomatic_total}
+        blob.hotspots = compute_hotspots(
+            file_commits,
+            file_loc,
+            file_cyclomatic_total,
+            reference_ts=ref_ts,
+        )
+
     return blob
 
 
@@ -821,6 +842,26 @@ async def run_partial_pipeline(
         note="only covers freshly-analysed area; cross-area clones may be absent",
     )
     partial_blob.clones = compute_clones(target_tokens, {n.id: n for n in partial_blob.nodes})
+
+    # Phase 12 — churn x complexity hotspot ranking (partial pipeline).
+    ref_ts_p, file_commits_p = collect_git_churn(workspace)
+    if ref_ts_p is None:
+        partial_blob.hotspots = []
+    else:
+        file_cyclomatic_total_p: dict[str, int] = {}
+        for n in partial_blob.nodes:
+            if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+                file_cyclomatic_total_p[n.file] = (
+                    file_cyclomatic_total_p.get(n.file, 0) + n.cyclomatic
+                )
+        file_loc_p: dict[str, int] = {f: count_loc(workspace, f) for f in file_cyclomatic_total_p}
+        partial_blob.hotspots = compute_hotspots(
+            file_commits_p,
+            file_loc_p,
+            file_cyclomatic_total_p,
+            reference_ts=ref_ts_p,
+        )
+
     return partial_blob
 
 
