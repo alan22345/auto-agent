@@ -346,6 +346,25 @@ class DependencyCycle(BaseModel):
     closing_edges: list[EdgeEvidence]
 
 
+class DeadCodeFinding(BaseModel):
+    """One dead-code finding in the module graph (ADR-016 quality layer §4).
+
+    ``kind`` categorises the finding; ``target`` is the node id or
+    identifier it refers to (e.g. ``"api/routes.py::unused_helper"`` for
+    an unused export, or ``"file:api/legacy.py"`` for an unused file).
+    ``reason`` is a short human-readable explanation."""
+
+    kind: Literal[
+        "unused_export",
+        "unused_file",
+        "unused_dependency",
+        "undeclared_dependency",
+    ]
+    target: str
+    file: str | None = None
+    reason: str
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -376,6 +395,11 @@ class RepoGraphBlob(BaseModel):
     cycles: list[DependencyCycle] = Field(default_factory=list)
     """Import-cycle records computed by Phase 9 Tarjan SCC pass; empty on
     pre-Phase-9 blobs (backward-compatible default)."""
+    dead_code: list[DeadCodeFinding] = Field(default_factory=list)
+    """Dead-code findings from the Phase 10 quality pass; empty on
+    pre-Phase-10 blobs (backward-compatible default). v1 populates
+    ``unused_export`` and ``unused_file`` kinds; ``unused_dependency``
+    and ``undeclared_dependency`` are reserved for a follow-up."""
 
 
 class RepoGraphRefreshResponse(BaseModel):

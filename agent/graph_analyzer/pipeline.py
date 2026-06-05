@@ -84,7 +84,8 @@ _GAP_FILL_CONCURRENCY = 8
 # graphs apart across phases. Phase 8 adds per-function complexity fields
 # (cyclomatic/cognitive/loc) to Node. Phase 9 adds import-cycle detection
 # (Tarjan SCC over imports edges) and the DependencyCycle schema.
-_ANALYSER_VERSION = "phase9-cycles-0.9.0"
+# Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
+_ANALYSER_VERSION = "phase10-deadcode-0.10.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
