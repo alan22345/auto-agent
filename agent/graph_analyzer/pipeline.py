@@ -94,22 +94,47 @@ _GAP_FILL_CONCURRENCY = 8
 # Phase 13 adds per-file maintainability index + repo health score.
 _ANALYSER_VERSION = "phase13-health-0.13.0"
 
-# Directories always excluded from area discovery. Matches the spec —
+# Directories always excluded from area discovery and file walking at any
+# depth. Covers: VCS internals and worktrees (.git, .claude/worktrees,
+# worktrees, .worktrees), package managers (node_modules), Python envs
+# and caches (.venv, venv, __pycache__, .pytest_cache, .mypy_cache,
+# .ruff_cache, .tox, .cache), build output (dist, build, target, out,
+# .next, .svelte-kit, .turbo), editor state (.idea, .vscode), JVM builds
+# (.gradle), and project-internal dirs (.auto-agent).
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
 # directory; the user can exclude it via graph.yml).
 _DEFAULT_EXCLUDE_DIRS = frozenset(
     {
+        # VCS and harness worktrees
         ".git",
+        ".claude",
+        "worktrees",
+        ".worktrees",
+        # Package managers
         "node_modules",
+        # Python envs and caches
         ".venv",
         "venv",
         "__pycache__",
-        "dist",
-        "build",
-        ".next",
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",
+        ".tox",
+        ".cache",
+        # Build output
+        "build",
+        "dist",
+        "out",
+        "target",
+        ".next",
+        ".svelte-kit",
+        ".turbo",
+        # Editor state
+        ".idea",
+        ".vscode",
+        # JVM build
+        ".gradle",
+        # Project-internal
         ".auto-agent",
     }
 )
