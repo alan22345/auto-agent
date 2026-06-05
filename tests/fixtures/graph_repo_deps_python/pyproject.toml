@@ -1,0 +1,7 @@
+[project]
+name = "deps-fixture"
+version = "0.1.0"
+dependencies = [
+    "used_pkg>=1.0",
+    "unused_pkg>=1.0",
+]

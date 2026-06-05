@@ -42,6 +42,7 @@ import yaml
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.cycles import compute_cycles
 from agent.graph_analyzer.dead_code import compute_dead_code
+from agent.graph_analyzer.dependencies import compute_dependency_dead_code
 from agent.graph_analyzer.duplication import compute_clones
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
@@ -567,6 +568,19 @@ async def run_pipeline(
     # expect.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
+    # Capture pre-resolution import targets for dependency analysis.
+    # External ``module:<pkg>`` targets are DROPPED by the resolution step
+    # below; they must be captured here before that happens.
+    pre_resolution_imports = sorted({e.target for e in all_edges if e.kind == "imports"})
+
+    # Compute first-party top-level module names from file nodes.
+    first_party_top_levels: set[str] = set()
+    for _n in all_nodes:
+        if _n.kind == "file" and _n.file:
+            _mod = _file_to_module(_n.file)
+            if _mod:
+                first_party_top_levels.add(_mod.split(".")[0])
+
     # Resolve bare ``module:<dotted>`` endpoints on import edges to the
     # corresponding ``file:`` node id, and drop edges whose endpoints
     # still don't resolve to a real node. Per-file parsers emit import
@@ -599,6 +613,11 @@ async def run_pipeline(
         cycles=compute_cycles(all_edges),
     )
     blob.dead_code = compute_dead_code(blob)
+    blob.dead_code = sorted(
+        blob.dead_code
+        + compute_dependency_dead_code(pre_resolution_imports, workspace, first_party_top_levels),
+        key=lambda f: (f.kind, f.target),
+    )
     blob.clones = compute_clones(all_tokens, {n.id: n for n in blob.nodes})
     return blob
 
@@ -737,7 +756,20 @@ async def run_partial_pipeline(
     # symbols via ``module:`` placeholders.
     all_edges = _resolve_cross_area_module_targets(all_edges, all_nodes)
 
-    # 6b. Resolve bare ``module:<dotted>`` import endpoints to real
+    # 6b. Capture pre-resolution import targets for dependency analysis.
+    # External ``module:<pkg>`` targets are DROPPED by the resolution step
+    # below; they must be captured here before that happens.
+    pre_resolution_imports_partial = sorted({e.target for e in all_edges if e.kind == "imports"})
+
+    # Compute first-party top-level module names from file nodes.
+    first_party_top_levels_partial: set[str] = set()
+    for _n in all_nodes:
+        if _n.kind == "file" and _n.file:
+            _mod = _file_to_module(_n.file)
+            if _mod:
+                first_party_top_levels_partial.add(_mod.split(".")[0])
+
+    # 6c. Resolve bare ``module:<dotted>`` import endpoints to real
     # ``file:`` nodes (and drop edges that still don't resolve). See the
     # full-pipeline path for the rationale — the partial path needs the
     # same hygiene step so re-analysed areas don't reintroduce phantom
@@ -771,6 +803,13 @@ async def run_partial_pipeline(
         cycles=compute_cycles(all_edges),
     )
     partial_blob.dead_code = compute_dead_code(partial_blob)
+    partial_blob.dead_code = sorted(
+        partial_blob.dead_code
+        + compute_dependency_dead_code(
+            pre_resolution_imports_partial, workspace, first_party_top_levels_partial
+        ),
+        key=lambda f: (f.kind, f.target),
+    )
     # Phase 11 — clone detection. Only tokens from the freshly-analysed
     # target area are available; inherited tokens from previous runs are not
     # persisted. Cross-area clones that span an inherited + target area
