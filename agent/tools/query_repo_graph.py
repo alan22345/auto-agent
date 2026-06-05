@@ -1,6 +1,6 @@
 """Query the code graph for a repo (ADR-016 Phase 6 §12).
 
-A single agent tool with seven read-only ops over the latest stored
+A single agent tool with fourteen read-only ops over the latest stored
 :class:`shared.types.RepoGraphBlob` for a repo. Every response carries
 a staleness envelope (graph SHA vs. workspace HEAD) and per-result
 existence flags so the agent can filter out symbols that have been
@@ -54,14 +54,33 @@ _KNOWN_OPS: frozenset[str] = frozenset(
     {
         "callers_of",
         "callees_of",
-        "outgoing_edges",
+        "clones",
+        "complex_functions",
+        "cycles_for",
+        "dead_code",
+        "file_health",
+        "hotspots",
         "incoming_edges",
-        "public_surface",
+        "outgoing_edges",
         "path_between",
+        "public_surface",
         "violates_boundaries",
         "which_capability",
     },
 )
+
+_DEAD_CODE_KINDS: frozenset[str] = frozenset(
+    {
+        "unused_export",
+        "unused_file",
+        "unused_dependency",
+        "undeclared_dependency",
+    },
+)
+
+_FILE_HEALTH_BANDS: frozenset[str] = frozenset({"good", "moderate", "poor"})
+
+_COMPLEX_FUNCTIONS_METRICS: frozenset[str] = frozenset({"cyclomatic", "cognitive"})
 
 
 class QueryRepoGraphTool(Tool):
@@ -92,7 +111,16 @@ class QueryRepoGraphTool(Tool):
                     "area's public API; 'path_between' returns a list of "
                     "node ids; 'violates_boundaries' returns a single edge "
                     "dict or null; 'which_capability' returns the flow(s) "
-                    "and capability group containing a node."
+                    "and capability group containing a node; "
+                    "'cycles_for' returns all import/call cycles whose "
+                    "members list contains the given node id; "
+                    "'hotspots' returns churn-x-complexity hotspot records "
+                    "sorted by score desc; "
+                    "'clones' returns duplicate-code clone groups; "
+                    "'dead_code' returns dead-code findings; "
+                    "'complex_functions' returns function nodes above a "
+                    "complexity threshold; "
+                    "'file_health' returns per-file maintainability records."
                 ),
             },
             "params": {
@@ -104,7 +132,16 @@ class QueryRepoGraphTool(Tool):
                     "path_between takes {source_id, target_id, "
                     "max_depth?=5}; violates_boundaries takes "
                     "{source_id, target_id}; which_capability takes "
-                    "{node: \"<node_id>\"}."
+                    '{node: "<node_id>"}; cycles_for takes {node_id}; '
+                    "hotspots takes {limit?=20}; "
+                    "clones takes {min_tokens?=0}; "
+                    "dead_code takes {kind?} where kind is one of "
+                    "unused_export/unused_file/unused_dependency/"
+                    "undeclared_dependency; "
+                    "complex_functions takes {metric, threshold} where "
+                    "metric is cyclomatic or cognitive; "
+                    "file_health takes {band?} where band is one of "
+                    "good/moderate/poor."
                 ),
             },
         },
@@ -308,6 +345,46 @@ def _dispatch(
         edge = _violates_boundaries(blob, source_id, target_id)
         return {"result": edge.model_dump(mode="json") if edge else None}
 
+    if op == "cycles_for":
+        node_id = _require_str(params, "node_id")
+        return {"result": _cycles_for(blob, node_id)}
+
+    if op == "hotspots":
+        limit = params.get("limit", 20)
+        if not isinstance(limit, int) or limit < 0:
+            raise _OpError("'limit' must be a non-negative integer.")
+        return {"result": _hotspots(blob, limit)}
+
+    if op == "clones":
+        min_tokens = params.get("min_tokens", 0)
+        if not isinstance(min_tokens, int) or min_tokens < 0:
+            raise _OpError("'min_tokens' must be a non-negative integer.")
+        return {"result": _clones(blob, min_tokens)}
+
+    if op == "dead_code":
+        kind = params.get("kind")
+        if kind is not None and (not isinstance(kind, str) or kind not in _DEAD_CODE_KINDS):
+            raise _OpError(f"'kind' must be one of {sorted(_DEAD_CODE_KINDS)}; got '{kind}'.")
+        return {"result": _dead_code(blob, kind)}
+
+    if op == "complex_functions":
+        metric = params.get("metric")
+        if not isinstance(metric, str) or metric not in _COMPLEX_FUNCTIONS_METRICS:
+            raise _OpError(
+                f"'metric' is required and must be one of "
+                f"{sorted(_COMPLEX_FUNCTIONS_METRICS)}; got '{metric}'."
+            )
+        threshold = params.get("threshold")
+        if not isinstance(threshold, int):
+            raise _OpError("'threshold' is required and must be an integer.")
+        return {"result": _complex_functions(blob, metric, threshold)}
+
+    if op == "file_health":
+        band = params.get("band")
+        if band is not None and (not isinstance(band, str) or band not in _FILE_HEALTH_BANDS):
+            raise _OpError(f"'band' must be one of {sorted(_FILE_HEALTH_BANDS)}; got '{band}'.")
+        return {"result": _file_health(blob, band)}
+
     # Defensive — execute() validated op, but keep the unreachable branch.
     raise _OpError(f"unknown op '{op}'")
 
@@ -455,6 +532,78 @@ def _violates_boundaries(
         if edge.source == source_id and edge.target == target_id:
             return edge
     return None
+
+
+def _cycles_for(blob: RepoGraphBlob, node_id: str) -> list[dict]:
+    """Return every DependencyCycle whose ``members`` contains ``node_id``.
+
+    Preserves the blob's existing cycle order (deterministic from Task B).
+    Returns an empty list when the node participates in no cycle — not an
+    error. Each cycle is serialised via ``model_dump`` for JSON transport.
+    """
+    return [c.model_dump(mode="json") for c in blob.cycles if node_id in c.members]
+
+
+def _hotspots(blob: RepoGraphBlob, limit: int) -> list[dict]:
+    """Return blob hotspots (already sorted score DESC) truncated to ``limit``.
+
+    ``limit=0`` returns all hotspots (callers that want "all" should pass 0
+    or omit the parameter to get the 20-entry default). A positive ``limit``
+    takes at most that many entries from the front of the list.
+    """
+    items = blob.hotspots
+    if limit > 0:
+        items = items[:limit]
+    return [h.model_dump(mode="json") for h in items]
+
+
+def _clones(blob: RepoGraphBlob, min_tokens: int) -> list[dict]:
+    """Return clone groups whose ``token_len >= min_tokens``.
+
+    ``min_tokens=0`` (default) returns all groups; preserves blob order.
+    """
+    return [g.model_dump(mode="json") for g in blob.clones if g.token_len >= min_tokens]
+
+
+def _dead_code(blob: RepoGraphBlob, kind: str | None) -> list[dict]:
+    """Return dead-code findings, optionally filtered to a single ``kind``.
+
+    ``kind=None`` returns all findings; preserves blob order.
+    """
+    findings = blob.dead_code
+    if kind is not None:
+        findings = [f for f in findings if f.kind == kind]
+    return [f.model_dump(mode="json") for f in findings]
+
+
+def _complex_functions(blob: RepoGraphBlob, metric: str, threshold: int) -> list[dict]:
+    """Return function-kind nodes where ``node.<metric> >= threshold``.
+
+    Nodes where the metric is ``None`` are excluded. Result is sorted by
+    the metric value DESC, then by node id ASC for determinism.
+    """
+    candidates = []
+    for n in blob.nodes:
+        if n.kind != "function":
+            continue
+        value = getattr(n, metric, None)
+        if value is None:
+            continue
+        if value >= threshold:
+            candidates.append((value, n.id, n))
+    candidates.sort(key=lambda t: (-t[0], t[1]))
+    return [n.model_dump(mode="json") for _, _, n in candidates]
+
+
+def _file_health(blob: RepoGraphBlob, band: str | None) -> list[dict]:
+    """Return file-health entries, optionally filtered by ``band``.
+
+    ``band=None`` returns all entries; preserves blob order.
+    """
+    entries = blob.file_health
+    if band is not None:
+        entries = [e for e in entries if e.band == band]
+    return [e.model_dump(mode="json") for e in entries]
 
 
 # ---------------------------------------------------------------------------

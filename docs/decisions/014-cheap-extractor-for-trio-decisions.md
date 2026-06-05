@@ -1,5 +1,7 @@
 # [ADR-014] Split the trio decision contract — prose by the architect, structure by a cheap classifier
 
+> **Summary:** Split the trio decision contract — heavy model reasons in prose, a cheap Bedrock-Haiku extractor turns prose into the structured JSON envelope, independent of LLM_PROVIDER.
+
 ## Status
 
 Accepted

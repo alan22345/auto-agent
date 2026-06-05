@@ -1,8 +1,10 @@
 # [ADR-015] Task flow redesign — three classifications, freeform mode, no-defer enforcement
 
+> **Summary:** Three flows (simple/complex/complex_large) on one classifier with conditional grill, a single design.md approval artefact, heavy per-item review, and four-layer no-defer enforcement.
+
 ## Status
 
-Proposed
+Accepted
 
 Supersedes ADR-013 (trio drives backlog via subagents). Extends ADR-014 (split decision contract — prose by heavy model, schema by Haiku) by generalising its skills-bridge pattern from "trio submit-X tools" to all gated agent actions across all three flows.
 

@@ -1,5 +1,7 @@
 # [ADR-009] Split `agent/main.py` into per-phase task lifecycle modules
 
+> **Summary:** Split the monolithic agent/main.py into per-phase modules under agent/lifecycle/, each owning one phase's handler, dispatched through the EventBus.
+
 ## Status
 
 Accepted

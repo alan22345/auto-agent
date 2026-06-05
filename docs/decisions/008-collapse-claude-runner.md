@@ -1,5 +1,7 @@
 # [ADR-008] Collapse `claude_runner/` into `agent/`
 
+> **Summary:** Apply the deletion test — delete claude_runner/ entirely and reroute its one live path through the LLMProvider seam.
+
 ## Status
 
 Accepted

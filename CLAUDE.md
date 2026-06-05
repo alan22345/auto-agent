@@ -69,7 +69,8 @@ agent/
 │
 ├─ context/
 │   ├─ __init__.py         # ContextManager — orchestrates all layers
-│   ├─ system.py           # Builds system prompt (base + CLAUDE.md + git + repo map)
+│   ├─ system.py           # Builds system prompt (base + CLAUDE.md + git + repo map + ADR index)
+│   ├─ adr_index.py        # Parse docs/decisions/ → typed meta + status-aware active index
 │   ├─ repo_map.py         # AST-based codebase index (Python + JS/TS)
 │   ├─ workspace_state.py  # Tracks files read/modified/tested per session
 │   ├─ microcompact.py     # Layer 1: clear old computed tool results
@@ -112,6 +113,7 @@ These are load-bearing — changing them has broken the agent before:
 2. **Tool results for one assistant turn must be batched into one user message.** The LLM API requires `{role: user, content: [tool_result, tool_result, ...]}`, not multiple user messages with one `tool_result` each. See `_build_api_messages` in `agent/llm/bedrock.py` and `agent/llm/anthropic.py`.
 3. **Only `grep`/`glob`/`git`/`bash` results are cleared by microcompact.** They're re-derivable; file contents are not.
 4. **Transient Bedrock errors (503/429/529) are retried with exponential backoff** in `BedrockProvider.complete`. Do not remove.
+5. **Superseded/Deprecated ADRs never enter agent context.** `adr_index.active_adrs` filters `docs/decisions/` by `## Status`, so only `Accepted`/`Proposed` ADRs reach the system prompt and `INDEX.md`. Retire an ADR by flipping its Status (use `agent/tools/adr_supersede.py::retire_adr`), never by deleting the file — the rationale is the history. The PR reviewer enforces retire-in-same-change via `verify_primitives.check_adr_consistency`.
 
 ### Key Design Patterns
 

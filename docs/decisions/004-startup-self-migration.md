@@ -1,4 +1,6 @@
-[ADR-004] Run Alembic Migrations at Lifespan Startup
+# [ADR-004] Run Alembic Migrations at Lifespan Startup
+
+> **Summary:** Run `alembic upgrade head` automatically at FastAPI startup (before create_all), wrapped so a bad migration logs and still boots on the prior consistent schema.
 
 ## Status
 

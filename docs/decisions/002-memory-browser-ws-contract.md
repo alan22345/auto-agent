@@ -1,5 +1,7 @@
 # [ADR-002] Memory browser uses the existing WebSocket contract for read + write
 
+> **Summary:** Memory-tab read+write rides the existing WebSocket contract behind one shared/memory_io.py seam; fact deletion is a soft delete that preserves the audit trail.
+
 ## Status
 
 Accepted

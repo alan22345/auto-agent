@@ -917,3 +917,90 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
         return body
     suffix = "\n\n" + section if not body.endswith("\n") else "\n" + section
     return body + suffix
+
+
+# ---------------------------------------------------------------------------
+# Public: check_adr_consistency — deterministic retire-in-same-change gate.
+# ---------------------------------------------------------------------------
+
+
+# Supersession claims are scoped to ADR files: a "Supersedes [ADR-X]" line only
+# counts when it is an ADDED line inside a ``docs/decisions/NNN-*.md`` hunk. This
+# prevents false positives from code comments, PR-description echoes, test
+# fixtures, or diff metadata that merely mention "supersedes [ADR-X]" elsewhere.
+_DIFF_ADR_PLUS_HDR_RE = re.compile(r"^\+\+\+ b/docs/decisions/\d{3}-.*\.md$")
+_DIFF_ADR_GIT_HDR_RE = re.compile(r"^diff --git .* b/docs/decisions/\d{3}-[^ ]*\.md$")
+_SUPERSEDES_CLAIM_RE = re.compile(r"supersedes\s+\[?ADR-(\d+)\]?", re.IGNORECASE)
+
+
+def _supersedes_claims_in_adr_hunks(diff: str) -> list[int]:
+    """ADR numbers claimed as superseded by ADDED lines inside ADR-file hunks.
+
+    Scoped to ``docs/decisions/NNN-*.md`` (detected from either the
+    ``diff --git`` or ``+++ b/`` header) so a "supersedes [ADR-X]" mention in a
+    code comment, PR description, or diff header never trips the gate.
+    """
+    nums: list[int] = []
+    in_adr_file = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            in_adr_file = bool(_DIFF_ADR_GIT_HDR_RE.match(line))
+            continue
+        if line.startswith("+++ "):
+            in_adr_file = bool(_DIFF_ADR_PLUS_HDR_RE.match(line))
+            continue
+        if line.startswith("--- "):
+            continue
+        if in_adr_file and line.startswith("+"):
+            m = _SUPERSEDES_CLAIM_RE.search(line)
+            if m:
+                nums.append(int(m.group(1)))
+    return nums
+
+
+@dataclass
+class AdrConsistencyResult:
+    ok: bool
+    violations: list[str] = field(default_factory=list)
+
+
+def check_adr_consistency(diff: str, adr_dir: str) -> AdrConsistencyResult:
+    """Deterministic ADR retire-in-same-change gate.
+
+    Flags when the diff introduces a 'Supersedes [ADR-X]' claim but ADR-X is
+    still Accepted/Proposed in the working tree, and when a 'Superseded by
+    [ADR-Y]' points at a Y that does not exist. No governs metadata required.
+    """
+    # Imported lazily to keep the agent-context dependency local to this gate.
+    from agent.context.adr_index import _adr_paths, parse_adr, status_kind
+
+    violations: list[str] = []
+
+    # Current state of every ADR in the tree, keyed by number.
+    by_num: dict[int, Any] = {}
+    for p in _adr_paths(adr_dir):
+        m = parse_adr(p)
+        by_num[m.number] = m
+
+    # Every "Supersedes [ADR-X]" added in an ADR-file hunk must leave X retired.
+    for x in _supersedes_claims_in_adr_hunks(diff):
+        target = by_num.get(x)
+        if target is None:
+            violations.append(
+                f"diff claims to supersede ADR-{x:03d}, which does not exist"
+            )
+        elif status_kind(target.status) in {"accepted", "proposed"}:
+            violations.append(
+                f"diff supersedes ADR-{x:03d} but it is still '{target.status}' — "
+                f"retire it (set its ## Status to Superseded) in this change"
+            )
+
+    # Any 'Superseded by [ADR-Y]' in the tree must point at an existing Y.
+    for m in by_num.values():
+        if m.superseded_by is not None and m.superseded_by not in by_num:
+            violations.append(
+                f"ADR-{m.number:03d} is 'Superseded by [ADR-{m.superseded_by:03d}]' "
+                f"but ADR-{m.superseded_by:03d} does not exist"
+            )
+
+    return AdrConsistencyResult(ok=not violations, violations=violations)

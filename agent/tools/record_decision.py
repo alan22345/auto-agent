@@ -28,30 +28,17 @@ def _next_number(decisions_dir: str) -> int:
     return (max(nums) + 1) if nums else 1
 
 
-def _render(template: str, title: str, context: str, decision: str, consequences: str) -> str:
-    """Render the ADR body.
-
-    Tries ``str.format`` against the template first (works when the template
-    uses ``{title}``, ``{context}``, ``{decision}``, ``{consequences}``
-    placeholders).  Falls back to a canonical ADR structure when the template
-    is the project's prose template (which has no format keys).
-    """
-    try:
-        return template.format(
-            title=title,
-            context=context,
-            decision=decision,
-            consequences=consequences,
-        )
-    except (KeyError, ValueError):
-        # Real project template uses prose section headers — build directly.
-        return (
-            f"# {title}\n\n"
-            "## Status\n\nAccepted\n\n"
-            f"## Context\n\n{context}\n\n"
-            f"## Decision\n\n{decision}\n\n"
-            f"## Consequences\n\n{consequences}\n"
-        )
+def _render(n: int, title: str, summary: str, context: str, decision: str, consequences: str) -> str:
+    """Render the canonical ADR body with an [ADR-NNN] title prefix and Summary slot."""
+    summary_line = f"> **Summary:** {summary}\n\n" if summary else ""
+    return (
+        f"# [ADR-{n:03d}] {title}\n\n"
+        f"{summary_line}"
+        "## Status\n\nAccepted\n\n"
+        f"## Context\n\n{context}\n\n"
+        f"## Decision\n\n{decision}\n\n"
+        f"## Consequences\n\n{consequences}\n"
+    )
 
 
 class RecordDecisionTool(Tool):
@@ -69,6 +56,8 @@ class RecordDecisionTool(Tool):
             "context": {"type": "string"},
             "decision": {"type": "string"},
             "consequences": {"type": "string"},
+            "summary": {"type": "string", "description": "One-line gist for the ADR index."},
+            "supersedes": {"type": "integer", "description": "ADR number this decision retires, if any."},
         },
         "required": ["title", "context", "decision", "consequences"],
     }
@@ -86,17 +75,15 @@ class RecordDecisionTool(Tool):
                 is_error=True,
             )
 
-        with open(template_path) as f:
-            template = f.read()
-
         n = _next_number(decisions_dir)
         slug = _slug(arguments["title"])
         filename = f"{n:03d}-{slug}.md"
         path = os.path.join(decisions_dir, filename)
 
         body = _render(
-            template,
+            n,
             title=arguments["title"],
+            summary=arguments.get("summary", ""),
             context=arguments["context"],
             decision=arguments["decision"],
             consequences=arguments["consequences"],
@@ -105,4 +92,25 @@ class RecordDecisionTool(Tool):
         with open(path, "w") as f:
             f.write(body)
 
-        return ToolResult(output=f"Wrote ADR: docs/decisions/{filename}", token_estimate=20)
+        # Optional supersession: retire the named prior ADR in the same write.
+        superseded_note = ""
+        supersedes = arguments.get("supersedes")
+        if supersedes is not None:
+            from agent.tools.adr_supersede import retire_adr  # Task 7
+
+            ok = retire_adr(decisions_dir, int(supersedes), by_number=n)
+            superseded_note = (
+                f" (superseded ADR-{int(supersedes):03d})" if ok
+                else f" (WARNING: ADR-{int(supersedes):03d} not found to supersede)"
+            )
+
+        # Regenerate the active index so it never drifts.
+        from agent.context.adr_index import build_index
+
+        with open(os.path.join(decisions_dir, "INDEX.md"), "w") as f:
+            f.write(build_index(decisions_dir))
+
+        return ToolResult(
+            output=f"Wrote ADR: docs/decisions/{filename}{superseded_note}",
+            token_estimate=20,
+        )

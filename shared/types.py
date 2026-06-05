@@ -132,14 +132,6 @@ class PRReviewComment(BaseModel):
     line: int | None = None
 
 
-class CIStatus(BaseModel):
-    """CI status for a commit."""
-
-    sha: str
-    state: Literal["success", "failure", "pending", "error"]
-    message: str = ""
-
-
 # --- Metrics types ---
 
 
@@ -282,6 +274,24 @@ class Node(BaseModel):
     by the Phase 4 HTTP-matching stage to find FastAPI/Flask route handlers.
     Always ``[]`` for non-Python nodes and for undecorated defs."""
 
+    cyclomatic: int | None = Field(default=None, ge=0)
+    """McCabe cyclomatic complexity for this node. Only populated on
+    ``kind="function"`` nodes (including methods, which are function-kind);
+    ``None`` for area, file, and class nodes. Populated by the Phase 8
+    complexity pass."""
+
+    cognitive: int | None = Field(default=None, ge=0)
+    """Cognitive complexity (Sonarqube/SonarSource metric) for this node.
+    Same applicability as ``cyclomatic`` — only set on function-kind nodes
+    (including methods, which are function-kind). Populated by the Phase 8
+    complexity pass."""
+
+    loc: int | None = Field(default=None, ge=0)
+    """Lines of code for this node (``line_end - line_start + 1``). Used
+    by downstream consumers to compute complexity density. Only populated
+    on ``kind="function"`` nodes (including methods) by the Phase 8
+    complexity pass; ``None`` for area, file, and class nodes (deferred)."""
+
 
 class EdgeEvidence(BaseModel):
     """Cited proof of an edge's existence — see ADR-016 §3."""
@@ -323,6 +333,107 @@ class Edge(BaseModel):
     violation_reason: str | None = None
 
 
+class DependencyCycle(BaseModel):
+    """One circular-dependency cycle detected in the module graph
+    (ADR-016 quality layer §3). Computed by Tarjan SCC over ``imports``
+    edges. ``members`` are the import-graph vertex ids participating in
+    the cycle (e.g. ``module:agent.a``); ``closing_edges`` cite the
+    ``imports`` edges whose source and target are both in the cycle."""
+
+    id: str
+    kind: Literal["import", "call"]
+    members: list[str]
+    closing_edges: list[EdgeEvidence]
+
+
+class DeadCodeFinding(BaseModel):
+    """One dead-code finding in the module graph (ADR-016 quality layer §4).
+
+    ``kind`` categorises the finding; ``target`` is the node id or
+    identifier it refers to (e.g. ``"api/routes.py::unused_helper"`` for
+    an unused export, or ``"file:api/legacy.py"`` for an unused file).
+    ``reason`` is a short human-readable explanation."""
+
+    kind: Literal[
+        "unused_export",
+        "unused_file",
+        "unused_dependency",
+        "undeclared_dependency",
+    ]
+    target: str
+    file: str | None = None
+    reason: str
+
+
+class CloneInstance(BaseModel):
+    """One occurrence of a duplicated code block (ADR-016 quality layer §2)."""
+
+    node_id: str
+    file: str
+    line_start: int
+    line_end: int
+
+
+class CloneGroup(BaseModel):
+    """A group of >= 2 duplicated code blocks (a "clone group").
+
+    ``token_len`` is the length of the duplicated token sequence.
+    ``mode`` is the normalization level that detected it (strict ->
+    semantic, increasing recall). ``family_id`` links clone groups that
+    involve the same files (systematic copy-paste) when set."""
+
+    id: str
+    token_len: int
+    mode: Literal["strict", "mild", "weak", "semantic"]
+    instances: list[CloneInstance]
+    family_id: str | None = None
+
+
+class Hotspot(BaseModel):
+    """A churn x complexity refactoring hotspot (ADR-016 quality layer §5).
+
+    ``churn`` is the 90-day-half-life-decayed commit weight for the file;
+    ``complexity_density`` is total cyclomatic complexity / lines of code;
+    ``score`` (0..100) is the normalized product of churn and density —
+    a file ranks high only if it is BOTH actively changing AND complex.
+    ``trend`` compares commit frequency in the first vs second half of
+    the window."""
+
+    file: str
+    churn: float
+    complexity_density: float
+    score: float
+    trend: Literal["accelerating", "stable", "cooling"]
+
+
+class FileHealth(BaseModel):
+    """Per-file maintainability (ADR-016 quality layer §6).
+
+    ``maintainability_index`` (0..100) = 100 - complexity_density*30
+    - dead_code_ratio*20 - fan_out_penalty, clamped to [0,100].
+    ``band``: good (70-100), moderate (40-70), poor (0-40).
+    ``crap`` (untested-complexity risk) is reserved — it needs per-function
+    coverage the graph does not yet ingest, so it is always None for now."""
+
+    file: str
+    maintainability_index: float
+    band: Literal["good", "moderate", "poor"]
+    crap: float | None = None
+
+
+class RepoHealth(BaseModel):
+    """Repo-level health summary (ADR-016 quality layer §6).
+
+    ``score`` is the LOC-weighted mean of per-file maintainability_index;
+    the counts are headline totals from the quality findings."""
+
+    score: float
+    clone_count: int
+    cycle_count: int
+    dead_count: int
+    hotspot_count: int
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -350,6 +461,26 @@ class RepoGraphBlob(BaseModel):
     nodes: list[Node]
     edges: list[Edge]
     public_symbols: list[str] = Field(default_factory=list)
+    cycles: list[DependencyCycle] = Field(default_factory=list)
+    """Import-cycle records computed by Phase 9 Tarjan SCC pass; empty on
+    pre-Phase-9 blobs (backward-compatible default)."""
+    dead_code: list[DeadCodeFinding] = Field(default_factory=list)
+    """Dead-code findings from the Phase 10 quality pass; empty on
+    pre-Phase-10 blobs (backward-compatible default). v1 populates
+    ``unused_export`` and ``unused_file`` kinds; ``unused_dependency``
+    and ``undeclared_dependency`` are reserved for a follow-up."""
+    clones: list[CloneGroup] = Field(default_factory=list)
+    """Clone-group records from the Phase 11 duplication pass; empty on
+    pre-Phase-11 blobs (backward-compatible default)."""
+    hotspots: list[Hotspot] = Field(default_factory=list)
+    """Churn-hotspot records from the Phase 12 quality pass; empty on
+    pre-Phase-12 blobs (backward-compatible default)."""
+    file_health: list[FileHealth] = Field(default_factory=list)
+    """Per-file maintainability records from the Phase 13 health pass; empty on
+    pre-Phase-13 blobs (backward-compatible default)."""
+    health: RepoHealth | None = None
+    """Repo-level health summary from the Phase 13 health pass; None on
+    pre-Phase-13 blobs (backward-compatible default)."""
 
 
 class RepoGraphRefreshResponse(BaseModel):

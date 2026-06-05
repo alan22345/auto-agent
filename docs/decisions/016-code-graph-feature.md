@@ -1,8 +1,10 @@
 # [ADR-016] Code graph — hierarchical, function-level, cited-edge map of an onboarded repo
 
+> **Summary:** Opt-in hierarchical, function-level, citation-validated code graph — one canonical store served to humans as a visualisation and to the agent through a typed query tool.
+
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 

@@ -1,4 +1,6 @@
-[ADR-003] Vendor Matt Pocock's Engineering Skills + Grill Loop + Architecture Mode
+# [ADR-003] Vendor Matt Pocock's Engineering Skills + Grill Loop + Architecture Mode
+
+> **Summary:** Vendor the Pocock engineering skills into skills/engineering/, bake the architecture lens into the base prompt, and grill BEFORE planning via a persisted intake_qa round-trip.
 
 ## Status
 

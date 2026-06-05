@@ -1,0 +1,4 @@
+[project]
+name = "bare-import-test"
+version = "0.1.0"
+dependencies = ["requests"]

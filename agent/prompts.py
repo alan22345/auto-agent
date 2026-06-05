@@ -393,7 +393,7 @@ You are a Product Owner analyzing a codebase to identify UX improvements and fea
 
 ### Brief summary
 {brief_summary}
-
+{graph_section}
 ## Your accumulated knowledge about this product
 {ux_knowledge}
 
@@ -851,6 +851,7 @@ def build_po_analysis_prompt(
     ux_knowledge: str | None = None,
     recent_suggestions: list[str] | None = None,
     goal: str | None = None,
+    graph_findings: str | None = None,
 ) -> str:
     knowledge = ux_knowledge or "No prior knowledge — this is the first analysis."
     suggestions = "\n".join(f"- {s}" for s in (recent_suggestions or []))
@@ -872,6 +873,19 @@ def build_po_analysis_prompt(
     else:
         goal_section = ""
         goal_directive = ""
+
+    graph_findings_clean = (graph_findings or "").strip()
+    if graph_findings_clean:
+        graph_section = (
+            "\n## Code graph findings (machine-derived, evidence-backed)\n"
+            "These are machine-derived, evidence-backed findings from the code "
+            "graph; prefer proposing concrete tasks from them where they serve "
+            "the goal. Each finding is churn-gated so only actively-changing "
+            "files are surfaced — high refactor ROI.\n\n"
+            f"{graph_findings_clean}\n"
+        )
+    else:
+        graph_section = ""
 
     def _bullet_list(items, fmt):
         if not items:
@@ -907,6 +921,7 @@ def build_po_analysis_prompt(
     return PO_ANALYSIS_PROMPT.format(
         goal_section=goal_section,
         goal_directive=goal_directive,
+        graph_section=graph_section,
         ux_knowledge=knowledge,
         recent_suggestions=suggestions,
         brief_product_category=brief.product_category or "(unknown)",

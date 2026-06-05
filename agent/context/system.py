@@ -10,6 +10,7 @@ from sqlalchemy import select
 from team_memory.graph import GraphEngine
 
 from agent import sh
+from agent.context.adr_index import active_adrs, build_index
 from agent.context.repo_map import (
     build_repo_map,
     format_map_with_commit,
@@ -280,6 +281,22 @@ class SystemPromptBuilder:
         # Repo summary
         if repo_summary:
             parts.append(f"## Repo summary\n{repo_summary}")
+
+        # Active ADR index (status-aware). Built live from the workspace so
+        # superseded/deprecated decisions never reach the agent. Cheap (reads
+        # a handful of small markdown files); failures are logged and skipped.
+        try:
+            adr_dir = os.path.join(workspace, "docs", "decisions")
+            if active_adrs(adr_dir):
+                parts.append(
+                    "## Architecture Decisions (active)\n"
+                    "Binding decisions for this repo. Before changing code in an "
+                    "area below, read that ADR's file; if your change overturns "
+                    "one, retire it (set its `## Status` to Superseded) in the "
+                    "same change.\n\n" + build_index(adr_dir)
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("adr_index_failed", error=str(e))
 
         # Graph memory (team knowledge relevant to this task)
         if memory_context:

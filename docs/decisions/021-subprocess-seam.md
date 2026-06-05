@@ -1,4 +1,6 @@
-# [ADR-010] Subprocess execution as a single seam
+# [ADR-021] Subprocess execution as a single seam
+
+> **Summary:** agent/sh.py is the single subprocess seam — owns env-merge (GIT_TERMINAL_PROMPT=0), timeout-with-kill, and output capping for every agent shell-out.
 
 ## Status
 
