@@ -41,15 +41,16 @@ def compute_cycles(edges: list[Edge]) -> list[DependencyCycle]:
     Returns
     -------
     list[DependencyCycle]
-        Sorted deterministically by cycle id. No duplicates.
+        Sorted deterministically by cycle id. No duplicate cycle objects.
 
     Each :class:`~shared.types.DependencyCycle` has:
 
     * ``kind="import"``
     * ``members`` — sorted vertex ids participating in the cycle.
-    * ``closing_edges`` — :class:`~shared.types.EdgeEvidence` of every
-      ``imports`` edge whose source **and** target are both in this SCC,
-      sorted by ``(file, line)``.
+    * ``closing_edges`` — one :class:`~shared.types.EdgeEvidence` per
+      ``imports`` edge whose source **and** target are both in this SCC
+      (i.e. one entry per edge, including parallel edges between the same
+      pair of modules), sorted by ``(file, line)``.
     * ``id`` — stable deterministic id: ``"cycle:" + "|".join(sorted_members)``.
     """
     # Collect only imports edges.
@@ -72,12 +73,6 @@ def compute_cycles(edges: list[Edge]) -> list[DependencyCycle]:
     # Build a set of self-loop sources for the 1-member SCC check.
     self_loops: set[str] = {e.source for e in import_edges if e.source == e.target}
 
-    # Build a lookup: (source, target) -> list of EdgeEvidence for closing_edges.
-    edge_evidence: dict[tuple[str, str], list[EdgeEvidence]] = {}
-    for e in import_edges:
-        key = (e.source, e.target)
-        edge_evidence.setdefault(key, []).append(e.evidence)
-
     cycles: list[DependencyCycle] = []
     for scc in sccs:
         if len(scc) == 1:
@@ -89,14 +84,14 @@ def compute_cycles(edges: list[Edge]) -> list[DependencyCycle]:
         sorted_members = sorted(scc)
         scc_set = scc  # already a set
 
-        # Collect closing edges: imports edges whose source AND target are both in SCC.
+        # Collect closing edges: one evidence entry per in-cycle import edge.
+        # Each edge contributes exactly its own evidence — no lookup by (source, target)
+        # to avoid N² expansion when parallel edges share the same pair.
         closing: list[EdgeEvidence] = []
         for e in import_edges:
             if e.source in scc_set and e.target in scc_set:
-                closing.extend(edge_evidence[(e.source, e.target)])
+                closing.append(e.evidence)
 
-        # Deduplicate closing edges while preserving sort order.
-        # (Multiple parallel imports edges between the same pair are all included.)
         closing_sorted = sorted(closing, key=lambda ev: (ev.file, ev.line))
 
         cycle_id = "cycle:" + "|".join(sorted_members)

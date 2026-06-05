@@ -293,6 +293,42 @@ class TestDeterminism:
         assert ids == sorted(ids)
 
 
+class TestParallelEdges:
+    """Parallel edges (same source+target, different lines) must each produce
+    exactly one evidence entry — no N² explosion."""
+
+    def test_parallel_edges_one_evidence_each(self) -> None:
+        """a->b at line 1, a->b at line 20 (parallel), b->a at line 1.
+
+        Expect: exactly one cycle, members == ["a", "b"],
+        and len(closing_edges) == 3 (one per import edge), NOT 5.
+        """
+        edges = [
+            _import_edge("a", "b", file="a.py", line=1),
+            _import_edge("a", "b", file="a.py", line=20),
+            _import_edge("b", "a", file="b.py", line=1),
+        ]
+        cycles = compute_cycles(edges)
+        assert len(cycles) == 1
+        assert cycles[0].members == ["a", "b"]
+        assert len(cycles[0].closing_edges) == 3, (
+            f"Expected 3 closing_edges (one per edge), got {len(cycles[0].closing_edges)}"
+        )
+
+    def test_parallel_edges_evidence_sorted(self) -> None:
+        """closing_edges for parallel edges are sorted by (file, line)."""
+        edges = [
+            _import_edge("a", "b", file="a.py", line=20),
+            _import_edge("a", "b", file="a.py", line=1),
+            _import_edge("b", "a", file="b.py", line=1),
+        ]
+        cycles = compute_cycles(edges)
+        closing = cycles[0].closing_edges
+        assert closing[0].file == "a.py" and closing[0].line == 1
+        assert closing[1].file == "a.py" and closing[1].line == 20
+        assert closing[2].file == "b.py" and closing[2].line == 1
+
+
 class TestEmptyInput:
     """Edge cases: empty lists and single-node graphs."""
 
