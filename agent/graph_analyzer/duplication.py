@@ -46,6 +46,7 @@ d) **min_tokens default 50** — very short functions are unlikely to
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from shared.types import CloneGroup, CloneInstance
@@ -397,9 +398,6 @@ def compute_clones(
             j += 1
         block_end = j  # exclusive
 
-        # All SA positions in this block: sa[block_start-1] .. sa[block_end-1]
-        block_positions = [sa[k] for k in range(block_start - 1, block_end)]
-
         # --- Sub-pass A: per-pair candidates ---
         # Each consecutive pair (sa[k-1], sa[k]) shares exactly lcp[k] tokens.
         for k in range(block_start, block_end):
@@ -414,18 +412,106 @@ def compute_clones(
                     best_by_set[key] = pair_len
 
         # --- Sub-pass B: block-level multi-owner detection ---
-        # Find the minimum lcp across this block (the length that all
-        # positions in the block share).
+        # For each contiguous SA sub-range [lo, hi] (lo >= block_start-1,
+        # hi <= block_end-1) the range-min of lcp[lo+1..hi] is the length
+        # shared by every suffix in that sub-range.  We want: for each
+        # distinct owner-set that appears in SOME sub-range, record the
+        # MAXIMUM range-min achievable — i.e. the tightest window that
+        # still covers all those owners.
+        #
+        # Strategy: use a sliding minimum window over SA indices.  Walk the
+        # block SA positions (indices block_start-1 .. block_end-1) with a
+        # two-pointer.  The LCP value for a window [lo..hi] is
+        # min(lcp[lo+1], …, lcp[hi]).  We track this with a running minimum
+        # that resets when the left pointer advances.
+        #
+        # For efficiency we collect, per owner, the set of SA indices where
+        # it appears, then use the minimum-coverage-window approach.
+        block_sa_indices = list(range(block_start - 1, block_end))
+        # Map from SA index → owner (or None for sentinels/invalid).
+        # We reuse min_lcp_in_block only as a fallback.
         min_lcp_in_block = min(lcp[k] for k in range(block_start, block_end))
-        owners: set[str] = set()
-        for pos in block_positions:
-            owner = _is_valid_start(pos, min_lcp_in_block)
-            if owner is not None:
-                owners.add(owner)
-        if len(owners) >= 2:
-            key = frozenset(owners)
-            if min_lcp_in_block > best_by_set.get(key, 0):
-                best_by_set[key] = min_lcp_in_block
+
+        # Collect all valid (owner, sa_index) in the block.
+        # For the multi-owner case we need the length for _is_valid_start,
+        # so we first gather owners at the block's min LCP (conservative),
+        # then tighten the window to maximise the shared length.
+        owner_at_idx: list[str | None] = []
+        for k in block_sa_indices:
+            owner_at_idx.append(_is_valid_start(sa[k], min_lcp_in_block))
+
+        # Build the set of distinct owners present in the full block.
+        all_block_owners = {o for o in owner_at_idx if o is not None}
+        if len(all_block_owners) < 2:
+            i = block_end
+            continue
+
+        # Emit the full owner-set at the block minimum (lower bound).
+        full_owner_key = frozenset(all_block_owners)
+        if min_lcp_in_block > best_by_set.get(full_owner_key, 0):
+            best_by_set[full_owner_key] = min_lcp_in_block
+
+        # Now find the TRUE maximum shared length for each subset of owners
+        # using a sliding-window minimum.  We slide over the LCP values
+        # associated with consecutive SA index pairs.
+        #
+        # For each contiguous sub-range [lo..hi] of block_sa_indices,
+        # the range-min is min(lcp[block_sa_indices[t]+1] for t in 1..hi-lo).
+        # We use a two-pointer: grow right, then shrink left until we no
+        # longer cover all owners, then emit.
+        #
+        # Since we want "all owners in window" we track a count of how many
+        # distinct owners are covered and a per-owner count.
+        #
+        # Limitation: here we emit the max-window length for SUBSET groups
+        # only if the subset appears in a tighter window than the full block.
+        # We skip this extra scan when the block has only 2 owners (pair
+        # already handled by sub-pass A).
+        if len(all_block_owners) >= 3:
+            m = len(block_sa_indices)
+            # lcp_val[t] = lcp value BETWEEN block_sa_indices[t-1] and
+            # block_sa_indices[t], i.e. lcp[block_sa_indices[t]] (since
+            # SA indices are consecutive integers in the block).
+            lcp_vals = [lcp[block_sa_indices[t]] for t in range(1, m)]
+
+            # Use two pointers to find the tightest SA sub-window that
+            # still covers all owners, then compute the range-min of LCP
+            # values within that window.  The maximum such range-min over
+            # all valid windows is the TRUE shared length for all owners.
+            # Range-min is recomputed on each shrink step; blocks are
+            # small in practice so the O(m²) worst-case is acceptable.
+            owner_list = list(all_block_owners)
+            owner_count: dict[str, int] = {o: 0 for o in owner_list}
+            covered = 0
+            needed = len(owner_list)
+            lo = 0
+            best_window_lcp = 0
+            for hi in range(m):
+                o = owner_at_idx[hi]
+                if o is not None:
+                    if owner_count[o] == 0:
+                        covered += 1
+                    owner_count[o] += 1
+                # While all owners covered, try shrinking from the left and
+                # record the range-min for each valid window.
+                while covered >= needed and lo <= hi:
+                    rmin = (
+                        min(lcp_vals[lo:hi])
+                        if lo < hi
+                        else (lcp_vals[lo] if lo < len(lcp_vals) else min_lcp_in_block)
+                    )
+                    if rmin > best_window_lcp:
+                        best_window_lcp = rmin
+                    # Shrink left pointer.
+                    o_lo = owner_at_idx[lo]
+                    if o_lo is not None:
+                        owner_count[o_lo] -= 1
+                        if owner_count[o_lo] == 0:
+                            covered -= 1
+                    lo += 1
+
+            if best_window_lcp > best_by_set.get(full_owner_key, 0):
+                best_by_set[full_owner_key] = int(best_window_lcp)
 
         i = block_end  # advance past the processed block
 
@@ -492,8 +578,6 @@ def compute_clones(
     #    family (singletons get None).
     # ---------------------------------------------------------------
     # Group by sorted-file-set.
-    from collections import defaultdict
-
     by_file_set: dict[tuple[str, ...], list[CloneGroup]] = defaultdict(list)
     for g in groups:
         files_key = tuple(sorted({inst.file for inst in g.instances}))

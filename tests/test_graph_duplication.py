@@ -561,3 +561,88 @@ class TestComputeClonesFamilyId:
             assert len(fam_ids) == 1, "Both groups must share the same family_id"
             fam_id = next(iter(fam_ids))
             assert fam_id.startswith("family:")
+
+
+# ---------------------------------------------------------------------------
+# compute_clones — N-way clone anti-fragmentation (Bug 1 regression tests)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeClonesNWayCoalesce:
+    """Regression tests for the N-way clone fragmentation bug.
+
+    When k >= 3 functions share an identical token block, compute_clones
+    must emit EXACTLY ONE group covering all k owners at the TRUE maximum
+    shared length — not a fragmented mix of a superset at a lower length
+    plus redundant pair groups at higher lengths.
+    """
+
+    def test_three_identical_functions_single_group(self):
+        """Exact repro from the bug report: 3 functions each with 8 identical
+        low-vocabulary tokens at min_tokens=5 must yield exactly ONE group
+        with all 3 owners and token_len == 8.
+        """
+        shared8 = [("identifier", "tok")] * 8
+        toks = {
+            "a.py::f": shared8,
+            "b.py::g": shared8,
+            "c.py::h": shared8,
+        }
+        nodes = {
+            nid: Node(
+                id=nid,
+                kind="function",
+                label=nid,
+                file=nid.split("::")[0],
+                area="x",
+                line_start=1,
+                line_end=9,
+            )
+            for nid in toks
+        }
+        groups = compute_clones(toks, nodes, min_tokens=5)
+        assert len(groups) == 1, (
+            f"Expected exactly 1 group, got {len(groups)}: "
+            f"{[(g.token_len, sorted(i.node_id for i in g.instances)) for g in groups]}"
+        )
+        g = groups[0]
+        assert g.token_len == 8, f"Expected token_len=8 (true shared length), got {g.token_len}"
+        owner_ids = {inst.node_id for inst in g.instances}
+        assert owner_ids == {"a.py::f", "b.py::g", "c.py::h"}
+
+    def test_no_redundant_subset_groups(self):
+        """3 identical functions + 1 unrelated function → ONE group for the 3,
+        none referencing the unrelated function.
+        """
+        shared8 = [("identifier", "tok")] * 8
+        unrelated = [("identifier", f"uniq{i}") for i in range(8)]
+        toks = {
+            "a.py::f": shared8,
+            "b.py::g": shared8,
+            "c.py::h": shared8,
+            "d.py::q": unrelated,
+        }
+        nodes = {
+            nid: Node(
+                id=nid,
+                kind="function",
+                label=nid,
+                file=nid.split("::")[0],
+                area="x",
+                line_start=1,
+                line_end=9,
+            )
+            for nid in toks
+        }
+        groups = compute_clones(toks, nodes, min_tokens=5)
+        # Exactly one group — covering only the 3 identical functions.
+        assert len(groups) == 1, (
+            f"Expected exactly 1 group, got {len(groups)}: "
+            f"{[(g.token_len, sorted(i.node_id for i in g.instances)) for g in groups]}"
+        )
+        g = groups[0]
+        owner_ids = {inst.node_id for inst in g.instances}
+        assert owner_ids == {"a.py::f", "b.py::g", "c.py::h"}, (
+            f"Unrelated function must not appear in clone group; owners={owner_ids}"
+        )
+        assert "d.py::q" not in owner_ids

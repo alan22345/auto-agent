@@ -775,6 +775,11 @@ async def run_partial_pipeline(
     # target area are available; inherited tokens from previous runs are not
     # persisted. Cross-area clones that span an inherited + target area
     # are therefore not detected in partial-pipeline runs.
+    log.debug(
+        "clone_detection_partial_mode",
+        area=target_status,
+        note="only covers freshly-analysed area; cross-area clones may be absent",
+    )
     partial_blob.clones = compute_clones(target_tokens, {n.id: n for n in partial_blob.nodes})
     return partial_blob
 
