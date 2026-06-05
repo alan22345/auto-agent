@@ -1,6 +1,6 @@
 """Query the code graph for a repo (ADR-016 Phase 6 §12).
 
-A single agent tool with seven read-only ops over the latest stored
+A single agent tool with nine read-only ops over the latest stored
 :class:`shared.types.RepoGraphBlob` for a repo. Every response carries
 a staleness envelope (graph SHA vs. workspace HEAD) and per-result
 existence flags so the agent can filter out symbols that have been
