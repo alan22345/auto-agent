@@ -18,6 +18,7 @@ from agent.context.memory import remember_priority_suggestion
 from agent.lifecycle.factory import create_agent
 from agent.llm.structured import parse_json_response
 from agent.market_researcher import run_market_research
+from agent.po_graph_findings import load_latest_graph_blob, summarize_graph_findings
 from agent.prompts import build_po_analysis_prompt
 from agent.workspace import clone_repo
 from shared.database import async_session
@@ -68,9 +69,7 @@ async def _check_and_analyze(session: AsyncSession) -> None:
                 brief = await _ensure_brief(session, config)
                 if brief is None:
                     repo = (
-                        await session.execute(
-                            select(Repo).where(Repo.id == config.repo_id)
-                        )
+                        await session.execute(select(Repo).where(Repo.id == config.repo_id))
                     ).scalar_one_or_none()
                     await publish(
                         po_analysis_failed(
@@ -125,9 +124,7 @@ def _filter_grounded(suggestions: list[dict]) -> tuple[list[dict], int]:
     return kept, dropped
 
 
-def _brief_is_fresh(
-    brief, now: datetime, max_age_days: int
-) -> bool:
+def _brief_is_fresh(brief, now: datetime, max_age_days: int) -> bool:
     """True if `brief` exists and is younger than `max_age_days`.
 
     The duck-typed signature (any object with `.created_at`) keeps the test
@@ -141,9 +138,7 @@ def _brief_is_fresh(
     return (now - created) < timedelta(days=max_age_days)
 
 
-async def _ensure_brief(
-    session: AsyncSession, config: FreeformConfig
-) -> MarketBrief | None:
+async def _ensure_brief(session: AsyncSession, config: FreeformConfig) -> MarketBrief | None:
     """Return a fresh MarketBrief for `config.repo_id`.
 
     Returns the latest existing brief if it's within `market_brief_max_age_days`.
@@ -199,15 +194,34 @@ async def handle_po_analysis(
 
     ws_name = f"po-{repo.name.replace('/', '-')}"
     workspace = await clone_repo(
-        repo.url, 0, config.dev_branch or repo.default_branch, workspace_name=ws_name,
+        repo.url,
+        0,
+        config.dev_branch or repo.default_branch,
+        workspace_name=ws_name,
         repo_id=repo.id,
     )
+
+    # Load code-graph findings to seed the PO with specific, evidence-cited
+    # refactor tasks.  A missing graph (no analysis run yet, parse error, or
+    # DB unavailable) must never break PO analysis — we fall back silently.
+    graph_findings: str | None = None
+    try:
+        blob = await load_latest_graph_blob(config.repo_id)
+        if blob is not None:
+            graph_findings = summarize_graph_findings(blob) or None
+    except Exception:
+        log.warning(
+            "PO graph findings load failed for repo_id=%s — proceeding without",
+            config.repo_id,
+            exc_info=True,
+        )
 
     prompt = build_po_analysis_prompt(
         brief=brief,
         ux_knowledge=config.ux_knowledge,
         recent_suggestions=recent_titles,
         goal=config.po_goal,
+        graph_findings=graph_findings,
     )
 
     # Notify UI
@@ -221,8 +235,7 @@ async def handle_po_analysis(
             readonly=True,
             max_turns=25,
             task_description=(
-                f"Product Owner analysis of {repo.name}: surface the most "
-                "impactful improvements."
+                f"Product Owner analysis of {repo.name}: surface the most impactful improvements."
             ),
             repo_name=repo.name,
         )
@@ -236,9 +249,7 @@ async def handle_po_analysis(
     suggestions_data = parse_json_response(output)
     if not suggestions_data:
         log.warning(f"PO analysis for '{repo.name}' returned no parseable output")
-        await publish(
-            po_analysis_failed(repo_name=repo.name, reason="No parseable output")
-        )
+        await publish(po_analysis_failed(repo_name=repo.name, reason="No parseable output"))
         return
 
     new_suggestions = suggestions_data.get("suggestions", [])
@@ -246,7 +257,8 @@ async def handle_po_analysis(
     if dropped:
         log.info(
             "PO filtered %d ungrounded suggestion(s) for repo='%s'",
-            dropped, repo.name,
+            dropped,
+            repo.name,
         )
 
     for s in filtered:
@@ -279,8 +291,8 @@ async def handle_po_analysis(
         config.ux_knowledge = ux_update
 
     await session.flush()
-    log.info(f"PO analysis for '{repo.name}': {len(filtered)} suggestions created ({dropped} ungrounded dropped)")
-
-    await publish(
-        po_suggestions_ready(repo_name=repo.name, count=len(filtered))
+    log.info(
+        f"PO analysis for '{repo.name}': {len(filtered)} suggestions created ({dropped} ungrounded dropped)"
     )
+
+    await publish(po_suggestions_ready(repo_name=repo.name, count=len(filtered)))
