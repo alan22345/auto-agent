@@ -690,3 +690,47 @@ async def test_artefact_scope_allow_stub_diff_proceeds_to_llm(tmp_path: Path) ->
     # The LLM ran because no blocking stub fired.
     assert agent_calls["n"] >= 1
     assert result.verdict == "approved"
+
+
+# ---------------------------------------------------------------------------
+# ADR retire-in-same-change backstop (Task 9, deterministic, pre-LLM).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_flags_unretired_supersession(tmp_path: Path) -> None:
+    """A diff that introduces 'Supersedes [ADR-005]' while ADR-005 is still
+    Accepted in the tree is blocked deterministically, before the LLM runs."""
+
+    workspace = tmp_path
+    d = workspace / "docs" / "decisions"
+    d.mkdir(parents=True)
+    (d / "005-old.md").write_text("# [ADR-005] Old\n\n## Status\n\nAccepted\n")
+    (d / "023-new.md").write_text(
+        "# [ADR-023] New\n\n## Status\n\nAccepted\n\n## Decision\n\nSupersedes [ADR-005].\n"
+    )
+    diff = (
+        "+++ b/docs/decisions/023-new.md\n"
+        "+## Decision\n"
+        "+Supersedes [ADR-005].\n"
+    )
+
+    def _no_llm(*_a, **_kw):
+        raise AssertionError("LLM must not run when the ADR backstop fires")
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=diff)),
+        patch.object(pr_reviewer, "create_agent", _no_llm),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    assert result.verdict == "changes_requested"
+    assert any("005" in (c.get("comment", "")) for c in result.comments)
+    # The verdict was persisted to the gate file.
+    payload = json.loads((workspace / ".auto-agent" / "pr_review.json").read_text())
+    assert payload["verdict"] == "changes_requested"

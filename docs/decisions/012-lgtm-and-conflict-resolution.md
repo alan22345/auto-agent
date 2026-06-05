@@ -1,5 +1,7 @@
 # [ADR-012] LGTM-driven auto-merge and merge-conflict resolution
 
+> **Summary:** Reviewer-approved (LGTM) freeform PRs auto-merge when CI is green and conflict-free; dirty PRs trigger the conflict resolver. Non-freeform still needs human review.
+
 ## Status
 
 Accepted

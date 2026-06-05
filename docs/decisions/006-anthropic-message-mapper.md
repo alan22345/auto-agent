@@ -1,4 +1,6 @@
-# 006 — Extract Anthropic message mapper as the LLM provider seam
+# [ADR-006] Extract Anthropic message mapper as the LLM provider seam
+
+> **Summary:** agent/llm/anthropic_mapper.py is the single owner of Message↔Anthropic-API translation; Bedrock and Anthropic providers shrink to thin transport+auth adapters.
 
 ## Status
 Accepted

@@ -1,8 +1,10 @@
 # [ADR-019] Per-repo project secrets vault — architect-declared, user-managed, build-gating
 
+> **Summary:** Per-repo encrypted secret vault — architect declares a required-secrets manifest, a hard gate blocks the build until they're populated, injected into the project runtime at boot.
+
 ## Status
 
-Proposed
+Accepted
 
 Extends ADR-018 §6 (per-domain ADR approval) and ADR-015 §11 (verify primitives). Does not supersede any existing ADR.
 

@@ -1,5 +1,7 @@
 # [ADR-007] Event publishing as a real seam
 
+> **Summary:** shared/events.py is the single publish seam (Publisher protocol + Redis/in-memory adapters); call sites just publish() with no Redis knowledge.
+
 ## Status
 
 Accepted

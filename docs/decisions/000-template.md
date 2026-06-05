@@ -1,5 +1,7 @@
 # [ADR-NNN] Title
 
+> **Summary:** One sentence — what was decided and why it matters.
+
 ## Status
 
 Proposed | Accepted | Deprecated | Superseded by [ADR-NNN]

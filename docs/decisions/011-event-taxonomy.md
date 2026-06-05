@@ -1,5 +1,7 @@
 # [ADR-011] Typed event taxonomy in shared/events.py
 
+> **Summary:** Typed event taxonomy in shared/events.py — StrEnum types + one factory per event so a payload typo fails at the producer, wire string unchanged.
+
 ## Status
 
 Accepted
