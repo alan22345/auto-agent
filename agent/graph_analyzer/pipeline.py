@@ -40,6 +40,7 @@ import structlog
 import yaml
 
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
+from agent.graph_analyzer.cycles import compute_cycles
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
@@ -574,6 +575,7 @@ async def run_pipeline(
         nodes=all_nodes,
         edges=all_edges,
         public_symbols=sorted(all_public_symbols),
+        cycles=compute_cycles(all_edges),
     )
 
 
@@ -740,6 +742,7 @@ async def run_partial_pipeline(
         nodes=all_nodes,
         edges=all_edges,
         public_symbols=sorted(all_public_symbols),
+        cycles=compute_cycles(all_edges),
     )
 
 
