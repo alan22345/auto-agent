@@ -333,6 +333,19 @@ class Edge(BaseModel):
     violation_reason: str | None = None
 
 
+class DependencyCycle(BaseModel):
+    """One circular-dependency cycle detected in the module graph
+    (ADR-016 quality layer §3). Computed by Tarjan SCC over ``imports``
+    edges. ``members`` are the import-graph vertex ids participating in
+    the cycle (e.g. ``module:agent.a``); ``closing_edges`` cite the
+    ``imports`` edges whose source and target are both in the cycle."""
+
+    id: str
+    kind: Literal["import", "call"]
+    members: list[str]
+    closing_edges: list[EdgeEvidence]
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -360,6 +373,9 @@ class RepoGraphBlob(BaseModel):
     nodes: list[Node]
     edges: list[Edge]
     public_symbols: list[str] = Field(default_factory=list)
+    cycles: list[DependencyCycle] = Field(default_factory=list)
+    """Import-cycle records computed by Phase 9 Tarjan SCC pass; empty on
+    pre-Phase-9 blobs (backward-compatible default)."""
 
 
 class RepoGraphRefreshResponse(BaseModel):

@@ -81,8 +81,9 @@ _GAP_FILL_CONCURRENCY = 8
 # is passed the analyser version still records that the binary is
 # *capable* of LLM gap-fill — useful for downstream consumers to tell
 # graphs apart across phases. Phase 8 adds per-function complexity fields
-# (cyclomatic/cognitive/loc) to Node.
-_ANALYSER_VERSION = "phase8-complexity-0.8.0"
+# (cyclomatic/cognitive/loc) to Node. Phase 9 adds import-cycle detection
+# (Tarjan SCC over imports edges) and the DependencyCycle schema.
+_ANALYSER_VERSION = "phase9-cycles-0.9.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
