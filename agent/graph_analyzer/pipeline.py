@@ -606,12 +606,18 @@ async def run_pipeline(
     )
 
     # Compute first-party top-level module names from file nodes.
+    # We add BOTH the top-level segment (e.g. "svc" from "svc.models") AND
+    # the leaf segment (e.g. "models") so that legacy bare-name imports such
+    # as ``import models`` — which resolve to ``module:models`` — are
+    # recognised as first-party and not falsely flagged as undeclared.
     first_party_top_levels: set[str] = set()
     for _n in all_nodes:
         if _n.kind == "file" and _n.file:
             _mod = _file_to_module(_n.file)
             if _mod:
-                first_party_top_levels.add(_mod.split(".")[0])
+                _parts = _mod.split(".")
+                first_party_top_levels.add(_parts[0])  # top-level package/dir
+                first_party_top_levels.add(_parts[-1])  # leaf name (bare-name imports)
 
     # Resolve bare ``module:<dotted>`` endpoints on import edges to the
     # corresponding ``file:`` node id, and drop edges whose endpoints
@@ -826,12 +832,18 @@ async def run_partial_pipeline(
     )
 
     # Compute first-party top-level module names from file nodes.
+    # We add BOTH the top-level segment (e.g. "svc" from "svc.models") AND
+    # the leaf segment (e.g. "models") so that legacy bare-name imports such
+    # as ``import models`` — which resolve to ``module:models`` — are
+    # recognised as first-party and not falsely flagged as undeclared.
     first_party_top_levels_partial: set[str] = set()
     for _n in all_nodes:
         if _n.kind == "file" and _n.file:
             _mod = _file_to_module(_n.file)
             if _mod:
-                first_party_top_levels_partial.add(_mod.split(".")[0])
+                _parts = _mod.split(".")
+                first_party_top_levels_partial.add(_parts[0])  # top-level package/dir
+                first_party_top_levels_partial.add(_parts[-1])  # leaf name (bare-name imports)
 
     # 6c. Resolve bare ``module:<dotted>`` import endpoints to real
     # ``file:`` nodes (and drop edges that still don't resolve). See the
