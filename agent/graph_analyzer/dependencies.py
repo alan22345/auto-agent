@@ -40,11 +40,17 @@ b) **Plugin / entry-point dependencies** — packages like ``pytest``,
    the most common instances, but runtime plugins (e.g. SQLAlchemy dialect
    packages) may still be falsely flagged.
 
-c) **Workspace-root manifests only** — only the root-level ``pyproject.toml``
-   and ``package.json`` are read.  Monorepo workspaces with nested
-   ``package.json`` files or PEP 517 sub-packages are not analysed.  This can
-   produce false ``undeclared_dependency`` findings for packages declared in a
-   nested manifest.
+c) **Nested manifests are read and unioned** — all ``pyproject.toml`` and
+   ``package.json`` files found anywhere in the workspace (excluding
+   ``node_modules``, ``.git``, ``.venv``, build/cache dirs — see
+   ``_DEFAULT_EXCLUDE_DIRS`` in ``pipeline.py``) are read, and their declared
+   deps are unioned into a single declared set.  A dep declared in *any*
+   manifest (root or nested) counts as declared.  Trade-off: this is a
+   conservative union across all packages in the monorepo — a dep declared in
+   one sub-package suppresses undeclared findings for all sub-packages.  This
+   accepts false negatives (cross-package precision lost) to eliminate
+   cross-package false positives, which is the right bias for an autonomous
+   task proposer.
 
 d) **Optional / extra dependency groups not analysed** — ``[project.optional-
    dependencies]``, ``[tool.poetry.group.*]``, and ``package.json``
@@ -226,6 +232,9 @@ def _top_level_js(module_target: str) -> str | None:
     """Extract the top-level package specifier from a ``module:<specifier>`` target.
 
     Rules:
+    - Strip a leading ``node:`` protocol prefix (e.g. ``node:path`` -> ``path``,
+      ``node:fs/promises`` -> ``fs``) so Node built-ins are recognised by
+      ``_NODE_BUILTINS`` regardless of whether the caller uses the protocol form.
     - Skip relative (``./``, ``../``) and absolute (``/``) specifiers.
     - Scoped packages: ``@scope/pkg/sub`` -> ``@scope/pkg``.
     - Bare package: ``lodash/merge`` -> ``lodash``.
@@ -235,6 +244,12 @@ def _top_level_js(module_target: str) -> str | None:
     if not module_target.startswith("module:"):
         return None
     spec = module_target[len("module:") :]
+    # Strip node: protocol prefix — node:path -> path, node:fs/promises -> fs
+    if spec.startswith("node:"):
+        spec = spec[len("node:") :]
+        # Take only the part before any sub-path (e.g. fs/promises -> fs)
+        spec = spec.split("/")[0]
+        return spec  # always a builtin candidate; caller checks _NODE_BUILTINS
     # Skip relative and absolute specifiers
     if spec.startswith(".") or spec.startswith("/"):
         return None
@@ -252,20 +267,23 @@ def _top_level_js(module_target: str) -> str | None:
 
 
 def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
-    """Read Python deps from ``pyproject.toml`` at workspace root.
+    """Read Python deps from ALL ``pyproject.toml`` files found under *workspace*.
+
+    Walks the workspace directory tree, skipping excluded dirs (``node_modules``,
+    ``.git``, ``.venv``, build/cache dirs — same set used by
+    ``pipeline.walk_files``), and unions the declared deps from every
+    ``pyproject.toml`` found.
 
     Returns ``(runtime_deps, all_deps)`` as sets of PEP-503-normalised
     names.  ``runtime_deps`` comes from ``[project].dependencies`` and
     ``[tool.poetry.dependencies]`` (Python key excluded).  ``all_deps``
     is the same set (extras/groups are not read in v1).
 
-    Returns ``(set(), set())`` if no ``pyproject.toml`` is present.
+    Returns ``(set(), set())`` if no ``pyproject.toml`` is found anywhere.
     """
     import os
 
-    toml_path = os.path.join(workspace, "pyproject.toml")
-    if not os.path.isfile(toml_path):
-        return set(), set()
+    from agent.graph_analyzer.pipeline import _DEFAULT_EXCLUDE_DIRS
 
     try:
         import tomllib
@@ -275,66 +293,85 @@ def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
         except ImportError:
             return set(), set()
 
-    try:
-        with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        return set(), set()
+    def _parse_one(toml_path: str) -> set[str]:
+        try:
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            return set()
 
-    raw_names: list[str] = []
+        raw_names: list[str] = []
 
-    # PEP 621: [project].dependencies
-    project = data.get("project") or {}
-    pep621_deps = project.get("dependencies") or []
-    if isinstance(pep621_deps, list):
-        raw_names.extend(pep621_deps)
+        # PEP 621: [project].dependencies
+        project = data.get("project") or {}
+        pep621_deps = project.get("dependencies") or []
+        if isinstance(pep621_deps, list):
+            raw_names.extend(pep621_deps)
 
-    # Poetry: [tool.poetry.dependencies]
-    tool = data.get("tool") or {}
-    poetry = tool.get("poetry") or {}
-    poetry_deps = poetry.get("dependencies") or {}
-    if isinstance(poetry_deps, dict):
-        for k in poetry_deps:
-            if k.lower() == "python":
+        # Poetry: [tool.poetry.dependencies]
+        tool = data.get("tool") or {}
+        poetry = tool.get("poetry") or {}
+        poetry_deps = poetry.get("dependencies") or {}
+        if isinstance(poetry_deps, dict):
+            for k in poetry_deps:
+                if k.lower() == "python":
+                    continue
+                raw_names.append(k)
+
+        normalized: set[str] = set()
+        for raw in raw_names:
+            if not isinstance(raw, str):
                 continue
-            raw_names.append(k)
+            name = _strip_python_version_specifier(raw)
+            if name:
+                normalized.add(_pep503_normalize(name))
+        return normalized
 
-    normalized: set[str] = set()
-    for raw in raw_names:
-        if not isinstance(raw, str):
-            continue
-        name = _strip_python_version_specifier(raw)
-        if name:
-            normalized.add(_pep503_normalize(name))
+    union: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(workspace):
+        # Prune excluded dirs in-place so os.walk doesn't descend into them
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        if "pyproject.toml" in filenames:
+            union |= _parse_one(os.path.join(dirpath, "pyproject.toml"))
 
-    return normalized, normalized.copy()
+    return union, union.copy()
 
 
 def _read_js_deps(workspace: str) -> tuple[set[str], set[str]]:
-    """Read JS deps from ``package.json`` at workspace root.
+    """Read JS deps from ALL ``package.json`` files found under *workspace*.
 
-    Returns ``(runtime_deps, all_deps)`` where ``runtime_deps`` is from
-    ``dependencies`` only and ``all_deps`` is ``dependencies + devDependencies``.
+    Walks the workspace directory tree, skipping excluded dirs (``node_modules``,
+    ``.git``, build/cache dirs — same set used by ``pipeline.walk_files``), and
+    unions the declared deps from every ``package.json`` found.
 
-    Returns ``(set(), set())`` if no ``package.json`` is present.
+    Returns ``(runtime_deps, all_deps)`` where ``runtime_deps`` is the union of
+    ``dependencies`` across all manifests and ``all_deps`` adds ``devDependencies``.
+
+    Returns ``(set(), set())`` if no ``package.json`` is found anywhere.
     """
     import json
     import os
 
-    pkg_path = os.path.join(workspace, "package.json")
-    if not os.path.isfile(pkg_path):
-        return set(), set()
+    from agent.graph_analyzer.pipeline import _DEFAULT_EXCLUDE_DIRS
 
-    try:
-        with open(pkg_path) as f:
-            data = json.load(f)
-    except Exception:
-        return set(), set()
+    runtime_union: set[str] = set()
+    all_union: set[str] = set()
 
-    runtime_deps: set[str] = set(data.get("dependencies", {}).keys())
-    dev_deps: set[str] = set(data.get("devDependencies", {}).keys())
-    all_deps = runtime_deps | dev_deps
-    return runtime_deps, all_deps
+    for dirpath, dirnames, filenames in os.walk(workspace):
+        # Prune excluded dirs in-place so os.walk doesn't descend into them
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        if "package.json" in filenames:
+            try:
+                with open(os.path.join(dirpath, "package.json")) as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            runtime_deps: set[str] = set(data.get("dependencies", {}).keys())
+            dev_deps: set[str] = set(data.get("devDependencies", {}).keys())
+            runtime_union |= runtime_deps
+            all_union |= runtime_deps | dev_deps
+
+    return runtime_union, all_union
 
 
 def _is_python_stdlib(name: str) -> bool:
@@ -428,8 +465,20 @@ def compute_dependency_dead_code(
     """
     import os
 
-    has_pyproject = os.path.isfile(os.path.join(workspace, "pyproject.toml"))
-    has_package_json = os.path.isfile(os.path.join(workspace, "package.json"))
+    from agent.graph_analyzer.pipeline import _DEFAULT_EXCLUDE_DIRS
+
+    # Determine whether ANY pyproject.toml / package.json exists anywhere in
+    # the workspace (nested manifests count — monorepos may have no root manifest).
+    has_pyproject = False
+    has_package_json = False
+    for _dirpath, dirnames, filenames in os.walk(workspace):
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        if not has_pyproject and "pyproject.toml" in filenames:
+            has_pyproject = True
+        if not has_package_json and "package.json" in filenames:
+            has_package_json = True
+        if has_pyproject and has_package_json:
+            break  # found both, no need to keep walking
 
     # If neither manifest is present there is nothing useful to compare
     # against — skip to avoid spurious findings.

@@ -413,3 +413,104 @@ def test_python_pptx_alias(tmp_path: Path) -> None:
     assert "pptx" not in undeclared, (
         f"pptx aliased to python-pptx must not be undeclared; got {undeclared}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: Nested manifest reading (monorepo support)
+# ---------------------------------------------------------------------------
+
+
+def test_nested_package_json_dep_not_undeclared(tmp_path: Path) -> None:
+    """No root package.json; nested web-next/package.json declares next and clsx.
+
+    Both must NOT be flagged as undeclared — the nested manifest is read and
+    unioned into the declared set.
+    """
+    nested_dir = tmp_path / "web-next"
+    nested_dir.mkdir()
+    (nested_dir / "package.json").write_text(
+        json.dumps({"name": "web-next", "dependencies": {"next": "*", "clsx": "*"}})
+    )
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:next", "module:clsx"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "next" not in undeclared, (
+        f"next is declared in nested package.json, must not be undeclared; got {undeclared}"
+    )
+    assert "clsx" not in undeclared, (
+        f"clsx is declared in nested package.json, must not be undeclared; got {undeclared}"
+    )
+
+
+def test_nested_pyproject_dep_not_undeclared(tmp_path: Path) -> None:
+    """No root pyproject.toml; nested pkg_a/pyproject.toml declares requests.
+
+    importing module:requests must NOT be flagged undeclared.
+    """
+    nested_dir = tmp_path / "pkg_a"
+    nested_dir.mkdir()
+    (nested_dir / "pyproject.toml").write_text(
+        '[project]\nname = "pkg_a"\nversion = "0.1.0"\ndependencies = ["requests>=2.0"]\n'
+    )
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:requests"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "requests" not in undeclared, (
+        f"requests declared in nested pyproject.toml must not be undeclared; got {undeclared}"
+    )
+
+
+def test_node_builtin_prefix_not_undeclared(tmp_path: Path) -> None:
+    """node:path and node:fs imports must NOT be flagged undeclared.
+
+    The ``node:`` protocol prefix must be stripped before the builtin check so
+    that ``node:path`` resolves to ``path`` (a known Node builtin).
+    """
+    write_package_json(tmp_path, deps={"react": "^18.0.0"})
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:node:path", "module:node:fs", "module:react"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "node:path" not in undeclared, (
+        f"node:path is a Node builtin, must not be undeclared; got {undeclared}"
+    )
+    assert "path" not in undeclared, (
+        f"path (from node:path) must not be undeclared; got {undeclared}"
+    )
+    assert "node:fs" not in undeclared, (
+        f"node:fs is a Node builtin, must not be undeclared; got {undeclared}"
+    )
+    assert "fs" not in undeclared, f"fs (from node:fs) must not be undeclared; got {undeclared}"
+
+
+def test_excluded_dir_manifests_ignored(tmp_path: Path) -> None:
+    """node_modules/somepkg/package.json must NOT be read.
+
+    A dep declared ONLY inside node_modules must still be flagged undeclared
+    — we must not pollute the declared set from excluded directories.
+    """
+    # Put a root package.json so the JS path is active
+    write_package_json(tmp_path, deps={"react": "^18.0.0"})
+    # Also put a package.json inside node_modules declaring a junk dep
+    nm_dir = tmp_path / "node_modules" / "somepkg"
+    nm_dir.mkdir(parents=True)
+    (nm_dir / "package.json").write_text(
+        json.dumps({"name": "somepkg", "dependencies": {"junkdep-only-in-node-modules": "*"}})
+    )
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:junkdep-only-in-node-modules"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "junkdep-only-in-node-modules" in undeclared, (
+        f"dep only declared inside node_modules must be flagged undeclared; got {undeclared}"
+    )
