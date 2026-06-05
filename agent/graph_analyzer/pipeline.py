@@ -41,6 +41,7 @@ import yaml
 
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.cycles import compute_cycles
+from agent.graph_analyzer.dead_code import compute_dead_code
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
@@ -568,7 +569,7 @@ async def run_pipeline(
         rules=rules,
     )
 
-    return RepoGraphBlob(
+    blob = RepoGraphBlob(
         commit_sha=commit_sha,
         generated_at=datetime.now(UTC),
         analyser_version=_ANALYSER_VERSION,
@@ -578,6 +579,8 @@ async def run_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
+    blob.dead_code = compute_dead_code(blob)
+    return blob
 
 
 async def run_partial_pipeline(
@@ -735,7 +738,7 @@ async def run_partial_pipeline(
     statuses = [*inherited_statuses, target_status]
     _ = inherited_node_ids  # silence "assigned but unused" linters
 
-    return RepoGraphBlob(
+    partial_blob = RepoGraphBlob(
         commit_sha=commit_sha,
         generated_at=datetime.now(UTC),
         analyser_version=_ANALYSER_VERSION,
@@ -745,6 +748,8 @@ async def run_partial_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
+    partial_blob.dead_code = compute_dead_code(partial_blob)
+    return partial_blob
 
 
 def _resolve_cross_area_module_targets(
