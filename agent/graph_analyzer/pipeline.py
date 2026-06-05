@@ -46,6 +46,7 @@ from agent.graph_analyzer.dead_code import compute_dead_code
 from agent.graph_analyzer.dependencies import compute_dependency_dead_code
 from agent.graph_analyzer.duplication import compute_clones
 from agent.graph_analyzer.gap_fill import gap_fill_site
+from agent.graph_analyzer.health import compute_health
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
 from agent.graph_analyzer.test_filter import is_test_file
@@ -90,8 +91,8 @@ _GAP_FILL_CONCURRENCY = 8
 # (Tarjan SCC over imports edges) and the DependencyCycle schema.
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
 # Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
-# Phase 12 adds churn hotspots (Hotspot schema + hotspots field).
-_ANALYSER_VERSION = "phase12-hotspots-0.12.0"
+# Phase 13 adds per-file maintainability index + repo health score.
+_ANALYSER_VERSION = "phase13-health-0.13.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
@@ -623,23 +624,31 @@ async def run_pipeline(
     blob.clones = compute_clones(all_tokens, {n.id: n for n in blob.nodes})
 
     # Phase 12 — churn x complexity hotspot ranking.
+    # Build file_cyclomatic_total from function nodes (reused by Phase 13).
+    file_cyclomatic_total: dict[str, int] = {}
+    for n in blob.nodes:
+        if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+            file_cyclomatic_total[n.file] = file_cyclomatic_total.get(n.file, 0) + n.cyclomatic
+    # Build file_loc for every file that has function/class nodes (reused by Phase 13).
+    _health_files: set[str] = {
+        n.file for n in blob.nodes if n.kind in {"function", "class"} and n.file is not None
+    }
+    file_loc: dict[str, int] = {f: count_loc(workspace, f) for f in _health_files}
     ref_ts, file_commits = collect_git_churn(workspace)
     if ref_ts is None:
         blob.hotspots = []
     else:
-        # Build file_cyclomatic_total: sum cyclomatic over function nodes per file.
-        file_cyclomatic_total: dict[str, int] = {}
-        for n in blob.nodes:
-            if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
-                file_cyclomatic_total[n.file] = file_cyclomatic_total.get(n.file, 0) + n.cyclomatic
-        # Build file_loc for every file that has function nodes.
-        file_loc: dict[str, int] = {f: count_loc(workspace, f) for f in file_cyclomatic_total}
         blob.hotspots = compute_hotspots(
             file_commits,
             file_loc,
             file_cyclomatic_total,
             reference_ts=ref_ts,
         )
+
+    # Phase 13 — per-file maintainability index + repo health score.
+    fh, rh = compute_health(blob, file_loc, file_cyclomatic_total)
+    blob.file_health = fh
+    blob.health = rh
 
     return blob
 
@@ -844,23 +853,31 @@ async def run_partial_pipeline(
     partial_blob.clones = compute_clones(target_tokens, {n.id: n for n in partial_blob.nodes})
 
     # Phase 12 — churn x complexity hotspot ranking (partial pipeline).
+    # Build file_cyclomatic_total from function nodes (reused by Phase 13).
+    file_cyclomatic_total_p: dict[str, int] = {}
+    for n in partial_blob.nodes:
+        if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
+            file_cyclomatic_total_p[n.file] = file_cyclomatic_total_p.get(n.file, 0) + n.cyclomatic
+    # Build file_loc for every file that has function/class nodes (reused by Phase 13).
+    _health_files_p: set[str] = {
+        n.file for n in partial_blob.nodes if n.kind in {"function", "class"} and n.file is not None
+    }
+    file_loc_p: dict[str, int] = {f: count_loc(workspace, f) for f in _health_files_p}
     ref_ts_p, file_commits_p = collect_git_churn(workspace)
     if ref_ts_p is None:
         partial_blob.hotspots = []
     else:
-        file_cyclomatic_total_p: dict[str, int] = {}
-        for n in partial_blob.nodes:
-            if n.kind == "function" and n.file is not None and n.cyclomatic is not None:
-                file_cyclomatic_total_p[n.file] = (
-                    file_cyclomatic_total_p.get(n.file, 0) + n.cyclomatic
-                )
-        file_loc_p: dict[str, int] = {f: count_loc(workspace, f) for f in file_cyclomatic_total_p}
         partial_blob.hotspots = compute_hotspots(
             file_commits_p,
             file_loc_p,
             file_cyclomatic_total_p,
             reference_ts=ref_ts_p,
         )
+
+    # Phase 13 — per-file maintainability index + repo health score (partial pipeline).
+    fh_p, rh_p = compute_health(partial_blob, file_loc_p, file_cyclomatic_total_p)
+    partial_blob.file_health = fh_p
+    partial_blob.health = rh_p
 
     return partial_blob
 

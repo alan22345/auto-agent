@@ -406,6 +406,34 @@ class Hotspot(BaseModel):
     trend: Literal["accelerating", "stable", "cooling"]
 
 
+class FileHealth(BaseModel):
+    """Per-file maintainability (ADR-016 quality layer §6).
+
+    ``maintainability_index`` (0..100) = 100 - complexity_density*30
+    - dead_code_ratio*20 - fan_out_penalty, clamped to [0,100].
+    ``band``: good (70-100), moderate (40-70), poor (0-40).
+    ``crap`` (untested-complexity risk) is reserved — it needs per-function
+    coverage the graph does not yet ingest, so it is always None for now."""
+
+    file: str
+    maintainability_index: float
+    band: Literal["good", "moderate", "poor"]
+    crap: float | None = None
+
+
+class RepoHealth(BaseModel):
+    """Repo-level health summary (ADR-016 quality layer §6).
+
+    ``score`` is the LOC-weighted mean of per-file maintainability_index;
+    the counts are headline totals from the quality findings."""
+
+    score: float
+    clone_count: int
+    cycle_count: int
+    dead_count: int
+    hotspot_count: int
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -447,6 +475,12 @@ class RepoGraphBlob(BaseModel):
     hotspots: list[Hotspot] = Field(default_factory=list)
     """Churn-hotspot records from the Phase 12 quality pass; empty on
     pre-Phase-12 blobs (backward-compatible default)."""
+    file_health: list[FileHealth] = Field(default_factory=list)
+    """Per-file maintainability records from the Phase 13 health pass; empty on
+    pre-Phase-13 blobs (backward-compatible default)."""
+    health: RepoHealth | None = None
+    """Repo-level health summary from the Phase 13 health pass; None on
+    pre-Phase-13 blobs (backward-compatible default)."""
 
 
 class RepoGraphRefreshResponse(BaseModel):
