@@ -295,3 +295,121 @@ def test_poetry_pyproject_deps_read(tmp_path: Path) -> None:
     # python key must not produce any finding
     assert "python" not in unused
     assert "python" not in undeclared
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: TS @/ path alias must NOT be flagged as undeclared
+# ---------------------------------------------------------------------------
+
+
+def test_ts_path_alias_not_undeclared(tmp_path: Path) -> None:
+    """@/components/Button and @/lib are Next.js/Vite path aliases, not npm packages.
+
+    They must never produce undeclared_dependency findings.
+    Real scoped packages (@scope/pkg declared -> not undeclared; @scope/other
+    NOT declared -> correctly undeclared) must still work.
+    """
+    write_package_json(
+        tmp_path,
+        deps={"react": "^18.0.0", "@scope/pkg": "^1.0.0"},
+    )
+    result = compute_dependency_dead_code(
+        imported_module_targets=[
+            "module:@/components/Button",
+            "module:@/lib",
+            "module:@scope/pkg",
+            "module:@scope/other",
+            "module:react",
+        ],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    # Path aliases must never be flagged
+    assert "@/components/Button" not in undeclared, (
+        f"@/components/Button is a path alias, must not be undeclared; got {undeclared}"
+    )
+    assert "@/lib" not in undeclared, (
+        f"@/lib is a path alias, must not be undeclared; got {undeclared}"
+    )
+    # Declared real scoped package must not be undeclared
+    assert "@scope/pkg" not in undeclared, (
+        f"@scope/pkg is declared, must not be undeclared; got {undeclared}"
+    )
+    # Undeclared real scoped package MUST be flagged (proves real scopes still work)
+    assert "@scope/other" in undeclared, (
+        f"@scope/other is not declared, must be undeclared; got {undeclared}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Google/Azure namespace packages — no double FP
+# ---------------------------------------------------------------------------
+
+
+def test_google_namespace_no_double_fp(tmp_path: Path) -> None:
+    """pyproject declares google-cloud-storage; source imports google.cloud.storage.
+
+    Must produce NEITHER unused_dependency(google-cloud-storage)
+    NOR undeclared_dependency(google).
+    """
+    write_pyproject(tmp_path, ["google-cloud-storage>=2.0"])
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:google.cloud.storage"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    unused = findings_of_kind(result, "unused_dependency")
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "google-cloud-storage" not in unused, (
+        f"google-cloud-storage is a namespace pkg for google.*, must not be unused; got {unused}"
+    )
+    assert "google" not in undeclared, (
+        f"google is a namespace root, must not be undeclared; got {undeclared}"
+    )
+
+
+def test_namespace_root_unused_suppressed(tmp_path: Path) -> None:
+    """google-auth declared but NOT imported; google.cloud.storage IS imported.
+
+    google-auth must NOT be flagged unused because 'google' is a namespace root
+    and google-auth starts with 'google-'. This is intentional conservatism —
+    we cannot distinguish google-auth from google-cloud-storage at import time.
+    """
+    write_pyproject(tmp_path, ["google-auth>=2.0", "google-cloud-storage>=2.0"])
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:google.cloud.storage"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    unused = findings_of_kind(result, "unused_dependency")
+    # Intentional conservatism: google-auth suppressed because namespace root 'google' is imported
+    assert "google-auth" not in unused, (
+        f"google-auth suppressed by namespace root conservatism; got {unused}"
+    )
+    assert "google-cloud-storage" not in unused, (
+        f"google-cloud-storage is a namespace pkg for google.*, must not be unused; got {unused}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: python-pptx / python-docx / python-slugify alias map
+# ---------------------------------------------------------------------------
+
+
+def test_python_pptx_alias(tmp_path: Path) -> None:
+    """Declares python-pptx; imports module:pptx -> neither unused nor undeclared."""
+    write_pyproject(tmp_path, ["python-pptx>=0.6"])
+    result = compute_dependency_dead_code(
+        imported_module_targets=["module:pptx"],
+        workspace=str(tmp_path),
+        first_party_top_levels=set(),
+    )
+    unused = findings_of_kind(result, "unused_dependency")
+    undeclared = findings_of_kind(result, "undeclared_dependency")
+    assert "python-pptx" not in unused, (
+        f"python-pptx aliased from pptx import must not be unused; got {unused}"
+    )
+    assert "pptx" not in undeclared, (
+        f"pptx aliased to python-pptx must not be undeclared; got {undeclared}"
+    )

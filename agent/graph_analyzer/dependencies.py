@@ -29,9 +29,8 @@ The ``unused_dependency`` finding is FP-prone because:
 
 a) **Import-name vs package-name mismatches** — e.g. the ``pyyaml`` package
    is imported as ``yaml``.  A small alias map covers the most common cases,
-   but exotic mismatches (``google-cloud-storage`` imported as
-   ``google.cloud.storage``) are not covered and may produce false
-   ``unused_dependency`` findings.  When in doubt, suppress, so the alias map
+   but unmapped import/package-name mismatches can still produce a paired
+   unused+undeclared finding.  When in doubt, suppress, so the alias map
    errs on the side of adding entries.
 
 b) **Plugin / entry-point dependencies** — packages like ``pytest``,
@@ -56,6 +55,13 @@ d) **Optional / extra dependency groups not analysed** — ``[project.optional-
 e) **Stub-only packages** — ``types-*`` (Python) and ``@types/*`` (JS)
    packages are declaration files; they are never imported directly and are
    unconditionally excluded from ``unused_dependency`` findings.
+
+f) **Namespace-package roots** (``google``, ``azure``, etc.) — these roots
+   cannot be reliably mapped to a single PyPI package name.  Namespace roots
+   are suppressed conservatively: no ``undeclared_dependency`` is emitted for
+   them, and no ``unused_dependency`` is emitted for any declared package whose
+   normalised name starts with ``<root>-`` (e.g. ``google-cloud-storage``,
+   ``google-auth``).  This accepts false negatives to eliminate double FPs.
 """
 
 from __future__ import annotations
@@ -133,6 +139,15 @@ _PYTHON_TOOLING_SKIP: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# Namespace-package roots: top-level module names that belong to PEP 420 /
+# implicit namespace packages and cannot be reliably mapped to a single PyPI
+# package name.  Suppressed conservatively — see module docstring §f.
+# ---------------------------------------------------------------------------
+_NAMESPACE_ROOTS: frozenset[str] = frozenset(
+    {"google", "azure", "ruamel", "zope", "sphinxcontrib", "backports"}
+)
+
+# ---------------------------------------------------------------------------
 # Alias map: import-name -> normalised package-name
 # Covers the most common import-name vs package-name mismatches for Python.
 # JS import specifiers are always the package name, so no aliasing is needed.
@@ -148,7 +163,8 @@ _PYTHON_IMPORT_ALIASES: dict[str, str] = {
     "jose": "python-jose",
     "dateutil": "python-dateutil",
     "attr": "attrs",
-    "google.cloud": "google-cloud-core",
+    # NOTE: "google.cloud" alias removed — top-level extraction strips to "google",
+    # which is now suppressed via _NAMESPACE_ROOTS (the old alias was unreachable).
     "serial": "pyserial",
     "usb": "pyusb",
     "OpenSSL": "pyopenssl",
@@ -159,6 +175,10 @@ _PYTHON_IMPORT_ALIASES: dict[str, str] = {
     "skimage": "scikit-image",
     "Bio": "biopython",
     "magic": "python-magic",
+    # python-* package name mismatches
+    "pptx": "python-pptx",
+    "docx": "python-docx",
+    "slugify": "python-slugify",
 }
 
 
@@ -220,10 +240,13 @@ def _top_level_js(module_target: str) -> str | None:
         return None
     if spec.startswith("@"):
         # Scoped: @scope/pkg or @scope/pkg/sub -> @scope/pkg
+        # A real npm scope cannot be empty — specs like "@/components/Button"
+        # are Next.js/Vite path aliases, not packages.  Detect them by checking
+        # whether the segment before the first "/" is just "@" (empty scope).
         parts = spec.split("/")
-        if len(parts) >= 2:
+        if len(parts) >= 2 and parts[0] != "@":
             return f"{parts[0]}/{parts[1]}"
-        return None
+        return None  # bare "@", "@/..." path alias, or malformed
     # Plain: lodash/merge -> lodash
     return spec.split("/")[0]
 
@@ -469,6 +492,11 @@ def compute_dependency_dead_code(
                 continue
             imported_js_raw.add(js_top)
 
+    # Determine which namespace roots are present among imported top-levels.
+    # Used below to suppress undeclared findings for namespace roots and
+    # unused findings for declared packages whose name starts with <root>-.
+    active_namespace_roots: set[str] = imported_py_raw & _NAMESPACE_ROOTS
+
     # Normalise Python imports through alias map then PEP 503
     def _normalize_py_import(raw: str) -> str:
         aliased = _PYTHON_IMPORT_ALIASES.get(raw, raw)
@@ -502,6 +530,10 @@ def compute_dependency_dead_code(
                 continue
             # Skip first-party
             if raw in first_party_top_levels:
+                continue
+            # Skip namespace-package roots: cannot reliably map to a single
+            # PyPI package — suppress to avoid undeclared FP (see §f in docstring)
+            if raw in _NAMESPACE_ROOTS:
                 continue
             findings.append(
                 DeadCodeFinding(
@@ -551,6 +583,12 @@ def compute_dependency_dead_code(
             # Also check if the raw import name (un-aliased) would match
             # e.g. declared 'requests', imported 'requests' -> matches
             if dep_norm in all_imported_normalized:
+                continue
+            # Namespace-root suppression (conservative, see §f in docstring):
+            # if any imported top-level is a namespace root, suppress unused
+            # findings for declared packages starting with "<root>-".
+            # E.g. "google" imported -> suppress "google-cloud-storage", "google-auth", etc.
+            if any(dep_norm.startswith(f"{root}-") for root in active_namespace_roots):
                 continue
             findings.append(
                 DeadCodeFinding(
