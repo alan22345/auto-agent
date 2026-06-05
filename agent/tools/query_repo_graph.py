@@ -54,6 +54,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
     {
         "callers_of",
         "callees_of",
+        "cycles_for",
         "outgoing_edges",
         "incoming_edges",
         "public_surface",
@@ -92,7 +93,9 @@ class QueryRepoGraphTool(Tool):
                     "area's public API; 'path_between' returns a list of "
                     "node ids; 'violates_boundaries' returns a single edge "
                     "dict or null; 'which_capability' returns the flow(s) "
-                    "and capability group containing a node."
+                    "and capability group containing a node; "
+                    "'cycles_for' returns all import/call cycles whose "
+                    "members list contains the given node id."
                 ),
             },
             "params": {
@@ -104,7 +107,7 @@ class QueryRepoGraphTool(Tool):
                     "path_between takes {source_id, target_id, "
                     "max_depth?=5}; violates_boundaries takes "
                     "{source_id, target_id}; which_capability takes "
-                    "{node: \"<node_id>\"}."
+                    '{node: "<node_id>"}; cycles_for takes {node_id}.'
                 ),
             },
         },
@@ -308,6 +311,10 @@ def _dispatch(
         edge = _violates_boundaries(blob, source_id, target_id)
         return {"result": edge.model_dump(mode="json") if edge else None}
 
+    if op == "cycles_for":
+        node_id = _require_str(params, "node_id")
+        return {"result": _cycles_for(blob, node_id)}
+
     # Defensive — execute() validated op, but keep the unreachable branch.
     raise _OpError(f"unknown op '{op}'")
 
@@ -455,6 +462,16 @@ def _violates_boundaries(
         if edge.source == source_id and edge.target == target_id:
             return edge
     return None
+
+
+def _cycles_for(blob: RepoGraphBlob, node_id: str) -> list[dict]:
+    """Return every DependencyCycle whose ``members`` contains ``node_id``.
+
+    Preserves the blob's existing cycle order (deterministic from Task B).
+    Returns an empty list when the node participates in no cycle — not an
+    error. Each cycle is serialised via ``model_dump`` for JSON transport.
+    """
+    return [c.model_dump(mode="json") for c in blob.cycles if node_id in c.members]
 
 
 # ---------------------------------------------------------------------------
