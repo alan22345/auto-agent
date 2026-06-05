@@ -21,11 +21,20 @@ REMOTE_DIR="~/auto-agent"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> Syncing files to VM..."
-rsync -avz \
+# --delete mirrors the working tree onto the VM so files removed/renamed in the
+# repo (e.g. retired modules, renamed ADRs, orphaned web-next components) don't
+# linger and break the build. Without it, stale files accumulate forever and a
+# leftover component importing a since-removed hook fails `npm run build`.
+# The --exclude'd paths are protected from deletion too (rsync never deletes
+# excluded files), so VM-local state — secrets, the venv, build caches, agent
+# workspaces, MCP config, env backups — is preserved.
+rsync -avz --delete \
   --exclude='.venv' \
   --exclude='__pycache__' \
   --exclude='.workspaces' \
   --exclude='.env' \
+  --exclude='.env.bak*' \
+  --exclude='.mcp.json' \
   --exclude='.git' \
   --exclude='node_modules' \
   --exclude='.next' \
