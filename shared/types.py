@@ -389,6 +389,23 @@ class CloneGroup(BaseModel):
     family_id: str | None = None
 
 
+class Hotspot(BaseModel):
+    """A churn x complexity refactoring hotspot (ADR-016 quality layer §5).
+
+    ``churn`` is the 90-day-half-life-decayed commit weight for the file;
+    ``complexity_density`` is total cyclomatic complexity / lines of code;
+    ``score`` (0..100) is the normalized product of churn and density —
+    a file ranks high only if it is BOTH actively changing AND complex.
+    ``trend`` compares commit frequency in the first vs second half of
+    the window."""
+
+    file: str
+    churn: float
+    complexity_density: float
+    score: float
+    trend: Literal["accelerating", "stable", "cooling"]
+
+
 class AreaStatus(BaseModel):
     """Per-area outcome (ADR-016 §10 — failures isolated per area)."""
 
@@ -427,6 +444,9 @@ class RepoGraphBlob(BaseModel):
     clones: list[CloneGroup] = Field(default_factory=list)
     """Clone-group records from the Phase 11 duplication pass; empty on
     pre-Phase-11 blobs (backward-compatible default)."""
+    hotspots: list[Hotspot] = Field(default_factory=list)
+    """Churn-hotspot records from the Phase 12 quality pass; empty on
+    pre-Phase-12 blobs (backward-compatible default)."""
 
 
 class RepoGraphRefreshResponse(BaseModel):

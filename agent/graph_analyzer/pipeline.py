@@ -89,7 +89,8 @@ _GAP_FILL_CONCURRENCY = 8
 # (Tarjan SCC over imports edges) and the DependencyCycle schema.
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
 # Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
-_ANALYSER_VERSION = "phase11-duplication-0.11.0"
+# Phase 12 adds churn hotspots (Hotspot schema + hotspots field).
+_ANALYSER_VERSION = "phase12-hotspots-0.12.0"
 
 # Directories always excluded from area discovery. Matches the spec —
 # tests/ is deliberately *not* in here (analyse it if it's a top-level
