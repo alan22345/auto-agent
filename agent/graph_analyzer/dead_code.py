@@ -122,6 +122,17 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
     and to exclude files that own an entry-point from ``unused_file``
     findings.
 
+    **Precondition:** the blob's ``imports`` edges are expected to have been
+    resolved to ``file:`` ids by the pipeline
+    (:func:`~agent.graph_analyzer.pipeline._resolve_module_imports_to_files`)
+    before calling this function.  The function defends against unresolved
+    ``module:<dotted>`` import targets (mapping them to their file node when a
+    matching ``file:`` node exists), but callers should run the full pipeline
+    for maximally accurate results — unresolved edges for third-party modules
+    are silently ignored, which is correct, but any first-party module that
+    slips through unresolved will benefit from this defence rather than being
+    falsely flagged.
+
     Returns a deduplicated, deterministically sorted
     ``list[DeadCodeFinding]``.
     """
@@ -211,7 +222,33 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
     # first-party imports edges target ``file:<path>`` node ids directly.
     # Build the set of file node ids that are targeted by at least one
     # imports edge.
-    imported_file_ids: set[str] = {edge.target for edge in blob.edges if edge.kind == "imports"}
+    #
+    # Defence against unresolved ``module:<dotted>`` targets: build a reverse
+    # map from ``module:<dotted-of-file>`` → ``file:<path>`` id for every
+    # file node, then when encountering a ``module:`` import target attempt
+    # to resolve it to its canonical file id before recording it.  This
+    # prevents false-positive unused_file findings when the pipeline is called
+    # without prior import resolution (e.g. from tests or the task proposer).
+    from agent.graph_analyzer.pipeline import _file_to_module  # local import avoids circular
+
+    module_to_file_id: dict[str, str] = {}
+    for n in blob.nodes:
+        if n.kind != "file" or not n.file:
+            continue
+        dotted = _file_to_module(n.file)
+        if dotted is not None:
+            module_to_file_id[f"module:{dotted}"] = n.id
+
+    imported_file_ids: set[str] = set()
+    for edge in blob.edges:
+        if edge.kind != "imports":
+            continue
+        target = edge.target
+        if target.startswith("module:"):
+            # Attempt to resolve to a file id; fall back to the raw target so
+            # that the unresolvable (third-party) case is still a no-op.
+            target = module_to_file_id.get(target, target)
+        imported_file_ids.add(target)
 
     for node in blob.nodes:
         if node.kind != "file":

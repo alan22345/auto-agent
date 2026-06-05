@@ -325,6 +325,40 @@ class TestUnusedFile:
         findings = compute_dead_code(blob)
         assert not any(f.kind == "unused_file" for f in findings)
 
+    def test_file_imported_via_unresolved_module_target_not_flagged(self):
+        """A file imported via an unresolved ``module:`` imports edge must NOT be flagged.
+
+        Scenario: the pipeline normally resolves ``module:pkg.b`` → ``file:pkg/b.py``
+        before calling compute_dead_code.  When called with a still-unresolved edge
+        (edge.target == "module:pkg.b"), the function must map it to the
+        corresponding file node (``file:pkg/b.py``) and NOT flag ``pkg/b.py`` as
+        unused_file.
+        """
+        # file:pkg/b.py — the file node that would normally be the resolved target
+        file_b = _file_node("pkg/b.py", area="pkg")
+        # file:pkg/a.py — the importer
+        file_a = _file_node("pkg/a.py", area="pkg")
+        # An imports edge with an UNRESOLVED module: target (pre-resolution form)
+        unresolved_imports_edge = Edge(
+            source="file:pkg/a.py",
+            target="module:pkg.b",
+            kind="imports",
+            evidence=_DUMMY_EVIDENCE,
+            source_kind="ast",
+        )
+        blob = _blob(
+            nodes=[file_a, file_b],
+            edges=[unresolved_imports_edge],
+            public_symbols=[],
+        )
+        findings = compute_dead_code(blob)
+        unused_file_targets = {f.target for f in findings if f.kind == "unused_file"}
+        assert "file:pkg/b.py" not in unused_file_targets, (
+            "pkg/b.py was falsely flagged as unused_file even though it is imported "
+            "via an unresolved 'module:pkg.b' edge. "
+            f"unused_file findings: {unused_file_targets}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Determinism tests
