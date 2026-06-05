@@ -42,6 +42,7 @@ import yaml
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
 from agent.graph_analyzer.cycles import compute_cycles
 from agent.graph_analyzer.dead_code import compute_dead_code
+from agent.graph_analyzer.duplication import compute_clones
 from agent.graph_analyzer.gap_fill import gap_fill_site
 from agent.graph_analyzer.http_match import match_http_edges
 from agent.graph_analyzer.parsers import parser_for, supported_extensions
@@ -249,15 +250,24 @@ async def _analyse_area(
     processed_files: dict | None = None,
     failed_sites: list | None = None,
     on_file_checkpoint: CheckpointFlush | None = None,
-) -> tuple[list[Node], list[Edge], list[UnresolvedSite], set[str], AreaStatus]:
+) -> tuple[
+    list[Node],
+    list[Edge],
+    list[UnresolvedSite],
+    set[str],
+    AreaStatus,
+    dict[str, list[tuple[str, str]]],
+]:
     """Run the parser dispatch over one area.
 
     Returns the area's nodes, AST edges, unresolved sites, the union of
     public-symbol ids contributed by every parsed file (Phase 5 — used
-    by the boundary-flagging stage), and an :class:`AreaStatus` (``ok``
-    on success; ``failed`` if a parser exception bubbled up). Individual
-    files the parser handled gracefully (e.g. tree-sitter ERROR-node
-    recovery) do NOT fail the area — only an unhandled exception does.
+    by the boundary-flagging stage), an :class:`AreaStatus` (``ok``
+    on success; ``failed`` if a parser exception bubbled up), and a
+    per-function token map (Phase 11 — ``{node_id: [(type, text), ...]}``)
+    used by the clone-detection stage.  Individual files the parser
+    handled gracefully (e.g. tree-sitter ERROR-node recovery) do NOT
+    fail the area — only an unhandled exception does.
 
     Unresolved sites are returned to the pipeline so the gap-fill
     stage can run against them. ``AreaStatus.unresolved_dynamic_sites``
@@ -272,6 +282,7 @@ async def _analyse_area(
     edges: list[Edge] = []
     unresolved_sites: list[UnresolvedSite] = []
     public_symbols: set[str] = set()
+    tokens: dict[str, list[tuple[str, str]]] = {}
 
     # Area node — every area gets one root compound box.
     nodes.append(
@@ -343,6 +354,7 @@ async def _analyse_area(
             edges.extend(pr.edges)
             unresolved_sites.extend(pr.unresolved_sites)
             public_symbols.update(pr.public_symbols)
+            tokens.update(pr.tokens)
 
             # Update checkpoint state for this file.
             if processed_files is not None and failed_sites is not None:
@@ -378,6 +390,7 @@ async def _analyse_area(
                 error=str(e) or e.__class__.__name__,
                 unresolved_dynamic_sites=len(unresolved_sites),
             ),
+            tokens,
         )
 
     return (
@@ -391,6 +404,7 @@ async def _analyse_area(
             error=None,
             unresolved_dynamic_sites=len(unresolved_sites),
         ),
+        tokens,
     )
 
 
@@ -473,6 +487,9 @@ async def run_pipeline(
     # check reads this to decide whether a cross-area edge's target is
     # part of the destination area's public surface.
     all_public_symbols: set[str] = set()
+    # Phase 11 — per-function token map for clone detection. Transient;
+    # never persisted in RepoGraphBlob.
+    all_tokens: dict[str, list[tuple[str, str]]] = {}
 
     # Resume: seed the accumulators from inherited checkpoint state so
     # files we skip in the area loop still contribute to the returned
@@ -489,7 +506,7 @@ async def run_pipeline(
         all_public_symbols.update(initial_blob.get("public_symbols") or [])
 
     for name, patterns in areas:
-        nodes, edges, sites, public_symbols, status = await _analyse_area(
+        nodes, edges, sites, public_symbols, status, area_tokens = await _analyse_area(
             workspace=workspace,
             area_name=name,
             patterns=patterns,
@@ -502,6 +519,7 @@ async def run_pipeline(
         all_edges.extend(edges)
         per_area_sites.append((name, sites))
         all_public_symbols.update(public_symbols)
+        all_tokens.update(area_tokens)
         statuses.append(status)
 
     # Gap-fill stage. Skipped when no provider is supplied.
@@ -581,6 +599,7 @@ async def run_pipeline(
         cycles=compute_cycles(all_edges),
     )
     blob.dead_code = compute_dead_code(blob)
+    blob.clones = compute_clones(all_tokens, {n.id: n for n in blob.nodes})
     return blob
 
 
@@ -650,6 +669,7 @@ async def run_partial_pipeline(
     target_public_symbols: set[str] = set()
     target_status: AreaStatus
 
+    target_tokens: dict[str, list[tuple[str, str]]] = {}
     if target_area in discovered_by_name:
         (
             target_nodes,
@@ -657,6 +677,7 @@ async def run_partial_pipeline(
             target_sites,
             target_public_symbols,
             target_status,
+            target_tokens,
         ) = await _analyse_area(
             workspace=workspace,
             area_name=target_area,
@@ -750,6 +771,11 @@ async def run_partial_pipeline(
         cycles=compute_cycles(all_edges),
     )
     partial_blob.dead_code = compute_dead_code(partial_blob)
+    # Phase 11 — clone detection. Only tokens from the freshly-analysed
+    # target area are available; inherited tokens from previous runs are not
+    # persisted. Cross-area clones that span an inherited + target area
+    # are therefore not detected in partial-pipeline runs.
+    partial_blob.clones = compute_clones(target_tokens, {n.id: n for n in partial_blob.nodes})
     return partial_blob
 
 

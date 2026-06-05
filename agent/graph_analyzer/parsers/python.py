@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent.graph_analyzer.parsers import Parser, ParseResult
+from agent.graph_analyzer.parsers import Parser, ParseResult, collect_leaf_tokens
 from agent.graph_analyzer.types import PatternHint, UnresolvedSite
 from shared.types import Edge, EdgeEvidence, Node
 
@@ -328,6 +328,8 @@ class PythonParser(Parser):
                 loc=line_end - line_start + 1,
             ),
         )
+        # Phase 11 — collect the raw leaf-token stream for clone detection.
+        result.tokens[node_id] = collect_leaf_tokens(node, source)
 
     # ------------------------------------------------------------------
     # Imports

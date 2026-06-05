@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent.graph_analyzer.parsers import Parser, ParseResult
+from agent.graph_analyzer.parsers import Parser, ParseResult, collect_leaf_tokens
 from agent.graph_analyzer.types import PatternHint, UnresolvedSite
 from shared.types import Edge, EdgeEvidence, Node
 
@@ -345,6 +345,8 @@ class TypeScriptParser(Parser):
                         loc=m_line_end - m_line_start + 1,
                     ),
                 )
+                # Phase 11 — collect the raw leaf-token stream for clone detection.
+                result.tokens[func_id] = collect_leaf_tokens(member, source)
                 scope.class_methods[cls_id].add(mname)
 
     def _emit_function_node(
@@ -380,6 +382,8 @@ class TypeScriptParser(Parser):
                 loc=line_end - line_start + 1,
             ),
         )
+        # Phase 11 — collect the raw leaf-token stream for clone detection.
+        result.tokens[node_id] = collect_leaf_tokens(node, source)
         # Collect nested function declarations inside this function body so
         # they surface as their own graph nodes (scored independently).
         self._collect_nested(
