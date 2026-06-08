@@ -8,7 +8,15 @@ import { HotspotsSection } from './hotspots-section';
 import { FileHealthSection } from './file-health-section';
 
 export function HealthTab({ blob }: { blob: RepoGraphBlob }) {
-  const poorFileCount = blob.file_health.filter((f) => f.band === 'poor').length;
+  // The quality arrays are optional on the wire — blobs produced before
+  // the quality layer omit them entirely. Coalesce so the sections (and
+  // the poor-file derivation) get a real array either way.
+  const cycles = blob.cycles ?? [];
+  const deadCode = blob.dead_code ?? [];
+  const clones = blob.clones ?? [];
+  const hotspots = blob.hotspots ?? [];
+  const fileHealth = blob.file_health ?? [];
+  const poorFileCount = fileHealth.filter((f) => f.band === 'poor').length;
   return (
     <div data-testid="health-tab" className="space-y-4 py-4">
       {blob.health == null ? (
@@ -23,11 +31,11 @@ export function HealthTab({ blob }: { blob: RepoGraphBlob }) {
       ) : (
         <HealthScorecard health={blob.health} poorFileCount={poorFileCount} />
       )}
-      <CyclesSection cycles={blob.cycles} />
-      <DeadCodeSection deadCode={blob.dead_code} />
-      <ClonesSection clones={blob.clones} />
-      <HotspotsSection hotspots={blob.hotspots} />
-      <FileHealthSection fileHealth={blob.file_health} />
+      <CyclesSection cycles={cycles} />
+      <DeadCodeSection deadCode={deadCode} />
+      <ClonesSection clones={clones} />
+      <HotspotsSection hotspots={hotspots} />
+      <FileHealthSection fileHealth={fileHealth} />
     </div>
   );
 }

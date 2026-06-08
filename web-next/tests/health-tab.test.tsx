@@ -49,4 +49,20 @@ describe('HealthTab', () => {
     expect(screen.queryByTestId('health-scorecard')).not.toBeInTheDocument();
     expect(screen.getByTestId('cycles-section')).toBeInTheDocument();
   });
+
+  it('renders without crashing when the quality arrays are absent (pre-quality-layer blob)', () => {
+    // A blob produced before the quality layer omits these fields entirely.
+    const blob: RepoGraphBlob = {
+      commit_sha: 'old',
+      generated_at: '2026-01-01T00:00:00Z',
+      analyser_version: 'phase2-python-0.2.0',
+      areas: [],
+      nodes: [],
+      edges: [],
+    };
+    render(<HealthTab blob={blob} />);
+    expect(screen.getByTestId('health-stale')).toBeInTheDocument();
+    expect(screen.getByTestId('cycles-section')).toBeInTheDocument();
+    expect(screen.getByTestId('file-health-section')).toBeInTheDocument();
+  });
 });
