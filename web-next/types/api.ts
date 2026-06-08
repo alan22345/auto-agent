@@ -493,8 +493,10 @@ export interface Node {
 /**
  * Repo-level health summary (ADR-016 quality layer §6).
  *
- * ``score`` is the LOC-weighted mean of per-file maintainability_index;
- * the counts are headline totals from the quality findings.
+ * ``score`` is the composite — the weighted mean of the five sub-scores
+ * below (each 0..100, higher = better). The counts are headline totals from
+ * the quality findings. Sub-score fields default to 100.0 so blobs produced
+ * before composite scoring stay valid.
  */
 export interface RepoHealth {
   score: number;
@@ -502,6 +504,11 @@ export interface RepoHealth {
   cycle_count: number;
   dead_count: number;
   hotspot_count: number;
+  maintainability?: number;
+  duplication?: number;
+  dead_code?: number;
+  cycles?: number;
+  coupling?: number;
 }
 /**
  * A Linear issue returned from the GraphQL API.

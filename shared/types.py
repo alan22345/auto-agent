@@ -424,14 +424,21 @@ class FileHealth(BaseModel):
 class RepoHealth(BaseModel):
     """Repo-level health summary (ADR-016 quality layer §6).
 
-    ``score`` is the LOC-weighted mean of per-file maintainability_index;
-    the counts are headline totals from the quality findings."""
+    ``score`` is the composite — the weighted mean of the five sub-scores
+    below (each 0..100, higher = better). The counts are headline totals from
+    the quality findings. Sub-score fields default to 100.0 so blobs produced
+    before composite scoring stay valid."""
 
     score: float
     clone_count: int
     cycle_count: int
     dead_count: int
     hotspot_count: int
+    maintainability: float = 100.0
+    duplication: float = 100.0
+    dead_code: float = 100.0
+    cycles: float = 100.0
+    coupling: float = 100.0
 
 
 class AreaStatus(BaseModel):

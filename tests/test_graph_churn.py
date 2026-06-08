@@ -423,3 +423,39 @@ def test_score_formula() -> None:
     by_file = {h.file: h for h in results}
     assert by_file["a.py"].score == pytest.approx(100.0, rel=1e-5)
     assert by_file["b.py"].score == pytest.approx(25.0, rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# select_hotspots — worst-decile surface threshold
+# ---------------------------------------------------------------------------
+
+
+def _hs(file: str, score: float):
+    from shared.types import Hotspot
+
+    return Hotspot(
+        file=file, churn=1.0, complexity_density=1.0, score=score, trend="stable"
+    )
+
+
+def test_select_hotspots_keeps_worst_decile() -> None:
+    from agent.graph_analyzer.churn import select_hotspots
+
+    ranked = [_hs(f"f{i:02d}.py", float(100 - i)) for i in range(20)]  # 20 scored files
+    sel = select_hotspots(ranked)
+    assert len(sel) == 2  # ceil(0.10 * 20)
+    assert [h.file for h in sel] == ["f00.py", "f01.py"]  # the two highest scores
+
+
+def test_select_hotspots_excludes_zero_score() -> None:
+    from agent.graph_analyzer.churn import select_hotspots
+
+    assert select_hotspots([_hs("a.py", 0.0)]) == []
+
+
+def test_select_hotspots_rounds_up_small_sets() -> None:
+    from agent.graph_analyzer.churn import select_hotspots
+
+    # 3 scored files → ceil(0.10*3) = 1
+    sel = select_hotspots([_hs("a.py", 9.0), _hs("b.py", 5.0), _hs("c.py", 1.0)])
+    assert [h.file for h in sel] == ["a.py"]

@@ -1,32 +1,61 @@
-"""Per-file and repo-level maintainability scoring (ADR-016 quality layer §6).
+"""Per-file maintainability + repo-level composite health scoring
+(ADR-016 quality layer §6).
 
-Maintainability Index formula (0..100, clamped):
+Per-file Maintainability Index (0..100, clamped):
     MI = 100 - complexity_density * 30 - dead_code_ratio * 20 - fan_out_penalty
-
-Where:
     complexity_density  = sum(cyclomatic) / file_loc  (0 if loc == 0)
     dead_code_ratio     = dead_symbols_in_file / total_fn_class_nodes_in_file,
-                         capped at 1.0; any unused_file finding for the file
-                         forces ratio to 1.0 (whole file considered dead).
+                         capped at 1.0; any unused_file finding forces 1.0.
     fan_out_penalty     = min(20.0, 2.0 * cross_area_outgoing_edges)
+    Bands: good >= 70, moderate >= 40, poor < 40.
 
-Bands:
-    good     — MI >= 70
-    moderate — MI >= 40 (and < 70)
-    poor     — MI <  40
+Repo health is a COMPOSITE — the weighted mean of five sub-scores, each
+0..100 (higher = better). Unlike the old score (which was just the
+maintainability mean and ignored duplication/cycles/dead-volume), the
+composite moves with every dimension, and each sub-score is surfaced so the
+number is interpretable.
 
-``crap`` (untested-complexity risk, change-risk anti-patterns) is deferred:
-it requires per-function coverage data that the graph does not yet ingest.
-It is always None.
+    maintainability  LOC-weighted mean of per-file MI
+    duplication      100 * (1 - cloned_LOC / total_LOC)
+    dead_code        100 * (1 - real_dead / (fn_class_nodes + files))
+                     real_dead EXCLUDES test-only findings (reasons in
+                     _TEST_ONLY_REASONS) — those are used, just by tests.
+    cycles           100 * (1 - nodes_in_cycles / fn_class_nodes)
+    coupling         100 * (1 - cross_area_edges / total_edges * _K_COUPLING)
 
-Fan-out uses cross-area edges: edges whose source node lives in the file and
-whose target node lives in a different area. Module:/unresolved targets that
-do not resolve to a known node are ignored.
+    score = 0.30*maintainability + 0.25*dead_code + 0.20*duplication
+          + 0.15*coupling + 0.10*cycles
+
+All ratios are clamped to [0, 1]; every denominator is guarded (0 → no
+penalty). Weights, _K_COUPLING, and the MI coefficients are explicit,
+heuristic, and tunable — not empirically validated.
+
+``crap`` (untested-complexity risk) is deferred: it needs per-function
+coverage the graph does not ingest. Always None.
 """
 
 from __future__ import annotations
 
 from shared.types import FileHealth, Node, RepoGraphBlob, RepoHealth
+
+# Composite weights — sum to 1.0. Heuristic and tunable.
+_W_MAINTAINABILITY = 0.30
+_W_DEAD_CODE = 0.25
+_W_DUPLICATION = 0.20
+_W_COUPLING = 0.15
+_W_CYCLES = 0.10
+
+# Coupling penalty scale: cross-area edge fraction * this, clamped to 1.0.
+_K_COUPLING = 3.0
+
+# Dead-code finding reasons that are NOT real dead code (used by tests).
+_TEST_ONLY_REASONS = frozenset(
+    {"referenced only by tests", "imported only by tests"}
+)
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
 
 
 def compute_health(
@@ -183,12 +212,75 @@ def compute_health(
     else:
         repo_score = 100.0
 
+    # ------------------------------------------------------------------
+    # 8. Per-dimension sub-scores + composite (0..100, higher = better).
+    # ------------------------------------------------------------------
+    maintainability = repo_score
+    fn_class_total = sum(len(v) for v in nodes_by_file.values())
+    file_count = sum(1 for n in blob.nodes if n.kind == "file")
+
+    # Duplication — fraction of LOC covered by clone instances.
+    total_loc = sum(file_loc.values())
+    cloned_loc = sum(
+        max(0, inst.line_end - inst.line_start + 1)
+        for cg in blob.clones
+        for inst in cg.instances
+    )
+    duplication = (
+        100.0 * (1.0 - _clamp01(cloned_loc / total_loc)) if total_loc > 0 else 100.0
+    )
+
+    # Dead code — real (non-test-only) findings over symbols + files.
+    real_dead = sum(1 for dc in blob.dead_code if dc.reason not in _TEST_ONLY_REASONS)
+    dead_denom = fn_class_total + file_count
+    dead_code_score = (
+        100.0 * (1.0 - _clamp01(real_dead / dead_denom)) if dead_denom > 0 else 100.0
+    )
+
+    # Cycles — fraction of symbols tangled in a dependency cycle.
+    cycle_members: set[str] = set()
+    for cyc in blob.cycles:
+        cycle_members.update(cyc.members)
+    cycles_score = (
+        100.0 * (1.0 - _clamp01(len(cycle_members) / fn_class_total))
+        if fn_class_total > 0
+        else 100.0
+    )
+
+    # Coupling — fraction of edges crossing area boundaries, scaled.
+    cross_area_edges = sum(
+        1
+        for e in blob.edges
+        if (sa := node_area.get(e.source)) is not None
+        and (ta := node_area.get(e.target)) is not None
+        and sa != ta
+    )
+    total_edges = len(blob.edges)
+    coupling = (
+        100.0 * (1.0 - _clamp01(cross_area_edges / total_edges * _K_COUPLING))
+        if total_edges > 0
+        else 100.0
+    )
+
+    composite = (
+        _W_MAINTAINABILITY * maintainability
+        + _W_DEAD_CODE * dead_code_score
+        + _W_DUPLICATION * duplication
+        + _W_COUPLING * coupling
+        + _W_CYCLES * cycles_score
+    )
+
     repo_health = RepoHealth(
-        score=repo_score,
+        score=composite,
         clone_count=len(blob.clones),
         cycle_count=len(blob.cycles),
         dead_count=len(blob.dead_code),
         hotspot_count=len(blob.hotspots),
+        maintainability=maintainability,
+        duplication=duplication,
+        dead_code=dead_code_score,
+        cycles=cycles_score,
+        coupling=coupling,
     )
 
     return file_health_list, repo_health
