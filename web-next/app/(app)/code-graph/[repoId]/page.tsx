@@ -38,8 +38,9 @@ import {
   useRepoGraphFlows,
 } from '@/hooks/useRepoGraphFlows';
 import { GraphCompletionBadge } from '@/components/code-graph/graph-completion-badge';
+import { HealthTab } from '@/components/code-graph/health-tab';
 
-type TabKey = 'map' | 'raw';
+type TabKey = 'map' | 'raw' | 'health';
 
 // ADR-016 §11 — per-repo settings + graph page.
 //
@@ -81,7 +82,12 @@ export default function CodeGraphRepoPage({
   // path live in the URL so reload, back/forward, and deep-link sharing
   // all do the right thing.
   const tabFromUrl = (searchParams.get('tab') ?? 'map').toLowerCase();
-  const activeTab: TabKey = tabFromUrl === 'raw' ? 'raw' : 'map';
+  const activeTab: TabKey =
+    tabFromUrl === 'raw'
+      ? 'raw'
+      : tabFromUrl === 'health'
+        ? 'health'
+        : 'map';
   const focusPath = parseFocusFromQuery(searchParams.get('p'));
 
   const setTab = (tab: TabKey) => {
@@ -205,6 +211,7 @@ export default function CodeGraphRepoPage({
               <TabsList className="self-start">
                 <TabsTrigger value="map">Map</TabsTrigger>
                 <TabsTrigger value="raw">Raw graph</TabsTrigger>
+                <TabsTrigger value="health">Health</TabsTrigger>
               </TabsList>
 
               <TabsContent value="map" className="min-h-0 flex-1">
@@ -321,6 +328,20 @@ export default function CodeGraphRepoPage({
                     className="flex h-[400px] items-center justify-center rounded-md border bg-card/40 text-sm text-muted-foreground"
                   >
                     Analysis in progress — first analysis can take a few minutes.
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="health" className="min-h-0 flex-1">
+                {latest?.blob ? (
+                  <HealthTab blob={latest.blob} />
+                ) : (
+                  <div
+                    role="status"
+                    className="flex h-[400px] items-center justify-center rounded-md border bg-card/40 text-sm text-muted-foreground"
+                  >
+                    Analysis in progress — first analysis can take a few
+                    minutes.
                   </div>
                 )}
               </TabsContent>

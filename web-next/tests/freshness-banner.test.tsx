@@ -30,6 +30,9 @@ function _latest(
     analyser_version: 'phase7-partial-0.5.0',
     status: 'ok',
     blob: _BLOB,
+    is_complete: true,
+    processed_files_count: 0,
+    total_files_estimate: 0,
     ...overrides,
   };
 }
@@ -47,6 +50,9 @@ describe('FreshnessBanner', () => {
       repo_id: 1,
       analysis_branch: 'main',
       blob: null,
+      is_complete: true,
+      processed_files_count: 0,
+      total_files_estimate: 0,
     };
     render(<FreshnessBanner latest={latest} />);
     expect(screen.getByRole('status').textContent).toMatch(/No analysis yet/i);

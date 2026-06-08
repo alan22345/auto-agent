@@ -699,6 +699,86 @@ describe('NodeSidePanel', () => {
     expect(last).toBeNull();
   });
 
+  it('renders complexity badges for a function node with complexity fields', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          content: '',
+        }),
+      }),
+    );
+    const complexBlob: RepoGraphBlob = {
+      commit_sha: 'abc',
+      generated_at: '2026-05-15T00:00:00Z',
+      analyser_version: 'phase7-0.7.0',
+      areas: [],
+      nodes: [
+        {
+          id: 'agent/dog.py::Dog.bark',
+          kind: 'function',
+          label: 'Dog.bark',
+          file: 'agent/dog.py',
+          line_start: 10,
+          line_end: 20,
+          area: 'agent',
+          parent: 'class:agent/dog.py::Dog',
+          cyclomatic: 7,
+          cognitive: 4,
+          loc: 22,
+        },
+      ],
+      edges: [],
+    };
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={complexBlob}
+        nodeId="agent/dog.py::Dog.bark"
+      />,
+    );
+    const badges = screen.getByTestId('node-complexity');
+    expect(badges).toBeTruthy();
+    expect(badges.textContent).toContain('cyclomatic 7');
+    expect(badges.textContent).toContain('cognitive 4');
+    expect(badges.textContent).toContain('loc 22');
+  });
+
+  it('does not render complexity badges for a non-function node', () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const fileBlob: RepoGraphBlob = {
+      commit_sha: 'abc',
+      generated_at: '2026-05-15T00:00:00Z',
+      analyser_version: 'phase7-0.7.0',
+      areas: [],
+      nodes: [
+        {
+          id: 'file:agent/dog.py',
+          kind: 'file',
+          label: 'dog.py',
+          file: 'agent/dog.py',
+          line_start: null,
+          line_end: null,
+          area: 'agent',
+          parent: 'area:agent',
+        },
+      ],
+      edges: [],
+    };
+    wrap(
+      <NodeSidePanel
+        repoId={7}
+        blob={fileBlob}
+        nodeId="file:agent/dog.py"
+      />,
+    );
+    expect(screen.queryByTestId('node-complexity')).toBeNull();
+  });
+
   it('skips the code preview fetch for nodes without a file/line span', () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

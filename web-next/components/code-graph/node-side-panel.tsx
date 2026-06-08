@@ -144,6 +144,26 @@ export function NodeSidePanel({
                 : ''}
             </p>
           )}
+          {node.kind === 'function' && node.cyclomatic != null && (
+            <div
+              data-testid="node-complexity"
+              className="mt-1 flex flex-wrap gap-1"
+            >
+              <Badge variant="outline" className="text-[10px]">
+                cyclomatic {node.cyclomatic}
+              </Badge>
+              {node.cognitive != null && (
+                <Badge variant="outline" className="text-[10px]">
+                  cognitive {node.cognitive}
+                </Badge>
+              )}
+              {node.loc != null && (
+                <Badge variant="outline" className="text-[10px]">
+                  loc {node.loc}
+                </Badge>
+              )}
+            </div>
+          )}
         </div>
         <Button
           type="button"
