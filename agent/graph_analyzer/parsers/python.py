@@ -364,13 +364,9 @@ class PythonParser(Parser):
             for child in node.children:
                 t = child.type
                 if t == _IMPORT_NODE:
-                    self._emit_import_edges(
-                        child, rel_path, area, source, result, throwaway
-                    )
+                    self._emit_import_edges(child, rel_path, area, source, result, throwaway)
                 elif t == _IMPORT_FROM_NODE:
-                    self._emit_import_from_edges(
-                        child, rel_path, area, source, result, throwaway
-                    )
+                    self._emit_import_from_edges(child, rel_path, area, source, result, throwaway)
                 else:
                     visit(child)
 
@@ -480,9 +476,7 @@ class PythonParser(Parser):
             imported_name: str | None = None
             if child.type == "dotted_name":
                 imported_name = _node_text(child, source).split(".")[-1]
-                scope.module_bindings[imported_name] = (
-                    f"module:{module_target}.{imported_name}"
-                )
+                scope.module_bindings[imported_name] = f"module:{module_target}.{imported_name}"
             elif child.type == "aliased_import":
                 inner = _named_child(child, "dotted_name")
                 aliased = _named_child(child, "identifier")
