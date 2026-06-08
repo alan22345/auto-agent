@@ -17,7 +17,9 @@ export function CyclesSection({ cycles }: { cycles: DependencyCycle[] }) {
                 {c.kind}
               </span>
               <span className="break-all font-mono">
-                {c.members.join(' → ')} → {c.members[0]}
+                {c.members.length > 0
+                  ? `${c.members.join(' → ')} → ${c.members[0]}`
+                  : '(empty cycle)'}
               </span>
             </li>
           ))}

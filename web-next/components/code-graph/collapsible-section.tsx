@@ -19,12 +19,14 @@ export function CollapsibleSection({
   children,
 }: Props) {
   const [open, setOpen] = useState(defaultOpen);
+  const bodyId = `${testId ?? 'collapsible'}-body`;
   return (
     <section data-testid={testId} className="rounded-md border bg-card/40">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-controls={bodyId}
         className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
       >
         <span className="flex items-center gap-2 text-sm font-semibold">
@@ -36,7 +38,11 @@ export function CollapsibleSection({
         </span>
         <Badge variant={count > 0 ? 'secondary' : 'outline'}>{count}</Badge>
       </button>
-      {open && <div className="border-t px-3 py-2 text-sm">{children}</div>}
+      {open && (
+        <div id={bodyId} className="border-t px-3 py-2 text-sm">
+          {children}
+        </div>
+      )}
     </section>
   );
 }

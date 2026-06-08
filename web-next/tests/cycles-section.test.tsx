@@ -11,7 +11,9 @@ describe('CyclesSection', () => {
   it('renders the member chain when expanded', () => {
     render(<CyclesSection cycles={cycles} />);
     fireEvent.click(screen.getByRole('button'));
-    expect(screen.getByTestId('cycle-row')).toHaveTextContent('agent/x → agent/y');
+    expect(screen.getByTestId('cycle-row')).toHaveTextContent(
+      'agent/x → agent/y → agent/x',
+    );
   });
 
   it('renders an empty state with zero cycles', () => {

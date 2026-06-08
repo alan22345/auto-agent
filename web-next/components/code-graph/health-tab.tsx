@@ -21,7 +21,7 @@ export function HealthTab({ blob }: { blob: RepoGraphBlob }) {
     <div data-testid="health-tab" className="space-y-4 py-4">
       {blob.health == null ? (
         <p
-          role="status"
+          role="note"
           data-testid="health-stale"
           className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400"
         >
