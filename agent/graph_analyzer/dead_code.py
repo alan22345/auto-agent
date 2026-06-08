@@ -114,7 +114,12 @@ def _build_module_symbol_lookup(nodes: list) -> dict[str, str]:
     return lookup
 
 
-def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
+def compute_dead_code(
+    blob: RepoGraphBlob,
+    *,
+    production_imports: list[tuple[str | None, str]] | None = None,
+    test_imports: list[tuple[str | None, str]] | None = None,
+) -> list[DeadCodeFinding]:
     """Compute dead-code findings for *blob*.
 
     Calls :func:`~agent.graph_analyzer.entry_points.detect_entry_points`
@@ -151,6 +156,46 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
     # Needed to resolve calls edges that still carry unresolved module targets
     # (same-area calls are NOT rewritten by _resolve_cross_area_module_targets).
     module_symbol_lookup = _build_module_symbol_lookup(blob.nodes)
+
+    # ``module:<dotted-of-file>`` → ``file:<path>`` id, for resolving import
+    # targets (both submodule file imports and the file-import side channel).
+    from agent.graph_analyzer.pipeline import _file_to_module  # local import avoids circular
+
+    module_to_file_id: dict[str, str] = {}
+    for n in blob.nodes:
+        if n.kind == "file" and n.file:
+            dotted = _file_to_module(n.file)
+            if dotted is not None:
+                module_to_file_id[f"module:{dotted}"] = n.id
+
+    def _resolve_imports(
+        pairs: list[tuple[str | None, str]] | None,
+    ) -> tuple[set[str], dict[str, set[str]]]:
+        """Resolve raw ``(src_file, module:target)`` import pairs into
+        (set of imported file node ids, {symbol node id → set of importer
+        files}). Symbol imports only count when the importer is a different
+        file than the symbol's own file."""
+        file_ids: set[str] = set()
+        symbol_callers: dict[str, set[str]] = {}
+        for src_file, target in pairs or []:
+            if not target.startswith("module:"):
+                continue
+            file_id = module_to_file_id.get(target)
+            if file_id is not None:
+                file_ids.add(file_id)
+                continue
+            sym_id = module_symbol_lookup.get(target)
+            if sym_id is None:
+                continue
+            sym_node = node_by_id.get(sym_id)
+            if sym_node is None or sym_node.file is None:
+                continue
+            if src_file != sym_node.file:
+                symbol_callers.setdefault(sym_id, set()).add(src_file or "")
+        return file_ids, symbol_callers
+
+    prod_imported_file_ids, prod_imported_symbols = _resolve_imports(production_imports)
+    test_imported_file_ids, test_imported_symbols = _resolve_imports(test_imports)
 
     # File path → set of entry-point node ids that live in that file.
     # Used for unused_file: if any entry-point node lives in a file, skip it.
@@ -189,6 +234,12 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
         if source_node.file != target_node.file:
             external_callers.setdefault(resolved_target, set()).add(source_node.file or "")
 
+    # Fix F: a symbol imported by name from another file counts as used,
+    # even with no call/inherit edge. Import edges are reliable AST data,
+    # whereas the call graph is gap-fill-dependent and incomplete.
+    for sym_id, callers in prod_imported_symbols.items():
+        external_callers.setdefault(sym_id, set()).update(callers)
+
     findings: list[DeadCodeFinding] = []
 
     for symbol_id in blob.public_symbols:
@@ -206,12 +257,17 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
             continue
         # Flag if there are no external callers or subclassers.
         if not external_callers.get(symbol_id):
+            # Fix B: distinguish "used only by tests" from genuinely dead.
+            if symbol_id in test_imported_symbols:
+                reason = "referenced only by tests"
+            else:
+                reason = "exported but no external caller or subclass"
             findings.append(
                 DeadCodeFinding(
                     kind="unused_export",
                     target=symbol_id,
                     file=node.file,
-                    reason="exported but no external caller or subclass",
+                    reason=reason,
                 )
             )
 
@@ -223,23 +279,8 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
     # Build the set of file node ids that are targeted by at least one
     # imports edge.
     #
-    # Defence against unresolved ``module:<dotted>`` targets: build a reverse
-    # map from ``module:<dotted-of-file>`` → ``file:<path>`` id for every
-    # file node, then when encountering a ``module:`` import target attempt
-    # to resolve it to its canonical file id before recording it.  This
-    # prevents false-positive unused_file findings when the pipeline is called
-    # without prior import resolution (e.g. from tests or the task proposer).
-    from agent.graph_analyzer.pipeline import _file_to_module  # local import avoids circular
-
-    module_to_file_id: dict[str, str] = {}
-    for n in blob.nodes:
-        if n.kind != "file" or not n.file:
-            continue
-        dotted = _file_to_module(n.file)
-        if dotted is not None:
-            module_to_file_id[f"module:{dotted}"] = n.id
-
-    imported_file_ids: set[str] = set()
+    # ``module_to_file_id`` was built once near the top of this function.
+    imported_file_ids: set[str] = set(prod_imported_file_ids)
     for edge in blob.edges:
         if edge.kind != "imports":
             continue
@@ -261,16 +302,22 @@ def compute_dead_code(blob: RepoGraphBlob) -> list[DeadCodeFinding]:
         # Skip if a file contains an entry-point node.
         if node.file in entry_point_files:
             continue
-        # Flag if no imports edge targets this file node.
-        if node.id not in imported_file_ids:
-            findings.append(
-                DeadCodeFinding(
-                    kind="unused_file",
-                    target=node.id,
-                    file=node.file,
-                    reason="no module imports this file and it defines no entry point",
-                )
+        # Skip if imported by production code.
+        if node.id in imported_file_ids:
+            continue
+        # Fix B: distinguish "imported only by tests" from genuinely orphaned.
+        if node.id in test_imported_file_ids:
+            reason = "imported only by tests"
+        else:
+            reason = "no module imports this file and it defines no entry point"
+        findings.append(
+            DeadCodeFinding(
+                kind="unused_file",
+                target=node.id,
+                file=node.file,
+                reason=reason,
             )
+        )
 
     # ------------------------------------------------------------------
     # Sort deterministically and return.

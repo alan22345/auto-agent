@@ -237,6 +237,47 @@ def walk_files(workspace: str) -> list[str]:
     return out
 
 
+def _collect_test_import_targets(workspace: str) -> list[tuple[str, str]]:
+    """Parse test files (which are excluded from the main graph) for their
+    imports, so the dead-code pass can distinguish "referenced only by tests"
+    from genuinely dead code.
+
+    Returns ``(test_file, module:<target>)`` pairs. AST-only — no LLM /
+    gap-fill — so it is cheap and keeps test files out of the rendered graph.
+    """
+    import os
+
+    out: list[tuple[str, str]] = []
+    ws_abs = os.path.abspath(workspace)
+    exts = supported_extensions()
+    for dirpath, dirnames, filenames in os.walk(ws_abs):
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        rel_dir = os.path.relpath(dirpath, ws_abs)
+        for f in filenames:
+            if os.path.splitext(f)[1].lower() not in exts:
+                continue
+            rel = f if rel_dir == "." else f"{rel_dir}/{f}"
+            rel = rel.replace(os.sep, "/")
+            if any(frag in rel for frag in _FILE_SKIP_PATH_FRAGMENTS):
+                continue
+            if not is_test_file(rel):
+                continue
+            parser = parser_for(rel)
+            if parser is None:
+                continue
+            try:
+                with open(os.path.join(dirpath, f), "rb") as fh:
+                    source = fh.read()
+                pr = parser.parse_file(rel_path=rel, area="tests", source=source)
+            except Exception:
+                # One bad test file must not abort the whole scan.
+                continue
+            for e in pr.edges:
+                if e.kind == "imports":
+                    out.append((e.evidence.file, e.target))
+    return out
+
+
 def _iter_area_files(workspace: str, patterns: list[str]) -> list[str]:
     """Return workspace-relative file paths matching ``patterns``.
 
@@ -650,7 +691,11 @@ async def run_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
-    blob.dead_code = compute_dead_code(blob)
+    blob.dead_code = compute_dead_code(
+        blob,
+        production_imports=pre_resolution_imports,
+        test_imports=_collect_test_import_targets(workspace),
+    )
     blob.dead_code = sorted(
         blob.dead_code
         + compute_dependency_dead_code(pre_resolution_imports, workspace, first_party_top_levels),
@@ -878,7 +923,11 @@ async def run_partial_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
-    partial_blob.dead_code = compute_dead_code(partial_blob)
+    partial_blob.dead_code = compute_dead_code(
+        partial_blob,
+        production_imports=pre_resolution_imports_partial,
+        test_imports=_collect_test_import_targets(workspace),
+    )
     partial_blob.dead_code = sorted(
         partial_blob.dead_code
         + compute_dependency_dead_code(
