@@ -92,7 +92,7 @@ _GAP_FILL_CONCURRENCY = 8
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
 # Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
 # Phase 13 adds per-file maintainability index + repo health score.
-_ANALYSER_VERSION = "phase13-health-0.13.0"
+_ANALYSER_VERSION = "phase14-deadcode-precision-0.14.0"
 
 # Directories always excluded from area discovery and file walking at any
 # depth. Covers: VCS internals and worktrees (.git, .claude/worktrees,
