@@ -172,6 +172,29 @@ def compute_hotspots(
     return hotspots
 
 
+def select_hotspots(
+    hotspots: list[Hotspot],
+    *,
+    top_fraction: float = 0.10,
+) -> list[Hotspot]:
+    """Apply the surface threshold: a "hotspot" is among the worst
+    ``top_fraction`` of files by score.
+
+    ``compute_hotspots`` ranks *every* scored file (no threshold), which on a
+    real repo flags almost all files. This keeps only the top
+    ``ceil(top_fraction * scored_count)`` so "hotspot" stays discriminating.
+    Files scoring 0 are never flagged. The result is score-descending.
+    """
+    import math
+
+    scored = sorted(
+        (h for h in hotspots if h.score > 0.0),
+        key=lambda h: (-h.score, h.file),
+    )
+    keep = math.ceil(top_fraction * len(scored)) if scored else 0
+    return scored[:keep]
+
+
 # ---------------------------------------------------------------------------
 # LOC helper
 # ---------------------------------------------------------------------------
