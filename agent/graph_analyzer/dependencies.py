@@ -573,6 +573,18 @@ def compute_dependency_dead_code(
     py_runtime_deps, py_all_deps = _read_python_deps(workspace)
     js_runtime_deps, js_all_deps = _read_js_deps(workspace)
 
+    # A name that is ALSO a declared dependency is NOT purely first-party.
+    # A first-party module sharing a leaf name with a declared package
+    # (e.g. ``agent/llm/anthropic.py`` vs the ``anthropic`` dep) must not
+    # shadow the real ``import anthropic``, or the declared dep is wrongly
+    # flagged unused. Prefer the declared (external) interpretation. (Fix E)
+    _declared_norm = {_pep503_normalize(d) for d in py_all_deps} | {
+        _pep503_normalize(d) for d in js_all_deps
+    }
+    first_party_top_levels = {
+        n for n in first_party_top_levels if _pep503_normalize(n) not in _declared_norm
+    }
+
     # ------------------------------------------------------------------
     # Collect imported external top-levels, routed by SOURCE FILE language
     # ------------------------------------------------------------------
