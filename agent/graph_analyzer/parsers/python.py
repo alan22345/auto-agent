@@ -126,6 +126,13 @@ class PythonParser(Parser):
         scope = _Scope(module_bindings={}, class_methods={})
         self._collect_top_level(tree.root_node, rel_path, area, source, result, scope)
 
+        # ---- Pass 1b: imports nested below module top level. ----
+        # ``_collect_top_level`` only sees direct children of the module root,
+        # so imports guarded by ``if TYPE_CHECKING:`` / ``try:`` or done lazily
+        # inside a function are invisible to it. Without these edges, a file
+        # imported only lazily is mis-flagged as unused_file.
+        self._collect_nested_imports(tree.root_node, rel_path, area, source, result)
+
         # ---- Pass 2: edges (imports / inherits / calls). ----
         # Imports are emitted in pass 1 because they live at module top
         # level only. Inherits + calls walk the tree again with the full
@@ -335,6 +342,40 @@ class PythonParser(Parser):
     # Imports
     # ------------------------------------------------------------------
 
+    def _collect_nested_imports(
+        self,
+        root,
+        rel_path: str,
+        area: str,
+        source: bytes,
+        result: ParseResult,
+    ) -> None:
+        """Emit ``imports`` edges for import statements nested below the
+        module top level (inside ``if`` / ``try`` / function / class bodies).
+
+        Module-level imports are already handled by :meth:`_collect_top_level`;
+        this walk deliberately skips the root's direct import children to avoid
+        emitting them twice. A throwaway scope is used so nested import
+        bindings do not perturb the call/inherit resolution in pass 2.
+        """
+        throwaway = _Scope(module_bindings={}, class_methods={})
+
+        def visit(node) -> None:
+            for child in node.children:
+                t = child.type
+                if t == _IMPORT_NODE:
+                    self._emit_import_edges(child, rel_path, area, source, result, throwaway)
+                elif t == _IMPORT_FROM_NODE:
+                    self._emit_import_from_edges(child, rel_path, area, source, result, throwaway)
+                else:
+                    visit(child)
+
+        for child in root.children:
+            # Skip module-level imports — already emitted by _collect_top_level.
+            if child.type in (_IMPORT_NODE, _IMPORT_FROM_NODE):
+                continue
+            visit(child)
+
     def _emit_import_edges(
         self,
         node,
@@ -410,30 +451,50 @@ class PythonParser(Parser):
         if module_target is None:
             return
 
+        src_module = f"module:{_module_from_path(rel_path)}"
+        evidence = EdgeEvidence(file=rel_path, line=line_no, snippet=line)
+
+        # The package/module edge — emitted first so edge ordering is stable.
+        result.edges.append(
+            Edge(
+                source=src_module,
+                target=f"module:{module_target}",
+                kind="imports",
+                evidence=evidence,
+                source_kind="ast",
+            ),
+        )
+
         # Names imported from the module — bind each to module:<target>.<name>
-        # so a later ``Cat(Animal)`` resolves Animal -> the imported binding.
+        # so a later ``Cat(Animal)`` resolves Animal -> the imported binding,
+        # AND emit a submodule-candidate edge ``module:<target>.<name>``. When
+        # ``<name>`` is a submodule the pipeline resolves that edge to the
+        # submodule's file node (so ``from pkg import sub`` no longer mis-flags
+        # ``pkg/sub.py`` as unused_file); when ``<name>`` is a symbol the edge
+        # resolves to the symbol node and counts as a use of that export.
         for child in node.named_children[1:]:  # skip the module ref itself
+            imported_name: str | None = None
             if child.type == "dotted_name":
-                name = _node_text(child, source).split(".")[-1]
-                scope.module_bindings[name] = f"module:{module_target}.{name}"
+                imported_name = _node_text(child, source).split(".")[-1]
+                scope.module_bindings[imported_name] = f"module:{module_target}.{imported_name}"
             elif child.type == "aliased_import":
                 inner = _named_child(child, "dotted_name")
                 aliased = _named_child(child, "identifier")
                 if inner is not None and aliased is not None:
-                    name = _node_text(inner, source).split(".")[-1]
+                    imported_name = _node_text(inner, source).split(".")[-1]
                     scope.module_bindings[_node_text(aliased, source)] = (
-                        f"module:{module_target}.{name}"
+                        f"module:{module_target}.{imported_name}"
                     )
-
-        result.edges.append(
-            Edge(
-                source=f"module:{_module_from_path(rel_path)}",
-                target=f"module:{module_target}",
-                kind="imports",
-                evidence=EdgeEvidence(file=rel_path, line=line_no, snippet=line),
-                source_kind="ast",
-            ),
-        )
+            if imported_name:
+                result.edges.append(
+                    Edge(
+                        source=src_module,
+                        target=f"module:{module_target}.{imported_name}",
+                        kind="imports",
+                        evidence=evidence,
+                        source_kind="ast",
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # Pass 2 — inherits + calls

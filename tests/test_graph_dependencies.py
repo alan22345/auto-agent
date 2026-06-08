@@ -80,6 +80,30 @@ def test_declared_but_not_imported_flagged_unused(tmp_path: Path) -> None:
     assert "unusedpkg" in unused, f"Expected unusedpkg in unused, got {unused}"
 
 
+def test_declared_dep_not_shadowed_by_first_party_leaf(tmp_path: Path) -> None:
+    """A declared dep imported bare must not be flagged unused just because a
+    first-party module shares its leaf name (Fix E).
+
+    Repro: ``agent/llm/anthropic.py`` puts ``anthropic`` into
+    ``first_party_top_levels`` (a module leaf), which used to make the real
+    ``import anthropic`` look first-party and the declared ``anthropic`` dep
+    look unused.
+    """
+    write_pyproject(tmp_path, ["anthropic>=0.30", "unuseddep>=1.0"])
+    result = compute_dependency_dead_code(
+        imported=[("agent/llm/bedrock.py", "module:anthropic")],
+        workspace=str(tmp_path),
+        # "anthropic" wrongly present as a first-party leaf, alongside "agent".
+        first_party_top_levels={"agent", "anthropic"},
+    )
+    unused = findings_of_kind(result, "unused_dependency")
+    assert "anthropic" not in unused, (
+        f"anthropic is declared AND imported — must not be unused. got {unused}"
+    )
+    # Sanity: a genuinely-unused declared dep is still detected.
+    assert "unuseddep" in unused, f"expected unuseddep flagged unused, got {unused}"
+
+
 def test_imported_but_not_declared_flagged_undeclared(tmp_path: Path) -> None:
     """Imported 'module:somepkg' not declared (not stdlib/first-party) -> undeclared."""
     write_pyproject(tmp_path, ["requests>=2.0"])

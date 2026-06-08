@@ -404,3 +404,65 @@ class TestDeterminism:
         assert isinstance(result, list)
         for f in result:
             assert isinstance(f, DeadCodeFinding)
+
+
+class TestImportAsUsageAndTestRefs:
+    """Fix F (symbol imported by name = used) and Fix B (test-only refs)."""
+
+    def test_unused_export_suppressed_when_symbol_imported_by_name(self):
+        # F: a public symbol imported by name from another file counts as
+        # used, even with no call/inherit edge (sidesteps call-graph gaps).
+        nodes = [
+            _file_node("pkg/exporter.py"),
+            _file_node("pkg/consumer.py"),
+            _func_node("pkg/exporter.py::thing", "pkg/exporter.py"),
+        ]
+        blob = _blob(nodes, edges=[], public_symbols=["pkg/exporter.py::thing"])
+        findings = compute_dead_code(
+            blob,
+            production_imports=[("pkg/consumer.py", "module:pkg.exporter.thing")],
+        )
+        targets = {f.target for f in findings if f.kind == "unused_export"}
+        assert "pkg/exporter.py::thing" not in targets
+
+    def test_unused_export_relabeled_when_only_test_imports(self):
+        # B: referenced only by tests → still listed, but labelled as such.
+        nodes = [
+            _file_node("pkg/exporter.py"),
+            _func_node("pkg/exporter.py::thing", "pkg/exporter.py"),
+        ]
+        blob = _blob(nodes, edges=[], public_symbols=["pkg/exporter.py::thing"])
+        findings = compute_dead_code(
+            blob,
+            test_imports=[("tests/test_x.py", "module:pkg.exporter.thing")],
+        )
+        f = next(f for f in findings if f.target == "pkg/exporter.py::thing")
+        assert f.kind == "unused_export"
+        assert "test" in f.reason.lower()
+
+    def test_unused_file_relabeled_when_only_test_imports(self):
+        nodes = [_file_node("pkg/helper.py")]
+        blob = _blob(nodes, edges=[], public_symbols=[])
+        findings = compute_dead_code(
+            blob,
+            test_imports=[("tests/test_x.py", "module:pkg.helper")],
+        )
+        f = next(
+            f
+            for f in findings
+            if f.kind == "unused_file" and f.target == "file:pkg/helper.py"
+        )
+        assert "test" in f.reason.lower()
+
+    def test_production_import_beats_test_import_for_file(self):
+        # Imported by BOTH prod and test → plain "used", not flagged at all.
+        nodes = [_file_node("pkg/helper.py"), _file_node("pkg/app.py")]
+        blob = _blob(nodes, edges=[
+            Edge(source="file:pkg/app.py", target="file:pkg/helper.py",
+                 kind="imports", evidence=_DUMMY_EVIDENCE, source_kind="ast"),
+        ], public_symbols=[])
+        findings = compute_dead_code(
+            blob,
+            test_imports=[("tests/test_x.py", "module:pkg.helper")],
+        )
+        assert "file:pkg/helper.py" not in {f.target for f in findings}

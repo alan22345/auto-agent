@@ -108,7 +108,24 @@ async def _load_or_create_row(session, repo_id: int, commit_sha: str):
         await session.flush()
         return row, "fresh"
     if row.is_complete and row.commit_sha == commit_sha:
-        return row, "noop"
+        if row.analyser_version == _analyser_version():
+            return row, "noop"
+        # Same commit, but the analyser itself changed (e.g. a dead-code
+        # precision fix was deployed). Force a full re-analysis by clearing
+        # the checkpoint so the pipeline re-parses from scratch — otherwise a
+        # new analyser silently never re-runs until the repo's source changes.
+        row.analyser_version = _analyser_version()
+        row.processed_files = {}
+        row.failed_sites = []
+        row.graph_json = {
+            "nodes": [],
+            "edges": [],
+            "areas": [],
+            "public_symbols": [],
+            "commit_sha": commit_sha,
+        }
+        row.is_complete = False
+        return row, "resume_same"
     if row.commit_sha == commit_sha:
         return row, "resume_same"
     return row, "resume_diff"

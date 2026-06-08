@@ -92,7 +92,7 @@ _GAP_FILL_CONCURRENCY = 8
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
 # Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
 # Phase 13 adds per-file maintainability index + repo health score.
-_ANALYSER_VERSION = "phase13-health-0.13.0"
+_ANALYSER_VERSION = "phase14-deadcode-precision-0.14.0"
 
 # Directories always excluded from area discovery and file walking at any
 # depth. Covers: VCS internals and worktrees (.git, .claude/worktrees,
@@ -234,6 +234,47 @@ def walk_files(workspace: str) -> list[str]:
                 continue
             out.append(rel)
     out.sort()
+    return out
+
+
+def _collect_test_import_targets(workspace: str) -> list[tuple[str, str]]:
+    """Parse test files (which are excluded from the main graph) for their
+    imports, so the dead-code pass can distinguish "referenced only by tests"
+    from genuinely dead code.
+
+    Returns ``(test_file, module:<target>)`` pairs. AST-only — no LLM /
+    gap-fill — so it is cheap and keeps test files out of the rendered graph.
+    """
+    import os
+
+    out: list[tuple[str, str]] = []
+    ws_abs = os.path.abspath(workspace)
+    exts = supported_extensions()
+    for dirpath, dirnames, filenames in os.walk(ws_abs):
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        rel_dir = os.path.relpath(dirpath, ws_abs)
+        for f in filenames:
+            if os.path.splitext(f)[1].lower() not in exts:
+                continue
+            rel = f if rel_dir == "." else f"{rel_dir}/{f}"
+            rel = rel.replace(os.sep, "/")
+            if any(frag in rel for frag in _FILE_SKIP_PATH_FRAGMENTS):
+                continue
+            if not is_test_file(rel):
+                continue
+            parser = parser_for(rel)
+            if parser is None:
+                continue
+            try:
+                with open(os.path.join(dirpath, f), "rb") as fh:
+                    source = fh.read()
+                pr = parser.parse_file(rel_path=rel, area="tests", source=source)
+            except Exception:
+                # One bad test file must not abort the whole scan.
+                continue
+            for e in pr.edges:
+                if e.kind == "imports":
+                    out.append((e.evidence.file, e.target))
     return out
 
 
@@ -650,7 +691,11 @@ async def run_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
-    blob.dead_code = compute_dead_code(blob)
+    blob.dead_code = compute_dead_code(
+        blob,
+        production_imports=pre_resolution_imports,
+        test_imports=_collect_test_import_targets(workspace),
+    )
     blob.dead_code = sorted(
         blob.dead_code
         + compute_dependency_dead_code(pre_resolution_imports, workspace, first_party_top_levels),
@@ -878,7 +923,11 @@ async def run_partial_pipeline(
         public_symbols=sorted(all_public_symbols),
         cycles=compute_cycles(all_edges),
     )
-    partial_blob.dead_code = compute_dead_code(partial_blob)
+    partial_blob.dead_code = compute_dead_code(
+        partial_blob,
+        production_imports=pre_resolution_imports_partial,
+        test_imports=_collect_test_import_targets(workspace),
+    )
     partial_blob.dead_code = sorted(
         partial_blob.dead_code
         + compute_dependency_dead_code(
@@ -1056,6 +1105,17 @@ def _resolve_module_imports_to_files(
         new_source = _resolve(edge.source)
         new_target = _resolve(edge.target)
         if new_source is None or new_target is None:
+            continue
+        # An ``imports`` edge must terminate on a real ``file:`` node. Any
+        # ``module:`` placeholder that survived resolution is either a
+        # third-party module or a ``from pkg import <symbol>`` candidate whose
+        # name is a symbol, not a submodule file — keep it out of the graph
+        # rather than leaving a phantom endpoint. (``calls`` / ``inherits``
+        # edges may legitimately carry ``module:<dotted>.<symbol>`` targets,
+        # so this guard is scoped to import edges only.)
+        if edge.kind == "imports" and (
+            new_source.startswith("module:") or new_target.startswith("module:")
+        ):
             continue
         if new_source == edge.source and new_target == edge.target:
             rewritten.append(edge)
