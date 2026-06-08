@@ -54,14 +54,6 @@ export interface AreaStatus {
   unresolved_dynamic_sites?: number;
 }
 /**
- * CI status for a commit.
- */
-export interface CIStatus {
-  sha: string;
-  state: "success" | "failure" | "pending" | "error";
-  message?: string;
-}
-/**
  * One named capability — a group of related flows.
  *
  * Phase 1 emits exactly one capability with ``id="unlabeled"`` covering
@@ -87,6 +79,30 @@ export interface ClassificationResult {
   estimated_files?: number;
   risk?: RiskLevel;
 }
+/**
+ * A group of >= 2 duplicated code blocks (a "clone group").
+ *
+ * ``token_len`` is the length of the duplicated token sequence.
+ * ``mode`` is the normalization level that detected it (strict ->
+ * semantic, increasing recall). ``family_id`` links clone groups that
+ * involve the same files (systematic copy-paste) when set.
+ */
+export interface CloneGroup {
+  id: string;
+  token_len: number;
+  mode: "strict" | "mild" | "weak" | "semantic";
+  instances: CloneInstance[];
+  family_id?: string | null;
+}
+/**
+ * One occurrence of a duplicated code block (ADR-016 quality layer §2).
+ */
+export interface CloneInstance {
+  node_id: string;
+  file: string;
+  line_start: number;
+  line_end: number;
+}
 export interface ConflictInfo {
   fact_id: string;
   existing_content: string;
@@ -97,12 +113,47 @@ export interface CreateUserRequest {
   display_name: string;
 }
 /**
+ * One dead-code finding in the module graph (ADR-016 quality layer §4).
+ *
+ * ``kind`` categorises the finding; ``target`` is the node id or
+ * identifier it refers to (e.g. ``"api/routes.py::unused_helper"`` for
+ * an unused export, or ``"file:api/legacy.py"`` for an unused file).
+ * ``reason`` is a short human-readable explanation.
+ */
+export interface DeadCodeFinding {
+  kind: "unused_export" | "unused_file" | "unused_dependency" | "undeclared_dependency";
+  target: string;
+  file?: string | null;
+  reason: string;
+}
+/**
  * API shape for one ADR file under ``docs/decisions/``.
  */
 export interface DecisionOut {
   filename: string;
   title: string;
   url: string;
+}
+/**
+ * One circular-dependency cycle detected in the module graph
+ * (ADR-016 quality layer §3). Computed by Tarjan SCC over ``imports``
+ * edges. ``members`` are the import-graph vertex ids participating in
+ * the cycle (e.g. ``module:agent.a``); ``closing_edges`` cite the
+ * ``imports`` edges whose source and target are both in the cycle.
+ */
+export interface DependencyCycle {
+  id: string;
+  kind: "import" | "call";
+  members: string[];
+  closing_edges: EdgeEvidence[];
+}
+/**
+ * Cited proof of an edge's existence — see ADR-016 §3.
+ */
+export interface EdgeEvidence {
+  file: string;
+  line: number;
+  snippet: string;
 }
 /**
  * One edge in the graph.
@@ -136,14 +187,6 @@ export interface Edge {
   violation_reason?: string | null;
 }
 /**
- * Cited proof of an edge's existence — see ADR-016 §3.
- */
-export interface EdgeEvidence {
-  file: string;
-  line: number;
-  snippet: string;
-}
-/**
  * Optional body for ``POST /api/repos/{repo_id}/graph``.
  *
  * All fields optional — the endpoint defaults the analysis branch to the
@@ -165,6 +208,21 @@ export interface FeedbackSummary {
   rejected?: number;
   approval_rate?: number;
   avg_review_rounds?: number;
+}
+/**
+ * Per-file maintainability (ADR-016 quality layer §6).
+ *
+ * ``maintainability_index`` (0..100) = 100 - complexity_density*30
+ * - dead_code_ratio*20 - fan_out_penalty, clamped to [0,100].
+ * ``band``: good (70-100), moderate (40-70), poor (0-40).
+ * ``crap`` (untested-complexity risk) is reserved — it needs per-function
+ * coverage the graph does not yet ingest, so it is always None for now.
+ */
+export interface FileHealth {
+  file: string;
+  maintainability_index: number;
+  band: "good" | "moderate" | "poor";
+  crap?: number | null;
 }
 /**
  * One flow — entry point through forward trace to a terminal effect.
@@ -327,6 +385,23 @@ export interface GraphStalenessResponse {
   workspace_sha?: string | null;
   drifted: boolean;
 }
+/**
+ * A churn x complexity refactoring hotspot (ADR-016 quality layer §5).
+ *
+ * ``churn`` is the 90-day-half-life-decayed commit weight for the file;
+ * ``complexity_density`` is total cyclomatic complexity / lines of code;
+ * ``score`` (0..100) is the normalized product of churn and density —
+ * a file ranks high only if it is BOTH actively changing AND complex.
+ * ``trend`` compares commit frequency in the first vs second half of
+ * the window.
+ */
+export interface Hotspot {
+  file: string;
+  churn: number;
+  complexity_density: number;
+  score: number;
+  trend: "accelerating" | "stable" | "cooling";
+}
 export interface IntentVerdict {
   ok: boolean;
   reasoning: string;
@@ -386,6 +461,12 @@ export interface RepoGraphBlob {
   nodes: Node[];
   edges: Edge[];
   public_symbols?: string[];
+  cycles?: DependencyCycle[];
+  dead_code?: DeadCodeFinding[];
+  clones?: CloneGroup[];
+  hotspots?: Hotspot[];
+  file_health?: FileHealth[];
+  health?: RepoHealth | null;
 }
 /**
  * One node in the hierarchical compound graph (ADR-016 §2).
@@ -405,6 +486,22 @@ export interface Node {
   area: string;
   parent?: string | null;
   decorators?: string[];
+  cyclomatic?: number | null;
+  cognitive?: number | null;
+  loc?: number | null;
+}
+/**
+ * Repo-level health summary (ADR-016 quality layer §6).
+ *
+ * ``score`` is the LOC-weighted mean of per-file maintainability_index;
+ * the counts are headline totals from the quality findings.
+ */
+export interface RepoHealth {
+  score: number;
+  clone_count: number;
+  cycle_count: number;
+  dead_count: number;
+  hotspot_count: number;
 }
 /**
  * A Linear issue returned from the GraphQL API.
