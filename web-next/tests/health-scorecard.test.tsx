@@ -9,6 +9,11 @@ const health: RepoHealth = {
   cycle_count: 3,
   dead_count: 8,
   hotspot_count: 12,
+  maintainability: 88,
+  duplication: 64,
+  dead_code: 70,
+  cycles: 95,
+  coupling: 55,
 };
 
 describe('HealthScorecard', () => {
@@ -20,5 +25,35 @@ describe('HealthScorecard', () => {
     expect(screen.getByTestId('count-Dead code')).toHaveTextContent('8');
     expect(screen.getByTestId('count-Hotspots')).toHaveTextContent('12');
     expect(screen.getByTestId('count-Poor files')).toHaveTextContent('4');
+  });
+
+  it('renders a bar + plain-language explanation for each sub-score', () => {
+    render(<HealthScorecard health={health} poorFileCount={4} />);
+    for (const label of [
+      'Maintainability',
+      'Duplication',
+      'Dead code',
+      'Cycles',
+      'Coupling',
+    ]) {
+      expect(screen.getByTestId(`subscore-${label}`)).toBeInTheDocument();
+    }
+    // value + explanation text are shown
+    expect(screen.getByTestId('subscore-Maintainability')).toHaveTextContent('88');
+    expect(
+      screen.getByTestId('subscore-Duplication'),
+    ).toHaveTextContent(/copy-pasted/i);
+  });
+
+  it('omits sub-score bars on a pre-composite blob (fields absent)', () => {
+    const legacy: RepoHealth = {
+      score: 80,
+      clone_count: 0,
+      cycle_count: 0,
+      dead_count: 0,
+      hotspot_count: 0,
+    };
+    render(<HealthScorecard health={legacy} poorFileCount={0} />);
+    expect(screen.queryByTestId('subscore-Maintainability')).not.toBeInTheDocument();
   });
 });
