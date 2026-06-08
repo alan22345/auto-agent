@@ -1057,6 +1057,17 @@ def _resolve_module_imports_to_files(
         new_target = _resolve(edge.target)
         if new_source is None or new_target is None:
             continue
+        # An ``imports`` edge must terminate on a real ``file:`` node. Any
+        # ``module:`` placeholder that survived resolution is either a
+        # third-party module or a ``from pkg import <symbol>`` candidate whose
+        # name is a symbol, not a submodule file — keep it out of the graph
+        # rather than leaving a phantom endpoint. (``calls`` / ``inherits``
+        # edges may legitimately carry ``module:<dotted>.<symbol>`` targets,
+        # so this guard is scoped to import edges only.)
+        if edge.kind == "imports" and (
+            new_source.startswith("module:") or new_target.startswith("module:")
+        ):
+            continue
         if new_source == edge.source and new_target == edge.target:
             rewritten.append(edge)
             continue

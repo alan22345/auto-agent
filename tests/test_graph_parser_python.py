@@ -74,10 +74,11 @@ class TestImports:
             area="orchestrator",
         )
         imports = [e for e in result.edges if e.kind == "imports"]
-        assert len(imports) == 1
-        e = imports[0]
-        assert e.target == "module:agent.graph"
-        assert e.source == "module:orchestrator.router"
+        # Package edge first, then the submodule/symbol-candidate edge (Fix A).
+        assert imports[0].target == "module:agent.graph"
+        assert imports[0].source == "module:orchestrator.router"
+        targets = {e.target for e in imports}
+        assert targets == {"module:agent.graph", "module:agent.graph.thing"}
 
     def test_relative_import_two_dots(self) -> None:
         # `from ..base import X` inside agent_area/sub/relative.py
@@ -88,7 +89,68 @@ class TestImports:
             area="agent_area",
         )
         imports = [e for e in result.edges if e.kind == "imports"]
+        # The package edge is emitted first, preserving order.
         assert imports[0].target == "module:agent_area.base"
+
+    def test_from_import_emits_submodule_candidate_edge(self) -> None:
+        # `from pkg import sub` must emit BOTH the package edge and a
+        # submodule-candidate edge, so a submodule file imported this way is
+        # not mis-flagged as unused_file. (Fix A)
+        result = _parse(
+            "from agent.lifecycle import coding\n",
+            rel_path="agent/main.py",
+            area="agent",
+        )
+        targets = {e.target for e in result.edges if e.kind == "imports"}
+        assert "module:agent.lifecycle" in targets
+        assert "module:agent.lifecycle.coding" in targets
+
+    def test_from_import_multiple_names_each_get_candidate(self) -> None:
+        result = _parse(
+            "from agent.lifecycle import (coding, deploy, cleanup)\n",
+            rel_path="agent/main.py",
+            area="agent",
+        )
+        targets = {e.target for e in result.edges if e.kind == "imports"}
+        assert {
+            "module:agent.lifecycle.coding",
+            "module:agent.lifecycle.deploy",
+            "module:agent.lifecycle.cleanup",
+        } <= targets
+
+    def test_aliased_from_import_uses_original_name_for_candidate(self) -> None:
+        result = _parse(
+            "from agent.lifecycle import coding as c\n",
+            rel_path="agent/main.py",
+            area="agent",
+        )
+        targets = {e.target for e in result.edges if e.kind == "imports"}
+        assert "module:agent.lifecycle.coding" in targets
+
+    def test_lazy_in_function_import_is_captured(self) -> None:
+        # Imports nested inside a function body (lazy imports) must still
+        # emit edges. (Fix C)
+        result = _parse(
+            "def handler():\n"
+            "    from agent.graph_analyzer.flow_labeler import label\n"
+            "    return label\n",
+            rel_path="orchestrator/router.py",
+            area="orchestrator",
+        )
+        targets = {e.target for e in result.edges if e.kind == "imports"}
+        assert "module:agent.graph_analyzer.flow_labeler" in targets
+
+    def test_typecheck_guarded_import_is_captured(self) -> None:
+        # Imports under `if TYPE_CHECKING:` are nested, not module-level. (Fix C)
+        result = _parse(
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from agent.llm.base import LLMProvider\n",
+            rel_path="agent/llm/structured.py",
+            area="agent",
+        )
+        targets = {e.target for e in result.edges if e.kind == "imports"}
+        assert "module:agent.llm.base" in targets
 
 
 class TestInherits:
