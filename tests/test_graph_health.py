@@ -11,7 +11,10 @@ import pytest
 
 from agent.graph_analyzer.health import compute_health
 from shared.types import (
+    CloneGroup,
+    CloneInstance,
     DeadCodeFinding,
+    DependencyCycle,
     Edge,
     EdgeEvidence,
     Node,
@@ -300,12 +303,15 @@ def test_band_just_below_40_is_poor():
 
 
 # ---------------------------------------------------------------------------
-# Test: RepoHealth.score = LOC-weighted mean
+# Test: maintainability sub-score = LOC-weighted mean of per-file MI
 # ---------------------------------------------------------------------------
 
 
-def test_repo_health_loc_weighted_mean():
-    """RepoHealth.score is the exact LOC-weighted mean for 2 files."""
+def test_maintainability_subscore_loc_weighted_mean():
+    """The maintainability sub-score is the exact LOC-weighted MI mean.
+
+    (The composite ``score`` is a weighted blend of all sub-scores; the
+    LOC-weighted mean now lives on ``maintainability``.)"""
     nodes = [
         _fn_node("file1.py", "fn", area="area1", cyclomatic=1),
         _fn_node("file2.py", "fn", area="area1", cyclomatic=10),
@@ -316,8 +322,12 @@ def test_repo_health_loc_weighted_mean():
     file_cyc = {"file1.py": 1, "file2.py": 10}
 
     _fh_list, rh = compute_health(blob, file_loc, file_cyc)
-    # Weighted = (97*10 + 85*20) / 30 = (970 + 1700) / 30 = 2670/30 = 89.0
-    assert rh.score == pytest.approx(89.0)
+    # Weighted = (97*10 + 85*20) / 30 = 2670/30 = 89.0
+    assert rh.maintainability == pytest.approx(89.0)
+    # No findings → other sub-scores are 100, so composite > maintainability.
+    assert rh.score == pytest.approx(
+        0.30 * 89.0 + 0.25 * 100 + 0.20 * 100 + 0.15 * 100 + 0.10 * 100
+    )
 
 
 def test_repo_health_counts():
@@ -407,3 +417,103 @@ def test_empty_blob_returns_score_100():
     fh_list, rh = compute_health(blob, {}, {})
     assert fh_list == []
     assert rh.score == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Composite + per-dimension sub-scores
+# ---------------------------------------------------------------------------
+
+
+class TestSubScores:
+    def _file(self, path: str, area: str = "area1") -> Node:
+        return Node(id=f"file:{path}", kind="file", label=path, file=path, area=area)
+
+    def test_clean_repo_all_subscores_high(self):
+        blob = _blob(nodes=[self._file("a.py"), _fn_node("a.py", "f", cyclomatic=1)])
+        _, rh = compute_health(blob, {"a.py": 20}, {"a.py": 1})
+        assert rh.maintainability >= 90
+        assert rh.duplication == 100
+        assert rh.dead_code == 100
+        assert rh.cycles == 100
+        assert rh.coupling == 100
+        assert rh.score >= 90
+
+    def test_heavy_duplication_drops_subscore_and_composite(self):
+        blob = _blob(
+            nodes=[self._file("a.py"), _fn_node("a.py", "f", cyclomatic=1)],
+            clones=[
+                CloneGroup(
+                    id="g1",
+                    token_len=100,
+                    mode="strict",
+                    instances=[
+                        CloneInstance(node_id="a.py::f", file="a.py", line_start=1, line_end=18)
+                    ],
+                )
+            ],
+        )
+        _, rh = compute_health(blob, {"a.py": 20}, {"a.py": 1})
+        assert rh.duplication < 30  # 18 of 20 lines cloned
+        assert rh.score < 90
+
+    def test_dead_code_subscore_excludes_test_only(self):
+        blob = _blob(
+            nodes=[
+                self._file("a.py"),
+                _fn_node("a.py", "f1", cyclomatic=1),
+                _fn_node("a.py", "f2", cyclomatic=1),
+            ],
+            dead_code=[
+                DeadCodeFinding(
+                    kind="unused_export",
+                    target="a.py::f1",
+                    file="a.py",
+                    reason="exported but no external caller or subclass",
+                ),
+                DeadCodeFinding(
+                    kind="unused_export",
+                    target="a.py::f2",
+                    file="a.py",
+                    reason="referenced only by tests",
+                ),
+            ],
+        )
+        _, rh = compute_health(blob, {"a.py": 20}, {"a.py": 2})
+        # Only f1 is real dead; f2 is test-only and excluded. denom = 2 fns + 1 file = 3.
+        assert 60.0 < rh.dead_code < 75.0
+
+    def test_cycles_subscore_drops(self):
+        blob = _blob(
+            nodes=[_fn_node("a.py", "f1", cyclomatic=1), _fn_node("a.py", "f2", cyclomatic=1)],
+            cycles=[
+                DependencyCycle(
+                    id="c1", kind="import", members=["a.py::f1", "a.py::f2"], closing_edges=[]
+                )
+            ],
+        )
+        _, rh = compute_health(blob, {"a.py": 20}, {"a.py": 2})
+        assert rh.cycles < 50.0  # both nodes tangled in a cycle
+
+    def test_composite_equals_weighted_sum_of_subscores(self):
+        blob = _blob(
+            nodes=[self._file("a.py"), _fn_node("a.py", "f", cyclomatic=8)],
+            clones=[
+                CloneGroup(
+                    id="g1",
+                    token_len=50,
+                    mode="strict",
+                    instances=[
+                        CloneInstance(node_id="a.py::f", file="a.py", line_start=1, line_end=5)
+                    ],
+                )
+            ],
+        )
+        _, rh = compute_health(blob, {"a.py": 20}, {"a.py": 8})
+        expected = (
+            0.30 * rh.maintainability
+            + 0.25 * rh.dead_code
+            + 0.20 * rh.duplication
+            + 0.15 * rh.coupling
+            + 0.10 * rh.cycles
+        )
+        assert abs(rh.score - expected) < 0.01

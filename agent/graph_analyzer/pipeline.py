@@ -40,7 +40,12 @@ import structlog
 import yaml
 
 from agent.graph_analyzer.boundaries import flag_violations, load_boundary_rules
-from agent.graph_analyzer.churn import collect_git_churn, compute_hotspots, count_loc
+from agent.graph_analyzer.churn import (
+    collect_git_churn,
+    compute_hotspots,
+    count_loc,
+    select_hotspots,
+)
 from agent.graph_analyzer.cycles import compute_cycles
 from agent.graph_analyzer.dead_code import compute_dead_code
 from agent.graph_analyzer.dependencies import compute_dependency_dead_code
@@ -92,7 +97,7 @@ _GAP_FILL_CONCURRENCY = 8
 # Phase 10 adds dead-code findings (DeadCodeFinding schema + dead_code field).
 # Phase 11 adds clone detection (CloneGroup/CloneInstance schema + clones field).
 # Phase 13 adds per-file maintainability index + repo health score.
-_ANALYSER_VERSION = "phase14-deadcode-precision-0.14.0"
+_ANALYSER_VERSION = "phase15-composite-health-0.15.0"
 
 # Directories always excluded from area discovery and file walking at any
 # depth. Covers: VCS internals and worktrees (.git, .claude/worktrees,
@@ -718,11 +723,13 @@ async def run_pipeline(
     if ref_ts is None:
         blob.hotspots = []
     else:
-        blob.hotspots = compute_hotspots(
-            file_commits,
-            file_loc,
-            file_cyclomatic_total,
-            reference_ts=ref_ts,
+        blob.hotspots = select_hotspots(
+            compute_hotspots(
+                file_commits,
+                file_loc,
+                file_cyclomatic_total,
+                reference_ts=ref_ts,
+            )
         )
 
     # Phase 13 — per-file maintainability index + repo health score.
@@ -961,11 +968,13 @@ async def run_partial_pipeline(
     if ref_ts_p is None:
         partial_blob.hotspots = []
     else:
-        partial_blob.hotspots = compute_hotspots(
-            file_commits_p,
-            file_loc_p,
-            file_cyclomatic_total_p,
-            reference_ts=ref_ts_p,
+        partial_blob.hotspots = select_hotspots(
+            compute_hotspots(
+                file_commits_p,
+                file_loc_p,
+                file_cyclomatic_total_p,
+                reference_ts=ref_ts_p,
+            )
         )
 
     # Phase 13 — per-file maintainability index + repo health score (partial pipeline).
