@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from shared.types import RepoGraphBlob
+
 Category = Literal["poor_file", "dead_code", "clone", "hotspot", "cycle"]
 
 # Mirrors the composite-health sub-score weighting in
@@ -50,3 +52,63 @@ class HealthFinding(BaseModel, frozen=True):
     title: str
     files: list[str]
     severity: float
+
+
+def extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
+    """Flatten a blob into normalized :class:`HealthFinding` records.
+
+    One finding per dead-code item, cycle, clone group, hotspot, and
+    'poor'-band file. 'moderate'/'good' files are not findings.
+    """
+    out: list[HealthFinding] = []
+
+    for d in blob.dead_code:
+        out.append(HealthFinding(
+            finding_hash=finding_hash("dead_code", [d.target]),
+            category="dead_code",
+            title=f"{d.kind}: {d.target} — {d.reason}",
+            files=[d.file] if d.file else [],
+            severity=1.0,
+        ))
+
+    for c in blob.cycles:
+        out.append(HealthFinding(
+            finding_hash=finding_hash("cycle", list(c.members)),
+            category="cycle",
+            title=f"import cycle [{c.kind}]: {' → '.join(c.members)}",
+            files=list(dict.fromkeys(m.split('::')[0] for m in c.members)),
+            severity=float(len(c.members)),
+        ))
+
+    for g in blob.clones:
+        files = list(dict.fromkeys(inst.file for inst in g.instances))
+        out.append(HealthFinding(
+            finding_hash=finding_hash("clone", [g.family_id] if g.family_id else
+                                      [f"{inst.file}:{inst.line_start}-{inst.line_end}" for inst in g.instances]),
+            category="clone",
+            title=f"clone group {g.id} — {g.token_len} tokens, {len(g.instances)} instances",
+            files=files,
+            severity=float(g.token_len),
+        ))
+
+    for h in blob.hotspots:
+        out.append(HealthFinding(
+            finding_hash=finding_hash("hotspot", [h.file]),
+            category="hotspot",
+            title=f"hotspot {h.file} — score {h.score:.1f} ({h.trend})",
+            files=[h.file],
+            severity=float(h.score),
+        ))
+
+    for fh in blob.file_health:
+        if fh.band != "poor":
+            continue
+        out.append(HealthFinding(
+            finding_hash=finding_hash("poor_file", [fh.file]),
+            category="poor_file",
+            title=f"poor maintainability {fh.file} — index {fh.maintainability_index:.1f}",
+            files=[fh.file],
+            severity=100.0 - fh.maintainability_index,
+        ))
+
+    return out
