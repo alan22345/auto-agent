@@ -26,6 +26,17 @@ CATEGORY_WEIGHTS: dict[Category, float] = {
 }
 
 
+def finding_hash(category: Category, parts: list[str]) -> str:
+    """Stable 16-char identity for a finding.
+
+    ``parts`` are the identity-bearing strings for the category (e.g. the
+    dead-code target, the sorted cycle members, the clone family). Sorted
+    before hashing so member ordering can't change the hash.
+    """
+    canonical = category + "|" + "|".join(sorted(parts))
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 class HealthFinding(BaseModel, frozen=True):
     """One actionable health finding, normalized across categories.
 

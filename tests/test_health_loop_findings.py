@@ -28,3 +28,20 @@ def test_category_weights_match_composite_health_weighting():
         "hotspot": 0.15,
         "cycle": 0.10,
     }
+
+
+from agent.health_loop.findings import finding_hash
+
+
+def test_finding_hash_is_stable_and_order_independent():
+    h1 = finding_hash("cycle", ["a.py::x", "b.py::y"])
+    h2 = finding_hash("cycle", ["b.py::y", "a.py::x"])
+    assert h1 == h2
+    assert len(h1) == 16
+
+
+def test_finding_hash_distinguishes_category_and_payload():
+    assert finding_hash("dead_code", ["api/routes.py::helper"]) != finding_hash(
+        "dead_code", ["api/routes.py::other"]
+    )
+    assert finding_hash("dead_code", ["x"]) != finding_hash("hotspot", ["x"])
