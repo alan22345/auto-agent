@@ -79,3 +79,28 @@ async def ensure_cleanup_branch(*, workspace: str, base_branch: str, cleanup_bra
     else:
         await _git("checkout", "-B", cleanup_branch, f"origin/{base_branch}", cwd=workspace)
         await _git("push", "-u", "origin", cleanup_branch, cwd=workspace)
+
+
+async def merge_fix(*, workspace: str, fix_branch: str, cleanup_branch: str) -> bool:
+    """Merge an accepted fix branch into the cleanup branch and push.
+
+    Returns True on a clean merge (pushed), False if the merge conflicted
+    (aborted, cleanup branch unchanged). The push is an ordinary
+    fast-forward of the cleanup branch — no force needed.
+    """
+    await _git("fetch", "origin", cwd=workspace)
+    await _git("checkout", "-B", cleanup_branch, f"origin/{cleanup_branch}", cwd=workspace)
+    merged = await _git(
+        "merge",
+        "--no-ff",
+        "-m",
+        f"health: merge {fix_branch}",
+        fix_branch,
+        cwd=workspace,
+        check=False,
+    )
+    if merged.failed:
+        await _git("merge", "--abort", cwd=workspace, check=False)
+        return False
+    await _git("push", "origin", cleanup_branch, cwd=workspace)
+    return True
