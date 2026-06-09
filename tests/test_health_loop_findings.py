@@ -102,3 +102,26 @@ def test_extract_severity_reflects_magnitude():
     ])
     found = {f.files[0]: f for f in extract_findings(blob)}
     assert found["worse.py"].severity > found["bad.py"].severity
+
+
+from agent.health_loop.findings import rank_findings
+
+
+def test_rank_orders_by_category_weight_then_severity():
+    blob = _blob(
+        cycles=[DependencyCycle(id="c1", kind="import", members=["a.py", "b.py"], closing_edges=[])],
+        file_health=[FileHealth(file="a.py", maintainability_index=10.0, band="poor")],
+    )
+    ranked = rank_findings(blob)
+    assert ranked[0].category == "poor_file"
+    assert ranked[-1].category == "cycle"
+
+
+def test_rank_is_deterministic():
+    blob = _blob(dead_code=[
+        DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
+        for i in range(5)
+    ])
+    assert [f.finding_hash for f in rank_findings(blob)] == [
+        f.finding_hash for f in rank_findings(blob)
+    ]

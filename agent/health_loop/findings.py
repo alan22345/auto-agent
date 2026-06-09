@@ -112,3 +112,16 @@ def extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
         ))
 
     return out
+
+
+def rank_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
+    """Return findings worst-first.
+
+    Primary key: category weight (higher first). Secondary: in-category
+    severity (higher first). Tertiary: ``finding_hash`` for a stable,
+    deterministic total order.
+    """
+    return sorted(
+        extract_findings(blob),
+        key=lambda f: (-CATEGORY_WEIGHTS[f.category], -f.severity, f.finding_hash),
+    )
