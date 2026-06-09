@@ -1,9 +1,24 @@
 """Phase 1 — pure finding ranking / identity / filtering."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from agent.health_loop.findings import (
     CATEGORY_WEIGHTS,
     HealthFinding,
+    extract_findings,
+    finding_hash,
+    rank_findings,
+    select_batch,
+)
+from shared.types import (
+    CloneGroup,
+    CloneInstance,
+    DeadCodeFinding,
+    DependencyCycle,
+    FileHealth,
+    Hotspot,
+    RepoGraphBlob,
 )
 
 
@@ -30,9 +45,6 @@ def test_category_weights_match_composite_health_weighting():
     }
 
 
-from agent.health_loop.findings import finding_hash
-
-
 def test_finding_hash_is_stable_and_order_independent():
     h1 = finding_hash("cycle", ["a.py::x", "b.py::y"])
     h2 = finding_hash("cycle", ["b.py::y", "a.py::x"])
@@ -45,21 +57,6 @@ def test_finding_hash_distinguishes_category_and_payload():
         "dead_code", ["api/routes.py::other"]
     )
     assert finding_hash("dead_code", ["x"]) != finding_hash("hotspot", ["x"])
-
-
-from datetime import datetime
-
-from shared.types import (
-    CloneGroup,
-    CloneInstance,
-    DeadCodeFinding,
-    DependencyCycle,
-    FileHealth,
-    Hotspot,
-    RepoGraphBlob,
-)
-
-from agent.health_loop.findings import extract_findings
 
 
 def _blob(**kw) -> RepoGraphBlob:
@@ -104,9 +101,6 @@ def test_extract_severity_reflects_magnitude():
     assert found["worse.py"].severity > found["bad.py"].severity
 
 
-from agent.health_loop.findings import rank_findings
-
-
 def test_rank_orders_by_category_weight_then_severity():
     blob = _blob(
         cycles=[DependencyCycle(id="c1", kind="import", members=["a.py", "b.py"], closing_edges=[])],
@@ -125,3 +119,28 @@ def test_rank_is_deterministic():
     assert [f.finding_hash for f in rank_findings(blob)] == [
         f.finding_hash for f in rank_findings(blob)
     ]
+
+
+def test_select_batch_excludes_suppressed_and_in_flight_and_caps_at_n():
+    blob = _blob(dead_code=[
+        DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
+        for i in range(10)
+    ])
+    ranked = rank_findings(blob)
+    suppressed = {ranked[0].finding_hash}
+    in_flight = {ranked[1].finding_hash}
+
+    batch = select_batch(blob, suppressed=suppressed, in_flight=in_flight, batch_size=3)
+
+    hashes = {f.finding_hash for f in batch}
+    assert len(batch) == 3
+    assert ranked[0].finding_hash not in hashes
+    assert ranked[1].finding_hash not in hashes
+
+
+def test_select_batch_empty_when_all_filtered():
+    blob = _blob(dead_code=[
+        DeadCodeFinding(kind="unused_export", target="a.py::h", file="a.py", reason="x")
+    ])
+    only = rank_findings(blob)[0].finding_hash
+    assert select_batch(blob, suppressed={only}, in_flight=set(), batch_size=5) == []

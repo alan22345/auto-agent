@@ -8,11 +8,12 @@ double-files or re-picks a suppressed finding.
 from __future__ import annotations
 
 import hashlib
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-from shared.types import RepoGraphBlob
+if TYPE_CHECKING:
+    from shared.types import RepoGraphBlob
 
 Category = Literal["poor_file", "dead_code", "clone", "hotspot", "cycle"]
 
@@ -125,3 +126,20 @@ def rank_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
         extract_findings(blob),
         key=lambda f: (-CATEGORY_WEIGHTS[f.category], -f.severity, f.finding_hash),
     )
+
+
+def select_batch(
+    blob: RepoGraphBlob,
+    *,
+    suppressed: set[str],
+    in_flight: set[str],
+    batch_size: int,
+) -> list[HealthFinding]:
+    """Top ``batch_size`` ranked findings, excluding suppressed/in-flight.
+
+    The exclusion is per-finding (by ``finding_hash``), so a batch never
+    re-files a finding that is already being worked or has been suppressed.
+    """
+    skip = suppressed | in_flight
+    eligible = [f for f in rank_findings(blob) if f.finding_hash not in skip]
+    return eligible[: max(0, batch_size)]
