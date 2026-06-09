@@ -50,3 +50,24 @@ async def test_lease_held_and_holder_reflect_state(fake_redis):
     await lease.acquire_lease("supervisor-1", ttl_seconds=60)
     assert await lease.lease_held() is True
     assert await lease.lease_holder() == "supervisor-1"
+
+
+@pytest.mark.asyncio
+async def test_renew_only_by_holder(fake_redis):
+    await lease.acquire_lease("supervisor-1", ttl_seconds=60)
+    assert await lease.renew_lease("supervisor-1", ttl_seconds=60) is True
+    # A non-holder cannot renew.
+    assert await lease.renew_lease("intruder", ttl_seconds=60) is False
+    # Still held by the original holder.
+    assert await lease.lease_holder() == "supervisor-1"
+
+
+@pytest.mark.asyncio
+async def test_release_only_by_holder(fake_redis):
+    await lease.acquire_lease("supervisor-1", ttl_seconds=60)
+    # A non-holder cannot release.
+    assert await lease.release_lease("intruder") is False
+    assert await lease.lease_held() is True
+    # The holder can release; afterwards the lease is free.
+    assert await lease.release_lease("supervisor-1") is True
+    assert await lease.lease_held() is False

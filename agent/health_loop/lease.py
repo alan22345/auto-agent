@@ -37,3 +37,29 @@ async def lease_holder() -> str | None:
 async def lease_held() -> bool:
     """True iff the lease is currently held by anyone."""
     return await lease_holder() is not None
+
+
+async def renew_lease(holder: str, *, ttl_seconds: int = 3600) -> bool:
+    """Extend the TTL — only if ``holder`` currently holds the lease.
+
+    Returns True on renewal, False if the lease is free or held by someone
+    else (the supervisor should treat that as 'lost the lease' and stop).
+    """
+    if await lease_holder() != holder:
+        return False
+    r = await get_redis()
+    await r.set(HEALTH_LEASE_KEY, holder.encode(), ex=ttl_seconds)
+    return True
+
+
+async def release_lease(holder: str) -> bool:
+    """Release the lease — only if ``holder`` currently holds it.
+
+    Returns True if released, False if it was free or held by someone else
+    (never steal another holder's lease).
+    """
+    if await lease_holder() != holder:
+        return False
+    r = await get_redis()
+    await r.delete(HEALTH_LEASE_KEY)
+    return True
