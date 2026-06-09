@@ -1,4 +1,5 @@
 """Phase 1 — pure finding ranking / identity / filtering."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -65,8 +66,14 @@ def _blob(**kw) -> RepoGraphBlob:
         generated_at=datetime(2026, 1, 1),
         analyser_version="test",
         areas=[],
-        nodes=[], edges=[], dead_code=[], cycles=[], clones=[],
-        hotspots=[], file_health=[], health=None,
+        nodes=[],
+        edges=[],
+        dead_code=[],
+        cycles=[],
+        clones=[],
+        hotspots=[],
+        file_health=[],
+        health=None,
     )
     base.update(kw)
     return RepoGraphBlob(**base)
@@ -74,13 +81,33 @@ def _blob(**kw) -> RepoGraphBlob:
 
 def test_extract_covers_every_category():
     blob = _blob(
-        dead_code=[DeadCodeFinding(kind="unused_export", target="a.py::h", file="a.py", reason="never imported")],
-        cycles=[DependencyCycle(id="c1", kind="import", members=["a.py", "b.py"], closing_edges=[])],
-        clones=[CloneGroup(id="g1", token_len=120, mode="strict", instances=[
-            CloneInstance(node_id="a.py::f", file="a.py", line_start=1, line_end=9),
-            CloneInstance(node_id="b.py::g", file="b.py", line_start=1, line_end=9),
-        ], family_id=None)],
-        hotspots=[Hotspot(file="a.py", churn=5.0, complexity_density=0.4, score=80.0, trend="accelerating")],
+        dead_code=[
+            DeadCodeFinding(
+                kind="unused_export", target="a.py::h", file="a.py", reason="never imported"
+            )
+        ],
+        cycles=[
+            DependencyCycle(
+                id="c1", kind="import", members=["file:a.py", "file:b.py"], closing_edges=[]
+            )
+        ],
+        clones=[
+            CloneGroup(
+                id="g1",
+                token_len=120,
+                mode="strict",
+                instances=[
+                    CloneInstance(node_id="a.py::f", file="a.py", line_start=1, line_end=9),
+                    CloneInstance(node_id="b.py::g", file="b.py", line_start=1, line_end=9),
+                ],
+                family_id=None,
+            )
+        ],
+        hotspots=[
+            Hotspot(
+                file="a.py", churn=5.0, complexity_density=0.4, score=80.0, trend="accelerating"
+            )
+        ],
         file_health=[
             FileHealth(file="a.py", maintainability_index=20.0, band="poor"),
             FileHealth(file="ok.py", maintainability_index=90.0, band="good"),
@@ -91,19 +118,50 @@ def test_extract_covers_every_category():
     assert cats == {"dead_code", "cycle", "clone", "hotspot", "poor_file"}
     assert all("ok.py" not in f.files for f in found if f.category == "poor_file")
 
+    # Cycle members are import-graph vertex ids in ``file:<rel_path>`` form;
+    # the finding must emit bare paths (no leaked ``file:`` prefix).
+    cycle = next(f for f in found if f.category == "cycle")
+    assert cycle.files == ["a.py", "b.py"]
+    assert all(not p.startswith("file:") for p in cycle.files)
+
+
+def test_clone_finding_hash_stable_across_line_shifts():
+    # Same instances / node_ids, different line numbers (an edit shifted the
+    # clone down the file) must produce the SAME finding_hash — otherwise a
+    # suppressed clone would reappear after any unrelated edit above it.
+    def _clone(start, end):
+        return CloneGroup(
+            id="g1",
+            token_len=120,
+            mode="strict",
+            instances=[
+                CloneInstance(node_id="a.py::f", file="a.py", line_start=start, line_end=end),
+                CloneInstance(node_id="b.py::g", file="b.py", line_start=start, line_end=end),
+            ],
+            family_id=None,
+        )
+
+    h1 = extract_findings(_blob(clones=[_clone(1, 9)]))[0].finding_hash
+    h2 = extract_findings(_blob(clones=[_clone(40, 48)]))[0].finding_hash
+    assert h1 == h2
+
 
 def test_extract_severity_reflects_magnitude():
-    blob = _blob(file_health=[
-        FileHealth(file="worse.py", maintainability_index=10.0, band="poor"),
-        FileHealth(file="bad.py", maintainability_index=35.0, band="poor"),
-    ])
+    blob = _blob(
+        file_health=[
+            FileHealth(file="worse.py", maintainability_index=10.0, band="poor"),
+            FileHealth(file="bad.py", maintainability_index=35.0, band="poor"),
+        ]
+    )
     found = {f.files[0]: f for f in extract_findings(blob)}
     assert found["worse.py"].severity > found["bad.py"].severity
 
 
 def test_rank_orders_by_category_weight_then_severity():
     blob = _blob(
-        cycles=[DependencyCycle(id="c1", kind="import", members=["a.py", "b.py"], closing_edges=[])],
+        cycles=[
+            DependencyCycle(id="c1", kind="import", members=["a.py", "b.py"], closing_edges=[])
+        ],
         file_health=[FileHealth(file="a.py", maintainability_index=10.0, band="poor")],
     )
     ranked = rank_findings(blob)
@@ -112,20 +170,24 @@ def test_rank_orders_by_category_weight_then_severity():
 
 
 def test_rank_is_deterministic():
-    blob = _blob(dead_code=[
-        DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
-        for i in range(5)
-    ])
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
+            for i in range(5)
+        ]
+    )
     assert [f.finding_hash for f in rank_findings(blob)] == [
         f.finding_hash for f in rank_findings(blob)
     ]
 
 
 def test_select_batch_excludes_suppressed_and_in_flight_and_caps_at_n():
-    blob = _blob(dead_code=[
-        DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
-        for i in range(10)
-    ])
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_export", target=f"a.py::h{i}", file="a.py", reason="x")
+            for i in range(10)
+        ]
+    )
     ranked = rank_findings(blob)
     suppressed = {ranked[0].finding_hash}
     in_flight = {ranked[1].finding_hash}
@@ -139,8 +201,8 @@ def test_select_batch_excludes_suppressed_and_in_flight_and_caps_at_n():
 
 
 def test_select_batch_empty_when_all_filtered():
-    blob = _blob(dead_code=[
-        DeadCodeFinding(kind="unused_export", target="a.py::h", file="a.py", reason="x")
-    ])
+    blob = _blob(
+        dead_code=[DeadCodeFinding(kind="unused_export", target="a.py::h", file="a.py", reason="x")]
+    )
     only = rank_findings(blob)[0].finding_hash
     assert select_batch(blob, suppressed={only}, in_flight=set(), batch_size=5) == []

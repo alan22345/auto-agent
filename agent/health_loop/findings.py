@@ -5,6 +5,7 @@ Pure functions over :mod:`shared.types` — no DB, no I/O. Given a
 worst-first, each carrying a stable ``finding_hash`` so the loop never
 double-files or re-picks a suppressed finding.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -64,53 +65,72 @@ def extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
     out: list[HealthFinding] = []
 
     for d in blob.dead_code:
-        out.append(HealthFinding(
-            finding_hash=finding_hash("dead_code", [d.target]),
-            category="dead_code",
-            title=f"{d.kind}: {d.target} — {d.reason}",
-            files=[d.file] if d.file else [],
-            severity=1.0,
-        ))
+        out.append(
+            HealthFinding(
+                finding_hash=finding_hash("dead_code", [d.target]),
+                category="dead_code",
+                title=f"{d.kind}: {d.target} — {d.reason}",
+                files=[d.file] if d.file else [],
+                severity=1.0,
+            )
+        )
 
     for c in blob.cycles:
-        out.append(HealthFinding(
-            finding_hash=finding_hash("cycle", list(c.members)),
-            category="cycle",
-            title=f"import cycle [{c.kind}]: {' → '.join(c.members)}",
-            files=list(dict.fromkeys(m.split('::')[0] for m in c.members)),
-            severity=float(len(c.members)),
-        ))
+        # ``DependencyCycle.members`` are import-graph vertex ids in
+        # ``file:<rel_path>`` form (see agent/graph_analyzer/cycles.py); strip
+        # the prefix so ``files`` carries bare paths like every other category.
+        bare = [m.removeprefix("file:") for m in c.members]
+        out.append(
+            HealthFinding(
+                finding_hash=finding_hash("cycle", list(c.members)),
+                category="cycle",
+                title=f"import cycle [{c.kind}]: {' → '.join(bare)}",
+                files=list(dict.fromkeys(bare)),
+                severity=float(len(c.members)),
+            )
+        )
 
     for g in blob.clones:
         files = list(dict.fromkeys(inst.file for inst in g.instances))
-        out.append(HealthFinding(
-            finding_hash=finding_hash("clone", [g.family_id] if g.family_id else
-                                      [f"{inst.file}:{inst.line_start}-{inst.line_end}" for inst in g.instances]),
-            category="clone",
-            title=f"clone group {g.id} — {g.token_len} tokens, {len(g.instances)} instances",
-            files=files,
-            severity=float(g.token_len),
-        ))
+        # Identity must be line-independent so a suppressed clone stays
+        # suppressed after an edit shifts its line numbers. ``family_id`` is the
+        # stable primary key; fall back to the per-instance ``node_id``s
+        # (``file::symbol``), which the clone detector derives from sorted node
+        # ids (see agent/graph_analyzer/duplication.py).
+        clone_parts = [g.family_id] if g.family_id else [inst.node_id for inst in g.instances]
+        out.append(
+            HealthFinding(
+                finding_hash=finding_hash("clone", clone_parts),
+                category="clone",
+                title=f"clone group {g.id} — {g.token_len} tokens, {len(g.instances)} instances",
+                files=files,
+                severity=float(g.token_len),
+            )
+        )
 
     for h in blob.hotspots:
-        out.append(HealthFinding(
-            finding_hash=finding_hash("hotspot", [h.file]),
-            category="hotspot",
-            title=f"hotspot {h.file} — score {h.score:.1f} ({h.trend})",
-            files=[h.file],
-            severity=float(h.score),
-        ))
+        out.append(
+            HealthFinding(
+                finding_hash=finding_hash("hotspot", [h.file]),
+                category="hotspot",
+                title=f"hotspot {h.file} — score {h.score:.1f} ({h.trend})",
+                files=[h.file],
+                severity=float(h.score),
+            )
+        )
 
     for fh in blob.file_health:
         if fh.band != "poor":
             continue
-        out.append(HealthFinding(
-            finding_hash=finding_hash("poor_file", [fh.file]),
-            category="poor_file",
-            title=f"poor maintainability {fh.file} — index {fh.maintainability_index:.1f}",
-            files=[fh.file],
-            severity=100.0 - fh.maintainability_index,
-        ))
+        out.append(
+            HealthFinding(
+                finding_hash=finding_hash("poor_file", [fh.file]),
+                category="poor_file",
+                title=f"poor maintainability {fh.file} — index {fh.maintainability_index:.1f}",
+                files=[fh.file],
+                severity=100.0 - fh.maintainability_index,
+            )
+        )
 
     return out
 
