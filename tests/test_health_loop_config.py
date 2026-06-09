@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 
 def test_health_loop_config_columns():
     from shared.models import HealthLoopConfig
@@ -26,10 +29,6 @@ def test_health_loop_config_columns():
     assert pk == {"repo_id"}
 
 
-import importlib.util
-from pathlib import Path
-
-
 def _load_migration():
     path = Path("migrations/versions/055_health_loop_config.py")
     spec = importlib.util.spec_from_file_location("m055", path)
@@ -44,3 +43,13 @@ def test_migration_055_chains_off_054_and_defines_up_down():
     assert m.down_revision == "054"
     assert callable(m.upgrade)
     assert callable(m.downgrade)
+
+
+def test_dedup_append_adds_once_and_preserves_order():
+    from agent.health_loop.config_service import _dedup_append
+
+    assert _dedup_append(["a", "b"], "c") == ["a", "b", "c"]
+    # Already present ⇒ unchanged (no duplicate).
+    assert _dedup_append(["a", "b"], "a") == ["a", "b"]
+    # Empty start.
+    assert _dedup_append([], "x") == ["x"]
