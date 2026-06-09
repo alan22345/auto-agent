@@ -64,6 +64,24 @@ def task_channel(_isolated_task_channel: InMemoryTaskChannelFactory) -> InMemory
 
 
 @pytest.fixture(autouse=True)
+def _free_health_lease(monkeypatch):
+    """Default the VM-global health-loop lease to *free* for every test.
+
+    ``orchestrator.queue`` now consults ``agent.health_loop.lease.lease_held``
+    (a third Redis seam, alongside the Publisher and TaskChannel above) in
+    ``can_start_task``/``next_eligible_task``. Without this, the existing
+    queue tests would try to open a real Redis connection. Tests that want
+    to exercise the held-lease gate patch ``queue.lease_held`` explicitly.
+    """
+    from orchestrator import queue as _queue_mod
+
+    async def _free() -> bool:
+        return False
+
+    monkeypatch.setattr(_queue_mod, "lease_held", _free)
+
+
+@pytest.fixture(autouse=True)
 def _graph_workspaces_tmpdir(tmp_path, monkeypatch):
     """Point ``settings.graph_workspaces_dir`` at a tmp path.
 
@@ -77,6 +95,7 @@ def _graph_workspaces_tmpdir(tmp_path, monkeypatch):
     workspaces = tmp_path / "graph-workspaces"
     workspaces.mkdir(parents=True, exist_ok=True)
     from shared.config import settings
+
     monkeypatch.setattr(settings, "graph_workspaces_dir", str(workspaces))
 
 
@@ -103,6 +122,7 @@ async def _reset_async_engine_per_loop():
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from shared import database as _db
+
     prev_engine = _db.engine
     fresh_engine = create_async_engine(os.environ["DATABASE_URL"], echo=False)
     _db.engine = fresh_engine

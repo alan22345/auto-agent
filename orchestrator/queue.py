@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
 
+from agent.health_loop.lease import lease_held
 from shared import quotas
 from shared.config import settings
 from shared.models import Task, TaskStatus
@@ -35,6 +36,14 @@ ACTIVE_STATUSES = {
     TaskStatus.ITERATING,  # ADR-017: PR open + actively re-iterating on feedback
     TaskStatus.BLOCKED,
 }
+
+
+def is_health_loop_task(task: Task) -> bool:
+    """True for the auto-heal loop's own tasks (the supervisor and its
+    per-batch fix tasks), which are exempt from the lease gate — the lease
+    blocks *other* work, never the loop's own."""
+    sid = task.source_id or ""
+    return sid == "health-loop" or sid.startswith("health:")
 
 
 async def count_active(session: AsyncSession) -> int:
@@ -74,14 +83,14 @@ async def can_start_task(session: AsyncSession, task: Task) -> bool:
     """Can this specific task start right now?"""
     if await count_active(session) >= settings.max_concurrent_workers:
         return False
+    # Health-loop lease: while held, only the loop's own tasks may start.
+    if not is_health_loop_task(task) and await lease_held():
+        return False
     if task.organization_id is not None and await _org_at_concurrency_cap(
         session, task.organization_id
     ):
         return False
-    return not (
-        task.repo_id is not None
-        and await _repo_has_active_task(session, task.repo_id)
-    )
+    return not (task.repo_id is not None and await _repo_has_active_task(session, task.repo_id))
 
 
 async def next_eligible_task(session: AsyncSession) -> Task | None:
@@ -94,6 +103,8 @@ async def next_eligible_task(session: AsyncSession) -> Task | None:
     """
     if await count_active(session) >= settings.max_concurrent_workers:
         return None
+
+    lease_is_held = await lease_held()
 
     active_repos_q = await session.execute(
         select(Task.repo_id)
@@ -110,6 +121,8 @@ async def next_eligible_task(session: AsyncSession) -> Task | None:
         .order_by(Task.priority.asc(), Task.created_at.asc())
     )
     for t in queued_q.scalars():
+        if lease_is_held and not is_health_loop_task(t):
+            continue
         if t.repo_id is not None and t.repo_id in busy_repos:
             continue
         if t.organization_id is not None:
