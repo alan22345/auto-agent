@@ -551,6 +551,5 @@ __all__ = [
     "_label_flow",
     "_load_file_slices",
     "_path_group_key",
-    "_phase1_fallback_capability",
     "label_flow_blob",
 ]
