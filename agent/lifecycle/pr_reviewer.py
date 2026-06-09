@@ -36,6 +36,7 @@ from agent.lifecycle.route_inference import (
     infer_routes_from_diff,
     is_ui_route,
 )
+from agent.lifecycle.trio.smoke_agent import SmokeAgentResult, run_smoke_agent
 from agent.lifecycle.verify_primitives import (
     RouteResult,
     ServerHandle,
@@ -375,11 +376,24 @@ async def _run_artefact_review(
                     verdict=verdict,
                 )
                 continue
-            comments = payload.get("comments") or []
+            comments = list(payload.get("comments") or [])
             summary = payload.get("summary", "") or ""
+            # Fail-closed runtime gate. The artefact scope (complex /
+            # complex_large) LLM judges PR *hygiene* by reading — it never
+            # runs the code. A clean-hygiene PR that doesn't actually run
+            # must not pass, so escalate to the smoke agent and downgrade
+            # the verdict on a non-pass. Runtime verification is mandatory
+            # (ADR-015 §3, extended to the self-review gates).
+            smoke_ok, smoke_comment, smoke_summary = await _smoke_gate(
+                task=task, workspace_root=workspace_root, diff=diff
+            )
+            if not smoke_ok and smoke_comment is not None:
+                comments.append(smoke_comment)
+                verdict = "changes_requested"
+                summary = (f"{summary} | smoke: {smoke_summary}").strip(" |")
             return PRReviewResult(
                 verdict=verdict,
-                comments=list(comments),
+                comments=comments,
                 summary=summary,
             )
         log.warning(
@@ -463,6 +477,62 @@ def _render_comment(c: dict[str, Any]) -> str:
     if path:
         return f"{path} — {text}"
     return str(text)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed runtime gate — single owner of "did the change actually run?"
+# ---------------------------------------------------------------------------
+
+
+async def _smoke_gate(
+    *,
+    task: Any,
+    workspace_root: str,
+    diff: str,
+) -> tuple[bool, dict[str, Any] | None, str]:
+    """Run the smoke agent and report whether the diff demonstrably runs.
+
+    This is the fail-closed counterpart to route-inference: the smoke
+    agent decides its own runtime check (boot+curl / test suite / build /
+    typecheck) and its verdict is always ``pass``/``fail`` — never
+    ``skipped`` (see :mod:`agent.lifecycle.trio.smoke_agent`). Non-UI
+    diffs (config / docs / pure-backend) still pass legitimately via
+    their test suite or build, so this does not false-reject them.
+
+    Returns ``(passed, blocking_comment_or_None, smoke_summary)``. The
+    caller appends ``blocking_comment`` to its comment list and/or
+    downgrades its verdict on a non-pass.
+    """
+
+    smoke: SmokeAgentResult = await run_smoke_agent(
+        workspace_root=workspace_root,
+        item=None,
+        design="",
+        diff=diff,
+        repo_name=getattr(task, "repo_name", None),
+        home_dir=await home_dir_for_task(task),
+        org_id=getattr(task, "organization_id", None),
+        repo_id=getattr(task, "repo_id", None),
+        task_id=getattr(task, "id", 0),
+    )
+    summary = smoke.summary[:200]
+    if smoke.verdict == "pass":
+        return True, None, summary
+
+    first_failure = (
+        smoke.failures[0]
+        if smoke.failures
+        else smoke.summary or "smoke agent could not verify the diff runs"
+    )
+    comment = {
+        "comment": (
+            f"Runtime verification failed (smoke agent): {first_failure[:400]}. "
+            f"The change must be provably runnable — the smoke agent boots the "
+            f"app and/or runs the project's test suite / build / typecheck, and "
+            f"it did not pass. Fix so the change runs before this PR can merge."
+        ),
+    }
+    return False, comment, summary
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +627,27 @@ async def _run_correctness_review(
         if handle is not None:
             await handle.teardown()
 
+    # ---------------------------------------------------------------------
+    # Smart-escalation, fail-closed runtime gate. When the diff yields no
+    # inferable routes, the route-exercise layer above ran nothing — and
+    # the review historically auto-approved with NO runtime verification at
+    # all (fail-open). The exact changes a refactor / dead-code / health
+    # fix makes are precisely the ones that add no route, so this is the
+    # hole that lets broken code merge. Instead of skipping, escalate to
+    # the smoke agent: it decides its own runtime check (test suite /
+    # build / typecheck / boot) and its verdict is always pass|fail
+    # (never "skipped" — see trio.smoke_agent). A non-pass verdict is a
+    # blocking comment. Non-UI tasks (config / docs / pure-backend) still
+    # pass legitimately via their test suite or build, so this does not
+    # false-reject them.
+    smoke_summary = ""
+    if not routes:
+        _passed, smoke_comment, smoke_summary = await _smoke_gate(
+            task=task, workspace_root=workspace_root, diff=diff
+        )
+        if smoke_comment is not None:
+            comments.append(smoke_comment)
+
     # Synthesise route-level comments AFTER UI to keep ordering deterministic.
     for route, rr in route_results.items():
         if rr.ok:
@@ -584,7 +675,10 @@ async def _run_correctness_review(
     if routes:
         summary_lines.append(f"routes inferred from diff: {routes!r}")
     else:
-        summary_lines.append("no routes inferred from diff; route exercise skipped.")
+        summary_lines.append(
+            f"no routes inferred from diff; escalated to smoke agent "
+            f"(verdict-bearing runtime check): {smoke_summary or 'n/a'}."
+        )
     summary = " ".join(summary_lines)
 
     result = PRReviewResult(verdict=verdict, comments=comments, summary=summary)

@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 from agent.lifecycle import review
+from agent.lifecycle.trio.smoke_agent import SmokeAgentResult
 
 # --- helpers ---
 
@@ -45,6 +46,14 @@ def _patch_orchestrator_io(monkeypatch, task, repo=None, freeform_cfg=None):
     )
     monkeypatch.setattr(
         "agent.lifecycle.review.publish", AsyncMock(),
+    )
+    # Default: the fail-closed smoke escalation (fired when ui_check is
+    # SKIPPED) passes, so these attempt-persistence / cycle-logic tests keep
+    # their original intent. The escalation behaviour itself is covered by
+    # tests/test_review_smoke_escalation.py.
+    monkeypatch.setattr(
+        "agent.lifecycle.review.run_smoke_agent",
+        AsyncMock(return_value=SmokeAgentResult(verdict="pass", summary="ok")),
     )
 
 

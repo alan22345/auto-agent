@@ -25,6 +25,7 @@ from agent.lifecycle._orchestrator_api import (
     transition_task,
 )
 from agent.lifecycle.factory import create_agent, home_dir_for_task
+from agent.lifecycle.trio.smoke_agent import run_smoke_agent
 from agent.prompts import (
     build_plan_independent_review_prompt,
     build_pr_independent_review_prompt_with_ui_check,
@@ -396,6 +397,53 @@ async def handle_independent_review(task_id: int, pr_url: str, branch_name: str)
             "NOT-OK": "fail",
             "SKIPPED": "skipped",
         }.get(ui_verdict, "skipped")
+
+        # Fail-closed runtime gate. A SKIPPED ui-check means the reviewer
+        # never actually ran the change at runtime — no affected_routes were
+        # declared, so no dev server booted and there was nothing to
+        # screenshot. Historically this auto-approved (fail-open). Instead,
+        # escalate to the smoke agent: it boots the app and/or runs the test
+        # suite / build / typecheck and returns a pass|fail verdict (never
+        # skipped). A non-pass downgrades the ui-check to a hard fail so the
+        # task loops back rather than merging unverified code. A passing
+        # smoke verdict lets the SKIPPED ui-check approve as before.
+        if code_verdict == "OK" and ui_verdict == "SKIPPED":
+            smoke_diff = ""
+            with contextlib.suppress(Exception):
+                diff_res = await sh.run(
+                    ["git", "diff", f"{base_branch}...HEAD"],
+                    cwd=workspace,
+                    timeout=30,
+                )
+                if not diff_res.failed:
+                    smoke_diff = diff_res.stdout
+            smoke = await run_smoke_agent(
+                workspace_root=workspace,
+                item=None,
+                design="",
+                diff=smoke_diff,
+                repo_name=task.repo_name,
+                home_dir=await home_dir_for_task(task),
+                org_id=task.organization_id,
+                repo_id=task.repo_id,
+                task_id=task_id,
+            )
+            if smoke.verdict != "pass":
+                first_failure = (
+                    smoke.failures[0]
+                    if smoke.failures
+                    else smoke.summary or "smoke agent could not verify the change runs"
+                )
+                ui_verdict = "NOT-OK"
+                ui_check_status = "fail"
+                ui_reasoning = (
+                    f"runtime verification failed (smoke agent): {first_failure[:300]}"
+                )
+                log.info(
+                    "review.smoke_escalation_failed",
+                    task_id=task_id,
+                    summary=smoke.summary[:200],
+                )
 
         approved = code_verdict == "OK" and ui_verdict in ("OK", "SKIPPED")
 
