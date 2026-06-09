@@ -64,3 +64,18 @@ async def _force_push_cleanup(
             f"allowlist {sorted(allowed_branches)}"
         )
     await _git("push", "--force-with-lease", "origin", cleanup_branch, cwd=workspace)
+
+
+async def ensure_cleanup_branch(*, workspace: str, base_branch: str, cleanup_branch: str) -> None:
+    """Check out the cleanup branch, creating it off ``base_branch`` if it
+    doesn't exist yet on the remote. Idempotent.
+    """
+    await _git("fetch", "origin", cwd=workspace)
+    existing = await _git(
+        "ls-remote", "--heads", "origin", cleanup_branch, cwd=workspace, check=False
+    )
+    if existing.stdout.strip():
+        await _git("checkout", "-B", cleanup_branch, f"origin/{cleanup_branch}", cwd=workspace)
+    else:
+        await _git("checkout", "-B", cleanup_branch, f"origin/{base_branch}", cwd=workspace)
+        await _git("push", "-u", "origin", cleanup_branch, cwd=workspace)
