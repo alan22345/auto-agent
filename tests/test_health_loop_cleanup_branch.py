@@ -214,3 +214,32 @@ async def test_rebase_conflict_aborts_and_reports(git_repos):
     # The repo is not mid-rebase (abort cleaned up).
     status = subprocess.run(["git", "status"], cwd=work, capture_output=True, text=True).stdout
     assert "rebase in progress" not in status.lower()
+
+
+@pytest.mark.asyncio
+async def test_merge_fix_conflict_aborts_and_returns_false(git_repos):
+    work = git_repos.work
+    await ensure_cleanup_branch(
+        workspace=work, base_branch="main", cleanup_branch=DEFAULT_CLEANUP_BRANCH
+    )
+    # Cleanup edits the only line of README and pushes.
+    (Path(work) / "README.md").write_text("cleanup line\n")
+    _run(["git", "add", "."], work)
+    _run(["git", "commit", "-m", "cleanup edits README"], work)
+    _run(["git", "push", "origin", DEFAULT_CLEANUP_BRANCH], work)
+    # A fix branch off main edits the SAME line to a different value, so it
+    # genuinely diverges from cleanup ⇒ merge --no-ff must conflict.
+    _run(["git", "checkout", "-b", "fix/conflict", "main"], work)
+    (Path(work) / "README.md").write_text("fix line\n")
+    _run(["git", "add", "."], work)
+    _run(["git", "commit", "-m", "fix edits README"], work)
+
+    merged = await merge_fix(
+        workspace=work, fix_branch="fix/conflict", cleanup_branch=DEFAULT_CLEANUP_BRANCH
+    )
+
+    assert merged is False
+    # No dangling merge state: abort cleaned up MERGE_HEAD and unmerged paths.
+    assert not (Path(work) / ".git" / "MERGE_HEAD").exists()
+    status = subprocess.run(["git", "status"], cwd=work, capture_output=True, text=True).stdout
+    assert "unmerged" not in status.lower()

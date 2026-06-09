@@ -56,7 +56,11 @@ async def _force_push_cleanup(
 
     The single deliberately-loosened guardrail in the auto-heal loop. The
     allowlist check runs before any git command so a misconfigured caller
-    can never force-push a non-cleanup branch.
+    can never force-push a non-cleanup branch. Its teeth come from the
+    CALLER passing a FIXED allowlist (e.g. ``{DEFAULT_CLEANUP_BRANCH}``): the
+    guard catches a misconfigured force-push *target*, so callers must pass an
+    explicit allowlist rather than one derived from the ``cleanup_branch``
+    argument (which would make the check tautological).
     """
     if cleanup_branch not in allowed_branches:
         raise ValueError(
@@ -119,6 +123,9 @@ async def rebase_onto_base(
     and ``ok=True``. On conflict the rebase is aborted, the branch is left
     unchanged, and ``conflict=True`` is returned for the caller to park.
     """
+    # NOTE: falling back to ``{cleanup_branch}`` makes the allowlist guard a
+    # no-op (the target always matches the allowlist). Real protection requires
+    # the caller to pass an explicit allowlist (e.g. {DEFAULT_CLEANUP_BRANCH}).
     allowed = allowed_branches or {cleanup_branch}
     await _git("fetch", "origin", cwd=workspace)
     await _git("checkout", "-B", cleanup_branch, f"origin/{cleanup_branch}", cwd=workspace)
