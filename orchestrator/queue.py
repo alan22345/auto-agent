@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
 from sqlalchemy import func, select
 
 from agent.health_loop.lease import lease_held
@@ -23,6 +24,8 @@ from shared.models import Task, TaskStatus
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+log = structlog.get_logger()
 
 # Statuses that count as "active" (occupying a slot)
 ACTIVE_STATUSES = {
@@ -41,9 +44,32 @@ ACTIVE_STATUSES = {
 def is_health_loop_task(task: Task) -> bool:
     """True for the auto-heal loop's own tasks (the supervisor and its
     per-batch fix tasks), which are exempt from the lease gate — the lease
-    blocks *other* work, never the loop's own."""
+    blocks *other* work, never the loop's own.
+
+    Matching is on ``source_id``, which is caller-influenceable: ``health:``
+    and ``health-loop`` are a RESERVED namespace. The lease throttle's
+    integrity therefore currently relies on no external caller using a
+    ``health:``/``health-loop`` ``source_id``. Phase 5 will replace this with
+    a server-owned ``TaskSource`` marker set at task creation (not settable by
+    API callers) once its migration lands.
+    """
     sid = task.source_id or ""
     return sid == "health-loop" or sid.startswith("health:")
+
+
+async def _lease_held_safe() -> bool:
+    """Lease check for the dispatch hot path — fails OPEN.
+
+    If Redis is unreachable, treat the lease as free rather than
+    letting a Redis hiccup wedge ALL task dispatch. The health loop
+    throttles one subsystem; it must never be able to freeze the
+    whole pipeline.
+    """
+    try:
+        return await lease_held()
+    except Exception:
+        log.warning("health-loop lease check failed; treating lease as free", exc_info=True)
+        return False
 
 
 async def count_active(session: AsyncSession) -> int:
@@ -84,7 +110,7 @@ async def can_start_task(session: AsyncSession, task: Task) -> bool:
     if await count_active(session) >= settings.max_concurrent_workers:
         return False
     # Health-loop lease: while held, only the loop's own tasks may start.
-    if not is_health_loop_task(task) and await lease_held():
+    if not is_health_loop_task(task) and await _lease_held_safe():
         return False
     if task.organization_id is not None and await _org_at_concurrency_cap(
         session, task.organization_id
@@ -104,7 +130,7 @@ async def next_eligible_task(session: AsyncSession) -> Task | None:
     if await count_active(session) >= settings.max_concurrent_workers:
         return None
 
-    lease_is_held = await lease_held()
+    lease_is_held = await _lease_held_safe()
 
     active_repos_q = await session.execute(
         select(Task.repo_id)

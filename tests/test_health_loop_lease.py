@@ -10,7 +10,12 @@ from agent.health_loop import lease
 
 
 class FakeRedis:
-    """Minimal async redis stand-in supporting set(nx,ex)/get/delete."""
+    """Minimal async redis stand-in supporting set(nx,ex)/get/delete.
+
+    Note: this does NOT model ``ex``/TTL expiry — keys never expire — so
+    TTL-expiry races (e.g. the renew_lease TOCTOU) are intentionally not
+    covered here.
+    """
 
     def __init__(self):
         self.store: dict[str, bytes] = {}

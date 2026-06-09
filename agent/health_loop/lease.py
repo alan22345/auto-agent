@@ -47,6 +47,10 @@ async def renew_lease(holder: str, *, ttl_seconds: int = 3600) -> bool:
     """
     if await lease_holder() != holder:
         return False
+    # TOCTOU: this GET-then-SET is non-atomic and uses SET without NX, so if the
+    # TTL expires in the gap it could re-create/clobber a lease. Safe under the
+    # serial single-supervisor design; the follow-up if the loop ever becomes
+    # concurrent is a Lua compare-and-set (GET + PEXPIRE atomically).
     r = await get_redis()
     await r.set(HEALTH_LEASE_KEY, holder.encode(), ex=ttl_seconds)
     return True
