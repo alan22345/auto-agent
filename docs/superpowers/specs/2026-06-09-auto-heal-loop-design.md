@@ -22,7 +22,8 @@ the UI verified."* Behavior must be provably preserved, not assumed.
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Trigger model | Autonomous daemon — runs indefinitely; drains all finding categories |
-| 2 | Pacing | **Serial** — exactly one fix in flight at a time |
+| 2 | Concurrency | **Serial** — exactly one fix *in flight* at a time (drives VM memory; protected by the lease) |
+| 2b | Batch size | A fix addresses **up to N findings** (`batch_size`, default 5, per-repo configurable). Independent of concurrency — still one agent / one branch / one verification run, so it adds no VM load |
 | 3 | Merge target | A long-lived **cleanup branch**, always rebased onto `main`; never auto-merge to `main` |
 | 4 | Regression guard | **Differential** (before/after) verification, in v1 |
 | 5 | Verification | Three gates, all must pass: CI green + fail-closed smoke + differential |
@@ -57,9 +58,9 @@ provisional.
                   ┌────────────────────▼────────────────────┐
                   │ 1. HealthRanker → ordered findings       │
                   │ 2. Suppression filter                    │
-                  │ 3. Finding→Task translator               │
-                  │ 4. Health-fix task (coder on child       │
-                  │    branch off cleanup tip)               │
+                  │ 3. Findings→Task (batch up to N)         │
+                  │ 4. Health-fix task (coder works all N    │
+                  │    on one child branch off cleanup tip)  │
                   │ 5. Three-gate verifier                   │
                   │      a. CI green                          │
                   │      b. smoke (fail-closed — built)       │
@@ -91,19 +92,31 @@ provisional.
 - Set from the health tab (per-row "suppress" action). Without this the loop
   would churn forever on findings it can't or shouldn't fix.
 
-### 3. Finding → Task translator
+### 3. Findings → Task translator (batched)
+- Takes the **top `N` un-suppressed, not-in-flight findings** from the ranker
+  (`N = batch_size`, default 5) and bundles them into **one** fix task.
 - Reuses `agent/po_graph_findings.py` summarization to render an
-  **evidence-cited** task description (node IDs, `file:line`, metrics) so the
-  coder has precise, grounded context.
-- Emits a `Task` with `source = FREEFORM`, `freeform_mode = True`,
-  `source_id = f"health:{repo_id}:{finding_hash}"` (dedup key), and a
-  `parent_task_id` pointing at the supervisor task.
+  **evidence-cited** task description listing all N findings (node IDs,
+  `file:line`, metrics) so the coder has precise, grounded context for each.
+- Emits a `Task` with `source = FREEFORM`, `freeform_mode = True`, a
+  `parent_task_id` pointing at the supervisor, and a **batch** identity:
+  - `source_id = f"health:{repo_id}:batch:{batch_hash}"` where `batch_hash`
+    derives from the sorted member `finding_hash`es.
+  - The task records the **set** of member `finding_hash`es (a
+    `health_finding_hashes` column / JSONB) so dedup and suppression operate on
+    members, not the batch: a finding already in flight or suppressed is
+    excluded from the next batch even if its siblings are picked.
+- **Attribution caveat (decision 2b):** because the batch is *not* segregated by
+  category or locality, a differential failure parks all N together (see gate 5c)
+  and a regression can't be pinned to a single member. `batch_size` is tunable
+  down (to 1) per repo if this bites on behavior-changing categories.
 
 ### 4. Health-fix execution
 - A dedicated handler (not generic classification) so every health fix takes the
   same path and always hits all three gates.
-- The coder works on a short-lived child branch cut from the **current cleanup
-  tip** (= latest `main` + previously accepted fixes).
+- The coder works **all N batch findings** on a single short-lived child branch
+  cut from the **current cleanup tip** (= latest `main` + previously accepted
+  fixes).
 
 ### 5. Three-gate verifier (all must pass)
 1. **CI green** — the repo's existing CI on the child branch.
@@ -122,8 +135,9 @@ provisional.
    - Invariant this enforces: *the cleanup branch behaves identically to `main`,
      just cleaner* (held inductively — each fix preserves it).
 - **Pass all three** → hand to CleanupBranchManager to merge.
-  **Fail any** → park the task `BLOCKED` with the diff/reason attached; the loop
-  records the finding as parked and **moves on** (no infinite retry).
+  **Fail any** → park the **whole batch** task `BLOCKED` with the diff/reason
+  attached; the loop records all N member findings as parked and **moves on**
+  (no infinite retry). (A `batch_size` of 1 recovers per-finding attribution.)
 
 ### 6. CleanupBranchManager
 - Owns the long-lived `auto-agent/health-cleanup` branch (name configurable).
@@ -169,11 +183,13 @@ provisional.
 
 - **`HealthLoopConfig`** (new, or extend `RepoGraphConfig`):
   `repo_id`, `enabled: bool`, `cleanup_branch: str = "auto-agent/health-cleanup"`,
-  `suppressed_finding_hashes: list[str]`, `state: enum`, `last_run_at`,
-  `supervisor_task_id: int | None`.
-- **`Task`**: reuse existing columns. `source_id = "health:{repo}:{hash}"` is the
-  dedup key; `parent_task_id` links fixes to the supervisor. No schema change
-  expected beyond possibly a `health_finding_hash` convenience column.
+  `batch_size: int = 5`, `suppressed_finding_hashes: list[str]`, `state: enum`,
+  `last_run_at`, `supervisor_task_id: int | None`.
+- **`Task`**: reuse existing columns plus one addition.
+  `source_id = "health:{repo}:batch:{batch_hash}"` is the batch dedup key;
+  `parent_task_id` links fixes to the supervisor; a new
+  `health_finding_hashes` JSONB column records the **member** finding hashes so
+  dedup and suppression operate per-member (not per-batch).
 - **Scheduling lease:** a single **VM-global** mutex — one Redis key
   `vm_exclusive_lease` (TTL-guarded so a crashed supervisor can't wedge the VM
   forever). Not per-repo (see component 7).
@@ -200,10 +216,10 @@ provisional.
   pattern, coder, the fail-closed gates (`_smoke_gate`), `po_graph_findings`
   summarization, `exercise_routes` / `inspect_ui`, the health blob + ranker
   inputs, the existing concurrency/queue dispatcher.
-- **Builds new:** HealthRanker + finding-hash, suppression, the supervisor task +
-  exclusive lease + Stop/Resume, the differential verifier, the
-  CleanupBranchManager (rebase/merge + scoped force-push exception), the UI
-  toggle/status/suppress.
+- **Builds new:** HealthRanker + finding-hash, batch assembly (up to N members) +
+  per-member dedup/suppression, the supervisor task + exclusive lease +
+  Stop/Resume, the differential verifier, the CleanupBranchManager (rebase/merge
+  + scoped force-push exception), the UI toggle/status/suppress.
 
 ## Failure & edge handling
 
@@ -220,19 +236,19 @@ provisional.
 
 ## Acceptance criteria
 
-1. With the loop enabled, a fresh health finding results in a fix branch that is
-   merged into the cleanup branch **only** after CI + smoke + differential all
-   pass; a fix that changes observable behavior is rejected (parked), never
-   merged.
+1. With the loop enabled, fresh health findings result in a fix branch (a batch
+   of up to `batch_size` findings) that is merged into the cleanup branch
+   **only** after CI + smoke + differential all pass; a batch that changes
+   observable behavior is rejected (parked as a whole), never merged.
 2. The cleanup branch is never `main`; `main` is only ever changed by a human
    merging the cleanup PR.
 3. While the loop is active, no other task is dispatched (verified: a submitted
    task stays `QUEUED` until Stop).
 4. Stop releases the lease after the in-flight fix reaches a terminal state;
    Resume continues from the next worst finding.
-5. A suppressed finding is never re-filed.
-6. The same finding is never double-filed across re-analyses (dedup by
-   `finding_hash`).
+5. A suppressed finding is never included in a batch.
+6. The same finding is never double-filed across re-analyses or bundled into two
+   concurrent batches (dedup by member `finding_hash`).
 7. The loop runs indefinitely: it idles when findings are exhausted and wakes on
    the next graph refresh.
 
