@@ -46,6 +46,17 @@ def test_non_json_body_compared_as_stripped_text():
     assert compare_route("/x", base, branch) is None  # whitespace-only ⇒ no diff
 
 
+def test_verdict_change_is_a_diff_at_same_status_and_body():
+    # exercise_routes flips ok→False (e.g. runtime_stub_shape) without changing
+    # status or body; that is still an observable regression.
+    base = RouteResult(ok=True, status=200, body="x")
+    branch = RouteResult(ok=False, status=200, body="x", reason="runtime_stub_shape")
+    d = compare_route("/x", base, branch)
+    assert isinstance(d, RouteDiff)
+    assert d.route == "/x"
+    assert "verdict" in d.detail.lower() or "ok" in d.detail.lower()
+
+
 def test_diff_results_flags_changed_route_only():
     base = {
         "/a": RouteResult(ok=True, status=200, body="x"),
@@ -165,3 +176,31 @@ async def test_verify_tears_down_both_servers():
         )
     # Booted twice (base + branch) ⇒ torn down twice.
     assert teardown.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_verify_tears_down_base_when_branch_boot_raises():
+    # Branch boot blows up after the base server is already up; the base
+    # server must still be torn down (no leaked process).
+    base_teardown = AsyncMock()
+    base_handle = _running()
+    base_handle.teardown = base_teardown  # instance-level so we count just this one
+    with (
+        patch.object(
+            differential,
+            "boot_dev_server",
+            AsyncMock(side_effect=[base_handle, RuntimeError("boom")]),
+        ),
+        patch.object(
+            differential,
+            "exercise_routes",
+            AsyncMock(return_value={"/a": RouteResult(ok=True, status=200, body="x")}),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await differential_verify(
+            base_workspace="/tmp/base",
+            branch_workspace="/tmp/branch",
+            routes=["/a"],
+        )
+    base_teardown.assert_awaited_once()

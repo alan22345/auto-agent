@@ -36,7 +36,12 @@ class RouteDiff:
 
 @dataclass
 class DifferentialResult:
-    """Outcome of a differential run. ``regressed`` is the gate."""
+    """Outcome of a differential run. ``regressed`` is the gate.
+
+    Result channels: route-level regressions populate ``diffs``; boot-level
+    regressions (boot state diverged, or neither side booted) populate
+    ``note``.
+    """
 
     regressed: bool
     diffs: list[RouteDiff] = field(default_factory=list)
@@ -44,7 +49,12 @@ class DifferentialResult:
 
 
 def _normalize_body(body: str):
-    """Parse JSON if possible (order-insensitive), else stripped text."""
+    """Parse JSON if possible (order-insensitive), else stripped text.
+
+    Known minor comparison quirks (accepted for now): ``json.loads`` coerces
+    JSON numerics so ``123`` and ``123.0`` compare equal, and it accepts the
+    non-standard ``NaN``/``Infinity`` tokens.
+    """
     try:
         return json.loads(body)
     except (json.JSONDecodeError, TypeError):
@@ -54,13 +64,20 @@ def _normalize_body(body: str):
 def compare_route(route: str, base: RouteResult, branch: RouteResult) -> RouteDiff | None:
     """Return a :class:`RouteDiff` if the two responses diverge, else None.
 
-    Status is compared exactly; body is compared JSON-aware (see
+    Status is compared exactly, then the ``ok`` verdict (so a flip from a
+    passing verdict to a stub-shape/expected-shape-mismatch verdict at the
+    same HTTP status+body is still caught), then the body JSON-aware (see
     :func:`_normalize_body`).
     """
     if base.status != branch.status:
         return RouteDiff(
             route=route,
             detail=f"status changed: {base.status} → {branch.status}",
+        )
+    if base.ok != branch.ok:
+        return RouteDiff(
+            route=route,
+            detail=f"verdict changed: ok {base.ok} → {branch.ok} ({branch.reason or 'n/a'})",
         )
     if _normalize_body(base.body) != _normalize_body(branch.body):
         return RouteDiff(
