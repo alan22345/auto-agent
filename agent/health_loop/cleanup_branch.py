@@ -104,3 +104,33 @@ async def merge_fix(*, workspace: str, fix_branch: str, cleanup_branch: str) -> 
         return False
     await _git("push", "origin", cleanup_branch, cwd=workspace)
     return True
+
+
+async def rebase_onto_base(
+    *,
+    workspace: str,
+    base_branch: str,
+    cleanup_branch: str,
+    allowed_branches: set[str] | None = None,
+) -> RebaseOutcome:
+    """Rebase the cleanup branch onto the latest base, then force-push it.
+
+    On a clean rebase the branch is force-pushed (via the allowlist guard)
+    and ``ok=True``. On conflict the rebase is aborted, the branch is left
+    unchanged, and ``conflict=True`` is returned for the caller to park.
+    """
+    allowed = allowed_branches or {cleanup_branch}
+    await _git("fetch", "origin", cwd=workspace)
+    await _git("checkout", "-B", cleanup_branch, f"origin/{cleanup_branch}", cwd=workspace)
+    rebased = await _git("rebase", f"origin/{base_branch}", cwd=workspace, check=False)
+    if rebased.failed:
+        await _git("rebase", "--abort", cwd=workspace, check=False)
+        return RebaseOutcome(
+            ok=False,
+            conflict=True,
+            detail=(rebased.stderr.strip() or rebased.stdout.strip())[:300] or "rebase conflict",
+        )
+    await _force_push_cleanup(
+        workspace=workspace, cleanup_branch=cleanup_branch, allowed_branches=allowed
+    )
+    return RebaseOutcome(ok=True)
