@@ -122,4 +122,4 @@ def append_journal_entry(
     return seq
 
 
-__all__ = ["append_journal_entry", "next_decision_seq"]
+__all__ = ["append_journal_entry"]
