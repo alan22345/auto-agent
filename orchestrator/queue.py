@@ -37,7 +37,7 @@ ACTIVE_STATUSES = {
 }
 
 
-async def count_active(session: AsyncSession) -> int:
+async def _count_active(session: AsyncSession) -> int:
     """Total active tasks across all users and repos."""
     result = await session.execute(
         select(func.count(Task.id)).where(Task.status.in_(ACTIVE_STATUSES))
@@ -72,7 +72,7 @@ async def _org_at_concurrency_cap(session: AsyncSession, org_id: int) -> bool:
 
 async def can_start_task(session: AsyncSession, task: Task) -> bool:
     """Can this specific task start right now?"""
-    if await count_active(session) >= settings.max_concurrent_workers:
+    if await _count_active(session) >= settings.max_concurrent_workers:
         return False
     if task.organization_id is not None and await _org_at_concurrency_cap(
         session, task.organization_id
@@ -92,7 +92,7 @@ async def next_eligible_task(session: AsyncSession) -> Task | None:
     Memoizes capped orgs per-tick so we don't query the plan repeatedly when
     many tasks belong to the same capped org.
     """
-    if await count_active(session) >= settings.max_concurrent_workers:
+    if await _count_active(session) >= settings.max_concurrent_workers:
         return None
 
     active_repos_q = await session.execute(
