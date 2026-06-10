@@ -24,7 +24,7 @@ class ChangedFilesPlan:
     renamed_modified: list[tuple[str, str]] = field(default_factory=list)
 
 
-def parse_git_name_status(raw: bytes) -> ChangedFilesPlan:
+def _parse_git_name_status(raw: bytes) -> ChangedFilesPlan:
     """Parse NUL-separated output of:
 
         git diff --name-status --diff-filter=AMRTUD -z <from> <to>
@@ -95,7 +95,7 @@ async def changed_files(
         if "unknown revision" in err or "bad revision" in err or "fatal" in err:
             raise CheckpointCommitUnreachable(err.strip())
         raise RuntimeError(f"git diff failed: {err.strip()}")
-    return parse_git_name_status(stdout)
+    return _parse_git_name_status(stdout)
 
 
 def apply_plan(
