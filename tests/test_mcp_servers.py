@@ -78,3 +78,20 @@ def test_to_cli_entry_stdio_shape():
     assert "serve" in entry["args"]
     assert entry["env"]["TEAM_MEMORY_DATABASE_URL"].endswith("/db")
     assert "type" not in entry  # stdio entries have no "type"
+
+
+def test_code_graph_added_when_repo_id_given():
+    specs = build_mcp_servers(
+        _settings(database_url="postgresql+asyncpg://u:p@host/app"), repo_id=7
+    )
+    cg = next(s for s in specs if s.name == "code-graph")
+    assert cg.transport == "stdio"
+    assert cg.targets == frozenset({"cli"})  # native keeps the in-process tool
+    assert cg.env["CODE_GRAPH_REPO_ID"] == "7"
+    assert cg.env["DATABASE_URL"].endswith("/app")
+    assert cg.args[-1] == "agent.mcp.code_graph_server"
+
+
+def test_code_graph_absent_without_repo_id():
+    specs = build_mcp_servers(_settings(database_url="postgresql+asyncpg://u:p@host/app"))
+    assert "code-graph" not in {s.name for s in specs}

@@ -66,11 +66,14 @@ def _resolve_team_memory_command() -> tuple[str, list[str]]:
     return sys.executable, ["-m", "team_memory.cli", "serve"]
 
 
-def build_mcp_servers(settings: Any) -> list[McpServerSpec]:
+def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpServerSpec]:
     """Assemble the configured MCP servers. Returns [] when MCP is disabled.
 
     Entries whose required secret/config is missing are skipped (logged), so a
     half-configured deployment degrades to "fewer servers" rather than failing.
+
+    ``repo_id`` pins the per-task code-graph server (ADR-023) to the repo the
+    agent is working in; without it that server is omitted.
     """
     if not getattr(settings, "mcp_enabled", True):
         return []
@@ -110,6 +113,26 @@ def build_mcp_servers(settings: Any) -> list[McpServerSpec]:
         )
     else:
         logger.info("mcp_server_skipped", server="team-memory", reason="no db url")
+
+    # code-graph — stdio MCP re-exposing query_repo_graph to the CLI path,
+    # which can't see in-process Python tools (ADR-023). Native mode keeps
+    # the in-process tool. Pinned to the task's repo; DATABASE_URL is
+    # forwarded so the subprocess resolves the same Postgres regardless of
+    # the CLI's working directory.
+    if repo_id is not None:
+        specs.append(
+            McpServerSpec(
+                name="code-graph",
+                transport="stdio",
+                targets=frozenset({"cli"}),
+                command=sys.executable,
+                args=("-m", "agent.mcp.code_graph_server"),
+                env={
+                    "CODE_GRAPH_REPO_ID": str(repo_id),
+                    "DATABASE_URL": getattr(settings, "database_url", "") or "",
+                },
+            )
+        )
 
     return specs
 
