@@ -151,6 +151,7 @@ async def run_pr_review(
     task: Any,
     workspace_root: str,
     scope: Literal["correctness", "artefact"],
+    base_branch: str = "main",
 ) -> PRReviewResult:
     """Run the self-PR-review for ``task`` against the workspace's PR diff.
 
@@ -168,10 +169,14 @@ async def run_pr_review(
     """
 
     if scope == "artefact":
-        return await _run_artefact_review(task=task, workspace_root=workspace_root)
+        return await _run_artefact_review(
+            task=task, workspace_root=workspace_root, base_branch=base_branch
+        )
 
     if scope == "correctness":
-        return await _run_correctness_review(task=task, workspace_root=workspace_root)
+        return await _run_correctness_review(
+            task=task, workspace_root=workspace_root, base_branch=base_branch
+        )
 
     raise ValueError(f"unknown PR review scope: {scope!r}")
 
@@ -253,6 +258,7 @@ async def _run_artefact_review(
     *,
     task: Any,
     workspace_root: str,
+    base_branch: str = "main",
 ) -> PRReviewResult:
     """LLM-driven artefact-scope PR review using the ``submit-pr-review`` skill.
 
@@ -268,7 +274,6 @@ async def _run_artefact_review(
     doesn't need to weigh in on.
     """
 
-    base_branch = getattr(task, "base_branch", None) or "main"
     diff = await _load_pr_diff(workspace_root, base_branch=base_branch)
 
     # Layer-4 grep backstop — runs before the LLM call.
@@ -474,10 +479,9 @@ async def _run_correctness_review(
     *,
     task: Any,
     workspace_root: str,
+    base_branch: str = "main",
 ) -> PRReviewResult:
     """Run the four verify primitives against the PR diff and synthesise a verdict."""
-
-    base_branch = getattr(task, "base_branch", None) or "main"
 
     diff = await _load_pr_diff(workspace_root, base_branch=base_branch)
 

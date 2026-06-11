@@ -351,10 +351,12 @@ async def _handle_verify_complex(task_id: int, task) -> None:
     attempt = await _create_verify_attempt(task_id, attempt_n)
     try:
         workspace, base_branch = await _prepare_workspace(task)
-        task.base_branch = base_branch
         result = await asyncio.wait_for(
             run_verify_primitives_for_task(
-                task=task, workspace_root=workspace, attempt=attempt_n,
+                task=task,
+                workspace_root=workspace,
+                attempt=attempt_n,
+                base_branch=base_branch,
             ),
             timeout=PHASE_TIMEOUT_SECONDS,
         )
@@ -480,6 +482,7 @@ async def run_verify_primitives_for_task(
     task: Any,
     workspace_root: str,
     attempt: int = 1,
+    base_branch: str = "main",
 ) -> VerifyPrimitivesResult:
     """Run the shared verify primitives end-to-end against the working diff.
 
@@ -495,7 +498,6 @@ async def run_verify_primitives_for_task(
     BLOCKED (attempt 2). Always writes ``.auto-agent/smoke_result.json``.
     """
 
-    base_branch = getattr(task, "base_branch", None) or "main"
     diff = await _load_diff(workspace_root, base_branch=base_branch)
 
     # --- Layer 1: stub grep -------------------------------------------------

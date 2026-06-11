@@ -98,3 +98,16 @@ async def test_get_freeform_config_disabled_returns_none(monkeypatch):
         ))
         await s.commit()
     assert await api.get_freeform_config("ff-disabled") is None
+
+
+@pytest.mark.asyncio
+async def test_mark_repo_harness_onboarded_writes_db(monkeypatch):
+    """Onboarding marks the repo in-process; the old POST /repos/{id}/harness
+    loopback 401'd, so onboarding re-fired forever opening duplicate PRs."""
+    _no_http(monkeypatch)
+    repo_id, _ = await _seed_repo("onboard-repo", harness_onboarded=False)
+    await api.mark_repo_harness_onboarded(repo_id, "https://github.com/x/onboard-repo/pull/1")
+    async with async_session() as s:
+        repo = (await s.execute(select(Repo).where(Repo.id == repo_id))).scalar_one()
+        assert repo.harness_onboarded is True
+        assert repo.harness_pr_url.endswith("/pull/1")

@@ -251,7 +251,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         fallback_branch=fallback_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
-        repo_id=task.repo_id,
+        repo_id=repo.id,
     )
 
     # Reuse existing branch or generate new one
@@ -691,14 +691,16 @@ async def _run_complex_pr_review(
     await transition_task(task_id, "pr_created", f"PR created: {pr_url}")
     await transition_task(task_id, "pr_review", "running self-PR-review (artefact scope)")
 
-    # Attach the base branch so pr_reviewer can compute the PR diff.
-    task.base_branch = base_branch
+    # Pass the base branch so pr_reviewer can compute the PR diff. We can't
+    # stash it on the TaskData (Pydantic forbids undeclared fields), so it's
+    # an explicit arg.
     task.pr_url = pr_url
     try:
         result = await pr_reviewer.run_pr_review(
             task=task,
             workspace_root=workspace,
             scope="artefact",
+            base_branch=base_branch,
         )
     except pr_reviewer.MissingPRReviewError as e:
         await transition_task(
@@ -763,13 +765,13 @@ async def _run_simple_pr_review(
     await transition_task(task_id, "pr_created", f"PR created: {pr_url}")
     await transition_task(task_id, "pr_review", "running self-PR-review (correctness scope)")
 
-    # Attach the base branch so pr_reviewer can compute the PR diff. We don't
-    # mutate the task object on the orchestrator side — this is local only.
-    task.base_branch = base_branch
+    # Pass the base branch so pr_reviewer can compute the PR diff (can't be
+    # stashed on the TaskData — Pydantic forbids undeclared fields).
     result = await pr_reviewer.run_pr_review(
         task=task,
         workspace_root=workspace,
         scope="correctness",
+        base_branch=base_branch,
     )
 
     if result.verdict == "approved":

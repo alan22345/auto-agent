@@ -91,6 +91,26 @@ async def get_repo(repo_name: str) -> RepoData | None:
         return _repo_to_data(repo)
 
 
+async def mark_repo_harness_onboarded(repo_id: int, pr_url: str | None) -> None:
+    """Mark a repo harness-onboarded in-process (DB write).
+
+    Same auth trap as ``get_repo``: the POST /repos/{id}/harness loopback is
+    org-scoped, so the unauthenticated agent call 401'd and the repo never got
+    marked onboarded — onboarding re-fired on every coding task, opening
+    duplicate harness PRs. Write in-process instead.
+    """
+    async with async_session() as s:
+        repo = (
+            await s.execute(select(Repo).where(Repo.id == repo_id))
+        ).scalar_one_or_none()
+        if repo is None:
+            log.error("mark_repo_harness_onboarded: repo not found", repo_id=repo_id)
+            return
+        repo.harness_onboarded = True
+        repo.harness_pr_url = pr_url
+        await s.commit()
+
+
 async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
     """Fetch a repo's enabled freeform config from the DB (in-process).
 

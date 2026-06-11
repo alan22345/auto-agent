@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import httpx
-
 from agent import sh
 from agent.workspace import _run_git, clone_repo, create_branch, push_branch
-from shared.config import settings
 from shared.logging import setup_logging
-from shared.types import RepoData
 
 log = setup_logging("harness")
-
-ORCHESTRATOR_URL = settings.orchestrator_url
 
 
 HARNESS_ONBOARDING_PROMPT = """\
@@ -70,17 +64,12 @@ async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
 
     log.info(f"Starting harness onboarding for repo '{repo_name}'")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
-        repos = resp.json()
+    # Read the repo in-process from the DB. The old GET /repos loopback is
+    # org-scoped (current_org_id_dep) and the agent process has no token, so it
+    # 401'd and model_validate choked on the {"detail": ...} error body.
+    from agent.lifecycle._orchestrator_api import get_repo, mark_repo_harness_onboarded
 
-    repo_data = None
-    for r in repos:
-        rd = RepoData.model_validate(r)
-        if rd.id == repo_id:
-            repo_data = rd
-            break
-
+    repo_data = await get_repo(repo_name)
     if not repo_data:
         log.error(f"Repo '{repo_name}' (id={repo_id}) not found")
         return None
@@ -141,11 +130,7 @@ async def handle_harness_onboarding(repo_id: int, repo_name: str) -> str | None:
 
         log.info(f"Harness onboarding PR created for '{repo_name}': {pr_url}")
 
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{ORCHESTRATOR_URL}/repos/{repo_id}/harness",
-                json={"harness_onboarded": True, "harness_pr_url": pr_url},
-            )
+        await mark_repo_harness_onboarded(repo_id, pr_url)
 
         return pr_url
 

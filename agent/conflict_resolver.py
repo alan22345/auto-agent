@@ -11,6 +11,12 @@ from __future__ import annotations
 
 import httpx
 
+# Read task/repo in-process from the DB. The GET /tasks/{id} and GET /repos
+# loopbacks are org-scoped (current_org_id_dep) and the agent process carries no
+# token, so they 401'd and silently returned None — every conflict-resolution
+# run aborted before it began.
+from agent.lifecycle._orchestrator_api import get_repo as _get_repo
+from agent.lifecycle._orchestrator_api import get_task as _get_task
 from agent.workspace import _run_git, clone_repo
 from shared.config import settings
 from shared.events import (
@@ -19,7 +25,6 @@ from shared.events import (
     task_merge_conflict_resolved,
 )
 from shared.logging import setup_logging
-from shared.types import RepoData, TaskData
 
 log = setup_logging("conflict-resolver")
 
@@ -60,26 +65,6 @@ can be committed.
   starting with `RESOLUTION_FAILED:` followed by a one-sentence explanation
   and stop.
 """
-
-
-async def _get_task(task_id: int) -> TaskData | None:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}")
-        if resp.status_code == 200:
-            return TaskData.model_validate(resp.json())
-    return None
-
-
-async def _get_repo(repo_name: str) -> RepoData | None:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
-        if resp.status_code != 200:
-            return None
-        for raw in resp.json():
-            r = RepoData.model_validate(raw)
-            if r.name == repo_name:
-                return r
-    return None
 
 
 def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
