@@ -1,6 +1,6 @@
 """Query the code graph for a repo (ADR-016 Phase 6 §12).
 
-A single agent tool with fourteen read-only ops over the latest stored
+A single agent tool with sixteen read-only ops over the latest stored
 :class:`shared.types.RepoGraphBlob` for a repo. Every response carries
 a staleness envelope (graph SHA vs. workspace HEAD) and per-result
 existence flags so the agent can filter out symbols that have been
@@ -27,8 +27,14 @@ field is a JSON string with the shape::
       ]
     }
 
-Ops returning a single value (``path_between``, ``violates_boundaries``)
-omit ``results_with_existence`` — the agent reads ``result`` directly.
+Ops returning a single value (``path_between``, ``violates_boundaries``,
+``get_symbol_source``) omit ``results_with_existence`` — the agent reads
+``result`` directly.
+
+The navigation pair added by ADR-023 — ``search_symbols`` (find node
+ids by name) and ``get_symbol_source`` (read one symbol's clamped
+source window) — closes the loop so the agent can go from a name to
+relationships to source without grep or whole-file reads.
 """
 
 from __future__ import annotations
@@ -41,6 +47,11 @@ from typing import Any, ClassVar
 import structlog
 from sqlalchemy import select
 
+from agent.graph_analyzer.source_window import (
+    SOURCE_WINDOW_MAX_LINES,
+    PathOutsideWorkspaceError,
+    read_source_window,
+)
 from agent.graph_analyzer.staleness import compute_staleness
 from agent.tools.base import Tool, ToolContext, ToolResult
 from shared.database import async_session
@@ -59,15 +70,19 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "cycles_for",
         "dead_code",
         "file_health",
+        "get_symbol_source",
         "hotspots",
         "incoming_edges",
         "outgoing_edges",
         "path_between",
         "public_surface",
+        "search_symbols",
         "violates_boundaries",
         "which_capability",
     },
 )
+
+_NODE_KINDS: frozenset[str] = frozenset({"area", "file", "class", "function"})
 
 _DEAD_CODE_KINDS: frozenset[str] = frozenset(
     {
@@ -120,7 +135,12 @@ class QueryRepoGraphTool(Tool):
                     "'dead_code' returns dead-code findings; "
                     "'complex_functions' returns function nodes above a "
                     "complexity threshold; "
-                    "'file_health' returns per-file maintainability records."
+                    "'file_health' returns per-file maintainability records; "
+                    "'search_symbols' finds nodes by name (use this FIRST "
+                    "when you only know a symbol's name, and before writing "
+                    "a new helper to check one doesn't already exist); "
+                    "'get_symbol_source' returns just that symbol's source "
+                    "lines — cheaper than reading the whole file."
                 ),
             },
             "params": {
@@ -141,7 +161,10 @@ class QueryRepoGraphTool(Tool):
                     "complex_functions takes {metric, threshold} where "
                     "metric is cyclomatic or cognitive; "
                     "file_health takes {band?} where band is one of "
-                    "good/moderate/poor."
+                    "good/moderate/poor; "
+                    "search_symbols takes {query, kind?, area?, limit?=20} "
+                    "where kind is one of area/file/class/function; "
+                    "get_symbol_source takes {node_id, context_lines?=0}."
                 ),
             },
         },
@@ -385,6 +408,34 @@ def _dispatch(
             raise _OpError(f"'band' must be one of {sorted(_FILE_HEALTH_BANDS)}; got '{band}'.")
         return {"result": _file_health(blob, band)}
 
+    if op == "search_symbols":
+        query = _require_str(params, "query")
+        kind = params.get("kind")
+        if kind is not None and (not isinstance(kind, str) or kind not in _NODE_KINDS):
+            raise _OpError(f"'kind' must be one of {sorted(_NODE_KINDS)}; got '{kind}'.")
+        area = params.get("area")
+        if area is not None and not isinstance(area, str):
+            raise _OpError("'area' must be a string.")
+        limit = params.get("limit", 20)
+        if not isinstance(limit, int) or limit < 0:
+            raise _OpError("'limit' must be a non-negative integer.")
+        nodes = _search_symbols(blob, query, kind=kind, area=area, limit=limit)
+        return _wrap_nodes(nodes, workspace_path)
+
+    if op == "get_symbol_source":
+        node_id = _require_str(params, "node_id")
+        context_lines = params.get("context_lines", 0)
+        if not isinstance(context_lines, int) or context_lines < 0:
+            raise _OpError("'context_lines' must be a non-negative integer.")
+        return {
+            "result": _get_symbol_source(
+                blob,
+                node_id,
+                context_lines=context_lines,
+                workspace_path=workspace_path,
+            ),
+        }
+
     # Defensive — execute() validated op, but keep the unreachable branch.
     raise _OpError(f"unknown op '{op}'")
 
@@ -593,6 +644,110 @@ def _complex_functions(blob: RepoGraphBlob, metric: str, threshold: int) -> list
             candidates.append((value, n.id, n))
     candidates.sort(key=lambda t: (-t[0], t[1]))
     return [n.model_dump(mode="json") for _, _, n in candidates]
+
+
+def _search_symbols(
+    blob: RepoGraphBlob,
+    query: str,
+    *,
+    kind: str | None,
+    area: str | None,
+    limit: int,
+) -> list[Node]:
+    """Find nodes whose label or id contains ``query`` (case-insensitive).
+
+    Ranking tiers: exact label match, label prefix, label substring,
+    then id substring (catches path-style queries like "parsers/util").
+    Ties break by label then id for determinism. ``limit=0`` returns
+    all matches.
+    """
+    q = query.lower()
+    scored: list[tuple[int, str, str, Node]] = []
+    for n in blob.nodes:
+        if kind is not None and n.kind != kind:
+            continue
+        if area is not None and n.area != area:
+            continue
+        tier = _match_tier(n, q)
+        if tier is None:
+            continue
+        scored.append((tier, (n.label or "").lower(), n.id, n))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]))
+    nodes = [n for _, _, _, n in scored]
+    if limit > 0:
+        nodes = nodes[:limit]
+    return nodes
+
+
+def _match_tier(node: Node, query_lower: str) -> int | None:
+    """Rank how well ``node`` matches the query; None means no match.
+
+    0 = exact label, 1 = label prefix, 2 = label substring,
+    3 = id substring (path-style queries like "parsers/util").
+    """
+    label = (node.label or "").lower()
+    if label == query_lower:
+        return 0
+    if label.startswith(query_lower):
+        return 1
+    if query_lower in label:
+        return 2
+    if query_lower in node.id.lower():
+        return 3
+    return None
+
+
+def _get_symbol_source(
+    blob: RepoGraphBlob,
+    node_id: str,
+    *,
+    context_lines: int,
+    workspace_path: str,
+) -> dict[str, Any]:
+    """Return the node's source window from the analyser workspace.
+
+    The window is the node's recorded line range extended by
+    ``context_lines`` both ways, clamped to the shared
+    ``SOURCE_WINDOW_MAX_LINES``/byte caps. ``line_end`` in the result
+    is the last line actually returned, so a window that runs past EOF
+    or the clamp reports its true extent.
+    """
+    node = next((n for n in blob.nodes if n.id == node_id), None)
+    if node is None:
+        raise _OpError(f"node '{node_id}' not found in the graph.")
+    if node.file is None:
+        raise _OpError(f"node '{node_id}' has no source file (kind={node.kind}).")
+    if node.line_start is None or node.line_end is None:
+        raise _OpError(f"node '{node_id}' has no recorded line range.")
+    if not workspace_path:
+        raise _OpError("no analyser workspace on this host — read the file directly.")
+
+    line_start = max(1, node.line_start - context_lines)
+    line_end = node.line_end + context_lines
+    line_clamped = False
+    if line_end - line_start + 1 > SOURCE_WINDOW_MAX_LINES:
+        line_end = line_start + SOURCE_WINDOW_MAX_LINES - 1
+        line_clamped = True
+
+    try:
+        window = read_source_window(workspace_path, node.file, line_start, line_end)
+    except PathOutsideWorkspaceError:
+        raise _OpError(f"node file '{node.file}' escapes the analyser workspace.") from None
+    except FileNotFoundError:
+        raise _OpError(
+            f"file '{node.file}' not found in the analyser workspace — the "
+            "graph may be stale; refresh it or read the file directly."
+        ) from None
+
+    last_line_returned = line_start + window.lines_read - 1 if window.lines_read else line_start
+    return {
+        "node_id": node.id,
+        "file": node.file,
+        "line_start": line_start,
+        "line_end": last_line_returned,
+        "source": window.content,
+        "truncated": line_clamped or window.byte_truncated,
+    }
 
 
 def _file_health(blob: RepoGraphBlob, band: str | None) -> list[dict]:

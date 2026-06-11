@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -66,11 +67,14 @@ def _resolve_team_memory_command() -> tuple[str, list[str]]:
     return sys.executable, ["-m", "team_memory.cli", "serve"]
 
 
-def build_mcp_servers(settings: Any) -> list[McpServerSpec]:
+def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpServerSpec]:
     """Assemble the configured MCP servers. Returns [] when MCP is disabled.
 
     Entries whose required secret/config is missing are skipped (logged), so a
     half-configured deployment degrades to "fewer servers" rather than failing.
+
+    ``repo_id`` pins the per-task code-graph server (ADR-023) to the repo the
+    agent is working in; without it that server is omitted.
     """
     if not getattr(settings, "mcp_enabled", True):
         return []
@@ -110,6 +114,29 @@ def build_mcp_servers(settings: Any) -> list[McpServerSpec]:
         )
     else:
         logger.info("mcp_server_skipped", server="team-memory", reason="no db url")
+
+    # code-graph — stdio MCP re-exposing query_repo_graph to the CLI path,
+    # which can't see in-process Python tools (ADR-023). Native mode keeps
+    # the in-process tool. Pinned to the task's repo. The CLI spawns the
+    # server with cwd = the task workspace and the app isn't pip-installed,
+    # so PYTHONPATH must point back at the auto-agent root; DATABASE_URL is
+    # forwarded so shared.config resolves the same Postgres from anywhere.
+    if repo_id is not None:
+        auto_agent_root = str(Path(__file__).resolve().parents[2])
+        specs.append(
+            McpServerSpec(
+                name="code-graph",
+                transport="stdio",
+                targets=frozenset({"cli"}),
+                command=sys.executable,
+                args=("-m", "agent.mcp.code_graph_server"),
+                env={
+                    "CODE_GRAPH_REPO_ID": str(repo_id),
+                    "DATABASE_URL": getattr(settings, "database_url", "") or "",
+                    "PYTHONPATH": auto_agent_root,
+                },
+            )
+        )
 
     return specs
 

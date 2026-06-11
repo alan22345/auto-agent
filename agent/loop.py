@@ -219,7 +219,7 @@ class AgentLoop:
         from agent.mcp.servers import build_mcp_servers, cli_specs
         from shared.config import settings
 
-        return cli_specs(build_mcp_servers(settings))
+        return cli_specs(build_mcp_servers(settings, repo_id=self._repo_id))
 
     async def _ensure_native_mcp_tools(self) -> None:
         """Register external HTTP MCP tools into the registry (native path).
