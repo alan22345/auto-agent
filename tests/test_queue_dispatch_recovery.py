@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import select
 
 import run as run_module
+from shared.events import Event, TaskEventType
 from shared.models import (
     Organization,
     Plan,
@@ -30,6 +31,7 @@ from shared.models import (
     TaskComplexity,
     TaskSource,
     TaskStatus,
+    User,
 )
 
 
@@ -160,3 +162,84 @@ async def test_poller_swallows_dispatch_errors_and_keeps_looping(monkeypatch):
     with pytest.raises(_BreakError):
         await run_module.queued_dispatch_poller()
     assert ticks == [1]
+
+
+@pytest.mark.asyncio
+async def test_start_queued_blocks_and_notifies_on_expired_creds(
+    session, monkeypatch, publisher
+):
+    """The user-kicked start path must apply the same auth gate as the other
+    dispatch paths: an owner with expired Claude credentials parks the task in
+    BLOCKED_ON_AUTH and fires the reconnect nudge — instead of starting it into
+    a silent, heartbeat-less hang (the task-319 stall)."""
+    org = await _seed_org(session)
+    user = User(
+        username=f"u-{uuid.uuid4().hex[:8]}",
+        password_hash="x",
+        display_name="Owner",
+        claude_auth_status="paired",
+        organization_id=org.id,
+    )
+    session.add(user)
+    await session.flush()
+    task = Task(
+        title="needs auth",
+        description="needs auth",
+        source=TaskSource.MANUAL,
+        status=TaskStatus.QUEUED,
+        complexity=TaskComplexity.SIMPLE,
+        organization_id=org.id,
+        created_by_user_id=user.id,
+    )
+    session.add(task)
+    await session.flush()
+    task_id = task.id
+
+    monkeypatch.setattr(run_module, "async_session", _patched_async_session(session))
+    monkeypatch.setattr(run_module, "can_start_task", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "orchestrator.claude_auth.resolve_home_dir",
+        AsyncMock(return_value="/data/users/x"),
+    )
+    monkeypatch.setattr(
+        "orchestrator.claude_auth.probe_credentials",
+        AsyncMock(return_value="expired"),
+    )
+
+    await run_module.on_start_queued_task(
+        Event(type=TaskEventType.START_QUEUED, task_id=task_id)
+    )
+
+    refreshed = (
+        await session.execute(select(Task).where(Task.id == task_id))
+    ).scalar_one()
+    assert refreshed.status == TaskStatus.BLOCKED_ON_AUTH
+    assert any(
+        e.type == TaskEventType.CLAUDE_AUTH_REQUIRED and e.task_id == task_id
+        for e in publisher.events
+    )
+
+
+def test_claude_auth_required_has_user_notification_formatters():
+    """The reconnect nudge must actually reach the user: the event has to be
+    registered in the Slack and Telegram formatter maps (events not in the map
+    are silently dropped)."""
+    from integrations.telegram import main as tg_main
+
+    assert TaskEventType.CLAUDE_AUTH_REQUIRED in tg_main._NOTIFICATION_FORMATTERS
+    tg_msg = tg_main._NOTIFICATION_FORMATTERS[TaskEventType.CLAUDE_AUTH_REQUIRED](
+        {"reason": "expired"}, "Task #1", False, 1
+    )
+    assert "reconnect" in tg_msg.lower()
+
+    # Slack pulls in slack_bolt/aiohttp, which may be absent in a bare local
+    # venv (they ship in the prod image / CI). Assert when importable.
+    try:
+        from integrations.slack import main as slack_main
+    except ModuleNotFoundError as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"slack deps unavailable locally: {exc}")
+    assert TaskEventType.CLAUDE_AUTH_REQUIRED in slack_main._NOTIFICATION_FORMATTERS
+    slack_msg = slack_main._NOTIFICATION_FORMATTERS[TaskEventType.CLAUDE_AUTH_REQUIRED](
+        {"reason": "expired"}, "Task #1", False, 1
+    )
+    assert "reconnect" in slack_msg.lower()

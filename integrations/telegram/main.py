@@ -600,6 +600,19 @@ def _fmt_task_blocked(
     )
 
 
+def _fmt_task_claude_auth_required(
+    payload: dict[str, Any], task_info: str, _is_freeform: bool, _task_id: int | None
+) -> str:
+    base = (settings.app_base_url or "").rstrip("/")
+    link = f"{base}/settings/claude" if base else "Settings → Claude"
+    what = "expired" if payload.get("reason") == "expired" else "aren't connected"
+    return (
+        f"🔑 *Claude credentials {what}*\n{task_info}\n\n"
+        f"This task is paused until you reconnect your Claude account.\n"
+        f"Reconnect here: {link}"
+    )
+
+
 def _gate_task_url(task_id: int | None) -> str:
     """Compose the web-next gate URL — ADR-015 Phase 7.7."""
     base = (settings.app_base_url or "").rstrip("/")
@@ -780,6 +793,7 @@ _NOTIFICATION_FORMATTERS: dict[str, Formatter] = {
     TaskEventType.AWAITING_PLAN_APPROVAL: _fmt_task_awaiting_plan_approval,
     TaskEventType.PR_CREATED: _fmt_task_pr_created,
     TaskEventType.ITERATION_COMPLETE: _fmt_task_iteration_complete,
+    TaskEventType.CLAUDE_AUTH_REQUIRED: _fmt_task_claude_auth_required,
     POEventType.ANALYSIS_QUEUED: _fmt_po_analysis_queued,
     POEventType.ANALYSIS_STARTED: _fmt_po_analysis_started,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,

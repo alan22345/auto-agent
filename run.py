@@ -61,6 +61,7 @@ from shared.events import (
     task_ci_failed,
     task_ci_passed,
     task_classified,
+    task_claude_auth_required,
     task_cleanup,
     task_created,
     task_deploy_preview,
@@ -285,6 +286,64 @@ async def health() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+async def _block_if_auth_required(session, task) -> bool:
+    """Dispatch-time Claude auth gate, shared by all three dispatch paths.
+
+    Probes whichever vault the task will actually use (owner's if paired,
+    otherwise the fallback's). If the credential is missing or expired, parks
+    the task in ``BLOCKED_ON_AUTH``, nudges the owner to (re)connect via
+    ``task_claude_auth_required``, and returns ``True`` so the caller stops
+    dispatching it. Returns ``False`` — proceed — when auth is fine or the
+    probe doesn't apply (no creator, or a no-code task).
+
+    Extracted so the user-triggered start path (``on_start_queued_task``) gets
+    the same gate as ``on_task_classified`` / ``_try_start_queued`` — without
+    it a task could start with dead credentials and hang silently.
+    """
+    if (
+        task.created_by_user_id is None
+        or task.complexity == TaskComplexity.SIMPLE_NO_CODE
+    ):
+        return False
+
+    from sqlalchemy import update as _u
+    from orchestrator.claude_auth import probe_credentials, resolve_home_dir
+
+    home = await resolve_home_dir(task.created_by_user_id)
+    if home is None:
+        # No paired credential and no fallback configured.
+        await transition(
+            session, task, TaskStatus.BLOCKED_ON_AUTH,
+            "Connect your Claude account to run this task",
+        )
+        await session.commit()
+        await publish(task_claude_auth_required(task.id, reason="no_credentials"))
+        return True
+
+    if await probe_credentials(home) == "expired":
+        # Only flag the owner's status when probing their OWN vault.
+        owner = (
+            await session.execute(
+                sa_select(User).where(User.id == task.created_by_user_id)
+            )
+        ).scalar_one_or_none()
+        if owner is not None and owner.claude_auth_status == "paired":
+            await session.execute(
+                _u(User)
+                .where(User.id == task.created_by_user_id)
+                .values(claude_auth_status="expired")
+            )
+        await transition(
+            session, task, TaskStatus.BLOCKED_ON_AUTH,
+            "Claude credentials expired — reconnect to resume",
+        )
+        await session.commit()
+        await publish(task_claude_auth_required(task.id, reason="expired"))
+        return True
+
+    return False
+
+
 async def on_task_created(event: Event) -> None:
     async with async_session() as session:
         task = await get_task(session, event.task_id)
@@ -350,52 +409,10 @@ async def on_task_classified(event: Event) -> None:
             if cfg and cfg.enabled and cfg.auto_start_tasks:
                 force_start = True
 
-        # Dispatch-time auth probe — probe whichever vault will actually be
-        # used (owner's if paired, otherwise fallback's). If the probe fails
-        # AND the failure is on the owner's own vault, mark them expired and
-        # park. If the failure is on the fallback's vault, park too — the
-        # admin needs to reconnect.
-        if (
-            task.created_by_user_id is not None
-            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
-        ):
-            from sqlalchemy import update as _u
-            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
-
-            home = await resolve_home_dir(task.created_by_user_id)
-            if home is None:
-                # No paired credential and no fallback configured.
-                task = await transition(
-                    session,
-                    task,
-                    TaskStatus.BLOCKED_ON_AUTH,
-                    "Connect your Claude account to run this task",
-                )
-                await session.commit()
-                await publish(Event(type="claude_auth_required", task_id=task.id))
-                return
-            status = await probe_credentials(home)
-            if status == "expired":
-                # Only flag the owner's status when probing their OWN vault.
-                user_q = await session.execute(
-                    sa_select(User).where(User.id == task.created_by_user_id)
-                )
-                owner = user_q.scalar_one_or_none()
-                if owner is not None and owner.claude_auth_status == "paired":
-                    await session.execute(
-                        _u(User)
-                        .where(User.id == task.created_by_user_id)
-                        .values(claude_auth_status="expired")
-                    )
-                task = await transition(
-                    session,
-                    task,
-                    TaskStatus.BLOCKED_ON_AUTH,
-                    "Claude credentials expired — reconnect to resume",
-                )
-                await session.commit()
-                await publish(Event(type="claude_auth_required", task_id=task.id))
-                return
+        # Dispatch-time auth probe — park + nudge the owner if their Claude
+        # credentials are missing or expired (shared helper).
+        if await _block_if_auth_required(session, task):
+            return
 
         # ADR-018 — SCAFFOLD tasks skip the trio entirely; they orchestrate
         # child trios instead. Route to ``run_scaffold_parent`` before the
@@ -1335,46 +1352,9 @@ async def _try_start_queued(session) -> None:
                 return
 
         # Dispatch-time auth probe — same gate as on_task_classified, but
-        # uses `continue` here so the queue scanner moves on to other tasks.
-        if (
-            task.created_by_user_id is not None
-            and task.complexity != TaskComplexity.SIMPLE_NO_CODE
-        ):
-            from sqlalchemy import update as _u
-            from orchestrator.claude_auth import probe_credentials, resolve_home_dir
-
-            home = await resolve_home_dir(task.created_by_user_id)
-            if home is None:
-                task = await transition(
-                    session,
-                    task,
-                    TaskStatus.BLOCKED_ON_AUTH,
-                    "Connect your Claude account to run this task",
-                )
-                await session.commit()
-                await publish(Event(type="claude_auth_required", task_id=task.id))
-                continue
-            status = await probe_credentials(home)
-            if status == "expired":
-                user_q = await session.execute(
-                    sa_select(User).where(User.id == task.created_by_user_id)
-                )
-                owner = user_q.scalar_one_or_none()
-                if owner is not None and owner.claude_auth_status == "paired":
-                    await session.execute(
-                        _u(User)
-                        .where(User.id == task.created_by_user_id)
-                        .values(claude_auth_status="expired")
-                    )
-                task = await transition(
-                    session,
-                    task,
-                    TaskStatus.BLOCKED_ON_AUTH,
-                    "Claude credentials expired — reconnect to resume",
-                )
-                await session.commit()
-                await publish(Event(type="claude_auth_required", task_id=task.id))
-                continue
+        # `continue` so the queue scanner moves on to other tasks.
+        if await _block_if_auth_required(session, task):
+            continue
 
         # Trio routing — see on_task_classified for the same branch.
         is_complex_large = task.complexity == TaskComplexity.COMPLEX_LARGE
@@ -1409,6 +1389,12 @@ async def on_start_queued_task(event: Event) -> None:
 
         if not await can_start_task(session, task):
             log.info(f"No slot available for task #{task.id} ({task.complexity.value})")
+            return
+
+        # Same auth gate as the other dispatch paths — without it a
+        # user-kicked task could start with expired credentials and hang
+        # silently with no heartbeat (the task-319 stall).
+        if await _block_if_auth_required(session, task):
             return
 
         # Trio routing — see on_task_classified for the same branch.
