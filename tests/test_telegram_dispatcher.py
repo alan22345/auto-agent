@@ -143,6 +143,7 @@ def test_dispatcher_covers_only_intended_event_set():
         TaskEventType.AWAITING_PLAN_APPROVAL,
         TaskEventType.PR_CREATED,
         TaskEventType.ITERATION_COMPLETE,
+        TaskEventType.CLAUDE_AUTH_REQUIRED,
         POEventType.ANALYSIS_QUEUED,
         POEventType.ANALYSIS_STARTED,
         POEventType.SUGGESTIONS_READY,

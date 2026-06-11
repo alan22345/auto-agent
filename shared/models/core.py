@@ -272,16 +272,27 @@ class Task(Base):
     integration_branch = Column(String(255), nullable=True)
 
     repo = relationship("Repo", back_populates="tasks", lazy="selectin")
-    history = relationship("TaskHistory", back_populates="task", order_by="TaskHistory.created_at")
+    # passive_deletes=True: defer to the DB's ON DELETE CASCADE (migrations
+    # 032 + 044) on parent delete. Without it SQLAlchemy nullifies the
+    # children's task_id, which their NOT NULL FK rejects — 500-ing every
+    # DELETE /tasks/{id}. See tests/test_task_delete_cascade.py.
+    history = relationship(
+        "TaskHistory",
+        back_populates="task",
+        order_by="TaskHistory.created_at",
+        passive_deletes=True,
+    )
     verify_attempts = relationship(
         "VerifyAttempt",
         back_populates="task",
         order_by="VerifyAttempt.cycle",
+        passive_deletes=True,
     )
     review_attempts = relationship(
         "ReviewAttempt",
         back_populates="task",
         order_by="ReviewAttempt.cycle",
+        passive_deletes=True,
     )
 
 

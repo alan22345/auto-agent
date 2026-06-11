@@ -574,6 +574,17 @@ def _fmt_task_failed(p, info, _ff, _tid):
     return f"💥 *Task failed*\n{info}" + (f"\n\n{err[:600]}" if err else "")
 
 
+def _fmt_task_claude_auth_required(p, info, _ff, _tid):
+    base = (settings.app_base_url or "").rstrip("/")
+    link = f"{base}/settings/claude" if base else "Settings → Claude"
+    what = "expired" if p.get("reason") == "expired" else "aren't connected"
+    return (
+        f"🔑 *Claude credentials {what}*\n{info}\n\n"
+        f"This task is paused until you reconnect your Claude account.\n"
+        f"Reconnect: {link}"
+    )
+
+
 def _gate_task_url(task_id):
     """Compose the web-next gate URL — ADR-015 Phase 7.7."""
     base = (settings.app_base_url or "").rstrip("/")
@@ -646,6 +657,7 @@ _NOTIFICATION_FORMATTERS = {
     TaskEventType.PR_CREATED: _fmt_task_pr_created,
     TaskEventType.ITERATION_COMPLETE: _fmt_task_iteration_complete,
     TaskEventType.FAILED: _fmt_task_failed,
+    TaskEventType.CLAUDE_AUTH_REQUIRED: _fmt_task_claude_auth_required,
     POEventType.SUGGESTIONS_READY: _fmt_po_suggestions_ready,
 }
 

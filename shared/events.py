@@ -127,6 +127,10 @@ class TaskEventType(StrEnum):
     # between task.created and the (often-skipped) gate events. The factory
     # carries pr_url + branch so dispatchers can deep-link to the PR.
     PR_CREATED = "task.pr_created"
+    # Fires when a dispatch-time auth probe finds the task owner's Claude
+    # credentials missing or expired. The task parks in BLOCKED_ON_AUTH; this
+    # event drives the "reconnect your Claude account" nudge to Slack/Telegram.
+    CLAUDE_AUTH_REQUIRED = "task.claude_auth_required"
 
 
 class POEventType(StrEnum):
@@ -368,6 +372,16 @@ def task_pr_created(task_id: int, *, pr_url: str = "", branch: str = "") -> Even
         task_id=task_id,
         payload={"pr_url": pr_url, "branch": branch},
     )
+
+
+def task_claude_auth_required(task_id: int, *, reason: str = "") -> Event:
+    """The task owner must (re)connect their Claude account before this task
+    can run. ``reason`` is ``"expired"`` or ``"no_credentials"`` so dispatchers
+    can tailor the message."""
+    payload: dict[str, Any] = {}
+    if reason:
+        payload["reason"] = reason
+    return Event(type=TaskEventType.CLAUDE_AUTH_REQUIRED, task_id=task_id, payload=payload)
 
 
 def task_failed(task_id: int, error: str = "") -> Event:
