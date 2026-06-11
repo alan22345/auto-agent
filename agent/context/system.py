@@ -197,20 +197,28 @@ SUPERPOWERS_DIR = os.path.join(
 # so the tests can search for the marker without coupling to layout.
 CODE_GRAPH_NUDGE = """\
 ## Code graph (pre-indexed)
-This repo has a code graph available. Before grepping or reading widely,
-consider calling `query_repo_graph` to find callers/callees/dependencies —
-it's exact and pre-indexed.
+This repo has a code graph available. Prefer `query_repo_graph` over grep
+and whole-file reads — it's exact, pre-indexed, and much cheaper on context.
+
+The navigation loop: `search_symbols` turns a name into node ids,
+relationship ops explore from there, and `get_symbol_source` reads just
+the symbol's body instead of the whole file.
 
 Ops:
+- search_symbols(query, kind?, area?, limit?=20) — find node ids by name
+- get_symbol_source(node_id, context_lines?=0) — read one symbol's source
 - callers_of(node_id) / callees_of(node_id)
 - outgoing_edges(node_id) / incoming_edges(node_id)
 - public_surface(area_name)
 - path_between(source_id, target_id, max_depth=5)
 - violates_boundaries(source_id, target_id)
 
-Node IDs are typically of the form `path/to/file.py::ClassName.method_name`
-or `path/to/file.ts::functionName`. When in doubt, use grep to find candidate
-symbols, then ask the graph for their relationships.
+Node IDs are of the form `path/to/file.py::ClassName.method_name` or
+`path/to/file.ts::functionName`.
+
+Before writing a new helper or utility function, call `search_symbols`
+with its intended name/purpose first — an equivalent often already
+exists, and duplicating it is a defect.
 
 Every response includes `staleness.drifted` (true if the graph is stale
 relative to your task workspace) and `exists_in_workspace` per result.

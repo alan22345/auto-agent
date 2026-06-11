@@ -135,3 +135,22 @@ async def test_nudge_resilient_to_db_failure(tmp_path: Path) -> None:
         prompt = await builder.build(ws, repo_id=7)
 
     assert _NUDGE_MARKER not in prompt
+
+
+@pytest.mark.asyncio
+async def test_nudge_teaches_navigation_ops_and_dedup_convention(
+    tmp_path: Path,
+) -> None:
+    """ADR-023: the nudge must name the entry/exit ops and tell the agent
+    to search for an existing symbol before writing a new helper."""
+    ws = _bare_workspace(tmp_path)
+    cfg = MagicMock()
+    cfg.last_analysis_id = 42
+
+    builder = SystemPromptBuilder()
+    with _patch_session(cfg):
+        prompt = await builder.build(ws, repo_id=7)
+
+    assert "search_symbols" in prompt
+    assert "get_symbol_source" in prompt
+    assert "before writing a new" in prompt.lower()
