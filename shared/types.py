@@ -546,18 +546,21 @@ class GraphStalenessResponse(BaseModel):
     """``GET /api/repos/{id}/graph/staleness`` payload — ADR-016 Phase 7 §11.
 
     Surfaces the comparison between the stored graph's ``commit_sha`` and
-    the current ``HEAD`` of the analyser workspace so the freshness
-    banner can show an amber "workspace has moved — refresh" hint
-    without re-fetching the whole graph blob.
+    reality so the freshness banner can show an amber "repo has moved —
+    refresh" hint without re-fetching the whole graph blob.
 
-    ``workspace_sha`` is ``None`` when the workspace can't be inspected
-    (missing directory, not a git checkout, permission denied). In that
-    case ``drifted`` is conservatively ``True`` — the banner shows the
-    same warning rather than pretending the graph is fresh.
+    ``origin_sha`` is the tip of ``origin/<analysis_branch>`` per
+    ``git ls-remote`` (ADR-024) — the authoritative drift signal; the
+    workspace HEAD only moves on refresh. ``None`` when origin couldn't
+    be asked, in which case ``drifted`` falls back to the workspace
+    comparison. ``workspace_sha`` is ``None`` when the workspace can't
+    be inspected; with both unknown, ``drifted`` is conservatively
+    ``True`` rather than pretending the graph is fresh.
     """
 
     graph_sha: str
     workspace_sha: str | None = None
+    origin_sha: str | None = None
     drifted: bool
 
 

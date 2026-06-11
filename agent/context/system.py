@@ -220,9 +220,10 @@ Before writing a new helper or utility function, call `search_symbols`
 with its intended name/purpose first — an equivalent often already
 exists, and duplicating it is a defect.
 
-Every response includes `staleness.drifted` (true if the graph is stale
-relative to your task workspace) and `exists_in_workspace` per result.
-Trust accordingly.
+Every response includes `staleness.drifted` (true when the graph is
+behind the repo's analysis branch on origin, or freshness can't be
+verified) and `exists_in_workspace` per result. When drifted, prefer
+reading the file directly over trusting the graph's answer.
 """
 
 

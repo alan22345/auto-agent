@@ -444,6 +444,7 @@ async def test_envelope_includes_staleness_dict_on_every_response(
     assert payload["staleness"] == {
         "graph_sha": "g",
         "workspace_sha": "w",
+        "origin_sha": None,
         "drifted": True,
     }
 

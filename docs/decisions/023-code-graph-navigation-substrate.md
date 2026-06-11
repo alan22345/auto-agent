@@ -6,7 +6,7 @@
 
 Accepted
 
-Supplements [ADR-016] (the code graph itself — unchanged and still binding).
+Supplements [ADR-016] (the code graph itself — unchanged and still binding). Extended by [ADR-024], which lifts the refresh-on-push deferral recorded below.
 
 ## Context
 

@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from orchestrator.graph_freshness import request_graph_refresh_soon
 from shared import installation_crypto
 from shared.config import settings
 from shared.database import async_session
@@ -32,7 +33,7 @@ from shared.events import (
     task_lgtm_received,
     task_review_approved,
 )
-from shared.models import Task, TaskStatus
+from shared.models import Repo, Task, TaskStatus
 from shared.types import PRReviewComment
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,22 @@ async def _secret_for_repo_full_name(*, full_name: str) -> str | None:
         if row is None:
             return None
         return await installation_crypto.decrypt(row.secret_enc, session=session)
+
+
+async def _find_repo_for_payload(payload: dict[str, Any]) -> Repo | None:
+    """Map a webhook payload's ``repository.full_name`` to our Repo row.
+
+    Matches by the name after the slash (same convention as the per-org
+    secret lookup). Returns None for unknown repos — webhook handlers
+    treat that as "not ours, ignore".
+    """
+    full_name = payload.get("repository", {}).get("full_name", "")
+    _, _, name = full_name.partition("/")
+    if not name:
+        return None
+    async with async_session() as session:
+        result = await session.execute(select(Repo).where(Repo.name == name))
+        return result.scalar_one_or_none()
 
 
 async def _find_task_by_pr_url(session: AsyncSession, pr_url: str) -> Task | None:
@@ -170,6 +187,8 @@ async def github_webhook(
         await _handle_issue_comment(payload)
     elif x_github_event == "pull_request":
         await _handle_pull_request(payload)
+    elif x_github_event == "push":
+        await _handle_push(payload)
     elif x_github_event == "status":
         await _handle_commit_status(payload)
     elif x_github_event == "installation":
@@ -370,6 +389,22 @@ async def _handle_issue_comment(payload: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _handle_push(payload: dict[str, Any]) -> None:
+    """A push moved a branch on origin — schedule a debounced graph
+    refresh (ADR-024). Branch deletions and tag pushes are ignored;
+    graph_freshness skips repos whose analysis branch didn't move."""
+    if payload.get("deleted"):
+        return
+    ref: str = payload.get("ref", "")
+    branch = ref.removeprefix("refs/heads/")
+    if not branch or branch == ref:
+        return  # tag push or malformed ref
+    repo = await _find_repo_for_payload(payload)
+    if repo is None:
+        return
+    request_graph_refresh_soon(repo.id, branch=branch)
+
+
 async def _handle_pull_request(payload: dict[str, Any]) -> None:
     """Handle pull_request closed+merged — task is done. Also detects CI failure on main."""
     action = payload.get("action")
@@ -377,6 +412,17 @@ async def _handle_pull_request(payload: dict[str, Any]) -> None:
     pr_url: str = pr.get("html_url", "")
     head_branch: str = pr.get("head", {}).get("ref", "")
     merged: bool = pr.get("merged", False)
+
+    if action == "closed" and merged:
+        # Any merged PR moves its base branch — human PRs included —
+        # so the graph refresh trigger fires regardless of whether a
+        # task transition follows below (ADR-024).
+        repo = await _find_repo_for_payload(payload)
+        if repo is not None:
+            request_graph_refresh_soon(
+                repo.id,
+                branch=pr.get("base", {}).get("ref") or None,
+            )
 
     if action == "closed" and merged and head_branch.startswith("auto-agent/"):
         async with async_session() as session:

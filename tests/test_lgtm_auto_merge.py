@@ -35,6 +35,7 @@ class StubTask:
     pr_url: str = "https://github.com/owner/repo/pull/42"
     freeform_mode: bool = True
     status: TaskStatus = TaskStatus.AWAITING_REVIEW
+    repo_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -266,3 +267,55 @@ async def test_lgtm_ci_blocked_falls_through_to_review():
     assert len(transitions) == 1
     assert transitions[0][0].value == "awaiting_review"
     assert "CI" in transitions[0][1]
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_success_schedules_graph_refresh(monkeypatch):
+    """ADR-024: a merge moves the base branch — the graph refresh trigger
+    must fire with the PR's base branch so a stale graph self-heals."""
+    monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
+
+    async def fake_state(_url, **_kw):
+        return {"mergeable_state": "clean", "base": {"ref": "main"}}
+
+    class FakeResp:
+        status_code = 200
+        text = "{}"
+
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def put(self, *a, **k): return FakeResp()
+
+    with patch("run._fetch_pr_state", side_effect=fake_state), \
+         patch("run.httpx.AsyncClient", FakeClient), \
+         patch("run.request_graph_refresh_soon") as refresh:
+        outcome = await _auto_merge_pr(StubTask(repo_id=5))
+
+    assert outcome == MERGE_OUTCOME_MERGED
+    refresh.assert_called_once_with(5, branch="main")
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_without_repo_id_skips_graph_refresh(monkeypatch):
+    monkeypatch.setattr(run.settings, "github_token", "fake-token", raising=False)
+
+    async def fake_state(_url, **_kw):
+        return {"mergeable_state": "clean"}
+
+    class FakeResp:
+        status_code = 200
+        text = "{}"
+
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def put(self, *a, **k): return FakeResp()
+
+    with patch("run._fetch_pr_state", side_effect=fake_state), \
+         patch("run.httpx.AsyncClient", FakeClient), \
+         patch("run.request_graph_refresh_soon") as refresh:
+        outcome = await _auto_merge_pr(StubTask(repo_id=None))
+
+    assert outcome == MERGE_OUTCOME_MERGED
+    refresh.assert_not_called()

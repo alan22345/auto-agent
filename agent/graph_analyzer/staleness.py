@@ -20,58 +20,122 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
+
+# How long one ls-remote answer is reused. Graph queries arrive in
+# bursts within a task; one network round-trip per minute per repo is
+# plenty, and a stale-by-a-minute origin SHA is still infinitely more
+# honest than never asking origin at all.
+ORIGIN_CACHE_TTL_SECONDS = 60.0
+
+_origin_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+
+
+def clear_origin_cache() -> None:
+    """Reset the ls-remote cache (used by tests)."""
+    _origin_cache.clear()
 
 
 @dataclass(frozen=True)
 class Staleness:
-    """Comparison result between a stored graph's SHA and a workspace's HEAD.
+    """Comparison result between a stored graph's SHA and reality.
 
     Attributes:
         graph_sha: The ``commit_sha`` recorded on the ``RepoGraph`` row
             (or in the blob) at analysis time.
         workspace_sha: Current ``HEAD`` of ``workspace_path``, or ``None``
             when it could not be determined.
-        drifted: ``True`` whenever the two SHAs differ — including the
-            "can't determine workspace SHA" case (treated as drifted by
-            convention so the agent never silently trusts a graph it
-            cannot verify against).
+        drifted: ``True`` when the graph is behind ``origin_sha`` (the
+            authoritative signal, ADR-024); falls back to the workspace
+            comparison when origin can't be asked. The "can't determine
+            anything" case is drifted by convention so the agent never
+            silently trusts a graph it cannot verify against.
+        origin_sha: Tip of ``origin/<analysis_branch>`` per
+            ``git ls-remote`` (TTL-cached), or ``None`` when no branch
+            was supplied or origin couldn't be reached.
     """
 
     graph_sha: str
     workspace_sha: str | None
     drifted: bool
+    origin_sha: str | None = None
 
 
-def compute_staleness(*, graph_sha: str, workspace_path: str) -> Staleness:
-    """Compare ``graph_sha`` against the current HEAD of ``workspace_path``.
+def compute_staleness(
+    *,
+    graph_sha: str,
+    workspace_path: str,
+    analysis_branch: str | None = None,
+) -> Staleness:
+    """Compare ``graph_sha`` against reality; never raises.
 
-    Pure-ish helper: the only side effect is a ``git rev-parse HEAD``
-    subprocess invocation against ``workspace_path``. The function never
-    raises; every error path resolves to ``Staleness(graph_sha,
-    workspace_sha=None, drifted=True)``.
-
-    Args:
-        graph_sha: SHA recorded on the ``RepoGraph`` row.
-        workspace_path: Absolute path to a (presumably git-tracked)
-            workspace directory. Empty string or missing directory →
-            ``workspace_sha=None``.
-
-    Returns:
-        A :class:`Staleness` instance describing the comparison.
+    With ``analysis_branch``, reality is the tip of
+    ``origin/<analysis_branch>`` (``git ls-remote`` from the workspace,
+    TTL-cached) — the workspace HEAD only moves on refresh, so comparing
+    against it alone reports "fresh" forever once an analysis lands.
+    Without a branch, or when origin is unreachable, falls back to the
+    workspace-HEAD comparison; if that can't be read either, the result
+    is drifted with ``workspace_sha=None``.
     """
     workspace_sha = _read_head_sha(workspace_path)
-    if workspace_sha is None:
-        return Staleness(
-            graph_sha=graph_sha,
-            workspace_sha=None,
-            drifted=True,
-        )
+    origin_sha = (
+        _read_origin_sha(workspace_path, analysis_branch)
+        if analysis_branch and workspace_sha is not None
+        else None
+    )
+
+    if origin_sha is not None:
+        drifted = graph_sha != origin_sha
+    elif workspace_sha is not None:
+        drifted = graph_sha != workspace_sha
+    else:
+        drifted = True
+
     return Staleness(
         graph_sha=graph_sha,
         workspace_sha=workspace_sha,
-        drifted=workspace_sha != graph_sha,
+        drifted=drifted,
+        origin_sha=origin_sha,
     )
+
+
+def _read_origin_sha(workspace_path: str, branch: str) -> str | None:
+    """TTL-cached tip of ``origin/<branch>``; None when origin can't say.
+
+    Failures are cached too — a dead remote shouldn't be re-asked on
+    every query in a burst.
+    """
+    key = (workspace_path, branch)
+    now = time.monotonic()
+    cached = _origin_cache.get(key)
+    if cached is not None and now - cached[0] < ORIGIN_CACHE_TTL_SECONDS:
+        return cached[1]
+    sha = _ls_remote_branch_tip(workspace_path, branch)
+    _origin_cache[key] = (now, sha)
+    return sha
+
+
+def _ls_remote_branch_tip(workspace_path: str, branch: str) -> str | None:
+    """Ask origin for the tip of ``branch``; None on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = result.stdout.strip().splitlines()[:1]
+    if not first_line:
+        return None
+    sha = first_line[0].split("\t")[0].strip()
+    return sha or None
 
 
 def _read_head_sha(workspace_path: str) -> str | None:

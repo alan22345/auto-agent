@@ -6,7 +6,7 @@
 
 Accepted
 
-Extended by [ADR-023] (navigation ops `search_symbols`/`get_symbol_source`, claude_cli MCP bridge, search-before-new-helper convention). This ADR remains binding.
+Extended by [ADR-023] (navigation ops `search_symbols`/`get_symbol_source`, claude_cli MCP bridge, search-before-new-helper convention) and [ADR-024] (origin-based drift + debounced refresh-on-change — lifts this ADR's "manual refresh only" v1 deferral). This ADR otherwise remains binding.
 
 ## Context
 
