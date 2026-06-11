@@ -2177,9 +2177,10 @@ async def _recover_stuck_tasks() -> None:
         )
         stuck_tasks = result.scalars().all()
 
-        if not stuck_tasks:
-            return
-
+        # Re-emit events for mid-flight tasks. Guard the loop (not an early
+        # return) so the queue-dispatch step below ALWAYS runs — a clean boot
+        # whose only non-terminal task is QUEUED has no stuck tasks here but
+        # still needs that task dispatched.
         for task in stuck_tasks:
             if task.status == TaskStatus.PLANNING:
                 log.info(f"Recovering task #{task.id}: re-emitting start_planning")
@@ -2194,13 +2195,39 @@ async def _recover_stuck_tasks() -> None:
             elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
                 log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
                 await publish(task_plan_ready(task.id, plan=task.plan or ""))
-        log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
+        if stuck_tasks:
+            log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
 
-    # Also try starting any queued tasks that may have been left behind
+    # Always try starting any queued tasks that may have been left behind —
+    # including the no-stuck-tasks case above.
     async with async_session() as session:
         await unblock_quota_paused(session)
         await session.commit()
         await _try_start_queued(session)
+
+
+# How often the queue poller re-scans for dispatchable QUEUED tasks.
+QUEUED_DISPATCH_INTERVAL = 60  # seconds
+
+
+async def queued_dispatch_poller() -> None:
+    """Safety-net poller that periodically dispatches eligible QUEUED tasks.
+
+    Dispatch is otherwise event-driven: ``_try_start_queued`` runs only when
+    another task finishes / passes CI / is reviewed, or on a PO event. A task
+    that can't start at classification time (e.g. the pool was full) is parked
+    in QUEUED and never re-evaluated if no such event later fires — so a lone
+    queued task with nothing else in flight strands forever. This loop re-scans
+    on a fixed interval so a freed slot is always picked up.
+    """
+    log.info("Queued dispatch poller started")
+    while True:
+        try:
+            async with async_session() as session:
+                await _try_start_queued(session)
+        except Exception:
+            log.exception("Queued dispatch poller error")
+        await asyncio.sleep(QUEUED_DISPATCH_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -2309,6 +2336,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_po_analysis_loop()),
         asyncio.create_task(run_architecture_loop()),
         asyncio.create_task(_scaffold_heartbeat_runner()),
+        asyncio.create_task(queued_dispatch_poller()),
     ]
 
     send_telegram("Auto-agent is online and ready for tasks.")
