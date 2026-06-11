@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 
 import agent.lifecycle._orchestrator_api as api
 from shared.database import async_session
-from shared.models import FreeformConfig, Organization, Repo
+from shared.models import FreeformConfig, Organization, Repo, Task, TaskStatus
 
 
 def _no_http(monkeypatch) -> None:
@@ -98,6 +98,33 @@ async def test_get_freeform_config_disabled_returns_none(monkeypatch):
         ))
         await s.commit()
     assert await api.get_freeform_config("ff-disabled") is None
+
+
+@pytest.mark.asyncio
+async def test_get_task_surfaces_repo_id_and_affected_routes(monkeypatch):
+    """The coding/verify/review path reads task.repo_id and task.affected_routes
+    directly; both must ride the TaskData or those reads raise AttributeError
+    (the second start_coding blocker after the get_repo 401 was cleared)."""
+    _no_http(monkeypatch)
+    repo_id, org_id = await _seed_repo("repo-with-task")
+    routes = [{"method": "GET", "path": "/health"}]
+    async with async_session() as s:
+        task = Task(
+            title="t", description="", source="slack", status=TaskStatus.CODING,
+            repo_id=repo_id, organization_id=org_id, affected_routes=routes,
+        )
+        s.add(task)
+        await s.commit()
+        task_id = task.id
+    try:
+        td = await api.get_task(task_id)
+        assert td is not None
+        assert td.repo_id == repo_id
+        assert td.affected_routes == routes
+    finally:
+        async with async_session() as s:
+            await s.execute(delete(Task).where(Task.id == task_id))
+            await s.commit()
 
 
 @pytest.mark.asyncio

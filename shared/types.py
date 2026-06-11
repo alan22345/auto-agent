@@ -41,6 +41,12 @@ class TaskData(BaseModel):
     status: str
     complexity: str | None = None
     repo_name: str | None = None
+    # Repo FK + planner-declared affected routes — both live on the ORM Task
+    # and are read directly across the coding/verify/review path (clone_repo,
+    # boot_dev_server, route exercising). They must ride the wire type or those
+    # ``task.repo_id`` / ``task.affected_routes`` reads raise on the TaskData.
+    repo_id: int | None = None
+    affected_routes: list[dict] = []
     branch_name: str | None = None
     pr_url: str | None = None
     plan: str | None = None

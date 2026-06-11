@@ -4490,6 +4490,8 @@ def _task_to_response(task: Task) -> TaskData:
         status=task.status.value,
         complexity=task.complexity.value if task.complexity else None,
         repo_name=task.repo.name if task.repo else None,
+        repo_id=task.repo_id,
+        affected_routes=task.affected_routes or [],
         branch_name=task.branch_name,
         pr_url=task.pr_url,
         plan=task.plan,

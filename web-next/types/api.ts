@@ -967,6 +967,10 @@ export interface TaskData {
   status: string;
   complexity?: string | null;
   repo_name?: string | null;
+  repo_id?: number | null;
+  affected_routes?: {
+    [k: string]: unknown;
+  }[];
   branch_name?: string | null;
   pr_url?: string | null;
   plan?: string | null;
