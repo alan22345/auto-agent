@@ -23,7 +23,6 @@ Three primitives:
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from agent.lifecycle._orchestrator_api import transition_task
 from agent.lifecycle.workspace_paths import (
@@ -138,12 +137,3 @@ async def resume_after_plan_approval(
         f"Plan rejected: {comments[:500] or '(no comments provided)'}",
     )
     return True
-
-
-def read_plan_approval(workspace_root: str) -> dict[str, Any] | None:
-    """Return the parsed approval payload, or None if not yet written."""
-
-    payload = read_gate_file(workspace_root, PLAN_APPROVAL_PATH, schema_version="1")
-    if isinstance(payload, dict):
-        return payload
-    return None

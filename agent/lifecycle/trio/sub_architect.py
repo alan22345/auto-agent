@@ -1121,7 +1121,6 @@ async def dispatch_sub_architects(
 __all__ = [
     "MAX_BACKLOG_ATTEMPTS_PER_SLICE",
     "MAX_GRILL_ROUNDS_PER_SLICE",
-    "MissingGrillAnswerError",
     "SliceResult",
     "SubArchitectDispatchResult",
     "dispatch_sub_architects",

@@ -2,9 +2,9 @@
 
 Pins the load-bearing post-rename invariants:
 
-  * ``agent.improvement_agent`` is the canonical module name; its public
+  * ``agent.improvement_agent`` is the canonical module name; its
     symbols (``run_architecture_loop``, ``_is_due``,
-    ``handle_architecture_analysis``) import cleanly.
+    ``_handle_architecture_analysis``) import cleanly.
   * The old ``agent.architect_analyzer`` import path no longer resolves —
     no compatibility shim, per the ADR's "one-shot rename" stance.
 """
@@ -18,7 +18,7 @@ def test_improvement_agent_module_imports() -> None:
     mod = importlib.import_module("agent.improvement_agent")
     assert hasattr(mod, "run_architecture_loop")
     assert hasattr(mod, "_is_due")
-    assert hasattr(mod, "handle_architecture_analysis")
+    assert hasattr(mod, "_handle_architecture_analysis")
 
 
 def test_old_architect_analyzer_module_is_gone() -> None:
