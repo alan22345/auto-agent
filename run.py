@@ -36,6 +36,7 @@ from integrations.telegram.main import (
     notification_loop as telegram_notification_loop,
 )
 from orchestrator.classifier import classify_task
+from orchestrator.graph_freshness import request_graph_refresh_soon
 from orchestrator.metrics import router as metrics_router
 from orchestrator.orgs import router as orgs_router
 from orchestrator.queue import can_start_task, next_eligible_task
@@ -1563,6 +1564,12 @@ async def _auto_merge_pr(task: Task) -> str:
             )
             if resp.status_code in (200, 201):
                 log.info(f"Auto-merged PR {task.pr_url} for task #{task.id}")
+                # The merge moved the base branch — let the code graph
+                # catch up (debounced, best-effort; ADR-024).
+                repo_id = getattr(task, "repo_id", None)
+                if repo_id is not None:
+                    base_branch = (pr_state or {}).get("base", {}).get("ref") or None
+                    request_graph_refresh_soon(repo_id, branch=base_branch)
                 return MERGE_OUTCOME_MERGED
             log.warning(f"Auto-merge failed for task #{task.id}: {resp.status_code} {resp.text[:200]}")
             return MERGE_OUTCOME_FAILED
