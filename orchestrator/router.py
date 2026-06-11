@@ -3335,6 +3335,12 @@ async def get_latest_market_brief(
 
 # Module-level so the staleness endpoint can be patched cleanly in
 # unit tests without faking out a subprocess.
+from agent.graph_analyzer.source_window import (  # noqa: E402
+    SOURCE_WINDOW_MAX_BYTES,
+    SOURCE_WINDOW_MAX_LINES,
+    PathOutsideWorkspaceError,
+    read_source_window,
+)
 from agent.graph_analyzer.staleness import compute_staleness  # noqa: E402
 
 
@@ -3935,12 +3941,10 @@ async def get_repo_graph_staleness(
     )
 
 
-# Hard caps for the side-panel code-preview endpoint. The line-range
-# cap mirrors the analyser's per-node window so the UI can't pull
-# arbitrary slabs of source. The byte cap is a defence-in-depth ceiling
-# for binary blobs or runaway-long lines.
-GRAPH_CODE_PREVIEW_MAX_LINES = 500
-GRAPH_CODE_PREVIEW_MAX_BYTES = 50 * 1024
+# Hard caps for the side-panel code-preview endpoint, shared with the
+# query_repo_graph get_symbol_source op (single owner: source_window).
+GRAPH_CODE_PREVIEW_MAX_LINES = SOURCE_WINDOW_MAX_LINES
+GRAPH_CODE_PREVIEW_MAX_BYTES = SOURCE_WINDOW_MAX_BYTES
 
 
 @router.get(
@@ -3972,8 +3976,6 @@ async def get_graph_code_preview(
     400 if the line range is invalid or exceeds the window cap, and
     422 if the path fails traversal validation.
     """
-    import os
-
     repo = await _get_repo_in_org(session, repo_id=repo_id, org_id=org_id)
     if not repo:
         raise HTTPException(404, "Repo not found")
@@ -3985,13 +3987,6 @@ async def get_graph_code_preview(
     if cfg is None:
         raise HTTPException(404, "Code graph not enabled for this repo")
 
-    # Path validation — refuse anything that looks like traversal before
-    # touching the filesystem. The check intentionally rejects absolute
-    # paths so a caller can never name an arbitrary file by its full
-    # path on the host.
-    if not path or path.startswith("/") or ".." in path.split("/"):
-        raise HTTPException(422, "Path must be repo-relative and contain no '..'")
-
     if line_start < 1 or line_end < line_start:
         raise HTTPException(400, "Invalid line range")
     if line_end - line_start + 1 > GRAPH_CODE_PREVIEW_MAX_LINES:
@@ -4000,42 +3995,22 @@ async def get_graph_code_preview(
             f"Line range exceeds the {GRAPH_CODE_PREVIEW_MAX_LINES}-line cap",
         )
 
-    workspace_root = os.path.realpath(cfg.workspace_path)
-    target = os.path.realpath(os.path.join(workspace_root, path))
-    # Belt-and-braces: even if the validation above passed, the resolved
-    # real path must still live inside the workspace root.
-    if not (target == workspace_root or target.startswith(workspace_root + os.sep)):
-        raise HTTPException(422, "Path escapes the workspace root")
-
-    if not os.path.isfile(target):
-        raise HTTPException(404, "File not found in the analyser workspace")
-
-    # Stream-read just the requested window. We read line-by-line and
-    # stop early so a 10MiB minified file doesn't blow up the worker.
-    selected: list[str] = []
     try:
-        with open(target, encoding="utf-8", errors="replace") as f:
-            for lineno, raw in enumerate(f, start=1):
-                if lineno < line_start:
-                    continue
-                if lineno > line_end:
-                    break
-                selected.append(raw)
+        window = read_source_window(cfg.workspace_path, path, line_start, line_end)
+    except PathOutsideWorkspaceError as exc:
+        raise HTTPException(
+            422, "Path must be repo-relative, contain no '..', and stay in the workspace"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "File not found in the analyser workspace") from exc
     except OSError as exc:  # pragma: no cover — defensive
         raise HTTPException(500, f"Failed to read file: {exc}") from exc
-
-    content = "".join(selected)
-    encoded = content.encode("utf-8")
-    if len(encoded) > GRAPH_CODE_PREVIEW_MAX_BYTES:
-        marker = b"\n... [truncated]\n"
-        cap = GRAPH_CODE_PREVIEW_MAX_BYTES - len(marker)
-        content = encoded[:cap].decode("utf-8", errors="replace") + marker.decode()
 
     return GraphCodePreviewResponse(
         file=path,
         line_start=line_start,
         line_end=line_end,
-        content=content,
+        content=window.content,
     )
 
 
