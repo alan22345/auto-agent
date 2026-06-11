@@ -16,7 +16,7 @@ directly; this file follows the same pattern.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -32,8 +32,10 @@ from shared.events import (
     task_done,
     task_failed,
 )
-from shared.models import Task, TaskStatus
-from shared.types import FreeformConfigData, RepoData, TaskData
+from shared.models import FreeformConfig, Repo, Task, TaskStatus
+
+if TYPE_CHECKING:
+    from shared.types import FreeformConfigData, RepoData, TaskData
 
 ORCHESTRATOR_URL = settings.orchestrator_url
 
@@ -69,41 +71,49 @@ async def get_task(task_id: int) -> TaskData | None:
 
 
 async def get_repo(repo_name: str) -> RepoData | None:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
-    if resp.status_code != 200:
-        log.error(
-            "get_repo: /repos returned non-200",
-            status=resp.status_code,
-            repo_name=repo_name,
-        )
-        return None
-    # Match on the raw payload first, then validate ONLY the target repo. A
-    # single malformed *other* repo used to throw out of RepoData.model_validate
-    # and abort every coding task before it logged a thing (the silent
-    # start_coding failure). One bad repo must not poison the whole lookup.
-    for repo_dict in resp.json():
-        if repo_dict.get("name") != repo_name:
-            continue
-        try:
-            return RepoData.model_validate(repo_dict)
-        except Exception:
-            log.exception("get_repo: RepoData validation failed", repo_name=repo_name)
+    """Fetch a repo as ``RepoData`` directly from the DB (in-process).
+
+    Like ``get_task``, this used to call the HTTP loopback (``GET /repos``),
+    but that endpoint requires ``current_org_id_dep`` (org-scoped auth) and the
+    agent has no session cookie or bearer token — so the call 401'd and we
+    blocked every coding task with a misleading "repo not found". Reading
+    in-process via the DB sidesteps auth entirely and reuses the canonical
+    ORM→RepoData mapping used by ``GET /repos``.
+    """
+    from orchestrator.router import _repo_to_data
+
+    async with async_session() as s:
+        repo = (
+            await s.execute(select(Repo).where(Repo.name == repo_name))
+        ).scalar_one_or_none()
+        if repo is None:
             return None
-    return None
+        return _repo_to_data(repo)
 
 
 async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{ORCHESTRATOR_URL}/freeform/config")
-        if resp.status_code != 200:
+    """Fetch a repo's enabled freeform config from the DB (in-process).
+
+    Same auth trap as ``get_repo``: the HTTP loopback (``GET /freeform/config``)
+    is org-scoped, so the unauthenticated agent call 401'd and silently dropped
+    dev-branch targeting for every freeform task. Read in-process instead.
+    """
+    from orchestrator.router import _freeform_config_to_response
+
+    async with async_session() as s:
+        repo = (
+            await s.execute(select(Repo).where(Repo.name == repo_name))
+        ).scalar_one_or_none()
+        if repo is None:
             return None
-        configs = resp.json()
-        for cfg in configs:
-            cfg_data = FreeformConfigData.model_validate(cfg)
-            if cfg_data.repo_name == repo_name and cfg_data.enabled:
-                return cfg_data
-    return None
+        cfg = (
+            await s.execute(
+                select(FreeformConfig).where(FreeformConfig.repo_id == repo.id)
+            )
+        ).scalar_one_or_none()
+        if cfg is None or not cfg.enabled:
+            return None
+        return _freeform_config_to_response(cfg, repo.name)
 
 
 async def set_task_affected_routes(task_id: int, routes: list[dict]) -> None:

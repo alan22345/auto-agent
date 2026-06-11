@@ -1,71 +1,100 @@
-"""get_repo must survive a malformed repo in the /repos payload.
+"""get_repo / get_freeform_config must read the DB in-process, not the HTTP API.
 
-Regression: ``get_repo`` validated EVERY repo dict with
-``RepoData.model_validate`` while scanning for the one it wanted. A single
-malformed repo (e.g. one whose graph/serialization was broken) threw out of
-the loop and aborted ``handle_coding`` before it logged anything — every
-coding task silently failed on ``start_coding``. The fix matches on the raw
-name first and validates only the target repo, handling failure gracefully.
+Regression (the real start_coding blocker): ``get_repo`` fetched repos via the
+HTTP loopback ``GET /repos``, but that endpoint requires ``current_org_id_dep``
+(org-scoped auth). The agent process carries no session cookie or bearer token,
+so the call returned **401** and ``handle_coding`` blocked every task with a
+misleading "Repo '<name>' not found" — regardless of the repo actually existing.
+
+The fix mirrors ``get_task``: read the repo straight from the DB in-process,
+which sidesteps auth entirely. These tests assert get_repo/get_freeform_config
+resolve a real repo row without any HTTP call (and that a stray HTTP call would
+fail the test).
 """
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import delete, select
 
 import agent.lifecycle._orchestrator_api as api
+from shared.database import async_session
+from shared.models import FreeformConfig, Organization, Repo
 
 
-class _FakeResp:
-    def __init__(self, status_code: int, payload) -> None:
-        self.status_code = status_code
-        self._payload = payload
+def _no_http(monkeypatch) -> None:
+    """Any HTTP client use is a regression back to the 401-prone loopback."""
 
-    def json(self):
-        return self._payload
+    def _boom(*_a, **_k):
+        raise AssertionError("get_repo must not make an HTTP call")
 
-
-class _FakeClient:
-    def __init__(self, resp: _FakeResp) -> None:
-        self._resp = resp
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_a):
-        return False
-
-    async def get(self, _url):
-        return self._resp
+    monkeypatch.setattr(api.httpx, "AsyncClient", _boom)
 
 
-def _patch_httpx(monkeypatch, resp: _FakeResp) -> None:
-    monkeypatch.setattr(api.httpx, "AsyncClient", lambda *a, **k: _FakeClient(resp))
+async def _org_id() -> int:
+    async with async_session() as s:
+        org = (await s.execute(select(Organization).limit(1))).scalar_one_or_none()
+        if org is None:
+            org = Organization(name="test-org")
+            s.add(org)
+            await s.commit()
+        return org.id
 
 
-_VALID_TARGET = {"id": 2, "name": "good-repo", "url": "https://x/good", "author": "me"}
-# Missing required url + author — would raise ValidationError if validated.
-_MALFORMED = {"id": 1, "name": "bad-other-repo"}
+async def _seed_repo(name: str, **cols) -> tuple[int, int]:
+    org_id = await _org_id()
+    async with async_session() as s:
+        existing = (
+            await s.execute(select(Repo).where(Repo.name == name))
+        ).scalar_one_or_none()
+        if existing is not None:
+            await s.execute(delete(FreeformConfig).where(FreeformConfig.repo_id == existing.id))
+            await s.delete(existing)
+            await s.commit()
+        repo = Repo(name=name, url=f"https://github.com/x/{name}", organization_id=org_id, **cols)
+        s.add(repo)
+        await s.commit()
+        return repo.id, org_id
 
 
 @pytest.mark.asyncio
-async def test_get_repo_skips_malformed_other_repo(monkeypatch):
-    """A malformed *other* repo earlier in the list must not break the lookup."""
-    _patch_httpx(monkeypatch, _FakeResp(200, [_MALFORMED, _VALID_TARGET]))
-    repo = await api.get_repo("good-repo")
+async def test_get_repo_reads_db_without_http(monkeypatch):
+    _no_http(monkeypatch)
+    repo_id, _ = await _seed_repo("causal-tool-data-generator")
+    repo = await api.get_repo("causal-tool-data-generator")
     assert repo is not None
-    assert repo.name == "good-repo"
+    assert repo.id == repo_id
+    assert repo.name == "causal-tool-data-generator"
 
 
 @pytest.mark.asyncio
-async def test_get_repo_non_200_returns_none(monkeypatch):
-    """A non-200 from /repos returns None instead of throwing on resp.json()."""
-    _patch_httpx(monkeypatch, _FakeResp(500, None))
-    assert await api.get_repo("good-repo") is None
+async def test_get_repo_missing_returns_none(monkeypatch):
+    _no_http(monkeypatch)
+    assert await api.get_repo("nope-does-not-exist") is None
 
 
 @pytest.mark.asyncio
-async def test_get_repo_target_invalid_returns_none(monkeypatch):
-    """If the TARGET repo itself fails validation, return None (logged) — never
-    raise, so the caller can transition to a clean 'repo not found' block."""
-    bad_target = {"id": 1, "name": "good-repo"}  # missing url + author
-    _patch_httpx(monkeypatch, _FakeResp(200, [bad_target]))
-    assert await api.get_repo("good-repo") is None
+async def test_get_freeform_config_reads_db_without_http(monkeypatch):
+    _no_http(monkeypatch)
+    repo_id, org_id = await _seed_repo("ff-repo")
+    async with async_session() as s:
+        s.add(FreeformConfig(
+            repo_id=repo_id, organization_id=org_id,
+            enabled=True, dev_branch="dev", prod_branch="main",
+        ))
+        await s.commit()
+    cfg = await api.get_freeform_config("ff-repo")
+    assert cfg is not None
+    assert cfg.enabled is True
+    assert cfg.dev_branch == "dev"
+
+
+@pytest.mark.asyncio
+async def test_get_freeform_config_disabled_returns_none(monkeypatch):
+    _no_http(monkeypatch)
+    repo_id, org_id = await _seed_repo("ff-disabled")
+    async with async_session() as s:
+        s.add(FreeformConfig(
+            repo_id=repo_id, organization_id=org_id, enabled=False, dev_branch="dev",
+        ))
+        await s.commit()
+    assert await api.get_freeform_config("ff-disabled") is None

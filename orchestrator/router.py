@@ -3069,27 +3069,28 @@ async def register_repo(
     return RepoResponse(id=repo.id, name=repo.name, url=repo.url)
 
 
+def _repo_to_data(r: Repo) -> RepoData:
+    return RepoData(
+        id=r.id,
+        name=r.name,
+        url=r.url,
+        default_branch=r.default_branch,
+        summary=r.summary,
+        summary_updated_at=r.summary_updated_at.isoformat() if r.summary_updated_at else None,
+        ci_checks=r.ci_checks,
+        harness_onboarded=r.harness_onboarded or False,
+        harness_pr_url=r.harness_pr_url,
+        mode=r.mode or "human_in_loop",
+    )
+
+
 @router.get("/repos", response_model=list[RepoData])
 async def list_repos(
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> list[RepoData]:
     result = await session.execute(scoped(select(Repo), Repo, org_id=org_id).order_by(Repo.name))
-    return [
-        RepoData(
-            id=r.id,
-            name=r.name,
-            url=r.url,
-            default_branch=r.default_branch,
-            summary=r.summary,
-            summary_updated_at=r.summary_updated_at.isoformat() if r.summary_updated_at else None,
-            ci_checks=r.ci_checks,
-            harness_onboarded=r.harness_onboarded or False,
-            harness_pr_url=r.harness_pr_url,
-            mode=r.mode or "human_in_loop",
-        )
-        for r in result.scalars().all()
-    ]
+    return [_repo_to_data(r) for r in result.scalars().all()]
 
 
 class ProductBriefIn(BaseModel):
