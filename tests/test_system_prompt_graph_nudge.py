@@ -154,3 +154,18 @@ async def test_nudge_teaches_navigation_ops_and_dedup_convention(
     assert "search_symbols" in prompt
     assert "get_symbol_source" in prompt
     assert "before writing a new" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_nudge_states_the_repo_id(tmp_path: Path) -> None:
+    """The tool requires a numeric repo_id — the nudge must say which."""
+    ws = _bare_workspace(tmp_path)
+    cfg = MagicMock()
+    cfg.last_analysis_id = 42
+
+    builder = SystemPromptBuilder()
+    with _patch_session(cfg):
+        prompt = await builder.build(ws, repo_id=7)
+
+    assert "repo_id" in prompt
+    assert "`7`" in prompt

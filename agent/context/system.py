@@ -266,7 +266,11 @@ class SystemPromptBuilder:
         # exploration strategy. Suppressed when the repo isn't opted in
         # OR no analysis has completed yet.
         if repo_id is not None and await self._has_active_code_graph(repo_id):
-            parts.append(CODE_GRAPH_NUDGE)
+            parts.append(
+                CODE_GRAPH_NUDGE
+                + f"\nThis repo's `repo_id` is `{repo_id}` — pass it to every"
+                " `query_repo_graph` call.\n"
+            )
 
         # CLAUDE.md
         claude_md = await self._read_claude_md(workspace)

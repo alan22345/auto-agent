@@ -319,6 +319,7 @@ class AgentLoop:
                     include_methodology=self._include_methodology,
                     task_description=self._task_description,
                     repo_name=self._repo_name,
+                    repo_id=self._repo_id,
                 )
 
         # Load or initialize conversation

@@ -5,6 +5,7 @@ evaluates the resulting workspace state.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -15,8 +16,36 @@ import time
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
+_PROVIDERS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PROVIDERS_DIR not in sys.path:
+    sys.path.insert(0, _PROVIDERS_DIR)
 
 from dotenv import load_dotenv
+
+
+def _collect_tool_metrics(messages):
+    """Per-run tool telemetry from the agent transcript.
+
+    Returns ``(tool_distribution, read_paths, graph_ops)`` where
+    graph_ops counts query_repo_graph calls per op — the "did the
+    treatment actually happen" signal for the graph A/B (ADR-025).
+    """
+    tool_distribution = {}
+    read_paths = []
+    graph_ops = {}
+    for msg in messages:
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+        for tc in msg.tool_calls:
+            tool_distribution[tc.name] = tool_distribution.get(tc.name, 0) + 1
+            if tc.name == "file_read":
+                path = tc.arguments.get("file_path", "")
+                if path:
+                    read_paths.append(path)
+            elif tc.name == "query_repo_graph":
+                op = tc.arguments.get("op", "unknown")
+                graph_ops[op] = graph_ops.get(op, 0) + 1
+    return tool_distribution, read_paths, graph_ops
 
 
 def call_api(prompt, options, context):
@@ -34,6 +63,9 @@ async def _run_agent(prompt, options, context):
     variables = context.get("vars", {})
     fixture = variables.get("fixture", "")
     task = variables.get("task", prompt)
+    provider_config = (options or {}).get("config", {}) or {}
+    graph_arm = bool(provider_config.get("graph", False))
+    provider_override = provider_config.get("provider_override")
 
     # Create temp workspace from fixture
     workspace = tempfile.mkdtemp(prefix="eval-agent-")
@@ -64,34 +96,39 @@ async def _run_agent(prompt, options, context):
         )
         await proc.communicate()
 
+        # Graph arm (ADR-025): build an AST-only graph over the fixture
+        # and patch the DB seams so query_repo_graph + the nudge work
+        # without Postgres. The off arm is the status quo (repo_id=None).
+        graph_context = contextlib.nullcontext()
+        repo_id = None
+        graph_nodes = graph_edges = 0
+        if graph_arm:
+            from graph_support import EVAL_REPO_ID, build_graph_blob, graph_enabled
+
+            blob, head_sha = await build_graph_blob(workspace)
+            graph_context = graph_enabled(workspace, blob, head_sha)
+            repo_id = EVAL_REPO_ID
+            graph_nodes, graph_edges = len(blob.nodes), len(blob.edges)
+
         # Run the agent
         from agent.llm import get_provider
         from agent.tools import create_default_registry
         from agent.context import ContextManager
         from agent.loop import AgentLoop
 
-        provider = get_provider()
+        provider = get_provider(provider_override=provider_override)
         tools = create_default_registry(readonly=False)
         ctx = ContextManager(workspace, provider)
         agent = AgentLoop(
             provider=provider, tools=tools, context_manager=ctx,
-            max_turns=30, workspace=workspace,
+            max_turns=30, workspace=workspace, repo_id=repo_id,
         )
         t0 = time.monotonic()
         try:
-            result = await agent.run(task)
+            with graph_context:
+                result = await agent.run(task)
         finally:
-            # Collect tool call distribution for diagnostics
-            tool_distribution = {}
-            read_paths: list[str] = []
-            for msg in result.messages:
-                if msg.role == "assistant" and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        tool_distribution[tc.name] = tool_distribution.get(tc.name, 0) + 1
-                        if tc.name == "file_read":
-                            p = tc.arguments.get("file_path", "")
-                            if p:
-                                read_paths.append(p)
+            tool_distribution, read_paths, graph_ops = _collect_tool_metrics(result.messages)
             # Close the async HTTP client before the event loop shuts down,
             # otherwise httpx raises "Event loop is closed" during GC cleanup.
             if hasattr(provider, '_client'):
@@ -217,6 +254,11 @@ async def _run_agent(prompt, options, context):
             "tool_distribution": tool_distribution,
             "unique_files_read": unique_reads,
             "total_reads": total_reads,
+            "graph_arm": graph_arm,
+            "graph_calls": sum(graph_ops.values()),
+            "graph_ops": graph_ops,
+            "graph_nodes": graph_nodes,
+            "graph_edges": graph_edges,
             "elapsed_seconds": elapsed_s,
             "tokens": {
                 "input": result.tokens_used.input_tokens,

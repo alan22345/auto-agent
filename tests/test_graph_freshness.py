@@ -89,3 +89,16 @@ async def test_distinct_repos_debounce_independently() -> None:
     assert publish.await_count == 2
     repo_ids = {call.args[0].payload["repo_id"] for call in publish.await_args_list}
     assert repo_ids == {7, 8}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_passes_repo_id_to_system_prompt_builder() -> None:
+    """Regression (ADR-016 Phase 6 was dark): _run_agentic must thread
+    repo_id into build_system_prompt or the code-graph nudge never fires."""
+    import inspect
+
+    from agent import loop as loop_mod
+
+    source = inspect.getsource(loop_mod.AgentLoop._run_agentic)
+    call = source.split("build_system_prompt(", 1)[1].split(")", 1)[0]
+    assert "repo_id" in call

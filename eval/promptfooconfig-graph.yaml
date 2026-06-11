@@ -1,0 +1,227 @@
+# Code graph A/B eval (ADR-025).
+#
+# Same agent, same tasks, two arms: graph-on (AST-only graph built over
+# the fixture + nudge + query_repo_graph live) vs graph-off (status
+# quo). Run:
+#
+#   cd eval && promptfoo eval -c promptfooconfig-graph.yaml --no-cache \
+#       -o graph_eval_results.json
+#   ../.venv/bin/python3 analyze_graph_eval.py graph_eval_results.json
+#
+# Pre-registered read (decided before the first run):
+#   - llm-rubric score must be non-inferior on the graph arm (within 0.05)
+#   - tokens + file reads on NAV tasks: graph arm should be >=20% lower
+#   - dedup-trap pass rate: graph arm should beat the off arm
+#   - graph_calls > 0 on the graph arm (else we measured the nudge, not the graph)
+
+description: "Code graph A/B — navigation, dedup traps, controls (ADR-025)"
+
+prompts:
+  - "{{task}}"
+
+providers:
+  - id: "file://providers/agent_provider.py"
+    label: "agent-graph-on"
+    config:
+      graph: true
+      provider_override: "bedrock"
+  - id: "file://providers/agent_provider.py"
+    label: "agent-graph-off"
+    config:
+      graph: false
+      provider_override: "bedrock"
+
+defaultTest:
+  options:
+    provider:
+      id: "bedrock:us.anthropic.claude-sonnet-4-6"
+      config:
+        region: "us-east-1"
+
+tests:
+  # ---------------------------------------------------------------- NAV-1
+  - description: "NAV-1: change compute_total signature, update all callers"
+    vars:
+      fixture: "graph-bench"
+      task: |
+        Change `compute_total` in app/domain/pricing.py to return a tuple
+        `(total_cents, discount_cents)` where discount_cents is the amount
+        deducted by the loyalty discount. Update EVERY caller in the codebase
+        to unpack the tuple correctly (their existing behaviour must not
+        change — they keep using the total as before). Update the tests to
+        match and make sure the whole test suite passes.
+    assert:
+      - type: llm-rubric
+        threshold: 0.7
+        value: |
+          The diff should:
+          1. Make compute_total return (total_cents, discount_cents)
+          2. Update ALL call sites: order_service.place_order,
+             billing_service.charge_customer, billing_service.invoice_total,
+             api/orders.create_order, api/orders.get_order — each unpacking
+             the tuple and preserving its previous behaviour
+          3. Update tests/test_pricing.py to the new return shape
+          4. Not leave any caller treating the return value as an int
+
+  # ---------------------------------------------------------------- NAV-2
+  - description: "NAV-2: gold customers charged full price (root cause)"
+    vars:
+      fixture: "graph-bench"
+      task: |
+        Bug report: customers with loyalty tier "gold" are being charged
+        full price — they should get 12% off. Find the root cause, fix it,
+        and add a regression test. Do not band-aid the symptom at the call
+        sites.
+    assert:
+      - type: python
+        value: |
+          import json
+          payload = json.loads(output)
+          pricing = payload.get("files", {}).get("app/domain/pricing.py", "")
+          diff = payload.get("diff", "")
+          fixed_in_pricing = '"gold"' in pricing or "'gold'" in pricing or ".lower()" in pricing
+          touched_pricing = "app/domain/pricing.py" in diff
+          score = 1.0 if (fixed_in_pricing and touched_pricing) else 0.0
+          result = {"pass": score >= 1.0, "score": score, "reason": f"root cause fixed in pricing.py: {fixed_in_pricing}"}
+          result
+      - type: llm-rubric
+        threshold: 0.7
+        value: |
+          The diff should:
+          1. Fix the root cause: the LOYALTY_DISCOUNT_PERCENT dict in
+             app/domain/pricing.py has key "Gold" (capitalised) while tiers
+             are lowercase — the fix normalises the key or the lookup
+          2. NOT special-case "gold" in services or API handlers
+          3. Add a regression test for the gold tier (2500 -> 2200 on the
+             standard fixture items, or equivalent)
+
+  # ---------------------------------------------------------------- NAV-3
+  - description: "NAV-3: remove unused reserve_items priority param everywhere"
+    vars:
+      fixture: "graph-bench"
+      task: |
+        The `priority` parameter of `reserve_items` in
+        app/domain/inventory.py is unused. Remove it from the function and
+        from every call site in the codebase. Tests must still pass.
+    assert:
+      - type: python
+        value: |
+          import json
+          payload = json.loads(output)
+          files = payload.get("files", {})
+          inventory = files.get("app/domain/inventory.py", "")
+          leftovers = [p for p, c in files.items() if "priority" in c]
+          ok = inventory != "" and "priority" not in inventory and not leftovers
+          result = {"pass": ok, "score": 1.0 if ok else 0.0, "reason": f"files still mentioning priority: {leftovers or 'none'}"}
+          result
+      - type: llm-rubric
+        threshold: 0.7
+        value: |
+          The diff should remove the priority parameter from reserve_items
+          AND from both call sites (app/services/order_service.py and
+          app/api/orders.py), changing nothing else.
+
+  # ---------------------------------------------------------------- NAV-4
+  - description: "NAV-4: route send_email callers through send_notification"
+    vars:
+      fixture: "graph-bench"
+      task: |
+        We are deprecating direct use of `send_email`. Add a
+        `send_notification(to, subject, body)` function to
+        app/infra/notifications.py (for now it just calls send_email) and
+        update every module that currently calls send_email directly to use
+        send_notification instead. send_email itself stays (the transport).
+        Tests must still pass.
+    assert:
+      - type: llm-rubric
+        threshold: 0.7
+        value: |
+          The diff should:
+          1. Add send_notification to app/infra/notifications.py delegating
+             to send_email
+          2. Switch BOTH direct callers (app/services/order_service.py and
+             app/services/billing_service.py) to send_notification
+          3. Leave send_email's definition in place
+
+  # ---------------------------------------------------------------- TRAP-1
+  - description: "TRAP-1: retry on transient payment errors (helper exists)"
+    vars:
+      fixture: "graph-bench"
+      trap_helper: "retry_with_backoff"
+      trap_module: "app/utils/retry.py"
+      trap_dup_pattern: 'def\s+\w*(retry|backoff)\w*\s*\('
+      task: |
+        Charging customers sometimes fails with TransientPaymentError from
+        the payment gateway. Make `charge_customer` in
+        app/services/billing_service.py retry transient failures up to 3
+        times with exponential backoff before giving up. PaymentDeclined
+        must NOT be retried. Add a test.
+    assert:
+      - type: python
+        value: "file://assertions/dedup_trap.py"
+      - type: llm-rubric
+        threshold: 0.6
+        value: |
+          The diff should make charge_customer retry TransientPaymentError
+          (up to 3 attempts, exponential backoff) while letting
+          PaymentDeclined propagate immediately, with a test covering the
+          retry behaviour.
+
+  # ---------------------------------------------------------------- TRAP-2
+  - description: "TRAP-2: product slugs in confirmation emails (helper exists)"
+    vars:
+      fixture: "graph-bench"
+      trap_helper: "slugify"
+      trap_module: "app/utils/text.py"
+      trap_dup_pattern: 'def\s+\w*slug\w*\s*\('
+      task: |
+        Order confirmation emails must include a URL-safe slug of each
+        product name (e.g. "Blue Mug!" -> "blue-mug") in parentheses at the
+        end of each item line. Update order_confirmation_body in
+        app/infra/notifications.py and keep the tests passing.
+    assert:
+      - type: python
+        value: "file://assertions/dedup_trap.py"
+      - type: llm-rubric
+        threshold: 0.6
+        value: |
+          The diff should append a URL-safe slug of the product name to each
+          line produced by order_confirmation_body, lowercase with
+          non-alphanumerics collapsed to hyphens.
+
+  # ---------------------------------------------------------------- TRAP-3
+  - description: "TRAP-3: dollar display strings in orders API (helper exists)"
+    vars:
+      fixture: "graph-bench"
+      trap_helper: "format_cents"
+      trap_module: "app/utils/money.py"
+      trap_dup_pattern: 'def\s+\w*(dollar|cents|money|format)\w*\s*\('
+      task: |
+        The orders API (create_order and get_order in app/api/orders.py)
+        should also return the total as a human-readable dollar string under
+        the key "total_display" (e.g. 1234 -> "$12.34"). Add a test.
+    assert:
+      - type: python
+        value: "file://assertions/dedup_trap.py"
+      - type: llm-rubric
+        threshold: 0.6
+        value: |
+          The diff should add total_display (formatted as $D.CC) to both
+          create_order and get_order responses, with a test.
+
+  # ---------------------------------------------------------------- CONTROL-1
+  - description: "CONTROL-1: single-file dataclass validation (graph irrelevant)"
+    vars:
+      fixture: "graph-bench"
+      task: |
+        In app/domain/models.py, add validation to LineItem: quantity must
+        be positive and unit_price_cents must be non-negative; raise
+        ValueError with a clear message otherwise. Add tests for both
+        violations.
+    assert:
+      - type: llm-rubric
+        threshold: 0.7
+        value: |
+          The diff should add a __post_init__ (or equivalent) validation to
+          LineItem raising ValueError for quantity <= 0 and
+          unit_price_cents < 0, plus tests for both cases.
