@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -116,10 +117,12 @@ def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpS
 
     # code-graph — stdio MCP re-exposing query_repo_graph to the CLI path,
     # which can't see in-process Python tools (ADR-023). Native mode keeps
-    # the in-process tool. Pinned to the task's repo; DATABASE_URL is
-    # forwarded so the subprocess resolves the same Postgres regardless of
-    # the CLI's working directory.
+    # the in-process tool. Pinned to the task's repo. The CLI spawns the
+    # server with cwd = the task workspace and the app isn't pip-installed,
+    # so PYTHONPATH must point back at the auto-agent root; DATABASE_URL is
+    # forwarded so shared.config resolves the same Postgres from anywhere.
     if repo_id is not None:
+        auto_agent_root = str(Path(__file__).resolve().parents[2])
         specs.append(
             McpServerSpec(
                 name="code-graph",
@@ -130,6 +133,7 @@ def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpS
                 env={
                     "CODE_GRAPH_REPO_ID": str(repo_id),
                     "DATABASE_URL": getattr(settings, "database_url", "") or "",
+                    "PYTHONPATH": auto_agent_root,
                 },
             )
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent.mcp.servers import (
@@ -90,6 +91,13 @@ def test_code_graph_added_when_repo_id_given():
     assert cg.env["CODE_GRAPH_REPO_ID"] == "7"
     assert cg.env["DATABASE_URL"].endswith("/app")
     assert cg.args[-1] == "agent.mcp.code_graph_server"
+    # The CLI spawns the server with cwd = the task workspace, where the
+    # agent package isn't importable (the app isn't pip-installed) —
+    # PYTHONPATH must point back at the auto-agent root.
+    import agent as agent_pkg
+
+    expected_root = str(Path(agent_pkg.__file__).resolve().parents[1])
+    assert cg.env["PYTHONPATH"] == expected_root
 
 
 def test_code_graph_absent_without_repo_id():
