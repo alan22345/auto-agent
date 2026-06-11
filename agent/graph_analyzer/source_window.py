@@ -54,23 +54,41 @@ def read_source_window(
     :class:`FileNotFoundError` when the resolved file doesn't exist;
     :class:`ValueError` on an invalid line range.
     """
-    if not path or path.startswith("/") or ".." in path.split("/"):
-        raise PathOutsideWorkspaceError(path)
     if line_start < 1 or line_end < line_start:
         raise ValueError(f"invalid line range {line_start}..{line_end}")
 
-    root = os.path.realpath(workspace_root)
-    target = os.path.realpath(os.path.join(root, path))
-    # Belt-and-braces: even with the segment check above, the resolved
-    # real path must still live inside the workspace root (symlinks).
-    if not (target == root or target.startswith(root + os.sep)):
-        raise PathOutsideWorkspaceError(path)
-
+    target = _resolve_inside_workspace(workspace_root, path)
     if not os.path.isfile(target):
         raise FileNotFoundError(path)
 
-    # Stream-read just the requested window, stopping early so a 10MiB
-    # minified file doesn't blow up the worker.
+    lines = _stream_read_lines(target, line_start, line_end)
+    content, byte_truncated = _apply_byte_cap("".join(lines))
+    return SourceWindow(
+        content=content,
+        lines_read=len(lines),
+        byte_truncated=byte_truncated,
+    )
+
+
+def _resolve_inside_workspace(workspace_root: str, path: str) -> str:
+    """Resolve ``path`` under the workspace root or raise.
+
+    Rejects absolute paths and ``..`` segments up front, then re-checks
+    the resolved real path — symlinks can escape even when the segments
+    look innocent.
+    """
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        raise PathOutsideWorkspaceError(path)
+    root = os.path.realpath(workspace_root)
+    target = os.path.realpath(os.path.join(root, path))
+    if not (target == root or target.startswith(root + os.sep)):
+        raise PathOutsideWorkspaceError(path)
+    return target
+
+
+def _stream_read_lines(target: str, line_start: int, line_end: int) -> list[str]:
+    """Read just the requested lines, stopping early so a 10MiB
+    minified file doesn't blow up the worker."""
     selected: list[str] = []
     with open(target, encoding="utf-8", errors="replace") as f:
         for lineno, raw in enumerate(f, start=1):
@@ -79,18 +97,16 @@ def read_source_window(
             if lineno > line_end:
                 break
             selected.append(raw)
+    return selected
 
-    content = "".join(selected)
-    byte_truncated = False
+
+def _apply_byte_cap(content: str) -> tuple[str, bool]:
+    """Truncate ``content`` to the byte cap with a visible marker.
+
+    Returns ``(content, was_truncated)``.
+    """
     encoded = content.encode("utf-8")
-    if len(encoded) > SOURCE_WINDOW_MAX_BYTES:
-        marker = _TRUNCATION_MARKER.encode()
-        cap = SOURCE_WINDOW_MAX_BYTES - len(marker)
-        content = encoded[:cap].decode("utf-8", errors="replace") + _TRUNCATION_MARKER
-        byte_truncated = True
-
-    return SourceWindow(
-        content=content,
-        lines_read=len(selected),
-        byte_truncated=byte_truncated,
-    )
+    if len(encoded) <= SOURCE_WINDOW_MAX_BYTES:
+        return content, False
+    cap = SOURCE_WINDOW_MAX_BYTES - len(_TRUNCATION_MARKER.encode())
+    return encoded[:cap].decode("utf-8", errors="replace") + _TRUNCATION_MARKER, True

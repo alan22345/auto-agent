@@ -6,6 +6,8 @@
 
 Accepted
 
+Extended by [ADR-023] (navigation ops `search_symbols`/`get_symbol_source`, claude_cli MCP bridge, search-before-new-helper convention). This ADR remains binding.
+
 ## Context
 
 When a repo is added to auto-agent, the system does almost nothing structural with it. `POST /repos` creates a row in the `Repo` table and stops. `agent/harness.py` (when manually triggered via `/repos/{name}/onboard`) writes a CLAUDE.md, lint config, ADR templates and opens a PR — a *prose* analysis. `agent/context/repo_map.py` runs per-task to inject a flat text outline (file → classes → functions) into the system prompt. None of these produce a structural map that:

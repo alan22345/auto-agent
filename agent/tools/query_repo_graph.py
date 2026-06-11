@@ -668,23 +668,33 @@ def _search_symbols(
             continue
         if area is not None and n.area != area:
             continue
-        label = (n.label or "").lower()
-        if label == q:
-            tier = 0
-        elif label.startswith(q):
-            tier = 1
-        elif q in label:
-            tier = 2
-        elif q in n.id.lower():
-            tier = 3
-        else:
+        tier = _match_tier(n, q)
+        if tier is None:
             continue
-        scored.append((tier, label, n.id, n))
+        scored.append((tier, (n.label or "").lower(), n.id, n))
     scored.sort(key=lambda t: (t[0], t[1], t[2]))
     nodes = [n for _, _, _, n in scored]
     if limit > 0:
         nodes = nodes[:limit]
     return nodes
+
+
+def _match_tier(node: Node, query_lower: str) -> int | None:
+    """Rank how well ``node`` matches the query; None means no match.
+
+    0 = exact label, 1 = label prefix, 2 = label substring,
+    3 = id substring (path-style queries like "parsers/util").
+    """
+    label = (node.label or "").lower()
+    if label == query_lower:
+        return 0
+    if label.startswith(query_lower):
+        return 1
+    if query_lower in label:
+        return 2
+    if query_lower in node.id.lower():
+        return 3
+    return None
 
 
 def _get_symbol_source(
@@ -729,11 +739,12 @@ def _get_symbol_source(
             "graph may be stale; refresh it or read the file directly."
         ) from None
 
+    last_line_returned = line_start + window.lines_read - 1 if window.lines_read else line_start
     return {
         "node_id": node.id,
         "file": node.file,
         "line_start": line_start,
-        "line_end": line_start + window.lines_read - 1 if window.lines_read else line_start,
+        "line_end": last_line_returned,
         "source": window.content,
         "truncated": line_clamped or window.byte_truncated,
     }
