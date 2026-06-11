@@ -3933,10 +3933,12 @@ async def get_repo_graph_staleness(
     result = compute_staleness(
         graph_sha=row.commit_sha,
         workspace_path=cfg.workspace_path,
+        analysis_branch=cfg.analysis_branch,
     )
     return GraphStalenessResponse(
         graph_sha=result.graph_sha,
         workspace_sha=result.workspace_sha,
+        origin_sha=result.origin_sha,
         drifted=result.drifted,
     )
 

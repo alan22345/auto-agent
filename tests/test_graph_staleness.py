@@ -17,7 +17,13 @@ import os
 import subprocess
 from pathlib import Path  # noqa: TC003 — used as runtime annotation by pytest fixtures
 
-from agent.graph_analyzer.staleness import Staleness, compute_staleness
+import pytest
+
+from agent.graph_analyzer.staleness import (
+    Staleness,
+    clear_origin_cache,
+    compute_staleness,
+)
 
 
 def _init_git_repo(path: Path) -> str:
@@ -144,3 +150,136 @@ class TestComputeStaleness:
             assert result.drifted is True
         finally:
             ws.chmod(0o755)
+
+
+def _clone(origin: Path, dest: Path) -> None:
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(dest)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _commit(repo: Path, filename: str) -> str:
+    (repo / filename).write_text("more\n")
+    subprocess.run(
+        ["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "add", filename],
+        cwd=str(repo),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-q", "-m", filename],
+        cwd=str(repo),
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _branch_of(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+class TestOriginComparison:
+    """ADR-024: ``drifted`` must reflect origin, not just the local clone.
+
+    The analyser workspace HEAD only moves on refresh, so comparing
+    against it alone reports "fresh" forever once an analysis lands.
+    When ``analysis_branch`` is supplied, compute_staleness asks origin
+    (``git ls-remote``) and compares the graph SHA against that.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        clear_origin_cache()
+        yield
+        clear_origin_cache()
+
+    def test_origin_ahead_means_drifted_even_when_workspace_matches(self, tmp_path: Path) -> None:
+        origin = tmp_path / "origin"
+        graph_sha = _init_git_repo(origin)
+        ws = tmp_path / "ws"
+        _clone(origin, ws)
+        new_sha = _commit(origin, "later.txt")
+
+        result = compute_staleness(
+            graph_sha=graph_sha,
+            workspace_path=str(ws),
+            analysis_branch=_branch_of(origin),
+        )
+
+        assert result.workspace_sha == graph_sha  # clone never refreshed
+        assert result.origin_sha == new_sha
+        assert result.drifted is True
+
+    def test_origin_matching_graph_means_fresh(self, tmp_path: Path) -> None:
+        origin = tmp_path / "origin"
+        graph_sha = _init_git_repo(origin)
+        ws = tmp_path / "ws"
+        _clone(origin, ws)
+
+        result = compute_staleness(
+            graph_sha=graph_sha,
+            workspace_path=str(ws),
+            analysis_branch=_branch_of(origin),
+        )
+
+        assert result.origin_sha == graph_sha
+        assert result.drifted is False
+
+    def test_no_remote_falls_back_to_workspace_comparison(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        sha = _init_git_repo(ws)  # plain repo, no origin configured
+
+        result = compute_staleness(
+            graph_sha=sha,
+            workspace_path=str(ws),
+            analysis_branch="main",
+        )
+
+        assert result.origin_sha is None
+        assert result.drifted is False  # legacy semantics preserved
+
+    def test_origin_lookup_is_cached_within_ttl(self, tmp_path: Path) -> None:
+        origin = tmp_path / "origin"
+        graph_sha = _init_git_repo(origin)
+        ws = tmp_path / "ws"
+        _clone(origin, ws)
+        branch = _branch_of(origin)
+
+        first = compute_staleness(
+            graph_sha=graph_sha, workspace_path=str(ws), analysis_branch=branch
+        )
+        assert first.drifted is False
+
+        _commit(origin, "later.txt")  # origin moves...
+        cached = compute_staleness(
+            graph_sha=graph_sha, workspace_path=str(ws), analysis_branch=branch
+        )
+        assert cached.drifted is False  # ...but the cached answer still serves
+
+        clear_origin_cache()
+        fresh = compute_staleness(
+            graph_sha=graph_sha, workspace_path=str(ws), analysis_branch=branch
+        )
+        assert fresh.drifted is True
+
+    def test_without_analysis_branch_behaviour_is_unchanged(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        sha = _init_git_repo(ws)
+
+        result = compute_staleness(graph_sha=sha, workspace_path=str(ws))
+
+        assert result.origin_sha is None
+        assert result.drifted is False

@@ -242,10 +242,13 @@ class QueryRepoGraphTool(Tool):
 
         workspace_path = cfg.workspace_path or ""
 
-        # 3. Compute staleness envelope.
+        # 3. Compute staleness envelope. The analysis branch makes drift
+        # honest: origin's tip is reality, the workspace HEAD only moves
+        # on refresh (ADR-024).
         staleness = compute_staleness(
             graph_sha=graph_row.commit_sha,
             workspace_path=workspace_path,
+            analysis_branch=getattr(cfg, "analysis_branch", None),
         )
 
         # 4. Dispatch to per-op handler.
@@ -273,6 +276,7 @@ class QueryRepoGraphTool(Tool):
             "staleness": {
                 "graph_sha": staleness.graph_sha,
                 "workspace_sha": staleness.workspace_sha,
+                "origin_sha": staleness.origin_sha,
                 "drifted": staleness.drifted,
             },
         }

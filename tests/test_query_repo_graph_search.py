@@ -535,3 +535,27 @@ async def test_get_symbol_source_traversal_node_is_rejected(tmp_path: Path) -> N
 
     assert result.is_error is True
     assert "nope" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_staleness_is_computed_against_the_analysis_branch(tmp_path: Path) -> None:
+    """ADR-024: the tool must hand cfg.analysis_branch to compute_staleness
+    so drift is measured against origin, not just the frozen workspace."""
+    cfg = _make_config(workspace_path=str(tmp_path))
+    cfg.analysis_branch = "develop"
+    graph_row = _make_graph_row(blob=_make_blob(_search_fixture_nodes()))
+    session_factory = lambda: _SessionStub(config=cfg, graph=graph_row)  # noqa: E731
+
+    with (
+        patch("agent.tools.query_repo_graph.async_session", new=session_factory),
+        patch(
+            "agent.tools.query_repo_graph.compute_staleness",
+            return_value=_fake_staleness(),
+        ) as staleness,
+    ):
+        await QueryRepoGraphTool().execute(
+            {"repo_id": 1, "op": "hotspots", "params": {}},
+            ToolContext(workspace=str(tmp_path)),
+        )
+
+    assert staleness.call_args.kwargs["analysis_branch"] == "develop"

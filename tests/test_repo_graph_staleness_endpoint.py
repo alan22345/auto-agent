@@ -130,6 +130,7 @@ class TestGraphStalenessEndpoint:
             graph_sha=row.commit_sha,
             workspace_sha="bbbbbbb" + "b" * 33,
             drifted=True,
+            origin_sha="ccccccc" + "c" * 33,
         )
 
         out = await get_repo_graph_staleness(
@@ -139,13 +140,16 @@ class TestGraphStalenessEndpoint:
         )
 
         # The endpoint must have called compute_staleness with the
-        # row's SHA + the config's workspace path.
+        # row's SHA, the config's workspace path, and the analysis
+        # branch so drift is measured against origin (ADR-024).
         mock_compute.assert_called_once_with(
             graph_sha=row.commit_sha,
             workspace_path=cfg.workspace_path,
+            analysis_branch=cfg.analysis_branch,
         )
         assert out.graph_sha == row.commit_sha
         assert out.workspace_sha == "bbbbbbb" + "b" * 33
+        assert out.origin_sha == "ccccccc" + "c" * 33
         assert out.drifted is True
 
     @pytest.mark.asyncio
