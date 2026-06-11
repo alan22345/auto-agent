@@ -74,16 +74,7 @@ tests:
         sites.
     assert:
       - type: python
-        value: |
-          import json
-          payload = json.loads(output)
-          pricing = payload.get("files", {}).get("app/domain/pricing.py", "")
-          diff = payload.get("diff", "")
-          fixed_in_pricing = '"gold"' in pricing or "'gold'" in pricing or ".lower()" in pricing
-          touched_pricing = "app/domain/pricing.py" in diff
-          score = 1.0 if (fixed_in_pricing and touched_pricing) else 0.0
-          result = {"pass": score >= 1.0, "score": score, "reason": f"root cause fixed in pricing.py: {fixed_in_pricing}"}
-          result
+        value: "file://assertions/nav2_root_cause.py"
       - type: llm-rubric
         threshold: 0.7
         value: |
@@ -105,15 +96,7 @@ tests:
         from every call site in the codebase. Tests must still pass.
     assert:
       - type: python
-        value: |
-          import json
-          payload = json.loads(output)
-          files = payload.get("files", {})
-          inventory = files.get("app/domain/inventory.py", "")
-          leftovers = [p for p, c in files.items() if "priority" in c]
-          ok = inventory != "" and "priority" not in inventory and not leftovers
-          result = {"pass": ok, "score": 1.0 if ok else 0.0, "reason": f"files still mentioning priority: {leftovers or 'none'}"}
-          result
+        value: "file://assertions/nav3_param_removed.py"
       - type: llm-rubric
         threshold: 0.7
         value: |
