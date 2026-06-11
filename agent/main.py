@@ -12,6 +12,7 @@ identifier (per ADR-008), even though the ``claude_runner`` package is gone.
 from __future__ import annotations
 
 import asyncio
+import traceback
 
 from agent.lifecycle import (
     cleanup,
@@ -86,11 +87,25 @@ async def event_loop() -> None:
             messages = await read_events(r, consumer="claude-runner", count=1, block=5000)
             backoff = 1
             for msg_id, data in messages:
+                event = None
                 try:
                     event = Event.from_redis(data)
                     await bus.dispatch(event)
-                except Exception:
-                    log.exception("Error handling event")
+                except Exception as exc:
+                    # structlog's format_exc_info has been dropping the traceback
+                    # for this handler, leaving only "Error handling event" with no
+                    # cause — which hid a coder failure for an entire afternoon.
+                    # Attach the error + a tail of the traceback explicitly so the
+                    # cause is always visible.
+                    log.exception(
+                        "Error handling event",
+                        error=repr(exc),
+                        event_type=getattr(event, "type", None),
+                        task_id=getattr(event, "task_id", None),
+                        traceback="".join(
+                            traceback.format_exception(type(exc), exc, exc.__traceback__)
+                        )[-4000:],
+                    )
                 finally:
                     await ack_event(r, msg_id, consumer="claude-runner")
         except Exception:

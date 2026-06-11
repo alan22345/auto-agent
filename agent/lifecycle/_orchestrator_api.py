@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import structlog
 from sqlalchemy import select
 
 from shared.config import settings
@@ -35,6 +36,8 @@ from shared.models import Task, TaskStatus
 from shared.types import FreeformConfigData, RepoData, TaskData
 
 ORCHESTRATOR_URL = settings.orchestrator_url
+
+log = structlog.get_logger()
 
 
 async def get_task(task_id: int) -> TaskData | None:
@@ -68,11 +71,25 @@ async def get_task(task_id: int) -> TaskData | None:
 async def get_repo(repo_name: str) -> RepoData | None:
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{ORCHESTRATOR_URL}/repos")
-        repos = resp.json()
-        for repo_dict in repos:
-            repo = RepoData.model_validate(repo_dict)
-            if repo.name == repo_name:
-                return repo
+    if resp.status_code != 200:
+        log.error(
+            "get_repo: /repos returned non-200",
+            status=resp.status_code,
+            repo_name=repo_name,
+        )
+        return None
+    # Match on the raw payload first, then validate ONLY the target repo. A
+    # single malformed *other* repo used to throw out of RepoData.model_validate
+    # and abort every coding task before it logged a thing (the silent
+    # start_coding failure). One bad repo must not poison the whole lookup.
+    for repo_dict in resp.json():
+        if repo_dict.get("name") != repo_name:
+            continue
+        try:
+            return RepoData.model_validate(repo_dict)
+        except Exception:
+            log.exception("get_repo: RepoData validation failed", repo_name=repo_name)
+            return None
     return None
 
 
