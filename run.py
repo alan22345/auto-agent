@@ -1653,30 +1653,39 @@ _recovery_attempted: set[int] = set()
 _coding_progress: dict[int, tuple[str, datetime]] = {}
 
 
-async def _workspace_signature(workspace: str) -> str | None:
-    """Cheap signature of a coding workspace's current state.
+_SIG_SKIP_DIRS = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist", "build"}
 
-    Combines HEAD (catches new commits) with the porcelain status and diff stat
-    (catches in-flight working-tree edits), so it changes whenever the coder
-    makes progress. Returns ``None`` when the workspace isn't a git checkout
-    (e.g. wiped by a restart) — the caller then falls back to the heartbeat path.
+
+def _scan_workspace_signature(workspace: str) -> str | None:
+    """Filesystem signature of a coding workspace: (file count, newest mtime).
+
+    A coder making progress writes/edits files, which bumps the count or the
+    newest mtime — so the signature changes whenever real work happens. Uses the
+    filesystem directly (no git subprocess), so it can't silently return ``None``
+    on a git hiccup; it returns ``None`` only when the workspace directory is
+    genuinely absent (e.g. wiped by a restart), where the caller falls back to
+    the heartbeat/age path.
     """
-    import hashlib
-
-    if not os.path.isdir(os.path.join(workspace, ".git")):
+    if not os.path.isdir(workspace):
         return None
-    parts: list[str] = []
-    for args in (["rev-parse", "HEAD"], ["status", "--porcelain"], ["diff", "--stat"]):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-C", workspace, *args,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-        except Exception:
-            return None
-        parts.append(out.decode("utf-8", "replace"))
-    return hashlib.sha1("\x00".join(parts).encode()).hexdigest()
+    newest = 0.0
+    count = 0
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in _SIG_SKIP_DIRS]
+        for fname in files:
+            try:
+                m = os.lstat(os.path.join(root, fname)).st_mtime
+            except OSError:
+                continue
+            count += 1
+            if m > newest:
+                newest = m
+    return f"{count}:{newest:.0f}"
+
+
+async def _workspace_signature(workspace: str) -> str | None:
+    """Async wrapper around the (blocking) filesystem scan."""
+    return await asyncio.to_thread(_scan_workspace_signature, workspace)
 
 
 def _progress_stall_seconds(task_id: int, signature: str, now: datetime) -> float:
@@ -1743,11 +1752,20 @@ async def task_timeout_watchdog() -> None:
                             task_id=task.id, organization_id=task.organization_id
                         )
                         sig = await _workspace_signature(ws)
-                        if sig is not None:
+                        if sig is None:
+                            log.warning(
+                                f"Task #{task.id} progress-check: no workspace at "
+                                f"{ws} — falling back to age-based timeout"
+                            )
+                        else:
                             stall_s = _progress_stall_seconds(task.id, sig, now)
                             if stall_s < CODING_PROGRESS_STALL:
                                 continue  # workspace still changing — making progress
                             # Stalled: time out on no-progress duration, not age.
+                            log.info(
+                                f"Task #{task.id} coding stalled {stall_s:.0f}s "
+                                f"(no workspace change) — applying stall timeout"
+                            )
                             age_s = stall_s
                             soft_timeout = CODING_PROGRESS_STALL
                             hard_timeout = CODING_PROGRESS_STALL_HARD
