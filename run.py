@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re as _re
 from datetime import datetime, timezone
 
@@ -1633,10 +1634,62 @@ CODING_TIMEOUT_SOFT = 3600  # 1 hour — try recovery first
 CODING_TIMEOUT_HARD = 7200  # 2 hours — fail the task
 WATCHDOG_INTERVAL = 120     # Check every 2 minutes
 
+# Progress-based liveness for CODING. The ``claude --print`` coder runs as one
+# long subprocess that sends no heartbeat mid-run, so a wall-clock timeout kills
+# long-but-productive work (e.g. a large multi-file refactor — task #327). Treat
+# a CODING task as alive as long as its workspace keeps changing (new commits OR
+# edits to the working tree); only a workspace static for CODING_PROGRESS_STALL
+# counts as stalled. A progressing task is never timed out, regardless of age.
+CODING_PROGRESS_STALL = 300       # 5 min with no workspace change → stalled (recovery)
+CODING_PROGRESS_STALL_HARD = 600  # 10 min static → fail
+
 TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 
 # Track which tasks have already had a recovery attempt (avoid infinite retries)
 _recovery_attempted: set[int] = set()
+
+# task_id -> (workspace signature, datetime it last changed). Drives the
+# progress-based stall check above.
+_coding_progress: dict[int, tuple[str, datetime]] = {}
+
+
+async def _workspace_signature(workspace: str) -> str | None:
+    """Cheap signature of a coding workspace's current state.
+
+    Combines HEAD (catches new commits) with the porcelain status and diff stat
+    (catches in-flight working-tree edits), so it changes whenever the coder
+    makes progress. Returns ``None`` when the workspace isn't a git checkout
+    (e.g. wiped by a restart) — the caller then falls back to the heartbeat path.
+    """
+    import hashlib
+
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        return None
+    parts: list[str] = []
+    for args in (["rev-parse", "HEAD"], ["status", "--porcelain"], ["diff", "--stat"]):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", workspace, *args,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except Exception:
+            return None
+        parts.append(out.decode("utf-8", "replace"))
+    return hashlib.sha1("\x00".join(parts).encode()).hexdigest()
+
+
+def _progress_stall_seconds(task_id: int, signature: str, now: datetime) -> float:
+    """Record this tick's signature; return seconds since it last changed.
+
+    0.0 when the signature changed this tick (or is first-seen) — i.e. the task
+    is making progress right now.
+    """
+    prev = _coding_progress.get(task_id)
+    if prev is None or prev[0] != signature:
+        _coding_progress[task_id] = (signature, now)
+        return 0.0
+    return (now - prev[1]).total_seconds()
 
 
 async def task_timeout_watchdog() -> None:
@@ -1677,6 +1730,27 @@ async def task_timeout_watchdog() -> None:
                                 f"but heartbeat is alive — skipping"
                             )
                         continue
+
+                    # Progress-based liveness for CODING: the passthrough coder
+                    # sends no heartbeat, so judge it by whether the workspace is
+                    # still changing. A progressing task is never timed out
+                    # regardless of wall-clock age; a static one is timed out on
+                    # the no-progress thresholds, not on total age.
+                    if task.status == TaskStatus.CODING:
+                        from agent.workspace import _workspace_path
+
+                        ws = _workspace_path(
+                            task_id=task.id, organization_id=task.organization_id
+                        )
+                        sig = await _workspace_signature(ws)
+                        if sig is not None:
+                            stall_s = _progress_stall_seconds(task.id, sig, now)
+                            if stall_s < CODING_PROGRESS_STALL:
+                                continue  # workspace still changing — making progress
+                            # Stalled: time out on no-progress duration, not age.
+                            age_s = stall_s
+                            soft_timeout = CODING_PROGRESS_STALL
+                            hard_timeout = CODING_PROGRESS_STALL_HARD
 
                     # No heartbeat — check timeouts
                     if age_s > hard_timeout:
