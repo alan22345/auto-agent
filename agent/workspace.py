@@ -291,7 +291,31 @@ async def create_branch(workspace: str, branch_name: str) -> None:
 
 
 async def push_branch(workspace: str, branch_name: str) -> None:
-    """Push the branch to remote."""
+    """Push the branch to remote, integrating an existing remote branch.
+
+    A bare ``git push`` is rejected non-fast-forward when the remote branch is
+    already ahead — e.g. a prior run of the same task pushed it and an open PR
+    carries the work. Rather than fail the task (task #327 died here with a
+    "(non-fast-forward)" error in Slack) or force-push and clobber the open PR,
+    we fetch the remote branch and rebase our local commits onto it, then retry
+    once. Rebase drops already-applied commits by patch-id, so a redundant
+    re-run converges to "remote up to date" instead of crashing.
+    """
+    _, _, rc = await _run_git("push", "-u", "origin", branch_name, cwd=workspace)
+    if rc == 0:
+        return
+
+    # Push rejected — integrate the remote branch (never force) and retry.
+    await _run_git("fetch", "origin", branch_name, cwd=workspace)
+    _, _, rebase_rc = await _run_git("rebase", f"origin/{branch_name}", cwd=workspace)
+    if rebase_rc != 0:
+        # Histories we can't auto-merge — abort to leave the tree clean and
+        # surface a clear error rather than a half-finished rebase.
+        await _run_git("rebase", "--abort", cwd=workspace)
+        raise RuntimeError(
+            f"push to origin/{branch_name} rejected and rebase onto it "
+            "conflicted; manual integration required"
+        )
     await _run_git("push", "-u", "origin", branch_name, cwd=workspace, check=True)
 
 
