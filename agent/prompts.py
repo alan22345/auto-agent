@@ -124,6 +124,33 @@ project's domain language.
 Do NOT write any code. Plan only. Output the plan as text.
 """
 
+# Scope fence — prepended to every coding prompt. The coder runs as a full
+# autonomous `claude --print` agent; on a repo that carries roadmap/plan/spec
+# docs it will happily implement those instead of the one task it was given
+# (observed: a "update the visual elements" task that grew into siting bounds,
+# run persistence, and economic-model tuning lifted from docs/superpowers/plans/).
+# This block leads the prompt so the narrow task wins over ambient repo context.
+_SCOPE_FENCE = """\
+## SCOPE — read first, overrides everything below
+
+Do EXACTLY what the Task says — nothing more. This is the most important rule here.
+
+- Implement ONLY the change described in the Task. Do not add features, options, \
+endpoints, or "while I'm here" improvements the Task did not ask for.
+- IGNORE roadmaps, plans, specs, TODOs, and design docs in the repo (e.g. anything \
+under `docs/`, `plans/`, `specs/`, `ROADMAP*`, `TODO*`). They are NOT this task — \
+do not implement them, even if they look unfinished.
+- Touch the SMALLEST set of files that satisfies the Task. If the Task is about the \
+UI / visual / styling, stay inside the front-end layer — do NOT modify backend, \
+server, engine, model, policy, or data code unless the Task explicitly requires it.
+- Do not refactor, rename, restructure, or reformat code the Task didn't name.
+- A small focused diff that does exactly what's asked is correct. A large diff that \
+also does adjacent work is WRONG and will be rejected by verify/review.
+- If the Task's scope is ambiguous, pick the NARROWEST reasonable interpretation.
+
+"""
+
+
 # Coding prompt when a plan exists — implement immediately
 CODING_PROMPT_WITH_PLAN = """\
 ## Instructions
@@ -740,7 +767,7 @@ def build_coding_prompt(
             clarification_instructions=CLARIFICATION_INSTRUCTIONS,
             critical_rules=critical_rules,
         )
-    return result + _repo_context(repo_summary)
+    return _SCOPE_FENCE + result + _repo_context(repo_summary)
 
 
 def build_review_prompt(base_branch: str = "main") -> str:
