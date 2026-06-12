@@ -11,10 +11,9 @@ import json
 from typing import Any
 
 import structlog
-from team_memory.graph import GraphEngine
 
 from agent.tools.base import Tool, ToolContext, ToolResult
-from shared.database import team_memory_session
+from shared import memory_client
 
 logger = structlog.get_logger()
 
@@ -67,24 +66,21 @@ class RememberMemoryTool(Tool):
                     is_error=True,
                 )
 
-        if team_memory_session is None:
+        if not memory_client.configured():
             return ToolResult(
                 output="Error: team-memory is not configured on this server.",
                 is_error=True,
             )
 
         try:
-            async with team_memory_session() as session:
-                engine = GraphEngine(session)
-                result = await engine.remember(
-                    content=arguments["fact"],
-                    entity=arguments["entity_name"],
-                    entity_type=arguments["entity_type"],
-                    kind=arguments["kind"],
-                    source="search-tab",
-                    author=self._author,
-                )
-                await session.commit()
+            result = await memory_client.remember(
+                content=arguments["fact"],
+                entity=arguments["entity_name"],
+                entity_type=arguments["entity_type"],
+                kind=arguments["kind"],
+                source="search-tab",
+                author=self._author,
+            )
         except Exception as e:
             logger.warning("remember_memory_failed", error=str(e))
             return ToolResult(output=f"Error remembering fact: {e}", is_error=True)

@@ -15,40 +15,28 @@ from shared.memory_io import (
 from shared.types import ProposedFact
 
 
-class FakeEngine:
-    def __init__(self, recall_result=None, remember_result=None, correct_result=None):
-        self.recall = AsyncMock(return_value=recall_result or {"matches": [], "ambiguous": False})
-        self.remember = AsyncMock(return_value=remember_result or {"fact_id": "f-new"})
-        self.correct = AsyncMock(return_value=correct_result or {"fact_id": "f-upd"})
-
-
-class _Ctx:
-    async def __aenter__(self):
-        return "session"
-
-    async def __aexit__(self, *a):
-        return False
-
-
 @pytest.fixture
 def patched_session():
-    fake = FakeEngine(
-        recall_result={
-            "matches": [
-                {
-                    "entity": {"name": "auto-agent", "type": "project"},
-                    "facts": [{"id": "f1", "content": "existing", "kind": "fact"}],
-                    "score": 0.9,
-                }
-            ],
-            "ambiguous": False,
-        }
-    )
+    """Patch the memory_client seam that recall/remember/correct route through."""
+    recall = AsyncMock(return_value={
+        "matches": [
+            {
+                "entity": {"name": "auto-agent", "type": "project"},
+                "facts": [{"id": "f1", "content": "existing", "kind": "fact"}],
+                "score": 0.9,
+            }
+        ],
+        "ambiguous": False,
+    })
+    remember = AsyncMock(return_value={"fact_id": "f-new"})
+    correct = AsyncMock(return_value={"fact_id": "f-upd"})
     with (
-        patch("shared.memory_io.team_memory_session", return_value=_Ctx()),
-        patch("shared.memory_io.GraphEngine", return_value=fake),
+        patch("shared.memory_client.configured", return_value=True),
+        patch("shared.memory_client.recall", recall),
+        patch("shared.memory_client.remember", remember),
+        patch("shared.memory_client.correct", correct),
     ):
-        yield fake
+        yield SimpleNamespace(recall=recall, remember=remember, correct=correct)
 
 
 async def test_recall_entity_returns_match(patched_session):
@@ -59,10 +47,9 @@ async def test_recall_entity_returns_match(patched_session):
 
 
 async def test_recall_entity_no_match():
-    fake = FakeEngine()
     with (
-        patch("shared.memory_io.team_memory_session", return_value=_Ctx()),
-        patch("shared.memory_io.GraphEngine", return_value=fake),
+        patch("shared.memory_client.configured", return_value=True),
+        patch("shared.memory_client.recall", AsyncMock(return_value={"matches": [], "ambiguous": False})),
     ):
         result = await recall_entity("missing-thing")
     assert result is None
@@ -104,44 +91,22 @@ async def test_search_entities_empty_query_returns_empty():
 
 
 async def test_search_entities_reshapes_matches():
-    fake = FakeEngine(
-        recall_result={
-            "matches": [
-                {
-                    "entity": {
-                        "id": "e-1",
-                        "name": "auto-agent",
-                        "type": "project",
-                        "tags": ["agent", "ws"],
-                    },
-                    "facts": [
-                        {
-                            "id": "f1",
-                            "content": "x",
-                            "kind": "fact",
-                            "valid_from": "2026-04-01T00:00:00+00:00",
-                            "valid_until": None,
-                        },
-                        {
-                            "id": "f2",
-                            "content": "y",
-                            "kind": "fact",
-                            "valid_from": "2026-04-02T00:00:00+00:00",
-                            "valid_until": None,
-                        },
-                    ],
-                },
-                {
-                    "entity": {"id": "e-2", "name": "atlas", "type": "system", "tags": []},
-                    "facts": [],
-                },
-            ],
-            "ambiguous": False,
-        }
-    )
+    recall = AsyncMock(return_value={
+        "matches": [
+            {
+                "entity": {"id": "e-1", "name": "auto-agent", "type": "project", "tags": ["agent", "ws"]},
+                "facts": [
+                    {"id": "f1", "content": "x", "kind": "fact", "valid_from": "2026-04-01T00:00:00+00:00", "valid_until": None},
+                    {"id": "f2", "content": "y", "kind": "fact", "valid_from": "2026-04-02T00:00:00+00:00", "valid_until": None},
+                ],
+            },
+            {"entity": {"id": "e-2", "name": "atlas", "type": "system", "tags": []}, "facts": []},
+        ],
+        "ambiguous": False,
+    })
     with (
-        patch("shared.memory_io.team_memory_session", return_value=_Ctx()),
-        patch("shared.memory_io.GraphEngine", return_value=fake),
+        patch("shared.memory_client.configured", return_value=True),
+        patch("shared.memory_client.recall", recall),
     ):
         out = await search_entities("auto", limit=5)
     assert len(out) == 2
@@ -150,15 +115,14 @@ async def test_search_entities_reshapes_matches():
     assert out[0].latest_fact_at == "2026-04-02T00:00:00+00:00"
     assert out[0].tags == ["agent", "ws"]
     assert out[1].fact_count == 0
-    fake.recall.assert_awaited_once()
-    assert fake.recall.await_args.kwargs["max_results"] == 5
+    recall.assert_awaited_once()
+    assert recall.await_args.kwargs["max_results"] == 5
 
 
 async def test_search_entities_no_matches():
-    fake = FakeEngine()  # default empty matches
     with (
-        patch("shared.memory_io.team_memory_session", return_value=_Ctx()),
-        patch("shared.memory_io.GraphEngine", return_value=fake),
+        patch("shared.memory_client.configured", return_value=True),
+        patch("shared.memory_client.recall", AsyncMock(return_value={"matches": [], "ambiguous": False})),
     ):
         out = await search_entities("nope")
     assert out == []

@@ -103,3 +103,32 @@ def test_code_graph_added_when_repo_id_given():
 def test_code_graph_absent_without_repo_id():
     specs = build_mcp_servers(_settings(database_url="postgresql+asyncpg://u:p@host/app"))
     assert "code-graph" not in {s.name for s in specs}
+
+
+def test_team_memory_http_when_url_and_token_set():
+    specs = build_mcp_servers(
+        _settings(
+            team_memory_mcp_url="https://team-memory-mcp.fly.dev/mcp",
+            team_memory_mcp_token="tm-tok",
+        )
+    )
+    tm = {s.name: s for s in specs}["team-memory"]
+    assert tm.transport == "http"
+    assert tm.url == "https://team-memory-mcp.fly.dev/mcp"
+    assert tm.headers["Authorization"] == "Bearer tm-tok"
+    assert tm.targets == frozenset({"cli"})
+    assert tm.to_cli_entry() == {
+        "type": "http",
+        "url": "https://team-memory-mcp.fly.dev/mcp",
+        "headers": {"Authorization": "Bearer tm-tok"},
+    }
+
+
+def test_team_memory_falls_back_to_stdio_without_token():
+    # url present but no token -> legacy stdio path (db-url backed)
+    specs = build_mcp_servers(
+        _settings(team_memory_mcp_url="https://team-memory-mcp.fly.dev/mcp")
+    )
+    tm = {s.name: s for s in specs}["team-memory"]
+    assert tm.transport == "stdio"
+    assert "serve" in tm.args
