@@ -11,10 +11,17 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import func, select
-from team_memory.graph import GraphEngine
 from team_memory.models import Entity, Fact
 
+from shared import memory_client
 from shared.database import team_memory_session
+
+# NOTE: recall/remember/correct below route through the team-memory MCP when it
+# is configured (shared/memory_client). The remaining functions
+# (list_recent_entities, get_entity_with_facts, delete_fact, _resolve_entity)
+# still use direct DB access via team_memory_session — the team-memory MCP has
+# no list/detail/delete primitive, so the web Memory Browser needs DB reach or
+# new MCP tools before it can run without it.
 
 if TYPE_CHECKING:
     from shared.types import (
@@ -32,12 +39,10 @@ async def recall_entity(name: str) -> dict[str, Any] | None:
 
     Shape: {"entity": {...}, "facts": [...], "score": float}
     """
-    if team_memory_session is None:
+    if not memory_client.configured():
         return None
     try:
-        async with team_memory_session() as session:
-            engine = GraphEngine(session)
-            result = await engine.recall(query=name)
+        result = await memory_client.recall(query=name)
     except Exception as e:
         logger.warning("memory_recall_failed", name=name, error=str(e))
         return None
@@ -49,16 +54,14 @@ async def recall_entity(name: str) -> dict[str, Any] | None:
 
 async def remember_row(row: ProposedFact, *, author: str | None = None) -> str:
     """Persist a new fact. Returns the new fact_id."""
-    async with team_memory_session() as session:
-        engine = GraphEngine(session)
-        result = await engine.remember(
-            content=row.content,
-            entity=row.entity,
-            entity_type=row.entity_type,
-            kind=row.kind,
-            source="memory-tab",
-            author=author,
-        )
+    result = await memory_client.remember(
+        content=row.content,
+        entity=row.entity,
+        entity_type=row.entity_type,
+        kind=row.kind,
+        source="memory-tab",
+        author=author,
+    )
     return result.get("fact_id", "")
 
 
@@ -74,15 +77,13 @@ async def correct_fact(
     `reason` is the user-supplied explanation; falls back to a generic marker
     when omitted so existing call sites (memory_save replace flow) keep working.
     """
-    async with team_memory_session() as session:
-        engine = GraphEngine(session)
-        result = await engine.correct(
-            fact_id=fact_id,
-            new_content=new_content,
-            reason=reason or "updated via memory tab",
-            source="memory-tab",
-            author=author,
-        )
+    result = await memory_client.correct(
+        fact_id=fact_id,
+        new_content=new_content,
+        reason=reason or "updated via memory tab",
+        source="memory-tab",
+        author=author,
+    )
     return result.get("fact_id", "")
 
 
@@ -115,12 +116,10 @@ async def search_entities(query: str, limit: int = 20) -> list[MemoryEntitySumma
     q = (query or "").strip()
     if not q:
         return []
-    if team_memory_session is None:
+    if not memory_client.configured():
         return []
     try:
-        async with team_memory_session() as session:
-            engine = GraphEngine(session)
-            result = await engine.recall(query=q, max_results=limit)
+        result = await memory_client.recall(query=q, max_results=limit)
     except Exception as e:
         logger.warning("memory_search_failed", query=q, error=str(e))
         return []

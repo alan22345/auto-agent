@@ -7,10 +7,9 @@ import json
 from typing import Any, ClassVar
 
 import structlog
-from team_memory.graph import GraphEngine
 
 from agent.tools.base import Tool, ToolContext, ToolResult
-from shared.database import team_memory_session
+from shared import memory_client
 
 logger = structlog.get_logger()
 
@@ -39,16 +38,14 @@ class RecallMemoryTool(Tool):
         if not query:
             return ToolResult(output="Error: 'query' is required.", is_error=True)
 
-        if team_memory_session is None:
+        if not memory_client.configured():
             return ToolResult(
                 output="Error: team-memory is not configured on this server.",
                 is_error=True,
             )
 
         try:
-            async with team_memory_session() as session:
-                engine = GraphEngine(session)
-                result = await engine.recall(query=query)
+            result = await memory_client.recall(query=query)
         except Exception as e:
             logger.warning("recall_memory_failed", error=str(e), query=query)
             return ToolResult(output=f"Error recalling memory: {e}", is_error=True)
