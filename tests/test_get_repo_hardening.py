@@ -13,6 +13,7 @@ fail the test).
 """
 from __future__ import annotations
 
+import httpx
 import pytest
 from sqlalchemy import delete, select
 
@@ -25,9 +26,9 @@ def _no_http(monkeypatch) -> None:
     """Any HTTP client use is a regression back to the 401-prone loopback."""
 
     def _boom(*_a, **_k):
-        raise AssertionError("get_repo must not make an HTTP call")
+        raise AssertionError("_orchestrator_api must not make an HTTP call")
 
-    monkeypatch.setattr(api.httpx, "AsyncClient", _boom)
+    monkeypatch.setattr(httpx, "AsyncClient", _boom)
 
 
 async def _org_id() -> int:
@@ -138,3 +139,47 @@ async def test_mark_repo_harness_onboarded_writes_db(monkeypatch):
         repo = (await s.execute(select(Repo).where(Repo.id == repo_id))).scalar_one()
         assert repo.harness_onboarded is True
         assert repo.harness_pr_url.endswith("/pull/1")
+
+
+async def _seed_task(**cols) -> int:
+    repo_id, org_id = await _seed_repo(f"task-repo-{cols.pop('slug', 'x')}")
+    async with async_session() as s:
+        # DONE (terminal, non-active) so the committed row doesn't count toward
+        # the global/per-repo active cap and pollute queue tests on the shared
+        # autoagent_test DB.
+        task = Task(
+            title="t", description="", source="slack", status=TaskStatus.DONE,
+            repo_id=repo_id, organization_id=org_id, **cols,
+        )
+        s.add(task)
+        await s.commit()
+        return task.id
+
+
+@pytest.mark.asyncio
+async def test_set_task_branch_writes_db(monkeypatch):
+    """Branch name persists in-process. The old PATCH /tasks/{id}/branch loopback
+    was org-gated → 401, and the response status was never checked, so the
+    branch was created locally but never recorded — verify then aborted the push
+    ("task.branch_name missing — cannot push") and the task failed after a clean,
+    intent-passing implementation (task #327)."""
+    _no_http(monkeypatch)
+    task_id = await _seed_task(slug="branch")
+    await api.set_task_branch(task_id, "auto-agent/data-gen-ui-327")
+    async with async_session() as s:
+        task = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        assert task.branch_name == "auto-agent/data-gen-ui-327"
+
+
+@pytest.mark.asyncio
+async def test_set_task_affected_routes_writes_db(monkeypatch):
+    """Affected routes persist in-process; the old POST /tasks/{id}/affected_routes
+    loopback was org-gated → 401, silently dropping the planner's routes so
+    verify/UI route exercising had nothing to check."""
+    _no_http(monkeypatch)
+    task_id = await _seed_task(slug="routes")
+    routes = [{"method": "GET", "path": "/data-gen"}]
+    await api.set_task_affected_routes(task_id, routes)
+    async with async_session() as s:
+        task = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        assert task.affected_routes == routes

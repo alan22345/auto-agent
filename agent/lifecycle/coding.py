@@ -25,6 +25,7 @@ from agent.lifecycle._orchestrator_api import (
     get_freeform_config,
     get_repo,
     get_task,
+    set_task_branch,
     transition_task,
 )
 from agent.lifecycle.factory import create_agent, home_dir_for_task
@@ -259,11 +260,7 @@ async def handle_coding(task_id: int, retry_reason: str | None = None) -> None:
         branch_name = task.branch_name
     else:
         branch_name = await _branch_name(task_id, task.title)
-        async with httpx.AsyncClient() as client:
-            await client.patch(
-                f"{ORCHESTRATOR_URL}/tasks/{task_id}/branch",
-                json={"branch_name": branch_name},
-            )
+        await set_task_branch(task_id, branch_name)
 
     await create_branch(workspace, branch_name)
 

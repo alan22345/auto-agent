@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import structlog
 from sqlalchemy import select
 
@@ -136,14 +135,44 @@ async def get_freeform_config(repo_name: str) -> FreeformConfigData | None:
         return _freeform_config_to_response(cfg, repo.name)
 
 
+async def set_task_branch(task_id: int, branch_name: str) -> None:
+    """Persist a task's branch name in-process (DB write).
+
+    Same auth trap as ``get_repo``: the PATCH /tasks/{id}/branch loopback is
+    org-scoped, so the unauthenticated agent call 401'd — and the caller never
+    checked the response status, so the write was silently dropped. The branch
+    was created locally but never recorded, so the verify push aborted with
+    "task.branch_name missing — cannot push" and the task failed *after* a
+    clean, intent-passing implementation (task #327). Write in-process instead.
+    """
+    async with async_session() as s:
+        task = (
+            await s.execute(select(Task).where(Task.id == task_id))
+        ).scalar_one_or_none()
+        if task is None:
+            log.error("set_task_branch: task not found", task_id=task_id)
+            return
+        task.branch_name = branch_name
+        await s.commit()
+
+
 async def set_task_affected_routes(task_id: int, routes: list[dict]) -> None:
-    """Persist the planner-declared affected routes for a task."""
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{ORCHESTRATOR_URL}/tasks/{task_id}/affected_routes",
-            json={"routes": routes},
-            timeout=10.0,
-        )
+    """Persist the planner-declared affected routes for a task (in-process).
+
+    Same auth trap as ``get_repo``: the POST /tasks/{id}/affected_routes
+    loopback is org-scoped, so the unauthenticated agent call 401'd and the
+    routes silently never persisted — verify/UI route exercising then had
+    nothing to check. Write in-process instead.
+    """
+    async with async_session() as s:
+        task = (
+            await s.execute(select(Task).where(Task.id == task_id))
+        ).scalar_one_or_none()
+        if task is None:
+            log.error("set_task_affected_routes: task not found", task_id=task_id)
+            return
+        task.affected_routes = routes
+        await s.commit()
 
 
 # Wire-status → event factory. Covers both terminal states (failed,

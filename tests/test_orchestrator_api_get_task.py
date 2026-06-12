@@ -13,6 +13,7 @@ The fix reads in-process via ``shared.database`` (the same pattern
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from shared.types import TaskData
@@ -58,7 +59,7 @@ async def test_get_task_reads_db_and_never_uses_http(monkeypatch):
     def _no_http(*a, **k):
         raise AssertionError("get_task must not use the HTTP loopback")
 
-    monkeypatch.setattr(api.httpx, "AsyncClient", _no_http)
+    monkeypatch.setattr(httpx, "AsyncClient", _no_http)
 
     got = await api.get_task(41)
     assert got is expected
@@ -72,6 +73,6 @@ async def test_get_task_returns_none_when_missing(monkeypatch):
     def _no_http(*a, **k):
         raise AssertionError("get_task must not use the HTTP loopback")
 
-    monkeypatch.setattr(api.httpx, "AsyncClient", _no_http)
+    monkeypatch.setattr(httpx, "AsyncClient", _no_http)
 
     assert await api.get_task(999) is None
