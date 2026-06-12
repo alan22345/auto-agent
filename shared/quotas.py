@@ -25,7 +25,9 @@ class QuotaExceeded(Exception):  # noqa: N818
 
 
 # Mirrors orchestrator.queue.ACTIVE_STATUSES but kept local to avoid a
-# cross-layer import. Update both together.
+# cross-layer import. Update both together. (BLOCKED / BLOCKED_ON_AUTH are
+# parked awaiting a human, so they are deliberately absent — see the deadlock
+# note in orchestrator/queue.py.)
 _ACTIVE_STATUSES = {
     TaskStatus.PLANNING,
     TaskStatus.AWAITING_APPROVAL,
@@ -35,7 +37,6 @@ _ACTIVE_STATUSES = {
     TaskStatus.AWAITING_CI,
     TaskStatus.AWAITING_REVIEW,
     TaskStatus.ITERATING,  # ADR-017: PR open + actively re-iterating on feedback
-    TaskStatus.BLOCKED,
 }
 
 

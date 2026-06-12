@@ -5,7 +5,12 @@ Concurrency rules:
   - At most 1 active task per repo_id (prevents working-tree conflicts).
   - Tasks with repo_id IS NULL (e.g. SIMPLE_NO_CODE research) bypass the
     per-repo cap; only the global cap applies.
-  - BLOCKED_ON_AUTH is paused, not active — does not occupy a slot.
+  - BLOCKED / BLOCKED_ON_AUTH are parked awaiting a human, not active — they
+    do not occupy a slot. Counting BLOCKED as active deadlocked retries: a
+    task that fails (e.g. intent check) parks in BLOCKED on its repo, and its
+    QUEUED re-trigger on the same repo could then never dispatch (the blocked
+    task held the repo's only slot forever). See
+    tests/test_queue_blocked_repo_deadlock.py.
 
 FIFO across all users. Priority (lower = first) breaks ties; default 100.
 """
@@ -33,7 +38,6 @@ ACTIVE_STATUSES = {
     TaskStatus.AWAITING_CI,
     TaskStatus.AWAITING_REVIEW,
     TaskStatus.ITERATING,  # ADR-017: PR open + actively re-iterating on feedback
-    TaskStatus.BLOCKED,
 }
 
 
