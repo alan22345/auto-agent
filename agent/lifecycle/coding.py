@@ -828,6 +828,16 @@ async def _finish_coding(
             f"Self-review did not fully pass after {MAX_REVIEW_RETRIES} attempts for task #{task_id}"
         )
 
+    # Push the coder's branch to origin BEFORE verify. WORKSPACES_DIR is
+    # ephemeral and verify re-prepares the workspace (clone_repo resets it to
+    # base), so an unpushed local commit is lost — verify then saw an empty
+    # diff and the PR push aborted with "no commits relative to base" even
+    # though the coder did the work (task #327). Pushing here makes the work
+    # durable on origin and lets verify check the branch out and test the real
+    # changes. The push in _open_pr_and_advance is idempotent on top of this.
+    await commit_pending_changes(workspace, task_id, task.title)
+    await push_branch(workspace, branch_name)
+
     # Hand off to verify; verify.pass_cycle calls _open_pr_and_advance.
     from agent.lifecycle import verify
 

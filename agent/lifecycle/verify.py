@@ -313,8 +313,16 @@ async def _prepare_workspace(task) -> tuple[str, str]:
         cfg = await get_freeform_config(task.repo_name)
         if cfg:
             base_branch = cfg.dev_branch
+    # Verify must test the coder's branch, not base. The branch is pushed at
+    # the end of coding, so check it out here (clone_repo fetches + resets to
+    # it); a base-reset workspace gave an empty diff and a "no commits relative
+    # to base" push failure even when the coder did the work (task #327).
+    # ``base_branch`` is still returned for the diff/boot comparison; falling
+    # back to it keeps edge callers (no branch yet) working.
+    checkout_branch = getattr(task, "branch_name", None) or base_branch
     workspace = await clone_repo(
-        repo.url, task.id, base_branch,
+        repo.url, task.id, checkout_branch,
+        fallback_branch=base_branch,
         user_id=task.created_by_user_id,
         organization_id=task.organization_id,
         repo_id=task.repo_id,
