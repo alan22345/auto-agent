@@ -163,7 +163,7 @@ async def _run_boot_and_intent(
                 await publish(verify_skipped_no_runner(task_id))
 
         # Intent check
-        verdict = await run_intent_check(task, workspace, server)
+        verdict = await run_intent_check(task, workspace, server, base_branch=base_branch)
         await _update_verify_attempt(
             attempt.id,
             intent_check="pass" if verdict.ok else "fail",
@@ -182,14 +182,37 @@ async def _run_boot_and_intent(
                 log.exception(f"task #{task_id}: dev server cleanup raised")
 
 
-async def run_intent_check(task, workspace: str, server) -> IntentVerdict:
-    """Single readonly-agent invocation; agent emits OK or NOT-OK on its first line."""
+async def run_intent_check(
+    task, workspace: str, server, base_branch: str = "main",
+) -> IntentVerdict:
+    """Single readonly-agent invocation; agent emits OK or NOT-OK on its first line.
+
+    Diffs the WHOLE task change (``base_branch...HEAD``), not just the last commit.
+    A ``claude --print`` coder typically makes several commits; the old
+    ``HEAD~1`` base showed only the final one, so the intent judge saw a partial,
+    misleading slice (e.g. a small trailing backend commit) and missed the bulk
+    of the work in earlier commits — wrongly returning ``intent_not_addressed``.
+    Mirrors ``pr_reviewer._load_pr_diff``'s ``{base}...HEAD`` range.
+    """
     diff_result = await sh.run(
-        ["git", "diff", "--stat", "HEAD~1"],
+        ["git", "diff", "--stat", f"{base_branch}...HEAD"],
         cwd=workspace,
         timeout=30,
     )
     diff_summary = (diff_result.stdout or "").strip() or "(no diff stat available)"
+
+    # Diagnostic: log the full file list the judge will see, so a spurious
+    # intent_not_addressed can be traced to scope drift vs a bad diff base.
+    names = await sh.run(
+        ["git", "diff", "--name-only", f"{base_branch}...HEAD"], cwd=workspace, timeout=30,
+    )
+    log.info(
+        "intent_check_diff",
+        task_id=task.id,
+        base_branch=base_branch,
+        changed_files=(names.stdout or "").strip()[:2000],
+        stat=diff_summary[:1000],
+    )
 
     server_url = f"http://localhost:{server.port}" if server is not None else None
     prompt = build_verify_intent_prompt(
