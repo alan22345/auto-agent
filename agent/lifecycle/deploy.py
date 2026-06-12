@@ -18,7 +18,7 @@ import httpx
 from agent import sh
 from agent.lifecycle._naming import _branch_name
 from agent.lifecycle._orchestrator_api import get_task
-from agent.workspace import WORKSPACES_DIR
+from agent.workspace import _workspace_path
 from shared.events import (
     Event,
     publish,
@@ -59,7 +59,7 @@ async def handle_deploy_preview(task_id: int) -> None:
         if deployed:
             return
 
-    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+    workspace = _workspace_path(task_id=task_id, organization_id=task.organization_id)
     if not os.path.exists(workspace):
         log.info(f"Task #{task_id}: no workspace for deploy preview, skipping")
         return

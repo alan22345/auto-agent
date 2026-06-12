@@ -23,7 +23,6 @@ needed).
 
 from __future__ import annotations
 
-import os
 import re as _re
 
 import httpx
@@ -38,7 +37,7 @@ from agent.lifecycle._orchestrator_api import (
     transition_task,
 )
 from agent.lifecycle.factory import create_agent, home_dir_for_task
-from agent.workspace import WORKSPACES_DIR
+from agent.workspace import _workspace_path, clone_repo
 from shared.events import (
     Event,
     human_message,
@@ -101,7 +100,7 @@ async def handle_plan_conversation(task_id: int, message: str) -> None:
         return
 
     session_id = _session_id(task_id, task.created_at)
-    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+    workspace = _workspace_path(task_id=task_id, organization_id=task.organization_id)
 
     log.info(f"Plan conversation for task #{task_id}: {message[:100]}...")
 
@@ -255,7 +254,20 @@ async def handle_clarification_response(task_id: int, answer: str) -> None:
         return
 
     session_id = _session_id(task_id, task.created_at)
-    workspace = os.path.join(WORKSPACES_DIR, f"task-{task_id}")
+    # WORKSPACES_DIR is ephemeral container storage, so a restart (e.g. a
+    # deploy) wipes the coding-phase checkout before the user answers. Don't
+    # assume the workspace is still on disk — re-materialise it (clone_repo
+    # reuses an existing checkout or clones fresh). Assuming it existed ran the
+    # claude subprocess with a missing cwd and crashed every resume (task #327).
+    workspace = await clone_repo(
+        repo.url,
+        task_id,
+        task.branch_name or repo.default_branch or "main",
+        fallback_branch=repo.default_branch,
+        user_id=task.created_by_user_id,
+        organization_id=task.organization_id,
+        repo_id=repo.id,
+    )
 
     log.info(f"Resuming task #{task_id} with clarification answer (session={session_id})")
 
