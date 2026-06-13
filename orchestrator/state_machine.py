@@ -171,6 +171,9 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.ARCHITECT_GAP_FIX: {
         TaskStatus.TRIO_EXECUTING,  # architect dispatched new items
         TaskStatus.BLOCKED,  # architect escalated or out of rounds
+        # Retry path: a malformed/empty gap-fix decision (action=None) loops
+        # back to final review for another bounded round instead of blocking.
+        TaskStatus.FINAL_REVIEW,
     },
     # ADR-018 — SCAFFOLD parent state machine. Intent grill → root ADR
     # gate → per-domain ADR gate → dispatch per-domain trios → final
