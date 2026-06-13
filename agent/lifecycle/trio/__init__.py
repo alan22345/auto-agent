@@ -1372,13 +1372,32 @@ async def _drive_final_review_and_pr(
             previous_attempt_summary = f"round {round_idx}: dispatched {len(new_items)} new items"
             await run_trio_parent(parent)
             return
-        # architect escalated, blocked, or unknown action
-        await _block_parent(
-            parent.id,
-            f"trio: gap-fix architect emitted action={action!r} — "
-            f"{decision.get('reason', '')[:200]}",
+        if action == "escalate":
+            # Deliberate architect decision (e.g. gap is out of design scope) —
+            # terminal. The orchestrator surfaces it to the operator separately.
+            await _block_parent(
+                parent.id,
+                f"trio: gap-fix architect escalated — {decision.get('reason', '')[:200]}",
+            )
+            return
+        # action is None / unknown / "blocked" — the architect did not emit a
+        # valid decision (a transient contract violation, not a deliberate
+        # choice). Retry the round rather than terminal-blocking on the first
+        # bad turn; the round budget bounds it and the loop re-runs final review
+        # + gap-fix. Incident: scaffold #332 (2026-06-13) blocked on round 1
+        # from a single action=None decision, jamming the serial scaffold chain.
+        log.warning(
+            "trio.gap_fix.malformed_decision_retry",
+            parent_id=parent.id,
+            round_idx=round_idx,
+            action=action,
         )
-        return
+        previous_gaps = list(review.gaps)
+        previous_attempt_summary = (
+            f"round {round_idx}: gap-fix returned no actionable decision "
+            f"(action={action!r}); retrying"
+        )
+        # Fall through — the for-loop advances to the next round.
 
 
 def _assign_missing_ids(
