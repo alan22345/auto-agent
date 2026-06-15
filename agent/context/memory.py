@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import structlog
-from team_memory.graph import GraphEngine
 
-from shared.database import team_memory_session
+from shared import memory_client
 
 logger = structlog.get_logger()
 
@@ -33,7 +32,7 @@ async def remember_priority_suggestion(
     """
     if priority is None or priority > _HIGH_PRIORITY_THRESHOLD:
         return
-    if team_memory_session is None:
+    if not memory_client.configured():
         return
 
     fact = (
@@ -41,17 +40,14 @@ async def remember_priority_suggestion(
         f"{(rationale or '').strip()[:600]}"
     )
     try:
-        async with team_memory_session() as session:
-            engine = GraphEngine(session)
-            await engine.remember(
-                content=fact,
-                entity=repo_name,
-                entity_type="project",
-                kind="note",
-                source=source,
-                author=None,
-            )
-            await session.commit()
+        await memory_client.remember(
+            content=fact,
+            entity=repo_name,
+            entity_type="project",
+            kind="note",
+            source=source,
+            author=None,
+        )
     except Exception as e:
         logger.warning(
             "remember_priority_suggestion_failed",
@@ -69,13 +65,11 @@ async def query_relevant_memory(task_description: str) -> str:
     if not task_description:
         return ""
 
-    if team_memory_session is None:
+    if not memory_client.configured():
         return ""
 
     try:
-        async with team_memory_session() as session:
-            engine = GraphEngine(session)
-            result = await engine.recall(query=task_description)
+        result = await memory_client.recall(query=task_description)
 
         if result.get("ambiguous") or not result.get("matches"):
             return ""

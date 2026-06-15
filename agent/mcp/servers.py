@@ -97,10 +97,24 @@ def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpS
     elif url and not token:
         logger.info("mcp_server_skipped", server="ergodic-ui", reason="no token")
 
-    # team-memory — stdio MCP. Native mode keeps its faster in-process tools, so
-    # this targets the CLI path only (which can't see in-process Python tools).
+    # team-memory — hosted HTTP MCP (Fly) when a url+token are configured, else
+    # the legacy stdio server backed by a direct DB URL. Targets the CLI path
+    # only; the native path uses the in-process recall/remember tools, which
+    # themselves route through the hosted MCP via shared.memory_client.
+    tm_url = (getattr(settings, "team_memory_mcp_url", "") or "").strip()
+    tm_token = (getattr(settings, "team_memory_mcp_token", "") or "").strip()
     db_url = (getattr(settings, "team_memory_database_url", "") or "").strip()
-    if db_url:
+    if tm_url and tm_token:
+        specs.append(
+            McpServerSpec(
+                name="team-memory",
+                transport="http",
+                targets=frozenset({"cli"}),
+                url=tm_url,
+                headers={"Authorization": f"Bearer {tm_token}"},
+            )
+        )
+    elif db_url:
         command, args = _resolve_team_memory_command()
         specs.append(
             McpServerSpec(
@@ -113,7 +127,7 @@ def build_mcp_servers(settings: Any, *, repo_id: int | None = None) -> list[McpS
             )
         )
     else:
-        logger.info("mcp_server_skipped", server="team-memory", reason="no db url")
+        logger.info("mcp_server_skipped", server="team-memory", reason="no url/token or db url")
 
     # code-graph — stdio MCP re-exposing query_repo_graph to the CLI path,
     # which can't see in-process Python tools (ADR-023). Native mode keeps

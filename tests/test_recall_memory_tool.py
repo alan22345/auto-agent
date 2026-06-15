@@ -1,5 +1,5 @@
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -21,12 +21,6 @@ _RECALL_RESULT = {
 }
 
 
-class _FakeSessionCtx:
-    def __init__(self, session): self._session = session
-    async def __aenter__(self): return self._session
-    async def __aexit__(self, *a): return None
-
-
 @pytest.mark.asyncio
 async def test_recall_memory_returns_matches_and_emits_events():
     received: list[dict] = []
@@ -37,12 +31,8 @@ async def test_recall_memory_returns_matches_and_emits_events():
     ctx = ToolContext(workspace="/tmp", event_sink=sink)
     tool = RecallMemoryTool()
 
-    fake_session = MagicMock()
-    fake_engine = MagicMock()
-    fake_engine.recall = AsyncMock(return_value=_RECALL_RESULT)
-
-    with patch("agent.tools.recall_memory.team_memory_session", lambda: _FakeSessionCtx(fake_session)), \
-         patch("agent.tools.recall_memory.GraphEngine", return_value=fake_engine):
+    with patch("shared.memory_client.configured", return_value=True), \
+         patch("shared.memory_client.recall", AsyncMock(return_value=_RECALL_RESULT)):
         result = await tool.execute({"query": "auto-agent"}, ctx)
 
     assert not result.is_error
@@ -57,7 +47,7 @@ async def test_recall_memory_returns_matches_and_emits_events():
 async def test_recall_memory_session_unavailable():
     ctx = ToolContext(workspace="/tmp")
     tool = RecallMemoryTool()
-    with patch("agent.tools.recall_memory.team_memory_session", None):
+    with patch("shared.memory_client.configured", return_value=False):
         result = await tool.execute({"query": "x"}, ctx)
     assert result.is_error
     assert "team-memory" in result.output.lower()

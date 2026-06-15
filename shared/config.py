@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     # ergodic-ui design-system MCP (HTTP). Token from env enables it.
     ergodic_ui_mcp_url: str = "https://ergodic-ui-mcp.fly.dev/mcp"
     ergodic_ui_mcp_token: str = ""
+    # team-memory hosted MCP (Fly). When url+token are set, recall/remember/
+    # correct route through this HTTP server (no direct DB needed) and the CLI
+    # path registers it as HTTP. Falls back to the stdio server +
+    # team_memory_database_url when the token is unset.
+    team_memory_mcp_url: str = "https://team-memory-mcp.fly.dev/mcp"
+    team_memory_mcp_token: str = ""
     # Bedrock — explicit credentials for VM deployment (optional).
     # Preferred: AWS Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) — simpler, no IAM setup.
     # Alternative: IAM access keys (aws_access_key_id + aws_secret_access_key).
