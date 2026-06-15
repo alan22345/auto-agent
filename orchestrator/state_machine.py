@@ -219,6 +219,10 @@ TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     },
     TaskStatus.DISPATCHING_DOMAIN_BUILDS: {
         TaskStatus.BUILDING_DOMAINS,
+        # Recovery: a zero-child dispatch (e.g. root ADR missing from the
+        # workspace) has nothing to wait for, so re-enter final verification
+        # instead of deadlocking in BUILDING_DOMAINS. Scaffold #329, 2026-06-14.
+        TaskStatus.AWAITING_FINAL_VERIFICATION,
     },
     TaskStatus.BUILDING_DOMAINS: {
         TaskStatus.AWAITING_FINAL_VERIFICATION,  # all children terminal
