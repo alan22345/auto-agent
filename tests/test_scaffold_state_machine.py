@@ -139,6 +139,9 @@ def test_awaiting_domain_adr_approval_branches() -> None:
 def test_dispatching_domain_builds_to_building_domains() -> None:
     assert TRANSITIONS[TaskStatus.DISPATCHING_DOMAIN_BUILDS] == {
         TaskStatus.BUILDING_DOMAINS,
+        # Zero-child dispatch re-enters final verification instead of
+        # deadlocking in BUILDING_DOMAINS (scaffold #329).
+        TaskStatus.AWAITING_FINAL_VERIFICATION,
     }
 
 

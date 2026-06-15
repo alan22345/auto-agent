@@ -516,7 +516,25 @@ async def run_scaffold_parent(task: Task) -> None:
 
         if status == TaskStatus.DISPATCHING_DOMAIN_BUILDS:
             log.info("scaffold.parent.phase_d_dispatch", task_id=task.id)
-            await dispatch_children.run(task)
+            created = await dispatch_children.run(task)
+            if not created:
+                # No new children were dispatched — either the root ADR is
+                # missing from the workspace (a gitignored artefact lost on a
+                # workspace recreate) or every approved domain child already
+                # exists. Parking in BUILDING_DOMAINS would DEADLOCK: the
+                # on-task-finished fan-in only fires when a child reaches a
+                # terminal state, but no new child exists and any prior
+                # children are already terminal. Re-enter final verification
+                # instead (bounded by MAX_FINAL_VERIFY_ROUNDS, which BLOCKs
+                # with a clear message if gaps persist). Scaffold #329,
+                # 2026-06-14.
+                log.warning("scaffold.parent.phase_d_dispatched_no_children", task_id=task.id)
+                task = await _transition_and_reload(
+                    task.id,
+                    TaskStatus.AWAITING_FINAL_VERIFICATION,
+                    message="No new domain children to dispatch; re-running final verification",
+                )
+                continue
             task = await _transition_and_reload(
                 task.id,
                 TaskStatus.BUILDING_DOMAINS,
