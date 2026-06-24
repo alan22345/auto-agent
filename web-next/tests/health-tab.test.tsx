@@ -1,7 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { HealthTab } from '@/components/code-graph/health-tab';
 import type { RepoGraphBlob } from '@/types/api';
+
+// The auto-heal panel fetches via TanStack Query; stub it so these tests stay
+// focused on the health sections (it has its own coverage).
+vi.mock('@/components/code-graph/health-loop-panel', () => ({
+  HealthLoopPanel: () => null,
+}));
 
 function baseBlob(): RepoGraphBlob {
   return {
@@ -31,7 +37,7 @@ function baseBlob(): RepoGraphBlob {
 
 describe('HealthTab', () => {
   it('renders the scorecard and all six sections', () => {
-    render(<HealthTab blob={baseBlob()} />);
+    render(<HealthTab blob={baseBlob()} repoId={1} />);
     expect(screen.getByTestId('health-scorecard')).toBeInTheDocument();
     expect(screen.getByTestId('cycles-section')).toBeInTheDocument();
     expect(screen.getByTestId('dead-code-section')).toBeInTheDocument();
@@ -44,7 +50,7 @@ describe('HealthTab', () => {
   it('shows a stale banner instead of the scorecard when health is null', () => {
     const blob = baseBlob();
     blob.health = null;
-    render(<HealthTab blob={blob} />);
+    render(<HealthTab blob={blob} repoId={1} />);
     expect(screen.getByTestId('health-stale')).toBeInTheDocument();
     expect(screen.queryByTestId('health-scorecard')).not.toBeInTheDocument();
     expect(screen.getByTestId('cycles-section')).toBeInTheDocument();
@@ -60,7 +66,7 @@ describe('HealthTab', () => {
       nodes: [],
       edges: [],
     };
-    render(<HealthTab blob={blob} />);
+    render(<HealthTab blob={blob} repoId={1} />);
     expect(screen.getByTestId('health-stale')).toBeInTheDocument();
     expect(screen.getByTestId('cycles-section')).toBeInTheDocument();
     expect(screen.getByTestId('file-health-section')).toBeInTheDocument();

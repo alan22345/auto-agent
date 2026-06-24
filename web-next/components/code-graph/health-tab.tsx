@@ -6,8 +6,9 @@ import { DeadCodeSection } from './dead-code-section';
 import { ClonesSection } from './clones-section';
 import { HotspotsSection } from './hotspots-section';
 import { FileHealthSection } from './file-health-section';
+import { HealthLoopPanel } from './health-loop-panel';
 
-export function HealthTab({ blob }: { blob: RepoGraphBlob }) {
+export function HealthTab({ blob, repoId }: { blob: RepoGraphBlob; repoId: number }) {
   // The quality arrays are optional on the wire — blobs produced before
   // the quality layer omit them entirely. Coalesce so the sections (and
   // the poor-file derivation) get a real array either way.
@@ -19,6 +20,7 @@ export function HealthTab({ blob }: { blob: RepoGraphBlob }) {
   const poorFileCount = fileHealth.filter((f) => f.band === 'poor').length;
   return (
     <div data-testid="health-tab" className="space-y-4 py-4">
+      <HealthLoopPanel repoId={repoId} />
       {blob.health == null ? (
         <p
           role="note"

@@ -24,6 +24,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import Response
 from sqlalchemy import select as sa_select
 
+from agent.health_loop.supervisor import run_health_loop_supervisor
 from agent.improvement_agent import run_architecture_loop
 from agent.main import event_loop as agent_event_loop
 from agent.po_analyzer import run_po_analysis_loop
@@ -2329,6 +2330,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_po_analysis_loop()),
         asyncio.create_task(run_architecture_loop()),
         asyncio.create_task(_scaffold_heartbeat_runner()),
+        asyncio.create_task(run_health_loop_supervisor()),
         asyncio.create_task(queued_dispatch_poller()),
     ]
 

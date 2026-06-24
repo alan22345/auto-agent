@@ -3571,6 +3571,198 @@ async def refresh_repo_graph(
     return RepoGraphRefreshResponse(request_id=request_id, status="accepted")
 
 
+# --- Auto-heal loop (code-graph health remediation) ---
+
+
+class HealthLoopStartRequest(BaseModel):
+    """Optional tunables when enabling the loop. Omitted fields keep defaults."""
+
+    batch_size: int | None = Field(default=None, ge=1, le=50)
+    cleanup_branch: str | None = None
+
+
+class HealthLoopSuppressRequest(BaseModel):
+    finding_hash: str = Field(..., min_length=1, max_length=64)
+
+
+class HealthLoopStatusResponse(BaseModel):
+    enabled: bool
+    state: str  # idle | running | paused
+    cleanup_branch: str
+    batch_size: int
+    cleanup_pr_url: str | None = None
+    current_batch: list[dict] = Field(default_factory=list)
+    merged_count: int = 0
+    parked_count: int = 0
+    suppressed_count: int = 0
+    remaining_count: int = 0
+
+
+async def _health_loop_status(repo_id: int) -> HealthLoopStatusResponse:
+    """Build the status strip payload for ``repo_id`` (loop must be configured)."""
+    from agent.health_loop import config_service
+    from agent.health_loop.findings import rank_findings
+    from agent.po_graph_findings import load_latest_graph_blob
+
+    cfg = await config_service.get_config(repo_id)
+    if cfg is None:
+        # Not configured yet — report a disabled, all-zero default.
+        return HealthLoopStatusResponse(
+            enabled=False,
+            state="idle",
+            cleanup_branch="auto-agent/health-cleanup",
+            batch_size=5,
+        )
+
+    suppressed = set(cfg.suppressed_finding_hashes or [])
+    addressed = set(cfg.addressed_finding_hashes or [])
+    remaining = 0
+    blob = await load_latest_graph_blob(repo_id)
+    if blob is not None:
+        excluded = suppressed | addressed
+        remaining = sum(1 for f in rank_findings(blob) if f.finding_hash not in excluded)
+
+    return HealthLoopStatusResponse(
+        enabled=cfg.enabled,
+        state=cfg.state,
+        cleanup_branch=cfg.cleanup_branch,
+        batch_size=cfg.batch_size,
+        cleanup_pr_url=cfg.cleanup_pr_url,
+        current_batch=list(cfg.current_batch or []),
+        merged_count=cfg.merged_count or 0,
+        parked_count=cfg.parked_count or 0,
+        suppressed_count=len(suppressed),
+        remaining_count=remaining,
+    )
+
+
+@router.get("/repos/{repo_id}/health-loop", response_model=HealthLoopStatusResponse)
+async def get_health_loop(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> HealthLoopStatusResponse:
+    """Auto-heal loop status: state, in-flight batch, cleanup PR, and counts."""
+    await _check_repo_access(session, repo_id, org_id)
+    return await _health_loop_status(repo_id)
+
+
+@router.post("/repos/{repo_id}/health-loop/start", response_model=HealthLoopStatusResponse)
+async def start_health_loop(
+    repo_id: int,
+    body: HealthLoopStartRequest = HealthLoopStartRequest(),
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+    user_id: int = Depends(current_user_id_dep),
+) -> HealthLoopStatusResponse:
+    """Enable the loop and put it in ``running``. The supervisor acquires the
+    VM-global lease on its next tick, blocking all other task dispatch. The
+    caller is recorded as the owner so the coder runs with their credentials."""
+    from agent.health_loop import config_service
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+    await config_service.get_or_create_config(repo.id, repo.organization_id)
+    if body.batch_size is not None or body.cleanup_branch is not None:
+        await config_service.update_settings(
+            repo.id, batch_size=body.batch_size, cleanup_branch=body.cleanup_branch
+        )
+    await config_service.set_started_by(repo.id, user_id)
+    await config_service.set_enabled(repo.id, True)
+    await config_service.set_state(repo.id, "running")
+    return await _health_loop_status(repo.id)
+
+
+@router.post("/repos/{repo_id}/health-loop/stop", response_model=HealthLoopStatusResponse)
+async def stop_health_loop(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> HealthLoopStatusResponse:
+    """Gracefully pause: the supervisor finishes the in-flight fix, then
+    releases the lease (normal dispatch resumes)."""
+    from agent.health_loop import config_service
+
+    await _check_repo_access(session, repo_id, org_id)
+    await config_service.set_state(repo_id, "paused")
+    return await _health_loop_status(repo_id)
+
+
+@router.post("/repos/{repo_id}/health-loop/resume", response_model=HealthLoopStatusResponse)
+async def resume_health_loop(
+    repo_id: int,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+    user_id: int = Depends(current_user_id_dep),
+) -> HealthLoopStatusResponse:
+    """Resume a paused loop — re-acquire the lease and continue draining."""
+    from agent.health_loop import config_service
+
+    await _check_repo_access(session, repo_id, org_id)
+    await config_service.set_started_by(repo_id, user_id)
+    await config_service.set_enabled(repo_id, True)
+    await config_service.set_state(repo_id, "running")
+    return await _health_loop_status(repo_id)
+
+
+class HealthLoopFinding(BaseModel):
+    finding_hash: str
+    category: str
+    title: str
+    files: list[str]
+    severity: float
+    suppressed: bool
+    addressed: bool
+
+
+@router.get("/repos/{repo_id}/health-loop/findings", response_model=list[HealthLoopFinding])
+async def list_health_findings(
+    repo_id: int,
+    limit: int = 50,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> list[HealthLoopFinding]:
+    """Ranked findings (worst-first) with their server-computed hashes, so the
+    UI can offer a per-row suppress without re-deriving the hash client-side."""
+    from agent.health_loop import config_service
+    from agent.health_loop.findings import rank_findings
+    from agent.po_graph_findings import load_latest_graph_blob
+
+    await _check_repo_access(session, repo_id, org_id)
+    blob = await load_latest_graph_blob(repo_id)
+    if blob is None:
+        return []
+    suppressed = await config_service.get_suppressed(repo_id)
+    addressed = await config_service.get_addressed(repo_id)
+    return [
+        HealthLoopFinding(
+            finding_hash=f.finding_hash,
+            category=f.category,
+            title=f.title,
+            files=f.files,
+            severity=f.severity,
+            suppressed=f.finding_hash in suppressed,
+            addressed=f.finding_hash in addressed,
+        )
+        for f in rank_findings(blob)[: max(0, limit)]
+    ]
+
+
+@router.post("/repos/{repo_id}/health-loop/suppress", response_model=HealthLoopStatusResponse)
+async def suppress_health_finding(
+    repo_id: int,
+    body: HealthLoopSuppressRequest,
+    session: AsyncSession = Depends(get_session),
+    org_id: int = Depends(current_org_id_dep),
+) -> HealthLoopStatusResponse:
+    """Add a finding hash to the per-repo won't-fix list so the loop skips it."""
+    from agent.health_loop import config_service
+
+    repo = await _check_repo_access(session, repo_id, org_id)
+    await config_service.get_or_create_config(repo.id, repo.organization_id)
+    await config_service.suppress_finding(repo.id, body.finding_hash)
+    return await _health_loop_status(repo.id)
+
+
 @router.post(
     "/repos/{repo_id}/graph/flows/recompute",
     response_model=RecomputeFlowsResponse,
