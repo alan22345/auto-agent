@@ -27,11 +27,6 @@ logger = structlog.get_logger()
 _discovery_cache: dict[tuple[str, str | None], list[McpToolDef]] = {}
 
 
-def clear_discovery_cache() -> None:
-    """Reset the per-process discovery cache (used by tests)."""
-    _discovery_cache.clear()
-
-
 class McpTool(Tool):
     """Adapts one remote MCP tool to the agent's Tool interface."""
 

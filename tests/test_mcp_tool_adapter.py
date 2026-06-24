@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from agent.mcp import tool_adapter
 from agent.mcp.client import McpToolDef, McpUnavailable
 from agent.mcp.servers import McpServerSpec
-from agent.mcp.tool_adapter import (
-    McpTool,
-    clear_discovery_cache,
-    register_mcp_tools,
-)
+from agent.mcp.tool_adapter import McpTool, register_mcp_tools
 from agent.tools.base import ToolContext, ToolRegistry
 
 
@@ -51,9 +48,9 @@ def _ctx():
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    clear_discovery_cache()
+    tool_adapter._discovery_cache.clear()
     yield
-    clear_discovery_cache()
+    tool_adapter._discovery_cache.clear()
 
 
 @pytest.mark.asyncio
