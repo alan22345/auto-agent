@@ -287,5 +287,4 @@ __all__ = [
     "MAX_FLOW_STEPS",
     "classify_terminal",
     "derive_flow_blob",
-    "trace_flow",
 ]

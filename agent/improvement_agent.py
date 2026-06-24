@@ -80,7 +80,7 @@ async def _check_and_analyze(session: AsyncSession) -> None:
         if _is_due(config, now):
             log.info(f"Architecture analysis due for repo_id={config.repo_id}")
             try:
-                await handle_architecture_analysis(session, config)
+                await _handle_architecture_analysis(session, config)
                 config.last_architecture_at = now
                 await session.commit()
             except Exception:
@@ -108,7 +108,7 @@ def _is_due(config: FreeformConfig, now: datetime) -> bool:
     return now >= next_run
 
 
-async def handle_architecture_analysis(session: AsyncSession, config: FreeformConfig) -> None:
+async def _handle_architecture_analysis(session: AsyncSession, config: FreeformConfig) -> None:
     """Run the agent as an architectural reviewer, producing deepening Suggestions.
 
     Uses readonly tools so the agent can explore the codebase but not modify it.
