@@ -696,6 +696,60 @@ class RepoGraphConfig(Base):
     )
 
 
+class HealthLoopConfig(Base):
+    """Per-repo auto-heal loop settings.
+
+    One row per repo with the loop configured. ``repo_id`` PK keeps the 1:1
+    relationship explicit. ``state`` is the supervisor's lifecycle
+    (``idle`` waiting for findings / ``running`` working a batch /
+    ``paused`` stopped by the user). ``suppressed_finding_hashes`` is the
+    won't-fix list the ranker filters out.
+    """
+
+    __tablename__ = "health_loop_configs"
+
+    repo_id = Column(
+        Integer,
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    cleanup_branch = Column(
+        String(255),
+        nullable=False,
+        default="auto-agent/health-cleanup",
+        server_default="auto-agent/health-cleanup",
+    )
+    batch_size = Column(Integer, nullable=False, default=5, server_default="5")
+    # idle | running | paused
+    state = Column(String(16), nullable=False, default="idle", server_default="idle")
+    suppressed_finding_hashes = Column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    supervisor_task_id = Column(
+        Integer,
+        ForeignKey("tasks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
 class RepoGraph(Base):
     """One row per completed graph analysis (ADR-016 §8).
 

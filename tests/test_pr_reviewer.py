@@ -33,6 +33,7 @@ from agent.lifecycle.pr_reviewer import (
     infer_routes_from_diff,
     run_pr_review,
 )
+from agent.lifecycle.trio.smoke_agent import SmokeAgentResult
 from agent.lifecycle.verify_primitives import (
     RouteResult,
     ServerHandle,
@@ -254,19 +255,23 @@ async def test_correctness_scope_fails_when_route_returns_5xx(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_correctness_scope_skips_route_exercise_with_no_routes(tmp_path: Path) -> None:
-    """A diff that touches no routes ⇒ no exercise_routes call, verdict passes if diff clean."""
+async def test_correctness_scope_escalates_to_smoke_when_no_routes(tmp_path: Path) -> None:
+    """A diff that infers no routes must NOT auto-approve (fail-open). It
+    escalates to the smoke agent for runtime verification instead. When
+    smoke passes, the verdict is approved."""
 
     workspace = tmp_path
 
     exercise_mock = AsyncMock()
-    boot_mock = AsyncMock(return_value=ServerHandle.disabled())
+    smoke_mock = AsyncMock(return_value=SmokeAgentResult(verdict="pass", summary="pytest green"))
 
     with (
         patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_NO_ROUTES)),
-        patch.object(pr_reviewer, "boot_dev_server", boot_mock),
+        patch.object(pr_reviewer, "boot_dev_server", AsyncMock(return_value=ServerHandle.disabled())),
         patch.object(pr_reviewer, "exercise_routes", exercise_mock),
         patch.object(pr_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
+        patch.object(pr_reviewer, "run_smoke_agent", smoke_mock),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
         patch.object(ServerHandle, "teardown", AsyncMock()),
     ):
         result = await run_pr_review(
@@ -276,8 +281,79 @@ async def test_correctness_scope_skips_route_exercise_with_no_routes(tmp_path: P
         )
 
     assert result.verdict == "approved"
-    # The whole route-exercise step is skipped when nothing was inferred.
+    # No routes to exercise, but runtime verification still happened via smoke.
     exercise_mock.assert_not_called()
+    smoke_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_correctness_scope_blocks_when_no_routes_and_smoke_fails(tmp_path: Path) -> None:
+    """The fail-closed gate: no inferable routes + a failing smoke verdict
+    ⇒ verdict=changes_requested. This is the regression that motivated the
+    smart-escalation change — previously this diff auto-approved."""
+
+    workspace = tmp_path
+
+    smoke_mock = AsyncMock(
+        return_value=SmokeAgentResult(
+            verdict="fail",
+            summary="pytest: 2 failed",
+            failures=["tests/test_widgets.py::test_list failed: AssertionError"],
+        )
+    )
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_NO_ROUTES)),
+        patch.object(pr_reviewer, "boot_dev_server", AsyncMock(return_value=ServerHandle.disabled())),
+        patch.object(pr_reviewer, "exercise_routes", AsyncMock()),
+        patch.object(pr_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
+        patch.object(pr_reviewer, "run_smoke_agent", smoke_mock),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(ServerHandle, "teardown", AsyncMock()),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="correctness",
+        )
+
+    assert result.verdict == "changes_requested"
+    blob = json.dumps(result.comments).lower()
+    assert "smoke" in blob or "runtime" in blob
+    # The concrete failure must surface so a human-on-block can see it.
+    assert "assertionerror" in blob or "failed" in blob
+
+
+@pytest.mark.asyncio
+async def test_correctness_scope_does_not_run_smoke_when_routes_present(tmp_path: Path) -> None:
+    """Smart escalation is scoped to the no-routes case. When routes ARE
+    inferred and exercised, that IS the runtime check — the smoke agent is
+    not invoked (avoids doubling the work on every routed task)."""
+
+    workspace = tmp_path
+    handle = ServerHandle(state="running", base_url="http://127.0.0.1:8080", port=8080)
+    smoke_mock = AsyncMock(return_value=SmokeAgentResult(verdict="pass"))
+
+    async def fake_exercise(routes, *, handle):
+        return {r: RouteResult(ok=True, status=200, body="[]") for r in routes}
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "boot_dev_server", AsyncMock(return_value=handle)),
+        patch.object(pr_reviewer, "exercise_routes", AsyncMock(side_effect=fake_exercise)),
+        patch.object(pr_reviewer, "inspect_ui", AsyncMock(return_value=UIResult(ok=True))),
+        patch.object(pr_reviewer, "run_smoke_agent", smoke_mock),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(ServerHandle, "teardown", AsyncMock()),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="correctness",
+        )
+
+    assert result.verdict == "approved"
+    smoke_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -347,6 +423,11 @@ async def test_artefact_scope_invokes_agent_with_submit_pr_review_skill(
         patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
         patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
         patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(
+            pr_reviewer,
+            "run_smoke_agent",
+            AsyncMock(return_value=SmokeAgentResult(verdict="pass")),
+        ),
     ):
         result = await run_pr_review(
             task=_FakeTask(),
@@ -398,6 +479,11 @@ async def test_artefact_scope_returns_comments_when_agent_emits_them(
         patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
         patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
         patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(
+            pr_reviewer,
+            "run_smoke_agent",
+            AsyncMock(return_value=SmokeAgentResult(verdict="pass")),
+        ),
     ):
         result = await run_pr_review(
             task=_FakeTask(),
@@ -409,6 +495,56 @@ async def test_artefact_scope_returns_comments_when_agent_emits_them(
     assert len(result.comments) == 2
     blob = json.dumps(result.comments)
     assert "feature flag" in blob
+
+
+@pytest.mark.asyncio
+async def test_artefact_scope_downgrades_to_changes_requested_on_smoke_fail(
+    tmp_path: Path,
+) -> None:
+    """The artefact (complex) scope LLM judges PR hygiene by reading — it
+    never runs the code. A clean-hygiene 'approved' verdict must still be
+    downgraded when the fail-closed smoke agent says the change doesn't run.
+    This is the complex-path counterpart to the correctness smoke gate."""
+
+    workspace = tmp_path
+
+    class FakeAgent:
+        async def run(self, prompt: str, **_kw):
+            (workspace / ".auto-agent").mkdir(exist_ok=True)
+            (workspace / ".auto-agent" / "pr_review.json").write_text(
+                json.dumps(
+                    {"schema_version": "1", "verdict": "approved", "comments": []}
+                )
+            )
+            res = AsyncMock()
+            res.output = "looks clean"
+            return res
+
+    smoke_fail = AsyncMock(
+        return_value=SmokeAgentResult(
+            verdict="fail",
+            summary="tsc --noEmit: 3 errors",
+            failures=["web-next/app/page.tsx(12,5): error TS2304: Cannot find name 'foo'"],
+        )
+    )
+
+    with (
+        patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
+        patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
+        patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(pr_reviewer, "run_smoke_agent", smoke_fail),
+    ):
+        result = await run_pr_review(
+            task=_FakeTask(),
+            workspace_root=str(workspace),
+            scope="artefact",
+        )
+
+    assert result.verdict == "changes_requested"
+    smoke_fail.assert_awaited_once()
+    blob = json.dumps(result.comments).lower()
+    assert "smoke" in blob or "runtime" in blob
+    assert "ts2304" in blob or "error" in blob
 
 
 @pytest.mark.asyncio
@@ -439,6 +575,11 @@ async def test_artefact_scope_writes_schema_versioned_pr_review(
         patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=_DIFF_OK)),
         patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
         patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(
+            pr_reviewer,
+            "run_smoke_agent",
+            AsyncMock(return_value=SmokeAgentResult(verdict="pass")),
+        ),
     ):
         await run_pr_review(
             task=_FakeTask(),
@@ -680,6 +821,11 @@ async def test_artefact_scope_allow_stub_diff_proceeds_to_llm(tmp_path: Path) ->
         patch.object(pr_reviewer, "_load_pr_diff", AsyncMock(return_value=optout_diff)),
         patch.object(pr_reviewer, "create_agent", lambda *a, **kw: FakeAgent()),
         patch.object(pr_reviewer, "home_dir_for_task", AsyncMock(return_value=None)),
+        patch.object(
+            pr_reviewer,
+            "run_smoke_agent",
+            AsyncMock(return_value=SmokeAgentResult(verdict="pass")),
+        ),
     ):
         result = await run_pr_review(
             task=_FakeTask(),
