@@ -146,6 +146,107 @@ def test_clone_finding_hash_stable_across_line_shifts():
     assert h1 == h2
 
 
+def test_extract_excludes_dependency_findings():
+    # The loop must never auto-edit pyproject deps — static analysis can't see
+    # runtime-only deps (pytest/uvicorn/asyncpg), so every dependency finding
+    # is dropped.
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_dependency", target="pytest", file=None, reason="x"),
+            DeadCodeFinding(kind="undeclared_dependency", target="bcrypt", file=None, reason="x"),
+        ]
+    )
+    assert extract_findings(blob) == []
+
+
+def test_extract_excludes_nextjs_route_entry_files():
+    # Next.js app-router special files are route entry points — nothing imports
+    # them, so the analyzer mis-flags them as unused_file. Deleting them removes
+    # routes / the UI.
+    specials = [
+        "web-next/app/(app)/settings/page.tsx",
+        "web-next/app/(app)/layout.tsx",
+        "web-next/app/layout.tsx",
+        "web-next/app/page.tsx",
+        "web-next/app/(public)/verify/[token]/page.tsx",
+        "web-next/app/api/health/route.ts",
+        "web-next/middleware.ts",
+    ]
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_file", target=f"file:{p}", file=p, reason="no importer")
+            for p in specials
+        ]
+    )
+    assert extract_findings(blob) == []
+
+
+def test_extract_excludes_entry_dirs_and_basenames():
+    paths = [
+        "migrations/env.py",
+        "migrations/versions/057_x.py",
+        "scripts/gen_ts_types.py",
+        "eval/providers/agent_provider.py",
+        "run.py",
+        "app.py",
+        "conftest.py",
+    ]
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_file", target=f"file:{p}", file=p, reason="no importer")
+            for p in paths
+        ]
+    )
+    assert extract_findings(blob) == []
+
+
+def test_extract_excludes_dispatch_handlers():
+    # Functions registered on the event bus / run as background loops look
+    # unused to static analysis. Exclude handler/loop-shaped export names.
+    handlers = [
+        "agent/lifecycle/coding.py::handle_coding",
+        "agent/lifecycle/coding.py::handle",
+        "run.py::on_task_created",
+        "agent/improvement_agent.py::run_architecture_loop",
+        "x/y.py::pr_merge_poller",  # not matched by name — see below
+    ]
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(kind="unused_export", target=t, file=t.split("::")[0], reason="x")
+            for t in handlers
+        ]
+    )
+    kept = {f.title for f in extract_findings(blob)}
+    # handle / handle_* / on_* / run_*_loop excluded; the poller (no matching
+    # affix) survives and would be judged by the coder + gates.
+    assert all("handle_coding" not in t for t in kept)
+    assert all("::handle " not in t and "::handle —" not in t for t in kept)
+    assert all("on_task_created" not in t for t in kept)
+    assert all("run_architecture_loop" not in t for t in kept)
+
+
+def test_extract_keeps_genuine_orphan_export_and_file():
+    blob = _blob(
+        dead_code=[
+            DeadCodeFinding(
+                kind="unused_export",
+                target="web-next/lib/usage.ts::formatBytes",
+                file="web-next/lib/usage.ts",
+                reason="exported but no importer",
+            ),
+            DeadCodeFinding(
+                kind="unused_file",
+                target="file:web-next/components/code-graph/orphan-widget.tsx",
+                file="web-next/components/code-graph/orphan-widget.tsx",
+                reason="no module imports this file",
+            ),
+        ]
+    )
+    titles = {f.title for f in extract_findings(blob)}
+    assert any("formatBytes" in t for t in titles)
+    assert any("orphan-widget" in t for t in titles)
+
+
 def test_extract_severity_reflects_magnitude():
     blob = _blob(
         file_health=[

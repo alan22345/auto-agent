@@ -735,9 +735,41 @@ class HealthLoopConfig(Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
+    # Every finding hash the loop has already ACTED on — merged to cleanup OR
+    # parked after a failed gate. Excluded (alongside ``suppressed``) from
+    # future batches so a re-analysis never re-files a fixed finding and a
+    # parked one is never retried in a loop. Distinct from ``suppressed`` (the
+    # user's explicit won't-fix list).
+    addressed_finding_hashes = Column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    # In-flight batch for the status strip: list of {"hash", "title"} dicts
+    # while a fix runs, emptied back to [] when the loop goes idle.
+    current_batch = Column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    # Running tallies surfaced in the UI status strip.
+    merged_count = Column(Integer, nullable=False, default=0, server_default="0")
+    parked_count = Column(Integer, nullable=False, default=0, server_default="0")
+    # The standing cleanup-branch → main PR a human reviews and merges.
+    cleanup_pr_url = Column(String(512), nullable=True)
     supervisor_task_id = Column(
         Integer,
         ForeignKey("tasks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The user who last enabled the loop. The batch coder runs as them so it
+    # uses their paired Claude + GitHub credentials (there is no shared host
+    # Claude in prod — per-user pairing is the production auth path).
+    started_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
     last_run_at = Column(DateTime(timezone=True), nullable=True)

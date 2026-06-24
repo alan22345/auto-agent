@@ -334,7 +334,7 @@ export default function CodeGraphRepoPage({
 
               <TabsContent value="health" className="min-h-0 flex-1">
                 {latest?.blob ? (
-                  <HealthTab blob={latest.blob} />
+                  <HealthTab blob={latest.blob} repoId={repoId} />
                 ) : (
                   <div
                     role="status"

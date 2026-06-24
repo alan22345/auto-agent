@@ -9,14 +9,84 @@ double-files or re-picks a suppressed finding.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from shared.types import RepoGraphBlob
+    from shared.types import DeadCodeFinding, RepoGraphBlob
 
 Category = Literal["poor_file", "dead_code", "clone", "hotspot", "cycle"]
+
+# --- Dead-code false-positive guard -----------------------------------------
+# The static dead-code analyser flags anything with no *import* edge as unused.
+# It can't see entry points (the app's run script, Next.js file-routing,
+# migrations, CLI scripts), event-bus dispatch, or runtime-only dependencies,
+# so it mislabels load-bearing code as dead. The loop ACTS on findings by
+# deleting code, so we exclude these classes before they ever reach the coder.
+# (False negatives — leaving a real dead item unfixed — are harmless; false
+# positives that delete live code are not.)
+
+# Next.js App Router special files are route entry points (nothing imports
+# them). Matches any depth, route groups like ``(app)`` included.
+_NEXT_SPECIAL_RE = re.compile(
+    r"(?:^|/)(?:page|layout|template|loading|error|not-found|default|global-error|route|middleware)"
+    r"\.[jt]sx?$"
+)
+# Directories that are entry points or test/eval infrastructure, not library code.
+_ENTRY_DIR_RE = re.compile(r"(?:^|/)(?:migrations|scripts|eval)/")
+# Conventional entry-script / config basenames.
+_ENTRY_BASENAMES = frozenset(
+    {"run.py", "__main__.py", "app.py", "main.py", "manage.py", "conftest.py", "env.py"}
+)
+# Export names shaped like event-bus handlers or background loops — dispatched
+# dynamically (``bus.on(...)`` / ``asyncio.create_task(...)``), so static
+# analysis sees no caller.
+_DISPATCH_NAME_RE = re.compile(
+    r"^(?:handle|handle_.+|on_.+|run_.+|.+_handler|.+_worker|.+_consumer|.+_poller|.+_loop)$"
+)
+
+# Dependency findings are never auto-actionable — runtime/CLI/test deps
+# (pytest, uvicorn, asyncpg) have no import edge the analyser can see.
+_DEPENDENCY_KINDS = frozenset({"unused_dependency", "undeclared_dependency"})
+
+
+def _dead_code_path(d: DeadCodeFinding) -> str:
+    """Best-effort source path for a finding.
+
+    ``unused_export`` carries it in ``file``; ``unused_file`` encodes it in
+    ``target`` as ``file:<path>`` and may leave ``file`` unset.
+    """
+    if d.file:
+        return d.file
+    if d.target and d.target.startswith("file:"):
+        return d.target[len("file:") :]
+    return ""
+
+
+def _is_entry_point_path(path: str) -> bool:
+    if not path:
+        return False
+    if _NEXT_SPECIAL_RE.search(path):
+        return True
+    if _ENTRY_DIR_RE.search(path):
+        return True
+    return path.rsplit("/", 1)[-1] in _ENTRY_BASENAMES
+
+
+def _is_unsafe_dead_code(d: DeadCodeFinding) -> bool:
+    """True if this dead-code finding must NOT be auto-removed by the loop."""
+    if d.kind in _DEPENDENCY_KINDS:
+        return True
+    if _is_entry_point_path(_dead_code_path(d)):
+        return True
+    if d.kind == "unused_export" and "::" in d.target:
+        symbol = d.target.rsplit("::", 1)[-1]
+        if _DISPATCH_NAME_RE.match(symbol):
+            return True
+    return False
+
 
 # Mirrors the composite-health sub-score weighting in
 # agent/graph_analyzer/health.py. 'coupling' (0.15) has no per-item finding
@@ -65,6 +135,10 @@ def extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
     out: list[HealthFinding] = []
 
     for d in blob.dead_code:
+        # Skip findings that are unsafe to auto-remove (entry points, dispatch
+        # handlers, dependencies) — see the guard helpers above.
+        if _is_unsafe_dead_code(d):
+            continue
         out.append(
             HealthFinding(
                 finding_hash=finding_hash("dead_code", [d.target]),

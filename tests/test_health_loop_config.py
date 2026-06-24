@@ -18,7 +18,14 @@ def test_health_loop_config_columns():
         "batch_size",
         "state",
         "suppressed_finding_hashes",
+        # Runtime/status fields added in migration 056.
+        "addressed_finding_hashes",
+        "current_batch",
+        "merged_count",
+        "parked_count",
+        "cleanup_pr_url",
         "supervisor_task_id",
+        "started_by_user_id",
         "last_run_at",
         "created_at",
         "updated_at",
@@ -29,18 +36,34 @@ def test_health_loop_config_columns():
     assert pk == {"repo_id"}
 
 
-def _load_migration():
-    path = Path("migrations/versions/055_health_loop_config.py")
-    spec = importlib.util.spec_from_file_location("m055", path)
+def _load_migration(filename: str, name: str):
+    path = Path("migrations/versions") / filename
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
 def test_migration_055_chains_off_054_and_defines_up_down():
-    m = _load_migration()
+    m = _load_migration("055_health_loop_config.py", "m055")
     assert m.revision == "055"
     assert m.down_revision == "054"
+    assert callable(m.upgrade)
+    assert callable(m.downgrade)
+
+
+def test_migration_056_chains_off_055_and_defines_up_down():
+    m = _load_migration("056_health_loop_runtime_fields.py", "m056")
+    assert m.revision == "056"
+    assert m.down_revision == "055"
+    assert callable(m.upgrade)
+    assert callable(m.downgrade)
+
+
+def test_migration_057_chains_off_056_and_defines_up_down():
+    m = _load_migration("057_health_loop_started_by.py", "m057")
+    assert m.revision == "057"
+    assert m.down_revision == "056"
     assert callable(m.upgrade)
     assert callable(m.downgrade)
 
