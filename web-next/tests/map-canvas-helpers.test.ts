@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   encodeFocusForQuery,
   parseFocusFromQuery,
-  drillOut,
 } from '@/lib/code-graph-focus';
 import {
   ROOT_FOCUS,
@@ -103,27 +102,6 @@ describe('encodeFocusForQuery / parseFocusFromQuery', () => {
   it('returns ROOT_FOCUS for null/empty', () => {
     expect(parseFocusFromQuery(null)).toEqual(ROOT_FOCUS);
     expect(parseFocusFromQuery('')).toEqual(ROOT_FOCUS);
-  });
-});
-
-describe('drillOut', () => {
-  it('drops stepNodeId first', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: 'f', stepNodeId: 's' }),
-    ).toEqual({ capabilityId: 'c', flowId: 'f', stepNodeId: null });
-  });
-  it('drops flowId next', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: 'f', stepNodeId: null }),
-    ).toEqual({ capabilityId: 'c', flowId: null, stepNodeId: null });
-  });
-  it('drops capabilityId last → ROOT_FOCUS', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: null, stepNodeId: null }),
-    ).toEqual(ROOT_FOCUS);
-  });
-  it('ROOT_FOCUS stays at ROOT_FOCUS', () => {
-    expect(drillOut(ROOT_FOCUS)).toEqual(ROOT_FOCUS);
   });
 });
 

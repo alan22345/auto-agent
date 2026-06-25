@@ -32,21 +32,3 @@ export function parseFocusFromQuery(raw: string | null): FocusPath {
     stepNodeId: step ? decodeURIComponent(step) : null,
   };
 }
-
-export function drillOut(focus: FocusPath): FocusPath {
-  if (focus.stepNodeId) {
-    return {
-      capabilityId: focus.capabilityId,
-      flowId: focus.flowId,
-      stepNodeId: null,
-    };
-  }
-  if (focus.flowId) {
-    return {
-      capabilityId: focus.capabilityId,
-      flowId: null,
-      stepNodeId: null,
-    };
-  }
-  return ROOT_FOCUS;
-}
