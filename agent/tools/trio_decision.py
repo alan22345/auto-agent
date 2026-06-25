@@ -359,11 +359,6 @@ def attach_architect_decision_tools(
     return sink
 
 
-def attach_checkpoint_decision_tool(agent: Any, sink: DecisionSink) -> DecisionSink:
-    agent.tools.register(SubmitCheckpointDecisionTool(sink))
-    return sink
-
-
 def attach_review_verdict_tool(agent: Any, sink: DecisionSink) -> DecisionSink:
     agent.tools.register(SubmitReviewVerdictTool(sink))
     return sink
