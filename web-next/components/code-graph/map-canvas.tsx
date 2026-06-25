@@ -48,7 +48,7 @@ export const ROOT_FOCUS: FocusPath = {
   stepNodeId: null,
 };
 
-export type Lod = 0 | 1 | 2 | 3;
+type Lod = 0 | 1 | 2 | 3;
 
 export function lodForFocus(focus: FocusPath): Lod {
   if (focus.stepNodeId) return 3;
