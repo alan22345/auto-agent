@@ -3,7 +3,6 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import {
   findViolations,
   ViolationsPanel,
-  violationEdgeId,
 } from '@/components/code-graph/violations-panel';
 import type { RepoGraphBlob } from '@/types/api';
 
@@ -131,13 +130,13 @@ describe('ViolationsPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /Boundary violations/i }));
     fireEvent.click(screen.getByTestId('violation-row'));
     expect(handler).toHaveBeenCalledWith(
-      violationEdgeId(blobWithViolation().edges[0]),
+      findViolations(blobWithViolation())[0]!.edgeId,
     );
   });
 
   it('toggles selection off when the highlighted row is clicked again', () => {
     const blob = blobWithViolation();
-    const edgeId = violationEdgeId(blob.edges[0]);
+    const edgeId = findViolations(blob)[0]!.edgeId;
     const handler = vi.fn();
     render(
       <ViolationsPanel
