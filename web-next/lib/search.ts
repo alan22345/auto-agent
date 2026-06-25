@@ -44,7 +44,7 @@ export type SearchMessage = {
   created_at: string;
 };
 
-export type SearchSessionDetail = SearchSession & { messages: SearchMessage[] };
+type SearchSessionDetail = SearchSession & { messages: SearchMessage[] };
 
 export const createSession = () =>
   api<SearchSession>('/api/search/sessions', { method: 'POST', body: '{}' });
