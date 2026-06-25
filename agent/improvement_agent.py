@@ -246,28 +246,6 @@ async def improvement_answer_grill(
     )
 
 
-async def improvement_approve_plan(
-    task,
-    plan_md: str,
-    workspace_root: str,
-    *,
-    session_blob: dict | None = None,
-) -> None:
-    """Improvement-agent standin approves/rejects a plan."""
-
-    from agent.lifecycle.standin import ImprovementAgentStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = ImprovementAgentStandin(task=task, repo=repo)
-    await standin.approve_plan(
-        plan_md,
-        {
-            "workspace_root": workspace_root,
-            "improvement_session": session_blob or {},
-        },
-    )
-
-
 async def improvement_approve_design(
     task,
     design_md: str,
