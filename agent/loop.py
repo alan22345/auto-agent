@@ -45,7 +45,7 @@ _COMPLEXITY_BUDGETS = {
 }
 
 
-def get_exploration_budget(complexity: str | None) -> int:
+def _get_exploration_budget(complexity: str | None) -> int:
     """Return the exploration budget for a given task complexity."""
     if complexity is None:
         return _EXPLORATION_BUDGET
@@ -530,7 +530,7 @@ class AgentLoop:
                         consecutive_reads += 1
 
                 # Inject nudge if budget exceeded (once)
-                budget = get_exploration_budget(self._complexity)
+                budget = _get_exploration_budget(self._complexity)
                 if consecutive_reads >= budget and not nudge_injected:
                     nudge_msg = Message(role="user", content=_EXPLORATION_NUDGE)
                     messages.append(nudge_msg)

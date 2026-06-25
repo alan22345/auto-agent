@@ -187,24 +187,24 @@ class TestComplexityAwareExplorationBudget:
         assert _EXPLORATION_BUDGET == 8
 
     def test_get_exploration_budget_simple(self):
-        from agent.loop import get_exploration_budget
-        assert get_exploration_budget("simple") == 5
+        from agent.loop import _get_exploration_budget
+        assert _get_exploration_budget("simple") == 5
 
     def test_get_exploration_budget_complex(self):
-        from agent.loop import get_exploration_budget
-        assert get_exploration_budget("complex") == 15
+        from agent.loop import _get_exploration_budget
+        assert _get_exploration_budget("complex") == 15
 
     def test_get_exploration_budget_complex_large(self):
-        from agent.loop import get_exploration_budget
-        assert get_exploration_budget("complex_large") == 25
+        from agent.loop import _get_exploration_budget
+        assert _get_exploration_budget("complex_large") == 25
 
     def test_get_exploration_budget_none_returns_default(self):
-        from agent.loop import get_exploration_budget
-        assert get_exploration_budget(None) == 8
+        from agent.loop import _get_exploration_budget
+        assert _get_exploration_budget(None) == 8
 
     def test_get_exploration_budget_unknown_returns_default(self):
-        from agent.loop import get_exploration_budget
-        assert get_exploration_budget("unknown") == 8
+        from agent.loop import _get_exploration_budget
+        assert _get_exploration_budget("unknown") == 8
 
 
 # ----------------------------------------------------------------------

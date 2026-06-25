@@ -353,5 +353,4 @@ async def run_gap_fix(
 __all__ = [
     "MAX_GAP_FIX_ROUNDS",
     "run_gap_fix",
-    "validate_backlog_items",
 ]
