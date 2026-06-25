@@ -1054,14 +1054,6 @@ class RepairContext(BaseModel):
     failed_pr_url: str
 
 
-class ArchitectDecision(BaseModel):
-    """The decision field on an ArchitectAttempt row when phase=checkpoint."""
-
-    action: Literal["continue", "revise", "done", "awaiting_clarification", "blocked"]
-    reason: str | None = None
-    question: str | None = None  # only when action=awaiting_clarification
-
-
 class ArchitectAttemptOut(BaseModel):
     """API shape for an architect_attempts row."""
 
