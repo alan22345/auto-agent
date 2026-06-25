@@ -21,6 +21,10 @@ from shared.models import Organization, OrganizationMembership, User
 
 router = APIRouter()
 
+# The module's only public surface is the mounted router (see run.py); the
+# request/response models below are internal implementation details.
+__all__ = ["router"]
+
 _ROLES_INVITABLE = {"admin", "member"}  # owner is reserved for the creator
 
 
