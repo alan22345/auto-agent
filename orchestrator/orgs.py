@@ -49,7 +49,7 @@ class InviteRequest(BaseModel):
     role: str = "member"
 
 
-class RoleChangeRequest(BaseModel):
+class _RoleChangeRequest(BaseModel):
     role: str
 
 
@@ -277,7 +277,7 @@ async def remove_member(
 async def change_role(
     target_org_id: int,
     target_user_id: int,
-    payload: RoleChangeRequest,
+    payload: _RoleChangeRequest,
     user_id: int = Depends(current_user_id),
     org_id: int = Depends(current_org_id_dep),
     session: AsyncSession = Depends(get_session),
