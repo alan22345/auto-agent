@@ -11,7 +11,6 @@ import {
 import {
   computeCapabilityPorts,
   computeSiblingFlowPorts,
-  indexNodeToCapability,
 } from '@/components/code-graph/map-boundary-ports';
 import type { Capability, Flow, FlowJsonBlob } from '@/types/api';
 
@@ -105,7 +104,7 @@ describe('encodeFocusForQuery / parseFocusFromQuery', () => {
   });
 });
 
-describe('indexNodeToCapability + computeCapabilityPorts', () => {
+describe('computeCapabilityPorts', () => {
   // Two capabilities. Auth has a flow that touches a node owned by Carbon.
   const blob: FlowJsonBlob = {
     capabilities: [
@@ -135,16 +134,6 @@ describe('indexNodeToCapability + computeCapabilityPorts', () => {
     deriver_version: 'phase1',
     labeler_model: null,
   };
-
-  it('indexNodeToCapability resolves first-touch ownership', () => {
-    const idx = indexNodeToCapability(blob);
-    expect(idx.byNode.get('app:login')).toBe('cap_auth');
-    // lib:carbon_util appears first in flow_login (cap_auth) — first
-    // touch wins by construction. (Real labeller produces a partition,
-    // but defensive resolution is documented.)
-    expect(idx.byNode.get('lib:carbon_util')).toBe('cap_auth');
-    expect(idx.byNode.get('app:calc')).toBe('cap_carbon');
-  });
 
   it('computeCapabilityPorts surfaces cross-capability links', () => {
     // Build a blob where the order is reversed so flow_calc indexes
