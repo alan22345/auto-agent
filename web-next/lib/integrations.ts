@@ -1,6 +1,6 @@
 import { api } from './api';
 
-export type SlackInstall =
+type SlackInstall =
   | { connected: false }
   | { connected: true; team_id: string; team_name: string | null };
 
