@@ -18,8 +18,8 @@ from agent.tools.dev_server import (
     DevServerHandle,
     EarlyExit,
     TailDevServerLogTool,
+    _kill_server,
     hold,
-    kill_server,
     sniff_run_command,
     start_dev_server,
     wait_for_port,
@@ -144,7 +144,7 @@ async def test_hold_passes_when_alive():
     try:
         await hold(handle, seconds=0.5)
     finally:
-        await kill_server(handle)
+        await _kill_server(handle)
 
 
 async def test_hold_raises_on_early_exit(tmp_path):

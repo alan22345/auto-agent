@@ -50,7 +50,7 @@ export const ROOT_FOCUS: FocusPath = {
 
 type Lod = 0 | 1 | 2 | 3;
 
-export function lodForFocus(focus: FocusPath): Lod {
+function lodForFocus(focus: FocusPath): Lod {
   if (focus.stepNodeId) return 3;
   if (focus.flowId) return 2;
   if (focus.capabilityId) return 1;

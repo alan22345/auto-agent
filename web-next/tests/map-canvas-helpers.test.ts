@@ -5,7 +5,6 @@ import {
 } from '@/lib/code-graph-focus';
 import {
   ROOT_FOCUS,
-  lodForFocus,
   type FocusPath,
 } from '@/components/code-graph/map-canvas';
 import {
@@ -43,25 +42,6 @@ const makeCap = (
   name,
   description: null,
   labeled_at_commit: null,
-});
-
-describe('lodForFocus', () => {
-  it('returns 0 at ROOT_FOCUS', () => {
-    expect(lodForFocus(ROOT_FOCUS)).toBe(0);
-  });
-  it('returns 1 with capability only', () => {
-    expect(lodForFocus({ capabilityId: 'c', flowId: null, stepNodeId: null })).toBe(1);
-  });
-  it('returns 2 with capability + flow', () => {
-    expect(
-      lodForFocus({ capabilityId: 'c', flowId: 'f', stepNodeId: null }),
-    ).toBe(2);
-  });
-  it('returns 3 with full path', () => {
-    expect(
-      lodForFocus({ capabilityId: 'c', flowId: 'f', stepNodeId: 's' }),
-    ).toBe(3);
-  });
 });
 
 describe('encodeFocusForQuery / parseFocusFromQuery', () => {

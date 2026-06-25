@@ -2,7 +2,7 @@
 
 Layers in this module:
 - Pure helpers: ``sniff_run_command``.
-- Async lifecycle: ``start_dev_server``, ``wait_for_port``, ``hold``, ``kill_server``.
+- Async lifecycle: ``start_dev_server``, ``wait_for_port``, ``hold``, ``_kill_server``.
 - Agent-callable tool: ``TailDevServerLogTool``.
 """
 
@@ -73,7 +73,7 @@ def sniff_run_command(workspace_path: str, *, override: str | None = None) -> st
 
 
 # ---------------------------------------------------------------------------
-# Task 7: DevServerHandle, start_dev_server, kill_server
+# Task 7: DevServerHandle, start_dev_server, _kill_server
 # ---------------------------------------------------------------------------
 
 
@@ -160,10 +160,10 @@ async def start_dev_server(
         try:
             yield handle
         finally:
-            await kill_server(handle)
+            await _kill_server(handle)
 
 
-async def kill_server(handle: DevServerHandle, grace_seconds: float = 2.0) -> None:
+async def _kill_server(handle: DevServerHandle, grace_seconds: float = 2.0) -> None:
     """Send SIGTERM to the server's process group; escalate to SIGKILL if needed."""
     try:
         os.killpg(handle.pgid, signal.SIGTERM)

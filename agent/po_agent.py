@@ -180,39 +180,6 @@ async def _write_answer(attempt_id: int, answer: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 10 freeform-mode gate entry points — ADR-015 §6.
-#
-# These thin wrappers delegate to ``agent.lifecycle.standin.POStandin`` so
-# every "PO acts as standin at gate X" call site has one shape. The
-# ``POStandin`` class owns the gate-file write + decision-event logging
-# invariants; the wrappers exist so callers don't have to know about the
-# class.
-#
-# The orchestrator's preferred entry point is
-# ``agent.lifecycle.standin.run_freeform_gate`` (which routes by mode +
-# origin); these per-function helpers are for code paths that already
-# know they want a PO decision specifically.
-# ---------------------------------------------------------------------------
-
-
-async def po_answer_grill(task, question: str, workspace_root: str) -> None:
-    """PO standin answers a grill question (freeform mode).
-
-    Reads ``Repo.product_brief`` + optional ``ARCHITECTURE.md`` excerpt
-    as grounding. Writes ``.auto-agent/grill_answer.json`` and publishes
-    a ``standin.decision`` event. Never escapes to the user — when
-    context is missing, falls back to a heuristic default and logs the
-    ``fallback_default(source=heuristic)`` marker.
-    """
-
-    from agent.lifecycle.standin import POStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = POStandin(task=task, repo=repo)
-    await standin.answer_grill(question, {"workspace_root": workspace_root})
-
-
-# ---------------------------------------------------------------------------
 # ADR-018 — scaffold-flow gate standins. The scaffold parent task drives
 # three gates that need a PO standin when ``task.freeform_mode is True``:
 # the intent grill, the root-ADR approval, and each per-domain ADR
@@ -685,34 +652,3 @@ async def po_approve_domain_adr(
         verdict,
         comments[:160],
     )
-
-
-async def _load_repo(repo_id: int | None):
-    """Fetch the ``Repo`` row for a task's ``repo_id``.
-
-    Returns a minimal stub when the row is missing so the standin's
-    fallback paths still fire (instead of crashing). The standin never
-    escapes to the user — missing repo data is just another "no
-    grounding context" case.
-    """
-
-    if repo_id is None:
-        return _MinimalRepo(id=None, product_brief=None, mode=None)
-    async with async_session() as s:
-        row = (await s.execute(select(Repo).where(Repo.id == repo_id))).scalar_one_or_none()
-    return row or _MinimalRepo(id=repo_id, product_brief=None, mode=None)
-
-
-class _MinimalRepo:
-    """Tiny fall-back shim — exposes the fields the standin reads."""
-
-    def __init__(
-        self,
-        *,
-        id: int | None,  # noqa: A002 — mirrors ORM column name; standin reads .id
-        product_brief: str | None,
-        mode: str | None,
-    ) -> None:
-        self.id = id
-        self.product_brief = product_brief
-        self.mode = mode
