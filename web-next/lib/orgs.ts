@@ -2,7 +2,7 @@ import { api } from "./api";
 
 type OrgRole = "owner" | "admin" | "member";
 
-export type Org = {
+type Org = {
   id: number;
   name: string;
   slug: string;
