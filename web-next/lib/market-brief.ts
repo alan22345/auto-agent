@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-export type MarketBrief = {
+type MarketBrief = {
   id: number;
   repo_id: number;
   created_at: string;
