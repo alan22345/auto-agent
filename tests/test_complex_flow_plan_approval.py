@@ -69,7 +69,7 @@ def test_write_plan_creates_auto_agent_dir_when_missing(tmp_path: Path) -> None:
 async def test_complex_planning_transitions_to_awaiting_plan_approval(
     tmp_path: Path,
 ) -> None:
-    """``finalize_plan`` writes plan.md and transitions to AWAITING_PLAN_APPROVAL.
+    """``_finalize_plan`` writes plan.md and transitions to AWAITING_PLAN_APPROVAL.
 
     The helper is the orchestrator-facing entry point: pass it the task_id,
     workspace, and plan text; it persists the artefact and moves the state
@@ -78,7 +78,7 @@ async def test_complex_planning_transitions_to_awaiting_plan_approval(
 
     transition_mock = AsyncMock()
     with patch.object(plan_approval, "transition_task", transition_mock):
-        await plan_approval.finalize_plan(
+        await plan_approval._finalize_plan(
             task_id=7,
             workspace=str(tmp_path),
             plan_text="# Plan\n",

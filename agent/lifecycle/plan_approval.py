@@ -14,7 +14,7 @@ simulate approval by writing the file directly.
 Three primitives:
 
 - :func:`write_plan` — persist the plan text to ``.auto-agent/plan.md``.
-- :func:`finalize_plan` — write + transition to AWAITING_PLAN_APPROVAL.
+- :func:`_finalize_plan` — write + transition to AWAITING_PLAN_APPROVAL.
 - :func:`resume_after_plan_approval` — read the verdict and transition
   the task to CODING (approved) or BLOCKED (rejected). No-op when the
   file is missing.
@@ -55,7 +55,7 @@ def write_plan(workspace_root: str, plan_text: str) -> str:
     return target
 
 
-async def finalize_plan(
+async def _finalize_plan(
     *,
     task_id: int,
     workspace: str,
