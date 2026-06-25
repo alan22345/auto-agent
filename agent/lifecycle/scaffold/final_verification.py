@@ -223,6 +223,3 @@ async def run(task: Task) -> str:
         route_count=len(routes),
     )
     return verdict
-
-
-__all__ = ["run"]
