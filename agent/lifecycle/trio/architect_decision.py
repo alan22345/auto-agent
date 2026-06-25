@@ -167,5 +167,4 @@ async def resolve_decision(
 
 __all__ = [
     "read_decision",
-    "resolve_decision",
 ]

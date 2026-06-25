@@ -2,7 +2,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { MemoryHit, SearchEvent, Source } from '@/lib/search';
 
-export type StreamStatus = 'idle' | 'streaming' | 'done' | 'error';
+type StreamStatus = 'idle' | 'streaming' | 'done' | 'error';
 
 export type StreamState = {
   status: StreamStatus;
