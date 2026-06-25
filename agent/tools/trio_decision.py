@@ -142,42 +142,6 @@ class SubmitBacklogTool(_SinkTool):
         )
 
 
-class SubmitClarificationTool(_SinkTool):
-    name = "submit_clarification"
-    description = (
-        "Pause the trio and ask the human a question. Use this ONLY when "
-        "you genuinely cannot proceed without an answer. Phrase the question "
-        "as a numbered markdown list if you have multiple things to ask. "
-        "Do not call this AND submit_backlog in the same run — pick one."
-    )
-    parameters: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": "The question to surface to the human.",
-            },
-        },
-        "required": ["question"],
-    }
-
-    async def execute(
-        self, arguments: dict[str, Any], context: ToolContext
-    ) -> ToolResult:
-        q = str(arguments.get("question", "")).strip()
-        if not q:
-            return ToolResult(
-                output="submit_clarification: 'question' must be non-empty.",
-                is_error=True,
-            )
-        self._sink.clarification = q
-        self._sink.log.append({"tool": "submit_clarification"})
-        return ToolResult(
-            output="Clarification recorded. The parent will be paused. Stop here.",
-            token_estimate=10,
-        )
-
-
 class SubmitReviewVerdictTool(_SinkTool):
     name = "submit_review_verdict"
     description = (
@@ -215,11 +179,9 @@ class SubmitReviewVerdictTool(_SinkTool):
 
 
 def attach_architect_decision_tools(
-    agent: Any, sink: DecisionSink, *, allow_clarification: bool = True
+    agent: Any, sink: DecisionSink
 ) -> DecisionSink:
-    """Register submit_backlog (+ optionally submit_clarification) on the
-    given architect agent. Returns the same sink for chaining."""
+    """Register submit_backlog on the given architect agent. Returns the
+    same sink for chaining."""
     agent.tools.register(SubmitBacklogTool(sink))
-    if allow_clarification:
-        agent.tools.register(SubmitClarificationTool(sink))
     return sink

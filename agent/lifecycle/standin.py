@@ -661,6 +661,5 @@ __all__ = [
     "ImprovementAgentStandin",
     "POStandin",
     "Standin",
-    "SuggestionRepo",
     "run_freeform_gate",
 ]
