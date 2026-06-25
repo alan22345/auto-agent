@@ -5,7 +5,7 @@
 /* Do not modify it by hand - just update the pydantic models and then re-run the script
 */
 
-export type RiskLevel = "low" | "medium" | "high";
+type RiskLevel = "low" | "medium" | "high";
 
 export interface AffectedRoute {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
