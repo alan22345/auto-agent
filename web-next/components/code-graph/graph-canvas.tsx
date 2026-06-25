@@ -923,7 +923,7 @@ export function computeSearchClasses(
  * and its weight at high zoom-out where the evidence popover is
  * impractical.
  */
-export function formatBundleLabel(kind: string, count: number): string {
+function formatBundleLabel(kind: string, count: number): string {
   if (count > 1) return `${kind} (×${count})`;
   return kind;
 }
