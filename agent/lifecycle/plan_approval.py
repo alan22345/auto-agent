@@ -11,13 +11,10 @@ task parks at ``AWAITING_PLAN_APPROVAL`` until either:
 For Phase 5 the standin is *not* fired — the gate just blocks. Tests
 simulate approval by writing the file directly.
 
-Three primitives:
+Two primitives:
 
 - :func:`write_plan` — persist the plan text to ``.auto-agent/plan.md``.
 - :func:`_finalize_plan` — write + transition to AWAITING_PLAN_APPROVAL.
-- :func:`resume_after_plan_approval` — read the verdict and transition
-  the task to CODING (approved) or BLOCKED (rejected). No-op when the
-  file is missing.
 """
 
 from __future__ import annotations
@@ -27,10 +24,8 @@ import os
 from agent.lifecycle._orchestrator_api import transition_task
 from agent.lifecycle.workspace_paths import (
     AUTO_AGENT_DIR,
-    PLAN_APPROVAL_PATH,
     PLAN_PATH,
 )
-from agent.lifecycle.workspace_reader import read_gate_file
 from shared.events import publish, task_plan_ready
 from shared.logging import setup_logging
 
@@ -80,60 +75,3 @@ async def _finalize_plan(
             await publish(task_plan_ready(task_id, plan=plan_text))
         except Exception:  # pragma: no cover — defensive
             log.warning("plan_approval.publish_failed", task_id=task_id)
-
-
-# ---------------------------------------------------------------------------
-# Approval-side: read .auto-agent/plan_approval.json and resume.
-# ---------------------------------------------------------------------------
-
-
-_VALID_VERDICTS = {"approved", "rejected"}
-
-
-async def resume_after_plan_approval(
-    *,
-    task_id: int,
-    workspace: str,
-) -> bool:
-    """Read ``plan_approval.json`` and transition the task accordingly.
-
-    Returns:
-      - ``True`` if a verdict was found and the state machine advanced.
-      - ``False`` if the file is missing (the gate is still open). The
-        orchestrator polls; missing == "not yet."
-
-    Raises:
-      ValueError: malformed JSON, missing ``verdict``, unknown verdict,
-        or wrong ``schema_version``.
-    """
-
-    payload = read_gate_file(workspace, PLAN_APPROVAL_PATH, schema_version="1")
-    if payload is None:
-        return False
-    if not isinstance(payload, dict):
-        raise ValueError(f"{PLAN_APPROVAL_PATH} must be a JSON object")
-
-    verdict = payload.get("verdict")
-    if verdict not in _VALID_VERDICTS:
-        raise ValueError(
-            f"{PLAN_APPROVAL_PATH} verdict must be one of {sorted(_VALID_VERDICTS)}; "
-            f"got {verdict!r}"
-        )
-
-    comments = (payload.get("comments") or "").strip()
-
-    if verdict == "approved":
-        await transition_task(
-            task_id,
-            "coding",
-            f"Plan approved{(': ' + comments[:200]) if comments else ''}",
-        )
-        return True
-
-    # verdict == "rejected"
-    await transition_task(
-        task_id,
-        "blocked",
-        f"Plan rejected: {comments[:500] or '(no comments provided)'}",
-    )
-    return True

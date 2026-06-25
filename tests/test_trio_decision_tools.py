@@ -13,7 +13,6 @@ from agent.tools.base import ToolContext
 from agent.tools.trio_decision import (
     DecisionSink,
     SubmitBacklogTool,
-    SubmitClarificationTool,
     SubmitReviewVerdictTool,
 )
 
@@ -58,24 +57,6 @@ async def test_submit_backlog_assigns_ids_when_missing():
     )
     assert not result.is_error
     assert sink.backlog[0]["id"] == "T1"
-
-
-@pytest.mark.asyncio
-async def test_submit_clarification_records_question():
-    sink = DecisionSink()
-    result = await SubmitClarificationTool(sink).execute(
-        {"question": "1. Stack? 2. Auth?"}, _ctx(),
-    )
-    assert not result.is_error
-    assert sink.clarification == "1. Stack? 2. Auth?"
-
-
-@pytest.mark.asyncio
-async def test_submit_clarification_rejects_empty():
-    sink = DecisionSink()
-    result = await SubmitClarificationTool(sink).execute({"question": "  "}, _ctx())
-    assert result.is_error
-    assert sink.clarification is None
 
 
 @pytest.mark.asyncio
