@@ -475,7 +475,7 @@ export function collectSubtreeNodeIds(
   return visited;
 }
 
-export function groupEdgesByKind(
+function groupEdgesByKind(
   edges: Edge[],
   predicate: (e: Edge) => boolean,
 ): EdgeGroup[] {
