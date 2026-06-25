@@ -545,6 +545,5 @@ async def label_flow_blob(
 
 __all__ = [
     "MAX_LINES_PER_STEP",
-    "_path_group_key",
     "label_flow_blob",
 ]
