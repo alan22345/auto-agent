@@ -212,19 +212,6 @@ async def po_answer_grill(task, question: str, workspace_root: str) -> None:
     await standin.answer_grill(question, {"workspace_root": workspace_root})
 
 
-async def po_approve_plan(task, plan_md: str, workspace_root: str) -> None:
-    """PO standin approves/rejects a complex-flow plan.
-
-    Writes ``.auto-agent/plan_approval.json``. Never escapes.
-    """
-
-    from agent.lifecycle.standin import POStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = POStandin(task=task, repo=repo)
-    await standin.approve_plan(plan_md, {"workspace_root": workspace_root})
-
-
 # ---------------------------------------------------------------------------
 # ADR-018 — scaffold-flow gate standins. The scaffold parent task drives
 # three gates that need a PO standin when ``task.freeform_mode is True``:
