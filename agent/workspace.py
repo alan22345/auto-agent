@@ -108,13 +108,13 @@ def _ensure_local_excludes(workspace: str) -> None:
 
 
 async def _safe_write_dotenv(workspace: str, repo_id: int) -> None:
-    """Best-effort wrapper around ``write_repo_dotenv``.
+    """Best-effort wrapper around ``_write_repo_dotenv``.
 
     Called from ``clone_repo`` after every workspace setup.  Any failure is
     logged and swallowed — a .env write error must never kill the clone path.
     """
     try:
-        await write_repo_dotenv(workspace, repo_id)
+        await _write_repo_dotenv(workspace, repo_id)
     except Exception as exc:
         _log.warning(
             "write_repo_dotenv_failed",
@@ -146,7 +146,7 @@ async def clone_repo(
     If the workspace already exists (from a previous phase of the same task),
     it is reused and pulled to get latest changes instead of re-cloning.
 
-    If `repo_id` is provided, ``write_repo_dotenv`` is called after the clone
+    If `repo_id` is provided, ``_write_repo_dotenv`` is called after the clone
     (or workspace reuse) to write ``.env`` from ``RepoSecret`` rows. ADR-019 §7.
 
     Args:
@@ -492,7 +492,7 @@ def _dotenv_escape(value: str) -> str:
     return f'"{escaped}"'
 
 
-async def write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
+async def _write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
     """Write ``<workspace>/.env`` from ``RepoSecret`` rows + ensure ``.env`` is
     in ``.gitignore``.
 
