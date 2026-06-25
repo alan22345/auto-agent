@@ -12,7 +12,7 @@ export type MemoryHit = {
   facts: Array<{ id: string; content: string; kind: string; source: string | null }>;
 };
 
-export type ToolCallStart = {
+type ToolCallStart = {
   type: 'tool_call_start';
   tool: string;
   args: Record<string, unknown>;
