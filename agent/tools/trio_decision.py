@@ -357,8 +357,3 @@ def attach_architect_decision_tools(
     if allow_clarification:
         agent.tools.register(SubmitClarificationTool(sink))
     return sink
-
-
-def attach_tiebreak_tool(agent: Any, sink: DecisionSink) -> DecisionSink:
-    agent.tools.register(SubmitTiebreakTool(sink))
-    return sink
