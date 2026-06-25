@@ -45,7 +45,7 @@ interface NodeToCapability {
   byNode: Map<string, string>;
 }
 
-export function indexNodeToCapability(blob: FlowJsonBlob): NodeToCapability {
+function indexNodeToCapability(blob: FlowJsonBlob): NodeToCapability {
   const flowsById = new Map<string, Flow>(blob.flows.map((f) => [f.id, f]));
   const byNode = new Map<string, string>();
   for (const cap of blob.capabilities) {
