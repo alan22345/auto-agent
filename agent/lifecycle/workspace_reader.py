@@ -4,13 +4,12 @@ Every gated agent action writes a JSON or markdown file under the
 ``.auto-agent/`` workspace directory; the orchestrator reads it after
 ``agent.run`` returns. This module owns the read side of that contract.
 
-Three primitives:
+Two primitives:
 
 - :func:`read_gate_file` — returns parsed JSON (``dict``), markdown text
   (``str``), or ``None`` if the file is missing. JSON payloads carrying
   a ``schema_version`` field are validated against the caller's expected
   version; a mismatch raises :class:`ValueError`.
-- :func:`gate_file_exists` — boolean existence check.
 - :func:`expect_gate_file` — like :func:`read_gate_file` but raises
   :class:`MissingGateFileError` instead of returning ``None``. Used by
   the orchestrator's retry-then-escalate path in later phases.
@@ -89,12 +88,6 @@ def read_gate_file(
     # Markdown (or anything else not .json) is returned verbatim.
     with open(abs_path) as fh:
         return fh.read()
-
-
-def gate_file_exists(workspace_root: str, relative_path: str) -> bool:
-    """Boolean existence check — does not parse the file."""
-
-    return os.path.isfile(_absolute_path(workspace_root, relative_path))
 
 
 def expect_gate_file(

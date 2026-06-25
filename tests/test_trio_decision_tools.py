@@ -15,7 +15,6 @@ from agent.tools.trio_decision import (
     SubmitBacklogTool,
     SubmitClarificationTool,
     SubmitReviewVerdictTool,
-    SubmitTiebreakTool,
 )
 
 
@@ -97,42 +96,6 @@ async def test_submit_review_verdict_records_reject_with_feedback():
     )
     assert sink.review_verdict["ok"] is False
     assert "null check" in sink.review_verdict["feedback"]
-
-
-@pytest.mark.asyncio
-async def test_submit_tiebreak_accept_records_decision():
-    sink = DecisionSink()
-    result = await SubmitTiebreakTool(sink).execute(
-        {"action": "accept", "reason": "spec ok"}, _ctx(),
-    )
-    assert not result.is_error
-    assert sink.tiebreak["action"] == "accept"
-    assert sink.tiebreak["reason"] == "spec ok"
-
-
-@pytest.mark.asyncio
-async def test_submit_tiebreak_revise_backlog_normalises_new_items():
-    sink = DecisionSink()
-    await SubmitTiebreakTool(sink).execute(
-        {
-            "action": "revise_backlog",
-            "new_items": [
-                {"id": "T1a", "title": "split a", "description": "..."},
-                {"id": "T1b", "title": "split b", "description": "..."},
-            ],
-        },
-        _ctx(),
-    )
-    assert sink.tiebreak["action"] == "revise_backlog"
-    assert len(sink.tiebreak["new_items"]) == 2
-
-
-@pytest.mark.asyncio
-async def test_submit_tiebreak_rejects_unknown_action():
-    sink = DecisionSink()
-    result = await SubmitTiebreakTool(sink).execute({"action": "shrug"}, _ctx())
-    assert result.is_error
-    assert sink.tiebreak is None
 
 
 @pytest.mark.asyncio
