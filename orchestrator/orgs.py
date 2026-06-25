@@ -28,7 +28,7 @@ __all__ = ["router"]
 _ROLES_INVITABLE = {"admin", "member"}  # owner is reserved for the creator
 
 
-class OrgOut(BaseModel):
+class _OrgOut(BaseModel):
     id: int
     name: str
     slug: str
@@ -36,8 +36,8 @@ class OrgOut(BaseModel):
 
 
 class MyOrgsResponse(BaseModel):
-    orgs: list[OrgOut]
-    current: OrgOut
+    orgs: list[_OrgOut]
+    current: _OrgOut
 
 
 class SwitchOrgRequest(BaseModel):
@@ -112,7 +112,7 @@ async def list_my_orgs(
         .order_by(Organization.created_at.asc())
     )).all()
     orgs = [
-        OrgOut(id=o.id, name=o.name, slug=o.slug, role=role)
+        _OrgOut(id=o.id, name=o.name, slug=o.slug, role=role)
         for o, role in rows
     ]
     if not orgs:
