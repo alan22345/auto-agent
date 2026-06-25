@@ -1,6 +1,6 @@
 import { api } from "./api";
 
-export type OrgRole = "owner" | "admin" | "member";
+type OrgRole = "owner" | "admin" | "member";
 
 export type Org = {
   id: number;
