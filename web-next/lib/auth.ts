@@ -8,10 +8,6 @@ export async function login(username: string, password: string) {
   });
 }
 
-export async function me() {
-  return api<UserData>('/api/auth/me');
-}
-
 export async function logout() {
   return api<{ ok: true }>('/api/auth/logout', { method: 'POST' });
 }
