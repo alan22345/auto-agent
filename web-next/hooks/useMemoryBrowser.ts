@@ -11,7 +11,7 @@ export interface FactError {
   message: string;
 }
 
-export interface UseMemoryBrowser {
+interface UseMemoryBrowser {
   query: string;
   setQuery: (q: string) => void;
   results: MemoryEntitySummary[] | null;
