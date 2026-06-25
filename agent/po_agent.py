@@ -239,16 +239,6 @@ async def po_approve_design(task, design_md: str, workspace_root: str) -> None:
     await standin.approve_design(design_md, {"workspace_root": workspace_root})
 
 
-async def po_review_pr(task, pr_diff: str, pr_metadata: dict, workspace_root: str) -> None:
-    """PO standin reviews a PR and writes ``.auto-agent/pr_review.json``."""
-
-    from agent.lifecycle.standin import POStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = POStandin(task=task, repo=repo)
-    await standin.review_pr(pr_diff, pr_metadata, {"workspace_root": workspace_root})
-
-
 # ---------------------------------------------------------------------------
 # ADR-018 — scaffold-flow gate standins. The scaffold parent task drives
 # three gates that need a PO standin when ``task.freeform_mode is True``:
