@@ -3,7 +3,7 @@ import { useState, useCallback } from 'react';
 import { useWS } from './useWS';
 import type { MemoryRow } from '@/types/ws';
 
-export type MemoryStatus = { text: string; isError?: boolean };
+type MemoryStatus = { text: string; isError?: boolean };
 
 export function useMemorySession() {
   const [rows, setRows] = useState<MemoryRow[]>([]);
