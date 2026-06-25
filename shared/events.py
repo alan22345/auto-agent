@@ -754,7 +754,7 @@ class EventBus:
 # ---------------------------------------------------------------------------
 
 
-class Publisher(Protocol):
+class _Publisher(Protocol):
     """Anything that can accept an Event for downstream consumers."""
 
     async def publish(self, event: Event) -> None: ...
@@ -844,10 +844,10 @@ class InMemoryPublisher:
         self.clear()
 
 
-_publisher: Publisher | None = None
+_publisher: _Publisher | None = None
 
 
-def set_publisher(publisher: Publisher) -> None:
+def set_publisher(publisher: _Publisher) -> None:
     """Register the active publisher. Called once at process start (production)
     and per-test (in fixtures).
 
@@ -860,7 +860,7 @@ def set_publisher(publisher: Publisher) -> None:
     _publisher = publisher
 
 
-def get_publisher() -> Publisher:
+def get_publisher() -> _Publisher:
     """Return the active publisher. Raises if none is registered — every
     process must wire one in before publishing."""
     if _publisher is None:
