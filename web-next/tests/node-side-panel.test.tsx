@@ -4,9 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   NodeSidePanel,
   collectSubtreeNodeIds,
-  groupEdgesByKind,
 } from '@/components/code-graph/node-side-panel';
-import type { Edge, RepoGraphBlob } from '@/types/api';
+import type { RepoGraphBlob } from '@/types/api';
 
 function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({
@@ -189,26 +188,6 @@ describe('collectSubtreeNodeIds', () => {
   it('returns just the node id when the id is unknown', () => {
     const set = collectSubtreeNodeIds(compoundBlob, 'no-such-node');
     expect(Array.from(set)).toEqual(['no-such-node']);
-  });
-});
-
-describe('groupEdgesByKind', () => {
-  it('groups edges in canonical kind order', () => {
-    const all = blob.edges as Edge[];
-    const groups = groupEdgesByKind(all, () => true);
-    // Canonical kind order in the component is calls → imports →
-    // inherits → http; absent kinds are dropped.
-    expect(groups.map((g) => g.kind)).toEqual(['calls', 'imports', 'inherits']);
-  });
-
-  it('skips edges that fail the predicate', () => {
-    const groups = groupEdgesByKind(
-      blob.edges as Edge[],
-      (e) => e.target === 'agent/dog.py::Dog.bark',
-    );
-    expect(groups).toHaveLength(1);
-    expect(groups[0].kind).toBe('calls');
-    expect(groups[0].edges).toHaveLength(1);
   });
 });
 

@@ -178,62 +178,6 @@ class SubmitClarificationTool(_SinkTool):
         )
 
 
-class SubmitCheckpointDecisionTool(_SinkTool):
-    name = "submit_checkpoint_decision"
-    description = (
-        "Commit the architect's checkpoint decision after reviewing the "
-        "current state of the integration branch. Use one of:\n"
-        "- 'done' — backlog complete, ready to open the integration PR.\n"
-        "- 'continue' — keep going; next pending item is fine to dispatch.\n"
-        "- 'revise' — backlog needs new items; call run_revision next.\n"
-        "- 'blocked' — cannot proceed; supply 'reason'.\n"
-        "- 'awaiting_clarification' — need human input; supply 'question'.\n"
-        "Call EXACTLY ONCE per checkpoint run."
-    )
-    parameters: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["done", "continue", "revise", "blocked", "awaiting_clarification"],
-            },
-            "reason": {
-                "type": "string",
-                "description": "One sentence explaining the decision.",
-            },
-            "question": {
-                "type": "string",
-                "description": "For 'awaiting_clarification' only.",
-            },
-        },
-        "required": ["action"],
-    }
-
-    async def execute(
-        self, arguments: dict[str, Any], context: ToolContext
-    ) -> ToolResult:
-        action = str(arguments.get("action", "")).strip()
-        valid = {"done", "continue", "revise", "blocked", "awaiting_clarification"}
-        if action not in valid:
-            return ToolResult(
-                output=f"submit_checkpoint_decision: 'action' must be one of {sorted(valid)}.",
-                is_error=True,
-            )
-        decision: dict = {"action": action}
-        reason = str(arguments.get("reason", "")).strip()
-        if reason:
-            decision["reason"] = reason
-        question = str(arguments.get("question", "")).strip()
-        if question:
-            decision["question"] = question
-        self._sink.checkpoint = decision
-        self._sink.log.append({"tool": "submit_checkpoint_decision", "action": action})
-        return ToolResult(
-            output=f"Checkpoint decision recorded: {action}. Stop here.",
-            token_estimate=10,
-        )
-
-
 class SubmitReviewVerdictTool(_SinkTool):
     name = "submit_review_verdict"
     description = (
