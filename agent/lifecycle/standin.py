@@ -663,5 +663,4 @@ __all__ = [
     "Standin",
     "SuggestionRepo",
     "run_freeform_gate",
-    "select_standin",
 ]
