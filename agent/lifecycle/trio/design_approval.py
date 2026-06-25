@@ -246,5 +246,4 @@ async def resume_after_design_approval(
 __all__ = [
     "finalize_design",
     "resume_after_design_approval",
-    "write_design",
 ]
