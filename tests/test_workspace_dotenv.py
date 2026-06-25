@@ -71,9 +71,9 @@ async def test_write_repo_dotenv_creates_env_file(tmp_path: Path):
     secrets = {"STRIPE_API_KEY": "sk_test_123", "POSTGRES_URL": "postgres://localhost/db"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     env_path = tmp_path / ".env"
     assert env_path.exists(), ".env was not created"
@@ -89,9 +89,9 @@ async def test_write_repo_dotenv_overwrites_existing(tmp_path: Path):
     secrets = {"NEW_KEY": "keep"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     content = (tmp_path / ".env").read_text()
     assert "OLD_KEY" not in content
@@ -104,9 +104,9 @@ async def test_write_repo_dotenv_creates_gitignore_if_absent(tmp_path: Path):
     secrets = {"FOO": "bar"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     gi = tmp_path / ".gitignore"
     assert gi.exists(), ".gitignore was not created"
@@ -121,9 +121,9 @@ async def test_write_repo_dotenv_appends_env_to_existing_gitignore(tmp_path: Pat
     secrets = {"FOO": "bar"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     content = (tmp_path / ".gitignore").read_text()
     assert "node_modules/" in content
@@ -137,9 +137,9 @@ async def test_write_repo_dotenv_does_not_duplicate_env_in_gitignore(tmp_path: P
     secrets = {"FOO": "bar"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     content = (tmp_path / ".gitignore").read_text()
     lines = [line.strip() for line in content.splitlines()]
@@ -156,9 +156,9 @@ async def test_write_repo_dotenv_escapes_special_values(tmp_path: Path):
     }
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     content = (tmp_path / ".env").read_text()
 
@@ -185,9 +185,9 @@ async def test_write_repo_dotenv_file_permissions(tmp_path: Path):
     secrets = {"SECRET": "value"}
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     mode = (tmp_path / ".env").stat().st_mode & 0o777
     assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
@@ -202,9 +202,9 @@ async def test_write_repo_dotenv_no_repo_warns_and_returns(tmp_path: Path, caplo
         import structlog.testing
 
         with structlog.testing.capture_logs() as cap_logs:
-            from agent.workspace import write_repo_dotenv
+            from agent.workspace import _write_repo_dotenv
 
-            await write_repo_dotenv(tmp_path, repo_id=999)
+            await _write_repo_dotenv(tmp_path, repo_id=999)
 
     assert not (tmp_path / ".env").exists(), ".env should NOT be created when repo is not found"
     event_names = [entry.get("event") for entry in cap_logs]
@@ -216,9 +216,9 @@ async def test_write_repo_dotenv_empty_secrets_writes_empty_file(tmp_path: Path)
     """When there are no secrets, .env is created and is empty (or just whitespace)."""
     p1, p2 = _patch_db(_make_repo_mock(), {})
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     env_path = tmp_path / ".env"
     assert env_path.exists(), ".env should be created even when secrets dict is empty"
@@ -240,9 +240,9 @@ async def test_write_repo_dotenv_preserves_literal_dollar_brace(tmp_path: Path):
     }
     p1, p2 = _patch_db(_make_repo_mock(), secrets)
     with p1, p2:
-        from agent.workspace import write_repo_dotenv
+        from agent.workspace import _write_repo_dotenv
 
-        await write_repo_dotenv(tmp_path, repo_id=1)
+        await _write_repo_dotenv(tmp_path, repo_id=1)
 
     try:
         import dotenv
