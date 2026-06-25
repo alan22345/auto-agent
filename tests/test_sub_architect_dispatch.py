@@ -291,7 +291,7 @@ def test_validator_rejects_nested_spawn(tmp_path: Path) -> None:
     from agent.lifecycle.trio import sub_architect
 
     # Parent context: spawn_sub_architects is valid.
-    ok, _ = sub_architect.validate_decision_for_role(
+    ok, _ = sub_architect._validate_decision_for_role(
         decision={
             "action": "spawn_sub_architects",
             "payload": {"slices": [{"name": "a", "scope": "a"}]},
@@ -301,7 +301,7 @@ def test_validator_rejects_nested_spawn(tmp_path: Path) -> None:
     assert ok is True
 
     # Sub-architect context: spawn_sub_architects is rejected.
-    ok, reason = sub_architect.validate_decision_for_role(
+    ok, reason = sub_architect._validate_decision_for_role(
         decision={
             "action": "spawn_sub_architects",
             "payload": {"slices": [{"name": "deeper", "scope": "x"}]},

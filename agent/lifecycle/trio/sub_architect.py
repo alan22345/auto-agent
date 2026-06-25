@@ -119,7 +119,7 @@ MAX_GRILL_ROUNDS_PER_SLICE = 6
 # ---------------------------------------------------------------------------
 
 
-def validate_decision_for_role(
+def _validate_decision_for_role(
     *,
     decision: dict[str, Any],
     is_sub_architect: bool,
@@ -197,7 +197,7 @@ async def _run_sub_architect_slice(
     Recursion bound: every architect run inside this function passes
     ``slice_name`` to ``create_architect_agent`` so the agent reads its
     own slice's pinned context, and any ``spawn_sub_architects`` decision
-    a sub-architect emits is rejected by :func:`validate_decision_for_role`.
+    a sub-architect emits is rejected by :func:`_validate_decision_for_role`.
 
     On any grill request mid-design — the sub-architect writes
     ``slices/<name>/grill_question.json`` and stops; the function returns
@@ -715,7 +715,7 @@ async def _run_slice_gap_fix(
         }
 
     # Recursion-bound check — a sub-architect cannot spawn deeper.
-    ok, reason = validate_decision_for_role(
+    ok, reason = _validate_decision_for_role(
         decision=decision,
         is_sub_architect=True,
     )
@@ -983,7 +983,7 @@ async def _run_one_slice_with_relay(
         # we let it proceed.
         nested = _read_slice_decision(workspace_root, slice_name)
         if nested is not None:
-            nested_ok, nested_reason = validate_decision_for_role(
+            nested_ok, nested_reason = _validate_decision_for_role(
                 decision=nested,
                 is_sub_architect=True,
             )
@@ -1124,5 +1124,4 @@ __all__ = [
     "SliceResult",
     "SubArchitectDispatchResult",
     "dispatch_sub_architects",
-    "validate_decision_for_role",
 ]
