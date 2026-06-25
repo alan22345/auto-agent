@@ -225,20 +225,6 @@ async def po_approve_plan(task, plan_md: str, workspace_root: str) -> None:
     await standin.approve_plan(plan_md, {"workspace_root": workspace_root})
 
 
-async def po_approve_design(task, design_md: str, workspace_root: str) -> None:
-    """PO standin approves/rejects a complex_large design doc.
-
-    Same shape as :func:`po_approve_plan`; design approval reuses
-    ``plan_approval.json`` per ADR-015 §2.
-    """
-
-    from agent.lifecycle.standin import POStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = POStandin(task=task, repo=repo)
-    await standin.approve_design(design_md, {"workspace_root": workspace_root})
-
-
 # ---------------------------------------------------------------------------
 # ADR-018 — scaffold-flow gate standins. The scaffold parent task drives
 # three gates that need a PO standin when ``task.freeform_mode is True``:
