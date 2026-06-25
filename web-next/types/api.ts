@@ -1080,14 +1080,3 @@ export interface VerifyAttemptOut {
   started_at: string;
   finished_at?: string | null;
 }
-/**
- * One backlog item the architect dispatches to a builder child task.
- */
-export interface WorkItem {
-  id: string;
-  title: string;
-  description: string;
-  status?: "pending" | "in_progress" | "done" | "skipped";
-  assigned_task_id?: number | null;
-  discovered_in_attempt_id?: number | null;
-}
