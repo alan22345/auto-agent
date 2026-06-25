@@ -18,7 +18,7 @@ export type Member = {
   joined_at: string;
 };
 
-export type MyOrgsResponse = { orgs: Org[]; current: Org };
+type MyOrgsResponse = { orgs: Org[]; current: Org };
 
 export function fetchMyOrgs(): Promise<MyOrgsResponse> {
   return api<MyOrgsResponse>("/api/orgs/me");

@@ -4,15 +4,12 @@ Every gated agent action writes a JSON or markdown file under the
 ``.auto-agent/`` workspace directory; the orchestrator reads it after
 ``agent.run`` returns. This module owns the read side of that contract.
 
-Two primitives:
+One primitive:
 
 - :func:`read_gate_file` — returns parsed JSON (``dict``), markdown text
   (``str``), or ``None`` if the file is missing. JSON payloads carrying
   a ``schema_version`` field are validated against the caller's expected
   version; a mismatch raises :class:`ValueError`.
-- :func:`expect_gate_file` — like :func:`read_gate_file` but raises
-  :class:`MissingGateFileError` instead of returning ``None``. Used by
-  the orchestrator's retry-then-escalate path in later phases.
 
 The module intentionally does not own state-machine wiring or retry
 logic; those live in the orchestrator. This is plumbing only.
@@ -22,16 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-
-
-class MissingGateFileError(FileNotFoundError):
-    """Raised by :func:`expect_gate_file` when the file is absent.
-
-    Inherits :class:`FileNotFoundError` so callers that already trap
-    ``OSError`` family exceptions continue to work; the dedicated class
-    lets the orchestrator distinguish "skill didn't run" from generic
-    filesystem errors.
-    """
 
 
 def _absolute_path(workspace_root: str, relative_path: str) -> str:
@@ -88,22 +75,3 @@ def read_gate_file(
     # Markdown (or anything else not .json) is returned verbatim.
     with open(abs_path) as fh:
         return fh.read()
-
-
-def expect_gate_file(
-    workspace_root: str,
-    relative_path: str,
-    schema_version: str = "1",
-) -> dict | str:
-    """Read a gate file or raise :class:`MissingGateFileError`.
-
-    The orchestrator's retry-then-escalate path (Phase 4+) uses this to
-    distinguish "skill didn't run" from "skill ran and wrote something
-    invalid" — the missing case is recoverable by re-invoking the agent
-    with an amended prompt, the invalid case escalates.
-    """
-
-    result = read_gate_file(workspace_root, relative_path, schema_version)
-    if result is None:
-        raise MissingGateFileError(f"expected gate file {relative_path} under {workspace_root}")
-    return result
