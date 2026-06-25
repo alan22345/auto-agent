@@ -391,4 +391,7 @@ async def run(task: Task) -> dict[str, Any]:
     return {"status": "all_complete", "results": results}
 
 
-__all__ = ["run"]
+# ``run`` is the module's entry point, but the scaffold parent driver invokes
+# it via attribute access (``domain_architect.run``) rather than a star-import,
+# so it does not need to be a declared star-export.
+__all__: list[str] = []
