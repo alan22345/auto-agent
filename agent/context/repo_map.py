@@ -217,7 +217,7 @@ def parse_stored_map(stored: str) -> tuple[str | None, str]:
     return None, stored
 
 
-def parse_single_file(workspace: str, relative_path: str) -> FileEntry:
+def _parse_single_file(workspace: str, relative_path: str) -> FileEntry:
     """Parse a single file and return its FileEntry."""
     entry = FileEntry(path=relative_path)
     full_path = Path(workspace) / relative_path
@@ -252,7 +252,7 @@ def patch_map(
 
         if full_path.is_file():
             # File exists — re-parse it
-            new_entry = parse_single_file(workspace, file_path)
+            new_entry = _parse_single_file(workspace, file_path)
             entries_by_path[file_path] = new_entry
         else:
             # File was deleted
