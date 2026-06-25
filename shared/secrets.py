@@ -25,6 +25,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.config import settings
 from shared.database import async_session
 
+# Public surface: the key allowlist and the CRUD helpers. ``UnknownSecretKey``
+# is an internal-only exception (raised by ``_check_key``); it is deliberately
+# omitted so it is not treated as part of the module's public API.
+__all__ = [
+    "SECRET_KEYS",
+    "delete",
+    "get",
+    "list_keys",
+    "set",
+]
+
 # Closed allowlist. The router whitelists path params against this set.
 SECRET_KEYS: frozenset[str] = frozenset({"github_pat", "anthropic_api_key"})
 

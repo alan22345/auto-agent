@@ -285,6 +285,5 @@ __all__ = [
     "BRANCH_INLINE_DEPTH",
     "DERIVER_VERSION",
     "MAX_FLOW_STEPS",
-    "classify_terminal",
     "derive_flow_blob",
 ]

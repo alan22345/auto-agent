@@ -14,7 +14,7 @@
 import { useState } from 'react';
 import type { Edge } from '@/types/api';
 
-export const EDGE_KINDS: Edge['kind'][] = ['calls', 'imports', 'inherits', 'http'];
+const EDGE_KINDS: Edge['kind'][] = ['calls', 'imports', 'inherits', 'http'];
 
 interface Props {
   onChange: (hidden: Set<Edge['kind']>) => void;
