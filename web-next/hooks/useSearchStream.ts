@@ -4,7 +4,7 @@ import type { MemoryHit, SearchEvent, Source } from '@/lib/search';
 
 type StreamStatus = 'idle' | 'streaming' | 'done' | 'error';
 
-export type StreamState = {
+type StreamState = {
   status: StreamStatus;
   activeTool: { tool: string; args: Record<string, unknown> } | null;
   sources: Source[];
