@@ -5,9 +5,9 @@ system prompt. The agent calls the ``submit-intent-summary`` skill,
 which writes ``.auto-agent/intent.md``. The orchestrator reads that
 file back here to confirm and to surface it on UI.
 
-When ``task.freeform_mode is True``, the PO standin
-(``agent.po_agent.po_answer_intent_grill``) answers any pending grill
-question instead of escaping to the user — see ADR-018 §2 + ADR-015 §6.
+In freeform mode (``task.freeform_mode is True``) there is no human in
+the loop, so the agent is told to infer answers and write the intent doc
+in one pass rather than pausing to grill — see ADR-018 §2 + ADR-015 §6.
 """
 
 from __future__ import annotations
@@ -26,26 +26,6 @@ if TYPE_CHECKING:
     from shared.models import Task
 
 log = structlog.get_logger()
-
-
-async def request_po_intent_answer(task: Task, question: str) -> str:
-    """Ask the PO standin to answer a pending intent-grill question.
-
-    Thin wrapper around ``agent.po_agent.po_answer_intent_grill`` so the
-    scaffold modules don't have to know about ``po_agent`` directly.
-    Returns the absolute path the PO wrote to.
-
-    Caller is responsible for checking ``task.freeform_mode`` before
-    invoking this — in human-in-loop mode the user answers via the UI.
-    """
-
-    from agent.po_agent import po_answer_intent_grill
-
-    workspace = await prepare_scaffold_workspace(task)
-    await po_answer_intent_grill(task, question, workspace)
-    from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH
-
-    return os.path.join(workspace, INTENT_GRILL_ANSWER_PATH)
 
 
 async def run(task: Task) -> str:
