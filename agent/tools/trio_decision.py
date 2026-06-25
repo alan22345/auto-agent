@@ -176,12 +176,3 @@ class SubmitReviewVerdictTool(_SinkTool):
             output=f"Verdict recorded: ok={ok}. Stop here.",
             token_estimate=10,
         )
-
-
-def attach_architect_decision_tools(
-    agent: Any, sink: DecisionSink
-) -> DecisionSink:
-    """Register submit_backlog on the given architect agent. Returns the
-    same sink for chaining."""
-    agent.tools.register(SubmitBacklogTool(sink))
-    return sink
