@@ -686,13 +686,6 @@ export interface RecomputeFlowsResponse {
   labeled_flow_count?: number;
 }
 /**
- * Passed to architect.checkpoint on parent re-entry after integration PR CI failure.
- */
-export interface RepairContext {
-  ci_log: string;
-  failed_pr_url: string;
-}
-/**
  * Typed representation of a repo from the orchestrator API.
  */
 export interface RepoData {
