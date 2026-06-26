@@ -54,6 +54,28 @@ _REDRIVEN_STATUSES = {
     TaskStatus.CODING,
 }
 
+# A human or external actor — not a system loop — is the expected driver of
+# these, so "stuck with nothing driving it" is simply false: the task is
+# correctly parked on someone's input (an approval, an answer, fixed creds, a
+# quota reset). Flagging them paged the owner every few hours about tasks
+# waiting on *them* — 33 awaiting_clarification alerts in a single prod sweep.
+# The backstop exists for SILENT SYSTEM strands; a human queue is not a strand.
+_HUMAN_GATED = {
+    TaskStatus.AWAITING_APPROVAL,
+    TaskStatus.AWAITING_PLAN_APPROVAL,
+    TaskStatus.AWAITING_CLARIFICATION,
+    TaskStatus.AWAITING_REVIEW,
+    TaskStatus.AWAITING_DESIGN_APPROVAL,
+    TaskStatus.AWAITING_INTENT_GRILL,
+    TaskStatus.AWAITING_ROOT_ADR_APPROVAL,
+    TaskStatus.AWAITING_DOMAIN_GRILL,
+    TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL,
+    TaskStatus.AWAITING_REQUIRED_SECRETS,
+    TaskStatus.BLOCKED,
+    TaskStatus.BLOCKED_ON_AUTH,
+    TaskStatus.BLOCKED_ON_QUOTA,
+}
+
 
 def is_silently_stuck(
     task: Task,
@@ -70,6 +92,8 @@ def is_silently_stuck(
     task that is merely taking a long time.
     """
     if task.status in _TERMINAL or task.status in _REDRIVEN_STATUSES:
+        return False
+    if task.status in _HUMAN_GATED:
         return False
     if heartbeat_alive:
         return False

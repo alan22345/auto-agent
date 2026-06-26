@@ -124,3 +124,25 @@ async def test_non_trio_task_is_ignored(session, monkeypatch) -> None:
     await _seed_task(session, status=TaskStatus.CODING, age_minutes=120)
     mock = await _run_tick(session, monkeypatch)
     mock.assert_not_awaited()
+
+
+async def test_stalled_parent_handled_once_until_it_progresses(session, monkeypatch) -> None:
+    # Without dedup the watchdog re-notified AND re-dispatched every stale parent
+    # every 5-min tick — in prod, 28 orphaned parents = a telegram each, every
+    # tick, forever. Handle each stall episode once; only fresh progress re-arms.
+    import agent.lifecycle.trio.recovery as recovery_mod
+
+    recovery_mod._stall_handled.clear()
+    task = await _seed_task(session, status=TaskStatus.TRIO_EXECUTING, age_minutes=120)
+
+    first = await _run_tick(session, monkeypatch)
+    first.assert_awaited_once()
+
+    second = await _run_tick(session, monkeypatch)  # same episode, updated_at unchanged
+    second.assert_not_awaited()
+
+    # Real progress bumps updated_at → a new episode is eligible again.
+    task.updated_at = datetime.now(UTC) - timedelta(minutes=120)
+    await session.flush()
+    third = await _run_tick(session, monkeypatch)
+    third.assert_awaited_once()
