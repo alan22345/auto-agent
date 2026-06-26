@@ -141,11 +141,6 @@ async def set_focus(
     await session.flush()
 
 
-async def clear_focus(session: AsyncSession, user_id: int) -> None:
-    """Drop focus to 'none' (used by the `reset` command)."""
-    await set_focus(session, user_id, focus_kind="none", focus_id=None)
-
-
 async def _force_expire(session: AsyncSession, user_id: int) -> None:
     """Test-only: shove expires_at into the past."""
     stmt = (
