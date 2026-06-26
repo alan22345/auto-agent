@@ -7,7 +7,6 @@ from shared.types import (
     IntentVerdict,
     MemorySaveResult,
     ProposedFact,
-    RepairContext,
     RepoData,
     ReviewAttemptOut,
     ReviewCombinedVerdict,
@@ -71,11 +70,6 @@ def test_review_attempt_out_instantiates():
     )
     assert a.code_review_verdict is None
     assert a.ui_check is None
-
-
-def test_repair_context_round_trip():
-    r = RepairContext(ci_log="err", failed_pr_url="https://github.com/x/y/pull/1")
-    assert RepairContext(**r.model_dump()) == r
 
 
 def test_trio_review_attempt_serialises():
