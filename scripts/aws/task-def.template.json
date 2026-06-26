@@ -1,0 +1,75 @@
+{
+  "family": "${TASK_FAMILY}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "4096",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "volumes": [
+    {
+      "name": "userdata",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "${EFS_ID}",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": { "accessPointId": "${EFS_ACCESS_POINT_ID}", "iam": "DISABLED" }
+      }
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "redis",
+      "image": "public.ecr.aws/docker/library/redis:7-alpine",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${LOG_GROUP}",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "redis"
+        }
+      }
+    },
+    {
+      "name": "auto-agent",
+      "image": "${ECR_AUTOAGENT}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [ { "containerPort": 2020, "protocol": "tcp" } ],
+      "dependsOn": [ { "containerName": "redis", "condition": "START" } ],
+      "environmentFiles": [
+        { "value": "arn:aws:s3:::${ENV_BUCKET}/autoagent.env", "type": "s3" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "userdata", "containerPath": "/data", "readOnly": false }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${LOG_GROUP}",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "auto-agent"
+        }
+      }
+    },
+    {
+      "name": "web-next",
+      "image": "${ECR_WEBNEXT}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [ { "containerPort": 3000, "protocol": "tcp" } ],
+      "dependsOn": [ { "containerName": "auto-agent", "condition": "START" } ],
+      "environment": [
+        { "name": "API_URL", "value": "http://localhost:2020" },
+        { "name": "NODE_ENV", "value": "production" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${LOG_GROUP}",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "web-next"
+        }
+      }
+    }
+  ]
+}
