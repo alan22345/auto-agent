@@ -165,6 +165,4 @@ async def resolve_decision(
     return {"action": action, "payload": body}
 
 
-__all__ = [
-    "read_decision",
-]
+__all__: list[str] = []
