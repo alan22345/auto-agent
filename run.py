@@ -2151,6 +2151,16 @@ async def _trio_heartbeat_runner() -> None:
     await trio_heartbeat_watchdog()
 
 
+async def _reconciler_runner() -> None:
+    """DB-truth backstop: surface any task that strands silently past the
+    threshold, below which the specialised watchdogs/pollers handle recovery.
+
+    See orchestrator/reconciler.py::reconciler_loop for the policy.
+    """
+    from orchestrator.reconciler import reconciler_loop
+    await reconciler_loop()
+
+
 # ---------------------------------------------------------------------------
 # Startup recovery — re-emit events for tasks stuck in active states
 # ---------------------------------------------------------------------------
@@ -2342,6 +2352,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_architecture_loop()),
         asyncio.create_task(_scaffold_heartbeat_runner()),
         asyncio.create_task(_trio_heartbeat_runner()),
+        asyncio.create_task(_reconciler_runner()),
         asyncio.create_task(run_health_loop_supervisor()),
         asyncio.create_task(queued_dispatch_poller()),
     ]
