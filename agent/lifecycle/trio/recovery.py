@@ -3,15 +3,60 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from shared.database import async_session
 from shared.events import Event, TaskEventType, publish
 from shared.models import ArchitectAttempt, Task, TaskStatus
 
 log = structlog.get_logger()
+
+
+async def _run_trio_parent_logged(parent_task: Task) -> None:
+    """Run the idempotent trio driver, logging any unobserved exception with a
+    full traceback.
+
+    Fire-and-forget ``asyncio.create_task`` otherwise swallows failures
+    silently — that bit us on task 170 after the ADR-013 deploy. structlog's
+    ``log.exception`` doesn't capture ``sys.exc_info`` reliably under our
+    processor chain, so we format the traceback ourselves.
+    """
+    from agent.lifecycle.trio import run_trio_parent
+
+    try:
+        await run_trio_parent(parent_task)
+    except Exception as exc:
+        import traceback
+
+        log.error(
+            "trio.run_failed",
+            parent_id=parent_task.id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            traceback=traceback.format_exc(),
+        )
+
+
+def _resumable_trio_where():
+    """Trio parents whose idempotent driver should be re-invoked.
+
+    In scope (same set boot recovery and the watchdog share):
+      - ``TRIO_EXECUTING``: actively running the per-item loop.
+      - ``ARCHITECT_BACKLOG_EMIT``: backlog emitted but the per-item builder
+        loop never started (observed on the 2026-05-23 harpoon run).
+      - ``AWAITING_DESIGN_APPROVAL`` with ``freeform_mode=True``: the standin
+        needs the driver re-invoked so the design gate fires. A non-freeform
+        design gate is a real human wait — deliberately excluded.
+    Re-invoking is safe: ``run_trio_parent`` checks committed artefacts first.
+    """
+    return or_(
+        Task.status == TaskStatus.TRIO_EXECUTING,
+        Task.status == TaskStatus.ARCHITECT_BACKLOG_EMIT,
+        (Task.status == TaskStatus.AWAITING_DESIGN_APPROVAL) & (Task.freeform_mode.is_(True)),
+    )
 
 
 async def resume_all_trio_parents() -> None:
@@ -35,30 +80,8 @@ async def resume_all_trio_parents() -> None:
     #     is idempotent: ``has_backlog=True`` short-circuits the
     #     architect re-run and falls into the per-item loop; empty backlog
     #     re-runs ``architect.run_initial`` to emit a fresh one.
-    from sqlalchemy import or_
-
-    from agent.lifecycle.trio import run_trio_parent
-
     async with async_session() as s:
-        rows = (
-            (
-                await s.execute(
-                    select(Task).where(
-                        or_(
-                            Task.status == TaskStatus.TRIO_EXECUTING,
-                            # Freeform tasks parked at the design gate need
-                            # re-entry so the standin can fire; non-freeform
-                            # tasks legitimately wait for a human verdict.
-                            (Task.status == TaskStatus.AWAITING_DESIGN_APPROVAL)
-                            & (Task.freeform_mode.is_(True)),
-                            Task.status == TaskStatus.ARCHITECT_BACKLOG_EMIT,
-                        )
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
+        rows = (await s.execute(select(Task).where(_resumable_trio_where()))).scalars().all()
 
     if rows:
         log.info(
@@ -66,28 +89,8 @@ async def resume_all_trio_parents() -> None:
             count=len(rows),
             task_ids=[r.id for r in rows],
         )
-
-        async def _run_with_exception_logging(parent_task: Task) -> None:
-            """Wrap run_trio_parent so an unobserved exception is logged
-            with a full traceback. Without this wrapper, fire-and-forget
-            asyncio.create_task swallows failures silently — bit us on
-            task 170 after the ADR-013 deploy. structlog.log.exception
-            doesn't capture sys.exc_info reliably under our processor
-            chain, so we format the traceback ourselves."""
-            try:
-                await run_trio_parent(parent_task)
-            except Exception as exc:
-                import traceback
-                log.error(
-                    "trio.recovery.run_failed",
-                    parent_id=parent_task.id,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    traceback=traceback.format_exc(),
-                )
-
         for parent in rows:
-            asyncio.create_task(_run_with_exception_logging(parent))  # noqa: RUF006
+            asyncio.create_task(_run_trio_parent_logged(parent))  # noqa: RUF006
 
     # Freeform AWAITING_REVIEW recovery (2026-05-23). Tasks parked at
     # AWAITING_REVIEW in a freeform repo were never getting auto-merged
@@ -126,9 +129,7 @@ async def resume_all_trio_parents() -> None:
         async def _resume_pr_review(parent_task: Task) -> None:
             try:
                 workspace = await _prepare_parent_workspace(parent_task)
-                workspace_root = (
-                    workspace.root if hasattr(workspace, "root") else str(workspace)
-                )
+                workspace_root = workspace.root if hasattr(workspace, "root") else str(workspace)
                 await _try_freeform_pr_review_standin(
                     parent=parent_task,
                     workspace_root=workspace_root,
@@ -136,6 +137,7 @@ async def resume_all_trio_parents() -> None:
                 )
             except Exception as exc:
                 import traceback
+
                 log.error(
                     "trio.recovery.freeform_review_failed",
                     parent_id=parent_task.id,
@@ -191,3 +193,88 @@ async def resume_all_trio_parents() -> None:
                     task_id=task.id,
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# Continuous watchdog — trio's missing sibling of scaffold_heartbeat_watchdog.
+# Boot recovery (above) only runs at startup, so a parent that stalled mid-run
+# — or a freeform task whose design-gate standin never fired — sat forever
+# holding its repo until a human deleted it. This re-invokes the idempotent
+# driver every interval for parents stale past the threshold.
+# ---------------------------------------------------------------------------
+
+_TRIO_WATCHDOG_INTERVAL_SECS = 5 * 60
+# Mirror scaffold's threshold: a trio parent legitimately sits a long time
+# between item builds / architect LLM calls without bumping ``updated_at``, so
+# a generous window avoids re-firing a still-progressing driver.
+_TRIO_STALL_THRESHOLD = timedelta(minutes=90)
+
+
+async def _notify_stall_recovery(task: Task) -> None:
+    """Tell the owner their task stalled and is being auto-recovered.
+
+    The whole point of the watchdog is that a silent strand never again needs a
+    manual delete to even be noticed. Best-effort: a notifier outage must never
+    block the recovery itself.
+    """
+    try:
+        from shared.notifier import send_telegram_async
+
+        minutes = int(_TRIO_STALL_THRESHOLD.total_seconds() // 60)
+        await send_telegram_async(
+            f"⚠️ Task #{task.id} stalled in {task.status.value} for "
+            f">{minutes} min — auto-recovering.",
+            task_id=task.id,
+        )
+    except Exception:
+        log.warning("trio.watchdog.notify_failed", task_id=task.id, exc_info=True)
+
+
+async def resume_stalled_trio_parents_once() -> list[int]:
+    """One watchdog tick. Re-invoke the driver for stale trio parents; notify
+    the owner of each. Returns the resumed task ids (empty when nothing
+    stalled) so the loop and tests can observe progress.
+    """
+    cutoff = datetime.now(UTC) - _TRIO_STALL_THRESHOLD
+    async with async_session() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(Task).where(and_(Task.updated_at < cutoff, _resumable_trio_where()))
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    if not rows:
+        return []
+
+    log.warning(
+        "trio.watchdog.stalled_detected",
+        count=len(rows),
+        task_ids=[r.id for r in rows],
+    )
+    for parent in rows:
+        await _notify_stall_recovery(parent)
+        asyncio.create_task(_run_trio_parent_logged(parent))  # noqa: RUF006
+    return [r.id for r in rows]
+
+
+async def trio_heartbeat_watchdog() -> None:
+    """Continuous sibling of ``scaffold_heartbeat_watchdog`` for trio parents.
+
+    Background task started from run.py lifespan. Runs forever; one tick every
+    ``_TRIO_WATCHDOG_INTERVAL_SECS``.
+    """
+    log.info("trio.watchdog.started", interval_secs=_TRIO_WATCHDOG_INTERVAL_SECS)
+    while True:
+        try:
+            await asyncio.sleep(_TRIO_WATCHDOG_INTERVAL_SECS)
+            await resume_stalled_trio_parents_once()
+        except asyncio.CancelledError:
+            log.info("trio.watchdog.cancelled")
+            raise
+        except Exception:
+            log.exception("trio.watchdog.tick_failed")
+            continue

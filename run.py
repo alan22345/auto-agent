@@ -2140,6 +2140,17 @@ async def _scaffold_heartbeat_runner() -> None:
     await scaffold_heartbeat_watchdog()
 
 
+async def _trio_heartbeat_runner() -> None:
+    """Detect silently-stalled trio parents and re-invoke the driver.
+
+    Trio's sibling of the scaffold heartbeat watchdog (boot recovery alone left
+    mid-run stalls and freeform design-gate deadlocks stranded forever). See
+    agent/lifecycle/trio/recovery.py::trio_heartbeat_watchdog for the policy.
+    """
+    from agent.lifecycle.trio.recovery import trio_heartbeat_watchdog
+    await trio_heartbeat_watchdog()
+
+
 # ---------------------------------------------------------------------------
 # Startup recovery — re-emit events for tasks stuck in active states
 # ---------------------------------------------------------------------------
@@ -2330,6 +2341,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_po_analysis_loop()),
         asyncio.create_task(run_architecture_loop()),
         asyncio.create_task(_scaffold_heartbeat_runner()),
+        asyncio.create_task(_trio_heartbeat_runner()),
         asyncio.create_task(run_health_loop_supervisor()),
         asyncio.create_task(queued_dispatch_poller()),
     ]
