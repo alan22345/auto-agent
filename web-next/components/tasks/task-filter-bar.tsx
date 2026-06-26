@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-export type StatusFilter = 'all' | 'active' | 'needs_action' | 'done' | 'failed';
+type StatusFilter = 'all' | 'active' | 'needs_action' | 'done' | 'failed';
 export type RepoFilter = 'all' | '__none__' | string;
 
 export type TaskFilter = { status: StatusFilter; repo: RepoFilter };
