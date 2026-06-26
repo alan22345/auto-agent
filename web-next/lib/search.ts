@@ -12,7 +12,7 @@ export type MemoryHit = {
   facts: Array<{ id: string; content: string; kind: string; source: string | null }>;
 };
 
-export type ToolCallStart = {
+type ToolCallStart = {
   type: 'tool_call_start';
   tool: string;
   args: Record<string, unknown>;
@@ -44,7 +44,7 @@ export type SearchMessage = {
   created_at: string;
 };
 
-export type SearchSessionDetail = SearchSession & { messages: SearchMessage[] };
+type SearchSessionDetail = SearchSession & { messages: SearchMessage[] };
 
 export const createSession = () =>
   api<SearchSession>('/api/search/sessions', { method: 'POST', body: '{}' });

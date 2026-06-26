@@ -17,8 +17,11 @@ import type { Edge, RepoGraphBlob } from '@/types/api';
 /** Bounded depth so pathological deep chains can't wedge the UI.
  * 20 levels is plenty for a function-level callgraph; deeper chains
  * almost always indicate a layering breach the user can investigate
- * via the violations panel. */
-export const REACHABILITY_MAX_DEPTH = 20;
+ * via the violations panel.
+ *
+ * Module-private: only the BFS below consumes it. The reachability test
+ * mirrors the literal rather than importing it. */
+const REACHABILITY_MAX_DEPTH = 20;
 
 /**
  * Compute the set of ancestor node ids — nodes that have a path TO

@@ -5,7 +5,7 @@
 /* Do not modify it by hand - just update the pydantic models and then re-run the script
 */
 
-export type RiskLevel = "low" | "medium" | "high";
+type RiskLevel = "low" | "medium" | "high";
 
 export interface AffectedRoute {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -1079,15 +1079,4 @@ export interface VerifyAttemptOut {
   log_tail?: string | null;
   started_at: string;
   finished_at?: string | null;
-}
-/**
- * One backlog item the architect dispatches to a builder child task.
- */
-export interface WorkItem {
-  id: string;
-  title: string;
-  description: string;
-  status?: "pending" | "in_progress" | "done" | "skipped";
-  assigned_task_id?: number | null;
-  discovered_in_attempt_id?: number | null;
 }

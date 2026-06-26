@@ -21,10 +21,14 @@ from shared.models import Organization, OrganizationMembership, User
 
 router = APIRouter()
 
+# The module's only public surface is the mounted router (see run.py); the
+# request/response models below are internal implementation details.
+__all__ = ["router"]
+
 _ROLES_INVITABLE = {"admin", "member"}  # owner is reserved for the creator
 
 
-class OrgOut(BaseModel):
+class _OrgOut(BaseModel):
     id: int
     name: str
     slug: str
@@ -32,8 +36,8 @@ class OrgOut(BaseModel):
 
 
 class MyOrgsResponse(BaseModel):
-    orgs: list[OrgOut]
-    current: OrgOut
+    orgs: list[_OrgOut]
+    current: _OrgOut
 
 
 class SwitchOrgRequest(BaseModel):
@@ -45,7 +49,7 @@ class InviteRequest(BaseModel):
     role: str = "member"
 
 
-class RoleChangeRequest(BaseModel):
+class _RoleChangeRequest(BaseModel):
     role: str
 
 
@@ -108,7 +112,7 @@ async def list_my_orgs(
         .order_by(Organization.created_at.asc())
     )).all()
     orgs = [
-        OrgOut(id=o.id, name=o.name, slug=o.slug, role=role)
+        _OrgOut(id=o.id, name=o.name, slug=o.slug, role=role)
         for o, role in rows
     ]
     if not orgs:
@@ -273,7 +277,7 @@ async def remove_member(
 async def change_role(
     target_org_id: int,
     target_user_id: int,
-    payload: RoleChangeRequest,
+    payload: _RoleChangeRequest,
     user_id: int = Depends(current_user_id),
     org_id: int = Depends(current_org_id_dep),
     session: AsyncSession = Depends(get_session),

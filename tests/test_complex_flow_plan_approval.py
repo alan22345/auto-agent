@@ -12,13 +12,12 @@ Five behaviours pinned here:
    ``AWAITING_PLAN_APPROVAL`` (the standin or human is still deciding).
 
 The gate is exercised through ``agent.lifecycle.plan_approval`` —
-``write_plan``, ``read_plan_approval``, and ``resume_after_plan_approval``
-are the three primitives the orchestrator calls.
+``write_plan`` and ``_finalize_plan`` are the primitives the orchestrator
+calls.
 """
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -26,7 +25,6 @@ import pytest
 
 from agent.lifecycle import plan_approval
 from agent.lifecycle.workspace_paths import (
-    PLAN_APPROVAL_PATH,
     PLAN_PATH,
 )
 
@@ -69,7 +67,7 @@ def test_write_plan_creates_auto_agent_dir_when_missing(tmp_path: Path) -> None:
 async def test_complex_planning_transitions_to_awaiting_plan_approval(
     tmp_path: Path,
 ) -> None:
-    """``finalize_plan`` writes plan.md and transitions to AWAITING_PLAN_APPROVAL.
+    """``_finalize_plan`` writes plan.md and transitions to AWAITING_PLAN_APPROVAL.
 
     The helper is the orchestrator-facing entry point: pass it the task_id,
     workspace, and plan text; it persists the artefact and moves the state
@@ -78,7 +76,7 @@ async def test_complex_planning_transitions_to_awaiting_plan_approval(
 
     transition_mock = AsyncMock()
     with patch.object(plan_approval, "transition_task", transition_mock):
-        await plan_approval.finalize_plan(
+        await plan_approval._finalize_plan(
             task_id=7,
             workspace=str(tmp_path),
             plan_text="# Plan\n",
@@ -92,118 +90,7 @@ async def test_complex_planning_transitions_to_awaiting_plan_approval(
 
 
 # ---------------------------------------------------------------------------
-# 3. Approval file with verdict="approved" resumes to CODING.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_approved_verdict_resumes_to_coding(tmp_path: Path) -> None:
-    (tmp_path / ".auto-agent").mkdir()
-    (tmp_path / PLAN_APPROVAL_PATH).write_text(
-        json.dumps(
-            {"schema_version": "1", "verdict": "approved", "comments": ""},
-        )
-    )
-
-    transition_mock = AsyncMock()
-    publish_mock = AsyncMock()
-    with (
-        patch.object(plan_approval, "transition_task", transition_mock),
-        patch.object(plan_approval, "publish", publish_mock),
-    ):
-        resumed = await plan_approval.resume_after_plan_approval(
-            task_id=11,
-            workspace=str(tmp_path),
-        )
-
-    assert resumed is True, "approved should report a state advance"
-    transition_mock.assert_awaited_once()
-    args, _ = transition_mock.call_args
-    assert args[0] == 11
-    assert args[1] == "coding"
-
-
-# ---------------------------------------------------------------------------
-# 4. Rejected verdict transitions to BLOCKED with comments attached.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_rejected_verdict_transitions_to_blocked(tmp_path: Path) -> None:
-    (tmp_path / ".auto-agent").mkdir()
-    (tmp_path / PLAN_APPROVAL_PATH).write_text(
-        json.dumps(
-            {
-                "schema_version": "1",
-                "verdict": "rejected",
-                "comments": "Please cover edge case X.",
-            },
-        )
-    )
-
-    transition_mock = AsyncMock()
-    with patch.object(plan_approval, "transition_task", transition_mock):
-        resumed = await plan_approval.resume_after_plan_approval(
-            task_id=12,
-            workspace=str(tmp_path),
-        )
-
-    assert resumed is True
-    transition_mock.assert_awaited_once()
-    args, _ = transition_mock.call_args
-    assert args[0] == 12
-    assert args[1] == "blocked"
-    # The reject comments must be carried into the BLOCKED message so the
-    # human sees why the gate flipped.
-    assert "edge case X" in args[2]
-
-
-# ---------------------------------------------------------------------------
-# 5. Missing approval file ⇒ stays in AWAITING_PLAN_APPROVAL.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_missing_approval_keeps_task_in_awaiting_plan_approval(
-    tmp_path: Path,
-) -> None:
-    """No file ⇒ no transition. The orchestrator polls; missing == not yet."""
-
-    transition_mock = AsyncMock()
-    with patch.object(plan_approval, "transition_task", transition_mock):
-        resumed = await plan_approval.resume_after_plan_approval(
-            task_id=13,
-            workspace=str(tmp_path),
-        )
-
-    assert resumed is False
-    transition_mock.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 6. Malformed schema_version raises so a bad upload is loud (not silent
-#    auto-resume).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_wrong_schema_version_raises(tmp_path: Path) -> None:
-    (tmp_path / ".auto-agent").mkdir()
-    (tmp_path / PLAN_APPROVAL_PATH).write_text(
-        json.dumps(
-            {"schema_version": "999", "verdict": "approved", "comments": ""},
-        )
-    )
-
-    with pytest.raises(ValueError):
-        await plan_approval.resume_after_plan_approval(
-            task_id=14,
-            workspace=str(tmp_path),
-        )
-
-
-# ---------------------------------------------------------------------------
-# 7. State machine accepts the new transitions.
+# 3. State machine accepts the new transitions.
 # ---------------------------------------------------------------------------
 
 

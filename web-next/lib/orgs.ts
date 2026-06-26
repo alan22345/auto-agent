@@ -1,8 +1,8 @@
 import { api } from "./api";
 
-export type OrgRole = "owner" | "admin" | "member";
+type OrgRole = "owner" | "admin" | "member";
 
-export type Org = {
+type Org = {
   id: number;
   name: string;
   slug: string;
@@ -18,7 +18,7 @@ export type Member = {
   joined_at: string;
 };
 
-export type MyOrgsResponse = { orgs: Org[]; current: Org };
+type MyOrgsResponse = { orgs: Org[]; current: Org };
 
 export function fetchMyOrgs(): Promise<MyOrgsResponse> {
   return api<MyOrgsResponse>("/api/orgs/me");
@@ -48,15 +48,4 @@ export function inviteMember(
 
 export function removeMember(org_id: number, user_id: number): Promise<{ removed: boolean }> {
   return api(`/api/orgs/${org_id}/members/${user_id}`, { method: "DELETE" });
-}
-
-export function changeRole(
-  org_id: number,
-  user_id: number,
-  role: "admin" | "member",
-): Promise<{ user_id: number; role: string }> {
-  return api(`/api/orgs/${org_id}/members/${user_id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ role }),
-  });
 }

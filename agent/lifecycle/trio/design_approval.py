@@ -243,22 +243,7 @@ async def resume_after_design_approval(
     return True
 
 
-def read_design_approval(workspace_root: str) -> dict[str, Any] | None:
-    """Return the parsed approval payload, or None if not yet written."""
-
-    payload = read_gate_file(
-        workspace_root,
-        PLAN_APPROVAL_PATH,
-        schema_version="1",
-    )
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-
 __all__ = [
     "finalize_design",
-    "read_design_approval",
     "resume_after_design_approval",
-    "write_design",
 ]

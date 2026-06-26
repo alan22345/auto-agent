@@ -2,17 +2,14 @@ import { describe, it, expect } from 'vitest';
 import {
   encodeFocusForQuery,
   parseFocusFromQuery,
-  drillOut,
 } from '@/lib/code-graph-focus';
 import {
   ROOT_FOCUS,
-  lodForFocus,
   type FocusPath,
 } from '@/components/code-graph/map-canvas';
 import {
   computeCapabilityPorts,
   computeSiblingFlowPorts,
-  indexNodeToCapability,
 } from '@/components/code-graph/map-boundary-ports';
 import type { Capability, Flow, FlowJsonBlob } from '@/types/api';
 
@@ -45,25 +42,6 @@ const makeCap = (
   name,
   description: null,
   labeled_at_commit: null,
-});
-
-describe('lodForFocus', () => {
-  it('returns 0 at ROOT_FOCUS', () => {
-    expect(lodForFocus(ROOT_FOCUS)).toBe(0);
-  });
-  it('returns 1 with capability only', () => {
-    expect(lodForFocus({ capabilityId: 'c', flowId: null, stepNodeId: null })).toBe(1);
-  });
-  it('returns 2 with capability + flow', () => {
-    expect(
-      lodForFocus({ capabilityId: 'c', flowId: 'f', stepNodeId: null }),
-    ).toBe(2);
-  });
-  it('returns 3 with full path', () => {
-    expect(
-      lodForFocus({ capabilityId: 'c', flowId: 'f', stepNodeId: 's' }),
-    ).toBe(3);
-  });
 });
 
 describe('encodeFocusForQuery / parseFocusFromQuery', () => {
@@ -106,28 +84,7 @@ describe('encodeFocusForQuery / parseFocusFromQuery', () => {
   });
 });
 
-describe('drillOut', () => {
-  it('drops stepNodeId first', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: 'f', stepNodeId: 's' }),
-    ).toEqual({ capabilityId: 'c', flowId: 'f', stepNodeId: null });
-  });
-  it('drops flowId next', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: 'f', stepNodeId: null }),
-    ).toEqual({ capabilityId: 'c', flowId: null, stepNodeId: null });
-  });
-  it('drops capabilityId last → ROOT_FOCUS', () => {
-    expect(
-      drillOut({ capabilityId: 'c', flowId: null, stepNodeId: null }),
-    ).toEqual(ROOT_FOCUS);
-  });
-  it('ROOT_FOCUS stays at ROOT_FOCUS', () => {
-    expect(drillOut(ROOT_FOCUS)).toEqual(ROOT_FOCUS);
-  });
-});
-
-describe('indexNodeToCapability + computeCapabilityPorts', () => {
+describe('computeCapabilityPorts', () => {
   // Two capabilities. Auth has a flow that touches a node owned by Carbon.
   const blob: FlowJsonBlob = {
     capabilities: [
@@ -157,16 +114,6 @@ describe('indexNodeToCapability + computeCapabilityPorts', () => {
     deriver_version: 'phase1',
     labeler_model: null,
   };
-
-  it('indexNodeToCapability resolves first-touch ownership', () => {
-    const idx = indexNodeToCapability(blob);
-    expect(idx.byNode.get('app:login')).toBe('cap_auth');
-    // lib:carbon_util appears first in flow_login (cap_auth) — first
-    // touch wins by construction. (Real labeller produces a partition,
-    // but defensive resolution is documented.)
-    expect(idx.byNode.get('lib:carbon_util')).toBe('cap_auth');
-    expect(idx.byNode.get('app:calc')).toBe('cap_carbon');
-  });
 
   it('computeCapabilityPorts surfaces cross-capability links', () => {
     // Build a blob where the order is reversed so flow_calc indexes

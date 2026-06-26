@@ -6,7 +6,7 @@ import asyncio
 import os
 import time
 
-from agent.tools.dev_server import DevServerHandle, kill_server
+from agent.tools.dev_server import DevServerHandle, _kill_server
 
 
 async def test_kill_server_unlinks_log_file(tmp_path):
@@ -31,7 +31,7 @@ async def test_kill_server_unlinks_log_file(tmp_path):
         process=proc,
     )
 
-    await kill_server(handle)
+    await _kill_server(handle)
 
     assert not os.path.isfile(str(log_file)), (
         f"Log file at {log_file} was not unlinked by kill_server"
@@ -57,4 +57,4 @@ async def test_kill_server_tolerates_missing_log(tmp_path):
     )
 
     # Should not raise even though the file doesn't exist.
-    await kill_server(handle)
+    await _kill_server(handle)

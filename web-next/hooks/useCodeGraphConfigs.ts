@@ -1,6 +1,7 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { listRepoGraphConfigs, listRepos } from '@/lib/code-graph';
+import { listRepoGraphConfigs } from '@/lib/code-graph';
+import { listRepos } from '@/lib/repos';
 import type { RepoData, RepoGraphConfigData } from '@/types/api';
 
 // Query keys exported so mutations can invalidate them centrally.

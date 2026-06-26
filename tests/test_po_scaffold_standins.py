@@ -341,43 +341,6 @@ async def test_po_approve_domain_adr_empty_body_revises(workspace: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_po_intent_answer_calls_po_function(workspace: str) -> None:
-    """``intent_grill.request_po_intent_answer`` delegates to po_answer_intent_grill."""
-
-    from agent.lifecycle.scaffold import intent_grill as ig_mod
-
-    captured: dict = {}
-
-    async def fake_po_answer(task, question, ws):
-        captured["task_id"] = task.id
-        captured["question"] = question
-        captured["workspace"] = ws
-        # Write a stub so the wiring helper can return its path.
-        from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH
-
-        out = Path(ws) / INTENT_GRILL_ANSWER_PATH
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("{}")
-
-    with (
-        patch.object(
-            ig_mod,
-            "prepare_scaffold_workspace",
-            new=AsyncMock(return_value=workspace),
-        ),
-        patch("agent.po_agent.po_answer_intent_grill", new=fake_po_answer),
-    ):
-        path = await ig_mod.request_po_intent_answer(_make_task(), "what features?")
-
-    assert captured == {
-        "task_id": 42,
-        "question": "what features?",
-        "workspace": workspace,
-    }
-    assert path.endswith(".auto-agent/intent_grill_answer.json")
-
-
-@pytest.mark.asyncio
 async def test_request_po_verdict_writes_root_approval(workspace: str) -> None:
     """``root_adr_approval.request_po_verdict`` reads the ADR and writes
     the verdict via the PO standin."""

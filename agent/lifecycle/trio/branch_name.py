@@ -27,7 +27,7 @@ _MAX_SLUG_LEN = 50
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
-def slugify_for_branch(title: str | None) -> str:
+def _slugify_for_branch(title: str | None) -> str:
     """Turn ``title`` into a kebab-case slug ≤ ``_MAX_SLUG_LEN`` chars.
 
     Lowercase, collapse non-alphanumeric runs to ``-``, strip leading
@@ -54,7 +54,7 @@ def integration_branch_name(task_id: int, title: str | None) -> str:
     or has no characters that survive slugification.
     """
 
-    slug = slugify_for_branch(title)
+    slug = _slugify_for_branch(title)
     if not slug:
         return f"{_BRANCH_PREFIX}/task-{task_id}"
     return f"{_BRANCH_PREFIX}/{slug}-{task_id}"
@@ -85,5 +85,4 @@ __all__ = [
     "consult_branch_name",
     "init_branch_name",
     "integration_branch_name",
-    "slugify_for_branch",
 ]

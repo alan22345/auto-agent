@@ -108,13 +108,13 @@ def _ensure_local_excludes(workspace: str) -> None:
 
 
 async def _safe_write_dotenv(workspace: str, repo_id: int) -> None:
-    """Best-effort wrapper around ``write_repo_dotenv``.
+    """Best-effort wrapper around ``_write_repo_dotenv``.
 
     Called from ``clone_repo`` after every workspace setup.  Any failure is
     logged and swallowed — a .env write error must never kill the clone path.
     """
     try:
-        await write_repo_dotenv(workspace, repo_id)
+        await _write_repo_dotenv(workspace, repo_id)
     except Exception as exc:
         _log.warning(
             "write_repo_dotenv_failed",
@@ -146,7 +146,7 @@ async def clone_repo(
     If the workspace already exists (from a previous phase of the same task),
     it is reused and pulled to get latest changes instead of re-cloning.
 
-    If `repo_id` is provided, ``write_repo_dotenv`` is called after the clone
+    If `repo_id` is provided, ``_write_repo_dotenv`` is called after the clone
     (or workspace reuse) to write ``.env`` from ``RepoSecret`` rows. ADR-019 §7.
 
     Args:
@@ -212,7 +212,7 @@ async def clone_repo(
         await _run_git("config", "user.name", _AGENT_GIT_NAME, cwd=workspace)
         if user_id is not None:
             try:
-                await install_coauthor_hook(workspace, user_id)
+                await _install_coauthor_hook(workspace, user_id)
             except Exception as e:
                 _log.warning(
                     "coauthor_hook_install_failed",
@@ -239,7 +239,7 @@ async def clone_repo(
     # any failure here is logged but doesn't break the clone.
     if user_id is not None:
         try:
-            await install_coauthor_hook(workspace, user_id)
+            await _install_coauthor_hook(workspace, user_id)
         except Exception as e:
             _log.warning(
                 "coauthor_hook_install_failed",
@@ -297,7 +297,7 @@ async def push_branch(workspace: str, branch_name: str) -> None:
 
 # commit-msg hook that appends the Co-Authored-By trailer for the task's
 # owner. Reads a trailer line from `.git/auto-agent-coauthor` (written at
-# clone time by ``install_coauthor_hook``) and appends it to the commit
+# clone time by ``_install_coauthor_hook``) and appends it to the commit
 # message if it isn't already present. Idempotent — re-running git commit
 # on the same message doesn't duplicate the trailer.
 _COAUTHOR_HOOK_SCRIPT = """#!/bin/sh
@@ -319,7 +319,7 @@ fi
 """
 
 
-async def install_coauthor_hook(workspace: str, user_id: int) -> None:
+async def _install_coauthor_hook(workspace: str, user_id: int) -> None:
     """Install a commit-msg hook that auto-appends Co-Authored-By for the
     requesting user. Looks up the user's display_name + username from the DB.
 
@@ -492,7 +492,7 @@ def _dotenv_escape(value: str) -> str:
     return f'"{escaped}"'
 
 
-async def write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
+async def _write_repo_dotenv(workspace: str | Path, repo_id: int) -> None:
     """Write ``<workspace>/.env`` from ``RepoSecret`` rows + ensure ``.env`` is
     in ``.gitignore``.
 

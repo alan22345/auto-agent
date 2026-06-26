@@ -690,7 +690,6 @@ def _build_llm_edge(call: FrontendHttpCall, route: BackendRoute) -> Edge:
 __all__ = [
     "BackendRoute",
     "FrontendHttpCall",
-    "discover_backend_routes",
     "discover_frontend_http_calls",
     "match_http_edges",
 ]

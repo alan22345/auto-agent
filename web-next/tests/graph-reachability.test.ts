@@ -18,9 +18,12 @@ import { describe, it, expect } from 'vitest';
 import {
   computeAncestors,
   computeDescendants,
-  REACHABILITY_MAX_DEPTH,
 } from '@/lib/graph-reachability';
 import type { Edge, RepoGraphBlob } from '@/types/api';
+
+// Mirrors the module-private depth cap in graph-reachability.ts. Kept in
+// sync by hand: if the BFS cap changes, the depth-cap test below fails.
+const REACHABILITY_MAX_DEPTH = 20;
 
 function evidenceFor(file: string, line: number, snippet: string) {
   return { file, line, snippet };

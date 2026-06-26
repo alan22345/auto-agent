@@ -34,7 +34,7 @@ def fallback_user_id() -> int | None:
     return settings.fallback_claude_user_id
 
 
-def effective_user_id_for(owner_user_id: int | None, owner_status: str) -> int | None:
+def _effective_user_id_for(owner_user_id: int | None, owner_status: str) -> int | None:
     """Pick which user's vault should run a task.
 
     - If the owner has paired credentials, use theirs.
@@ -67,7 +67,7 @@ async def resolve_home_dir(owner_user_id: int | None) -> str | None:
         if user is not None:
             owner_status = user.claude_auth_status
 
-    target = effective_user_id_for(owner_user_id, owner_status)
+    target = _effective_user_id_for(owner_user_id, owner_status)
     if target is None:
         return None
     return ensure_vault_dir(target)

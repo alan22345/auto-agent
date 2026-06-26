@@ -545,10 +545,5 @@ async def label_flow_blob(
 
 __all__ = [
     "MAX_LINES_PER_STEP",
-    "_label_capabilities",
-    "_label_capabilities_by_path_prefix",
-    "_label_flow",
-    "_load_file_slices",
-    "_path_group_key",
     "label_flow_blob",
 ]

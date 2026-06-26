@@ -1262,8 +1262,9 @@ async def checkpoint(
     - ``repair_context`` — the integration PR failed CI; the architect
       diagnoses and adds fix work items to the backlog.
 
-    Returns the decision dict (matches ``shared.types.ArchitectDecision``
-    shape). On JSON-extraction failure, returns a ``blocked`` decision
+    Returns the decision dict (an ``action`` field — one of continue/
+    revise/done/awaiting_clarification/blocked — plus optional ``reason``
+    and ``question``). On JSON-extraction failure, returns a ``blocked`` decision
     and persists an attempt row with that decision; the parent's backlog
     is left untouched in that case.
     """

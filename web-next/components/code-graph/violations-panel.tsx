@@ -120,7 +120,7 @@ export function ViolationsPanel({
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-export function violationEdgeId(edge: Edge): string {
+function violationEdgeId(edge: Edge): string {
   // Same canonical form the graph-canvas uses so the parent page can
   // correlate panel rows with cytoscape edge data.
   return `${edge.source}->${edge.target}:${edge.kind}`;

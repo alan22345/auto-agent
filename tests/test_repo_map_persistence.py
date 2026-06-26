@@ -4,8 +4,8 @@ from agent.context.repo_map import (
     FileEntry,
     FileSymbol,
     _parse_map_text,
+    _parse_single_file,
     format_map_with_commit,
-    parse_single_file,
     parse_stored_map,
     patch_map,
 )
@@ -74,20 +74,20 @@ class TestParseSingleFile:
     def test_parses_python_file(self, tmp_path):
         src = tmp_path / "utils.py"
         src.write_text("def helper():\n    pass\n")
-        entry = parse_single_file(str(tmp_path), "utils.py")
+        entry = _parse_single_file(str(tmp_path), "utils.py")
         assert entry.path == "utils.py"
         assert len(entry.symbols) == 1
         assert entry.symbols[0].name == "helper"
 
     def test_returns_empty_for_missing_file(self, tmp_path):
-        entry = parse_single_file(str(tmp_path), "nonexistent.py")
+        entry = _parse_single_file(str(tmp_path), "nonexistent.py")
         assert entry.path == "nonexistent.py"
         assert entry.symbols == []
 
     def test_parses_js_file(self, tmp_path):
         src = tmp_path / "app.js"
         src.write_text("function render() { return null; }\n")
-        entry = parse_single_file(str(tmp_path), "app.js")
+        entry = _parse_single_file(str(tmp_path), "app.js")
         assert len(entry.symbols) == 1
         assert entry.symbols[0].name == "render"
 

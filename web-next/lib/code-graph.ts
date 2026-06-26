@@ -12,7 +12,6 @@ import type {
   LatestFlowsData,
   LatestRepoGraphData,
   RecomputeFlowsResponse,
-  RepoData,
   RepoGraphConfigData,
   RepoGraphProgressData,
   RepoGraphRefreshResponse,
@@ -123,12 +122,6 @@ export async function getRepoGraphStaleness(
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
-}
-
-// The /code-graph onboarding modal needs to pick from existing repos —
-// reuses the existing /api/repos endpoint.
-export async function listRepos(): Promise<RepoData[]> {
-  return api<RepoData[]>('/api/repos');
 }
 
 // Fetch the current progress of a code graph analysis.

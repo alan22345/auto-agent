@@ -48,18 +48,17 @@ export const ROOT_FOCUS: FocusPath = {
   stepNodeId: null,
 };
 
-export type Lod = 0 | 1 | 2 | 3;
+type Lod = 0 | 1 | 2 | 3;
 
-export function lodForFocus(focus: FocusPath): Lod {
+function lodForFocus(focus: FocusPath): Lod {
   if (focus.stepNodeId) return 3;
   if (focus.flowId) return 2;
   if (focus.capabilityId) return 1;
   return 0;
 }
 
-// Drop the deepest non-null segment of a ``FocusPath`` — the in-component
-// equivalent of the page-level ``drillOut`` exported from
-// ``app/(app)/code-graph/[repoId]/page.tsx``. Duplicated to keep the
+// Drop the deepest non-null segment of a ``FocusPath``. Kept in-component
+// (rather than imported from ``lib/code-graph-focus.ts``) to keep the
 // page → canvas import direction one-way.
 export function drillOutFocus(focus: FocusPath): FocusPath {
   if (focus.stepNodeId)
