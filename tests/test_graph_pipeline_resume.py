@@ -1,4 +1,13 @@
-"""Tests for the diff-plan application + smart-cascade logic."""
+"""Tests for the diff-plan application + smart-cascade logic.
+
+Edges use FLAT string ``source``/``target`` node ids (see
+``shared.types.Edge`` — ``source: str``, ``target: str``), NOT nested
+``{"id", "file"}`` dicts. An earlier version of these tests used the nested
+shape, which let ``apply_plan`` pass in tests while crashing in prod with
+``string indices must be integers, not 'str'`` on every refresh-after-commit
+(the ``resume_diff`` path). ``test_apply_plan_handles_real_edge_shape`` locks
+the real contract.
+"""
 
 from agent.graph_analyzer.diff import ChangedFilesPlan, apply_plan
 
@@ -11,10 +20,8 @@ def _blob():
             {"id": "b.ts::caller", "file": "b.ts"},
         ],
         "edges": [
-            {"source": {"id": "b.ts::caller", "file": "b.ts"},
-             "target": {"id": "a.ts::foo", "file": "a.ts"}},
-            {"source": {"id": "a.ts::bar", "file": "a.ts"},
-             "target": {"id": "a.ts::foo", "file": "a.ts"}},
+            {"source": "b.ts::caller", "target": "a.ts::foo"},
+            {"source": "a.ts::bar", "target": "a.ts::foo"},
         ],
     }
 
@@ -76,3 +83,37 @@ def test_pure_rename_rewrites_paths_no_cascade():
         for n in blob["nodes"]
         if "foo" in n["id"] or "bar" in n["id"]
     )
+    # edge endpoint ids are rewritten too
+    assert any(e["target"] == "moved/a.ts::foo" for e in blob["edges"])
+
+
+def test_apply_plan_handles_real_edge_shape():
+    """Regression: edges carry the real serialized ``shared.types.Edge`` shape
+    (flat string source/target + evidence/kind/source_kind). apply_plan must
+    not raise ``string indices must be integers`` on it."""
+    blob = {
+        "nodes": [
+            {"id": "a.ts::foo", "file": "a.ts", "kind": "function", "area": "x"},
+            {"id": "b.ts::caller", "file": "b.ts", "kind": "function", "area": "x"},
+        ],
+        "edges": [
+            {
+                "source": "b.ts::caller",
+                "target": "a.ts::foo",
+                "kind": "calls",
+                "evidence": {"file": "b.ts", "line": 3, "snippet": "foo()"},
+                "source_kind": "ast",
+            },
+        ],
+    }
+    processed = {"a.ts": {}, "b.ts": {}}
+    cascade = apply_plan(
+        blob,
+        processed,
+        ChangedFilesPlan(modified=["a.ts"]),
+        re_walk=lambda p: {"nodes_in_path": []},
+    )
+    # caller in b.ts referenced a now-lost target in a.ts → must cascade
+    assert "b.ts" in cascade
+    # the a.ts node/edge were pruned for re-walk
+    assert all(n["file"] != "a.ts" for n in blob["nodes"])
