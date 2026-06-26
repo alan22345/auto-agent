@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re as _re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -302,10 +303,7 @@ async def _block_if_auth_required(session, task) -> bool:
     the same gate as ``on_task_classified`` / ``_try_start_queued`` — without
     it a task could start with dead credentials and hang silently.
     """
-    if (
-        task.created_by_user_id is None
-        or task.complexity == TaskComplexity.SIMPLE_NO_CODE
-    ):
+    if task.created_by_user_id is None or task.complexity == TaskComplexity.SIMPLE_NO_CODE:
         return False
 
     from sqlalchemy import update as _u
@@ -315,7 +313,9 @@ async def _block_if_auth_required(session, task) -> bool:
     if home is None:
         # No paired credential and no fallback configured.
         await transition(
-            session, task, TaskStatus.BLOCKED_ON_AUTH,
+            session,
+            task,
+            TaskStatus.BLOCKED_ON_AUTH,
             "Connect your Claude account to run this task",
         )
         await session.commit()
@@ -325,9 +325,7 @@ async def _block_if_auth_required(session, task) -> bool:
     if await probe_credentials(home) == "expired":
         # Only flag the owner's status when probing their OWN vault.
         owner = (
-            await session.execute(
-                sa_select(User).where(User.id == task.created_by_user_id)
-            )
+            await session.execute(sa_select(User).where(User.id == task.created_by_user_id))
         ).scalar_one_or_none()
         if owner is not None and owner.claude_auth_status == "paired":
             await session.execute(
@@ -336,7 +334,9 @@ async def _block_if_auth_required(session, task) -> bool:
                 .values(claude_auth_status="expired")
             )
         await transition(
-            session, task, TaskStatus.BLOCKED_ON_AUTH,
+            session,
+            task,
+            TaskStatus.BLOCKED_ON_AUTH,
             "Claude credentials expired — reconnect to resume",
         )
         await session.commit()
@@ -404,6 +404,7 @@ async def on_task_classified(event: Event) -> None:
         force_start = False
         if task.freeform_mode and task.repo_id:
             from sqlalchemy import select as _sel
+
             cfg_result = await session.execute(
                 _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
             )
@@ -428,6 +429,7 @@ async def on_task_classified(event: Event) -> None:
             )
             await session.commit()
             from agent.lifecycle.scaffold import run_scaffold_parent
+
             _spawn_bg(run_scaffold_parent(task), label=f"scaffold_parent.start.{task.id}")
             return
 
@@ -442,12 +444,12 @@ async def on_task_classified(event: Event) -> None:
         if force_start or await can_start_task(session, task):
             if route_to_trio:
                 task = await transition(session, task, TaskStatus.QUEUED)
-                task = await transition(
-                    session, task, TaskStatus.TRIO_EXECUTING, "Starting trio"
-                )
+                task = await transition(session, task, TaskStatus.TRIO_EXECUTING, "Starting trio")
             elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
                 task = await transition(session, task, TaskStatus.QUEUED)
-                task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
+                task = await transition(
+                    session, task, TaskStatus.PLANNING, "Starting planning phase"
+                )
             else:
                 task = await transition(session, task, TaskStatus.QUEUED)
                 task = await transition(session, task, TaskStatus.CODING, "Starting coding")
@@ -461,6 +463,7 @@ async def on_task_classified(event: Event) -> None:
             await publish(task_start_coding(task.id))
         elif task.status == TaskStatus.TRIO_EXECUTING:
             from agent.lifecycle.trio import run_trio_parent
+
             _spawn_bg(run_trio_parent(task), label=f"trio_parent.start.{task.id}")
 
 
@@ -474,12 +477,16 @@ async def on_clarification_resolved(event: Event) -> None:
         # Determine which phase to resume based on complexity and prior state
         if task.complexity == TaskComplexity.COMPLEX and task.plan is None:
             # Was in planning phase, hasn't produced a plan yet — resume planning
-            task = await transition(session, task, TaskStatus.PLANNING, "Clarification resolved, resuming planning")
+            task = await transition(
+                session, task, TaskStatus.PLANNING, "Clarification resolved, resuming planning"
+            )
             await session.commit()
             await publish(task_start_planning(task.id))
         else:
             # Was in coding phase — resume coding
-            task = await transition(session, task, TaskStatus.CODING, "Clarification resolved, resuming coding")
+            task = await transition(
+                session, task, TaskStatus.CODING, "Clarification resolved, resuming coding"
+            )
             await session.commit()
             await publish(task_start_coding(task.id))
 
@@ -512,19 +519,22 @@ async def on_architect_clarification_needed(event: Event) -> None:
 
     if effective_mode == "freeform":
         import agent.po_agent as po_agent
+
         _spawn_bg(
             po_agent.answer_architect_question(task.id),
             label=f"po_answer_architect.{task.id}",
         )
     else:
-        await publish(Event(
-            type=TaskEventType.CLARIFICATION_NEEDED,
-            task_id=task.id,
-            payload={
-                "question": event.payload.get("question", ""),
-                "phase": "trio_architect",
-            },
-        ))
+        await publish(
+            Event(
+                type=TaskEventType.CLARIFICATION_NEEDED,
+                task_id=task.id,
+                payload={
+                    "question": event.payload.get("question", ""),
+                    "phase": "trio_architect",
+                },
+            )
+        )
 
 
 async def on_architect_clarification_resolved(event: Event) -> None:
@@ -536,7 +546,9 @@ async def on_architect_clarification_resolved(event: Event) -> None:
         if task.trio_phase is None:
             return
         await transition(
-            session, task, TaskStatus.TRIO_EXECUTING,
+            session,
+            task,
+            TaskStatus.TRIO_EXECUTING,
             "Architect resuming after clarification",
         )
         await session.commit()
@@ -582,6 +594,7 @@ async def on_design_approved(event: Event) -> None:
         if not task:
             return
         from agent.lifecycle.trio import run_trio_parent
+
         _spawn_bg(run_trio_parent(task), label=f"on_design_approved.{task.id}")
 
 
@@ -604,7 +617,9 @@ async def on_review_complete(event: Event) -> None:
         task.pr_url = pr_url
         task = await transition(session, task, TaskStatus.PR_CREATED, f"PR created: {pr_url}")
         task = await transition(
-            session, task, TaskStatus.AWAITING_CI,
+            session,
+            task,
+            TaskStatus.AWAITING_CI,
             f"Independent review complete. Waiting for CI.\n\n{review[:2000]}",
         )
         await session.commit()
@@ -616,8 +631,12 @@ async def on_review_comments_addressed(event: Event) -> None:
         task = await get_task(session, event.task_id)
         if not task:
             return
-        task = await transition(session, task, TaskStatus.PR_CREATED, "Review feedback addressed, new changes pushed")
-        task = await transition(session, task, TaskStatus.AWAITING_CI, "Waiting for CI on updated code")
+        task = await transition(
+            session, task, TaskStatus.PR_CREATED, "Review feedback addressed, new changes pushed"
+        )
+        task = await transition(
+            session, task, TaskStatus.AWAITING_CI, "Waiting for CI on updated code"
+        )
         await session.commit()
 
 
@@ -648,16 +667,17 @@ async def on_ci_passed(event: Event) -> None:
             from sqlalchemy import select as _sel
 
             from shared.models import FreeformConfig as _FC
-            result = await session.execute(
-                _sel(_FC).where(_FC.repo_id == task.repo_id)
-            )
+
+            result = await session.execute(_sel(_FC).where(_FC.repo_id == task.repo_id))
             repo_freeform_config = result.scalar_one_or_none()
 
         if _should_auto_merge(task, repo_freeform_config):
             # Freeform mode: auto-merge to dev, skip human review
             outcome = await _auto_merge_pr(task)
             if outcome == MERGE_OUTCOME_MERGED:
-                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merging to dev")
+                task = await transition(
+                    session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merging to dev"
+                )
                 task = await transition(session, task, TaskStatus.DONE, "Auto-merged to dev branch")
                 await session.commit()
                 await unblock_quota_paused(session)
@@ -668,7 +688,12 @@ async def on_ci_passed(event: Event) -> None:
                 # on success, or transition to AWAITING_REVIEW on failure.
                 log.info(f"Task #{task.id}: conflict resolver dispatched, awaiting outcome")
             else:
-                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, auto-merge failed — awaiting manual review")
+                task = await transition(
+                    session,
+                    task,
+                    TaskStatus.AWAITING_REVIEW,
+                    "CI passed, auto-merge failed — awaiting manual review",
+                )
                 await session.commit()
             return
 
@@ -680,7 +705,9 @@ async def on_ci_passed(event: Event) -> None:
                 f"falling through to human review (safety gate)"
             )
 
-        task = await transition(session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review")
+        task = await transition(
+            session, task, TaskStatus.AWAITING_REVIEW, "CI passed, awaiting human review"
+        )
         await session.commit()
 
     # Trigger dev deploy so the user can review a live preview
@@ -697,11 +724,13 @@ _CI_LOG_NO_FAILED_RUNS = "No failed check runs found"
 _CI_LOG_PR_FETCH_FAILED = "Could not fetch PR details"
 _CI_LOG_CHECK_RUNS_FETCH_FAILED = "Could not fetch check runs"
 
-_EMPTY_CI_LOG_SENTINELS: frozenset[str] = frozenset({
-    _CI_LOG_NO_FAILED_RUNS,
-    _CI_LOG_PR_FETCH_FAILED,
-    _CI_LOG_CHECK_RUNS_FETCH_FAILED,
-})
+_EMPTY_CI_LOG_SENTINELS: frozenset[str] = frozenset(
+    {
+        _CI_LOG_NO_FAILED_RUNS,
+        _CI_LOG_PR_FETCH_FAILED,
+        _CI_LOG_CHECK_RUNS_FETCH_FAILED,
+    }
+)
 
 
 def _ci_logs_are_empty(ci_logs: str) -> bool:
@@ -719,11 +748,15 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
     """
     try:
         import httpx as _httpx
+
         parts = pr_url.rstrip("/").split("/")
         owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
 
         async with _httpx.AsyncClient() as client:
-            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+            }
 
             # Get PR head SHA
             resp = await client.get(
@@ -744,8 +777,7 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
 
             check_runs = resp.json().get("check_runs", [])
             failed_runs = [
-                cr for cr in check_runs
-                if cr.get("conclusion") in ("failure", "timed_out")
+                cr for cr in check_runs if cr.get("conclusion") in ("failure", "timed_out")
             ]
 
             if not failed_runs:
@@ -781,7 +813,11 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                     if resp.status_code == 200:
                         suite = resp.json()
                         # Get jobs for this workflow run
-                        run_url = suite.get("url", "").replace("/check-suites/", "/actions/runs/").rsplit("/", 1)[0]
+                        run_url = (
+                            suite.get("url", "")
+                            .replace("/check-suites/", "/actions/runs/")
+                            .rsplit("/", 1)[0]
+                        )
                         # Actually use the check_suite -> workflow run relationship
                         head_branch = suite.get("head_branch", "")
                         # Try listing workflow runs for this SHA
@@ -803,7 +839,8 @@ async def _fetch_failed_ci_logs(pr_url: str, token: str) -> str:
                                                 if job.get("conclusion") == "failure":
                                                     steps = job.get("steps", [])
                                                     failed_steps = [
-                                                        s for s in steps
+                                                        s
+                                                        for s in steps
                                                         if s.get("conclusion") == "failure"
                                                     ]
                                                     step_info = "\n".join(
@@ -848,8 +885,10 @@ async def on_ci_failed(event: Event) -> None:
     # Fetch actual failure logs if we have a PR URL
     if pr_url:
         from shared.github_auth import get_github_token as _gh_token
+
         ci_logs = await _fetch_failed_ci_logs(
-            pr_url, await _gh_token(user_id=created_by_user_id),
+            pr_url,
+            await _gh_token(user_id=created_by_user_id),
         )
         reason = f"CI failed. Here are the failure details:\n\n{ci_logs}"
     else:
@@ -860,6 +899,7 @@ async def on_ci_failed(event: Event) -> None:
         # which transitions to TRIO_EXECUTING and fires ``run_trio_parent``
         # with a ``repair_context`` so the architect can plan a repair pass.
         from orchestrator.ci_handler import on_ci_resolved
+
         await on_ci_resolved(event.task_id, passed=False, log=ci_logs)
         return
 
@@ -885,13 +925,31 @@ DEPLOY_RETRY_LIMIT = 2
 # expired credentials, quota). We block on the first occurrence so the agent
 # doesn't burn cycles "fixing" something it can't reach.
 _ENV_FAILURE_PATTERNS: list[tuple[_re.Pattern[str], str]] = [
-    (_re.compile(r"\bbilling\b.*\b(disabled|suspended|inactive|required|invalid)\b", _re.I), "billing disabled/required"),
-    (_re.compile(r"\b(payment|subscription)\b.*\b(required|suspended|inactive|past[- ]due|invalid|disabled)\b", _re.I), "payment/subscription problem"),
+    (
+        _re.compile(r"\bbilling\b.*\b(disabled|suspended|inactive|required|invalid)\b", _re.I),
+        "billing disabled/required",
+    ),
+    (
+        _re.compile(
+            r"\b(payment|subscription)\b.*\b(required|suspended|inactive|past[- ]due|invalid|disabled)\b",
+            _re.I,
+        ),
+        "payment/subscription problem",
+    ),
     (_re.compile(r"\b402\s+payment\s+required\b", _re.I), "HTTP 402 payment required"),
-    (_re.compile(r"\binsufficient\s+(funds|balance|quota|credit)s?\b", _re.I), "insufficient funds/quota"),
+    (
+        _re.compile(r"\binsufficient\s+(funds|balance|quota|credit)s?\b", _re.I),
+        "insufficient funds/quota",
+    ),
     (_re.compile(r"\bquota\s+(exceeded|exhausted)\b", _re.I), "quota exceeded"),
-    (_re.compile(r"\b(aws|gcloud|az|docker|kubectl|terraform)\s*:\s*command not found\b", _re.I), "deploy CLI missing on runner"),
-    (_re.compile(r"\bunable to locate credentials\b", _re.I), "missing cloud credentials on runner"),
+    (
+        _re.compile(r"\b(aws|gcloud|az|docker|kubectl|terraform)\s*:\s*command not found\b", _re.I),
+        "deploy CLI missing on runner",
+    ),
+    (
+        _re.compile(r"\bunable to locate credentials\b", _re.I),
+        "missing cloud credentials on runner",
+    ),
 ]
 
 
@@ -916,7 +974,7 @@ def _should_block_after_repeated_failures(history) -> bool:
     """
     count = 0
     for h in history:
-        msg = (getattr(h, "message", None) or "")
+        msg = getattr(h, "message", None) or ""
         if msg.startswith("Deploy failed"):
             count += 1
             if count >= DEPLOY_RETRY_LIMIT:
@@ -938,12 +996,16 @@ async def on_dev_deploy_failed(event: Event) -> None:
         env_reason = _classify_deploy_failure(output)
 
         history_rows = (
-            await session.execute(
-                sa_select(TaskHistory)
-                .where(TaskHistory.task_id == task.id)
-                .order_by(TaskHistory.created_at.desc())
+            (
+                await session.execute(
+                    sa_select(TaskHistory)
+                    .where(TaskHistory.task_id == task.id)
+                    .order_by(TaskHistory.created_at.desc())
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         repeated = _should_block_after_repeated_failures(history_rows)
 
         if env_reason or repeated:
@@ -968,8 +1030,10 @@ async def on_dev_deploy_failed(event: Event) -> None:
         # Fetch actual failure logs if we have a PR URL and output is sparse
         if task.pr_url and len(output) < 200:
             from shared.github_auth import get_github_token as _gh_token
+
             ci_logs = await _fetch_failed_ci_logs(
-                task.pr_url, await _gh_token(user_id=task.created_by_user_id),
+                task.pr_url,
+                await _gh_token(user_id=task.created_by_user_id),
             )
             # If GH had no failed check runs to surface (typical for repos
             # without GitHub Actions — the deploy failure happened in the
@@ -1037,10 +1101,14 @@ async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
         if task.status not in (
             # ADR-017: PR_CREATED is transit-only; AWAITING_REVIEW and ITERATING
             # are the long-lived "PR is open" states alongside AWAITING_CI.
-            TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI, TaskStatus.AWAITING_REVIEW,
+            TaskStatus.PR_CREATED,
+            TaskStatus.AWAITING_CI,
+            TaskStatus.AWAITING_REVIEW,
             TaskStatus.ITERATING,
         ):
-            log.info(f"LGTM on task #{task_id} in status {task.status.value} — skipping (not at PR stage)")
+            log.info(
+                f"LGTM on task #{task_id} in status {task.status.value} — skipping (not at PR stage)"
+            )
             return
         starting_status = task.status
 
@@ -1059,7 +1127,9 @@ async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
             if starting_status == TaskStatus.PR_CREATED:
                 task = await transition(session, task, TaskStatus.AWAITING_CI, f"LGTM ({trigger})")
             if task.status == TaskStatus.AWAITING_CI:
-                task = await transition(session, task, TaskStatus.AWAITING_REVIEW, f"LGTM ({trigger}), auto-merging")
+                task = await transition(
+                    session, task, TaskStatus.AWAITING_REVIEW, f"LGTM ({trigger}), auto-merging"
+                )
             task = await transition(session, task, TaskStatus.DONE, "Auto-merged via LGTM")
             await session.commit()
             await unblock_quota_paused(session)
@@ -1073,11 +1143,17 @@ async def _attempt_lgtm_merge(task_id: int, trigger: str) -> None:
         return
 
     if outcome == MERGE_OUTCOME_CI_BLOCKED:
-        await _settle_at_review(task_id, starting_status, "LGTM received but CI is failing/pending — awaiting manual review")
+        await _settle_at_review(
+            task_id,
+            starting_status,
+            "LGTM received but CI is failing/pending — awaiting manual review",
+        )
         return
 
     # MERGE_OUTCOME_FAILED
-    await _settle_at_review(task_id, starting_status, "LGTM received but auto-merge failed — awaiting manual review")
+    await _settle_at_review(
+        task_id, starting_status, "LGTM received but auto-merge failed — awaiting manual review"
+    )
 
 
 async def _settle_at_review(task_id: int, starting_status: TaskStatus, message: str) -> None:
@@ -1123,7 +1199,9 @@ async def on_merge_conflict_resolution_failed(event: Event) -> None:
         if not task:
             return
         task = await transition(
-            session, task, TaskStatus.AWAITING_REVIEW,
+            session,
+            task,
+            TaskStatus.AWAITING_REVIEW,
             f"Merge conflict resolution failed ({reason[:200]}) — awaiting manual review",
         )
         await session.commit()
@@ -1167,15 +1245,24 @@ async def on_po_suggestions_ready(event: Event) -> None:
             sa_select(Task).where(
                 Task.repo_id == repo.id,
                 Task.freeform_mode == True,  # noqa: E712
-                Task.status.in_([
-                    TaskStatus.INTAKE, TaskStatus.CLASSIFYING, TaskStatus.QUEUED,
-                    TaskStatus.PLANNING, TaskStatus.AWAITING_APPROVAL,
-                    TaskStatus.AWAITING_CLARIFICATION, TaskStatus.CODING,
-                    # ADR-017: include ITERATING — a PR is open and being actively
-                    # worked on; counts as an active freeform slot.
-                    TaskStatus.PR_CREATED, TaskStatus.AWAITING_CI,
-                    TaskStatus.AWAITING_REVIEW, TaskStatus.ITERATING, TaskStatus.BLOCKED,
-                ]),
+                Task.status.in_(
+                    [
+                        TaskStatus.INTAKE,
+                        TaskStatus.CLASSIFYING,
+                        TaskStatus.QUEUED,
+                        TaskStatus.PLANNING,
+                        TaskStatus.AWAITING_APPROVAL,
+                        TaskStatus.AWAITING_CLARIFICATION,
+                        TaskStatus.CODING,
+                        # ADR-017: include ITERATING — a PR is open and being actively
+                        # worked on; counts as an active freeform slot.
+                        TaskStatus.PR_CREATED,
+                        TaskStatus.AWAITING_CI,
+                        TaskStatus.AWAITING_REVIEW,
+                        TaskStatus.ITERATING,
+                        TaskStatus.BLOCKED,
+                    ]
+                ),
             )
         )
         active_count = len(active_result.scalars().all())
@@ -1286,9 +1373,7 @@ async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> 
             # phase (shouldn't happen, but be defensive).
             return
 
-        siblings_q = await session.execute(
-            sa_select(Task).where(Task.parent_task_id == parent.id)
-        )
+        siblings_q = await session.execute(sa_select(Task).where(Task.parent_task_id == parent.id))
         siblings = siblings_q.scalars().all()
         if not siblings:
             return
@@ -1328,6 +1413,7 @@ async def _maybe_advance_scaffold_parent_on_child_finish(child_task_id: int) -> 
     if parent is None:
         return
     from agent.lifecycle.scaffold import run_scaffold_parent
+
     _spawn_bg(run_scaffold_parent(parent), label=f"scaffold_parent.resume.{parent.id}")
 
 
@@ -1343,14 +1429,13 @@ async def _try_start_queued(session) -> None:
         # freeform will trigger another start attempt later.
         if task.freeform_mode and task.repo_id:
             from sqlalchemy import select as _sel
+
             cfg_result = await session.execute(
                 _sel(FreeformConfig).where(FreeformConfig.repo_id == task.repo_id)
             )
             cfg = cfg_result.scalar_one_or_none()
             if not cfg or not cfg.enabled:
-                log.info(
-                    f"Skipping freeform task #{task.id}: repo freeform is disabled"
-                )
+                log.info(f"Skipping freeform task #{task.id}: repo freeform is disabled")
                 return
 
         # Dispatch-time auth probe — same gate as on_task_classified, but
@@ -1367,6 +1452,7 @@ async def _try_start_queued(session) -> None:
             )
             await session.commit()
             from agent.lifecycle.trio import run_trio_parent
+
             _spawn_bg(run_trio_parent(task), label=f"slot_opened.trio.{task.id}")
         elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(
@@ -1403,9 +1489,7 @@ async def on_start_queued_task(event: Event) -> None:
         is_complex_large = task.complexity == TaskComplexity.COMPLEX_LARGE
         is_freeform = bool(task.freeform_mode)
         if is_complex_large or is_freeform:
-            task = await transition(
-                session, task, TaskStatus.TRIO_EXECUTING, "Starting trio"
-            )
+            task = await transition(session, task, TaskStatus.TRIO_EXECUTING, "Starting trio")
         elif task.complexity in (TaskComplexity.COMPLEX, TaskComplexity.COMPLEX_LARGE):
             task = await transition(session, task, TaskStatus.PLANNING, "Starting planning phase")
         else:
@@ -1418,6 +1502,7 @@ async def on_start_queued_task(event: Event) -> None:
             await publish(task_start_coding(task.id))
         elif task.status == TaskStatus.TRIO_EXECUTING:
             from agent.lifecycle.trio import run_trio_parent
+
             _spawn_bg(run_trio_parent(task), label=f"trio_parent.start.{task.id}")
         log.info(f"Started queued task #{task.id}")
 
@@ -1438,7 +1523,9 @@ def _parse_pr_url(pr_url: str) -> tuple[str, str, str]:
 
 
 async def _fetch_pr_state(
-    pr_url: str, *, user_id: int | None = None,
+    pr_url: str,
+    *,
+    user_id: int | None = None,
 ) -> dict | None:
     """Fetch a PR's mergeable + mergeable_state from GitHub.
 
@@ -1492,9 +1579,13 @@ async def _mark_conflict_resolution_attempted(task_id: int) -> None:
 async def _dispatch_conflict_resolution(task: Task, trigger: str) -> None:
     """Emit task.merge_conflict_detected so the agent can resolve conflicts."""
     await _mark_conflict_resolution_attempted(task.id)
-    await publish(task_merge_conflict_detected(
-        task.id, pr_url=task.pr_url or "", trigger=trigger,
-    ))
+    await publish(
+        task_merge_conflict_detected(
+            task.id,
+            pr_url=task.pr_url or "",
+            trigger=trigger,
+        )
+    )
     log.info(f"Conflict resolution dispatched for task #{task.id} (trigger={trigger})")
 
 
@@ -1527,7 +1618,9 @@ async def _auto_merge_pr(task: Task) -> str:
         ms = pr_state.get("mergeable_state") or "unknown"
         if ms == "dirty":
             if await _conflict_resolution_attempted(task.id):
-                log.warning(f"Auto-merge: conflict persists after one resolution attempt on task #{task.id}")
+                log.warning(
+                    f"Auto-merge: conflict persists after one resolution attempt on task #{task.id}"
+                )
                 return MERGE_OUTCOME_FAILED
             await _dispatch_conflict_resolution(task, trigger="auto_merge")
             return MERGE_OUTCOME_CONFLICT_DISPATCHED
@@ -1558,7 +1651,9 @@ async def _auto_merge_pr(task: Task) -> str:
                     base_branch = (pr_state or {}).get("base", {}).get("ref") or None
                     request_graph_refresh_soon(repo_id, branch=base_branch)
                 return MERGE_OUTCOME_MERGED
-            log.warning(f"Auto-merge failed for task #{task.id}: {resp.status_code} {resp.text[:200]}")
+            log.warning(
+                f"Auto-merge failed for task #{task.id}: {resp.status_code} {resp.text[:200]}"
+            )
             return MERGE_OUTCOME_FAILED
     except Exception:
         log.exception(f"Auto-merge error for task #{task.id}")
@@ -1629,10 +1724,10 @@ async def orchestrator_event_loop() -> None:
 # ---------------------------------------------------------------------------
 
 # Timeout thresholds
-PLANNING_TIMEOUT = 1200     # 20 minutes for planning
+PLANNING_TIMEOUT = 1200  # 20 minutes for planning
 CODING_TIMEOUT_SOFT = 3600  # 1 hour — try recovery first
 CODING_TIMEOUT_HARD = 7200  # 2 hours — fail the task
-WATCHDOG_INTERVAL = 120     # Check every 2 minutes
+WATCHDOG_INTERVAL = 120  # Check every 2 minutes
 
 TIMED_STATUSES = {TaskStatus.PLANNING, TaskStatus.CODING}
 
@@ -1653,6 +1748,7 @@ async def task_timeout_watchdog() -> None:
         try:
             async with async_session() as session:
                 from sqlalchemy import select as sa_select
+
                 result = await session.execute(
                     sa_select(Task).where(Task.status.in_(TIMED_STATUSES))
                 )
@@ -1667,8 +1763,16 @@ async def task_timeout_watchdog() -> None:
                     age_s = (now - updated).total_seconds()
 
                     # Choose timeout based on status
-                    soft_timeout = PLANNING_TIMEOUT if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_SOFT
-                    hard_timeout = PLANNING_TIMEOUT * 2 if task.status == TaskStatus.PLANNING else CODING_TIMEOUT_HARD
+                    soft_timeout = (
+                        PLANNING_TIMEOUT
+                        if task.status == TaskStatus.PLANNING
+                        else CODING_TIMEOUT_SOFT
+                    )
+                    hard_timeout = (
+                        PLANNING_TIMEOUT * 2
+                        if task.status == TaskStatus.PLANNING
+                        else CODING_TIMEOUT_HARD
+                    )
 
                     # If agent is actively sending heartbeats, it's alive — skip
                     if await task_channel(task.id).is_alive():
@@ -1687,7 +1791,9 @@ async def task_timeout_watchdog() -> None:
                             f"({age_s:.0f}s, no heartbeat)"
                         )
                         task = await transition(
-                            session, task, TaskStatus.FAILED,
+                            session,
+                            task,
+                            TaskStatus.FAILED,
                             f"Timed out after {age_s:.0f}s in {task.status.value} "
                             f"(no agent heartbeat detected)",
                         )
@@ -1742,6 +1848,7 @@ async def ci_status_poller() -> None:
         try:
             async with async_session() as session:
                 from sqlalchemy import select as sa_select
+
                 result = await session.execute(
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_CI)
                 )
@@ -1791,6 +1898,7 @@ async def _check_pr_ci_status(pr_url: str, token: str) -> str | None:
     owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
 
     import httpx
+
     async with httpx.AsyncClient() as client:
         # Get PR head SHA
         resp = await client.get(
@@ -1817,7 +1925,9 @@ async def _check_pr_ci_status(pr_url: str, token: str) -> str | None:
                     return None  # Still running
 
                 if any(c in ("failure", "timed_out", "action_required") for c in conclusions):
-                    return next(c for c in conclusions if c in ("failure", "timed_out", "action_required"))
+                    return next(
+                        c for c in conclusions if c in ("failure", "timed_out", "action_required")
+                    )
 
                 if all(c == "success" or c == "skipped" for c in conclusions):
                     return "success"
@@ -1845,6 +1955,7 @@ async def _pr_has_no_checks(pr_url: str, token: str) -> bool:
     owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
 
     import httpx
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
@@ -1903,6 +2014,7 @@ async def pr_merge_poller() -> None:
         return
 
     import time
+
     log.info("PR merge poller started")
 
     while True:
@@ -1911,6 +2023,7 @@ async def pr_merge_poller() -> None:
             async with async_session() as session:
                 gh_token = await get_github_token()
                 from sqlalchemy import select as sa_select
+
                 result = await session.execute(
                     sa_select(Task).where(Task.status == TaskStatus.AWAITING_REVIEW)
                 )
@@ -1969,6 +2082,7 @@ async def _check_pr_merged(pr_url: str, token: str) -> bool:
     owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
 
     import httpx
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
@@ -1978,9 +2092,16 @@ async def _check_pr_merged(pr_url: str, token: str) -> bool:
             return False
         pr_data = resp.json()
         return pr_data.get("merged", False)
+
+
 # ADR-017: ITERATING added — PR branch gets new commits during iteration;
 # CI re-runs and needs to be polled just like AWAITING_CI/AWAITING_REVIEW.
-REVIEW_POLL_STATUSES = {TaskStatus.AWAITING_REVIEW, TaskStatus.AWAITING_CI, TaskStatus.PR_CREATED, TaskStatus.ITERATING}
+REVIEW_POLL_STATUSES = {
+    TaskStatus.AWAITING_REVIEW,
+    TaskStatus.AWAITING_CI,
+    TaskStatus.PR_CREATED,
+    TaskStatus.ITERATING,
+}
 
 # Track last seen comment ID per task to avoid re-processing
 _last_seen_comments: dict[int, int] = {}
@@ -2004,6 +2125,7 @@ async def pr_comment_poller() -> None:
         try:
             async with async_session() as session:
                 from sqlalchemy import select as sa_select
+
                 result = await session.execute(
                     sa_select(Task).where(Task.status.in_(REVIEW_POLL_STATUSES))
                 )
@@ -2029,6 +2151,7 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
     import httpx
+
     async with httpx.AsyncClient() as client:
         # Get issue comments (conversation-level comments on the PR)
         resp = await client.get(
@@ -2060,12 +2183,14 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
             for review in resp3.json():
                 if review.get("body") and review.get("state") in ("CHANGES_REQUESTED", "COMMENTED"):
                     # Treat formal reviews as comments too
-                    comments.append({
-                        "id": review["id"],
-                        "user": review.get("user", {}),
-                        "body": f"[Review - {review['state']}] {review['body']}",
-                        "created_at": review.get("submitted_at", ""),
-                    })
+                    comments.append(
+                        {
+                            "id": review["id"],
+                            "user": review.get("user", {}),
+                            "body": f"[Review - {review['state']}] {review['body']}",
+                            "created_at": review.get("submitted_at", ""),
+                        }
+                    )
 
     if not comments:
         return
@@ -2100,9 +2225,7 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
     log.info(f"Task #{task.id}: {len(new_comments)} new PR comment(s) found (polled)")
 
     await publish(
-        human_message(
-            task_id=task.id, message=all_feedback, source="github_pr_comment_poll"
-        )
+        human_message(task_id=task.id, message=all_feedback, source="github_pr_comment_poll")
     )
 
 
@@ -2113,19 +2236,23 @@ async def _poll_pr_comments(task: Task, token: str) -> None:
 
 async def start_slack_inbound_if_configured() -> None:
     from shared.config import settings
+
     if not settings.slack_bot_token or not settings.slack_app_token:
         log.info("Slack not configured, skipping inbound")
         return
     from integrations.slack.main import inbound_loop as slack_inbound_loop
+
     log.info("Starting Slack inbound (Socket Mode)")
     await slack_inbound_loop()
 
 
 async def start_slack_notifications_if_configured() -> None:
     from shared.config import settings
+
     if not settings.slack_bot_token:
         return
     from integrations.slack.main import notification_loop as slack_notification_loop
+
     log.info("Starting Slack notification fan-out")
     await slack_notification_loop()
 
@@ -2137,6 +2264,7 @@ async def _scaffold_heartbeat_runner() -> None:
     for the policy (5-min poll, 30-min stall threshold).
     """
     from agent.lifecycle.scaffold.recovery import scaffold_heartbeat_watchdog
+
     await scaffold_heartbeat_watchdog()
 
 
@@ -2148,6 +2276,7 @@ async def _trio_heartbeat_runner() -> None:
     agent/lifecycle/trio/recovery.py::trio_heartbeat_watchdog for the policy.
     """
     from agent.lifecycle.trio.recovery import trio_heartbeat_watchdog
+
     await trio_heartbeat_watchdog()
 
 
@@ -2158,6 +2287,7 @@ async def _reconciler_runner() -> None:
     See orchestrator/reconciler.py::reconciler_loop for the policy.
     """
     from orchestrator.reconciler import reconciler_loop
+
     await reconciler_loop()
 
 
@@ -2180,14 +2310,17 @@ async def _recover_stuck_tasks() -> None:
       scaffold tasks get stuck after a restart (see task 52 incident).
     """
     from sqlalchemy import select as sa_select
+
     async with async_session() as session:
         result = await session.execute(
             sa_select(Task).where(
-                Task.status.in_({
-                    TaskStatus.PLANNING,
-                    TaskStatus.CODING,
-                    TaskStatus.AWAITING_APPROVAL,
-                })
+                Task.status.in_(
+                    {
+                        TaskStatus.PLANNING,
+                        TaskStatus.CODING,
+                        TaskStatus.AWAITING_APPROVAL,
+                    }
+                )
             )
         )
         stuck_tasks = result.scalars().all()
@@ -2208,7 +2341,9 @@ async def _recover_stuck_tasks() -> None:
                     log.info(f"Recovering task #{task.id}: re-emitting start_coding")
                     await publish(task_start_coding(task.id))
             elif task.status == TaskStatus.AWAITING_APPROVAL and task.freeform_mode:
-                log.info(f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review")
+                log.info(
+                    f"Recovering freeform task #{task.id}: re-emitting plan_ready for auto-review"
+                )
                 await publish(task_plan_ready(task.id, plan=task.plan or ""))
         if stuck_tasks:
             log.info(f"Recovered {len(stuck_tasks)} stuck task(s)")
@@ -2250,48 +2385,99 @@ async def queued_dispatch_poller() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_alembic_upgrade_sync() -> None:
-    """Apply pending alembic migrations. Runs synchronously in its own thread.
+# Startup migration retries before the app gives up and crash-loops. Bounded so
+# a transient DDL-lock conflict with a still-draining container self-heals,
+# while a genuinely broken migration still fails loudly (and safely).
+_MIGRATION_MAX_ATTEMPTS = 5
+_MIGRATION_BACKOFF_CAP_S = 20
 
-    The deploy script (scripts/deploy.sh) only runs migrations when invoked
-    with the explicit `migrate` flag, so a default deploy ships new code
-    against an old schema. New columns added to existing tables would
-    silently break SQL queries (Base.metadata.create_all only creates
-    missing TABLES, not missing COLUMNS). Running alembic at startup keeps
-    the schema in sync with the code that's about to run, regardless of
-    how the container was deployed.
 
-    Must run in a thread (not the lifespan event loop) because
-    migrations/env.py::run_migrations_online calls asyncio.run(), which
-    can't be invoked from within a running loop.
+def _db_current_heads() -> set[str]:
+    """Revisions recorded in ``alembic_version`` right now. Empty set when the
+    table is absent (a brand-new database)."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
 
-    Idempotent — alembic skips revisions already applied.
+    async def _query() -> set[str]:
+        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                return set(result.scalars().all())
+        finally:
+            await engine.dispose()
+
+    try:
+        return asyncio.run(_query())
+    except Exception:
+        return set()
+
+
+def _ensure_schema_at_head_sync() -> None:
+    """Migrate to alembic head, then VERIFY the DB is actually at head — raising
+    if it is not, so the app refuses to start against a stale schema.
+
+    Runs synchronously in its own thread because migrations/env.py calls
+    asyncio.run(), which can't nest inside the lifespan event loop.
+
+    Why this raises instead of the old log-and-continue: at an old revision the
+    current code can't READ some tables and can't PERSIST others (writes hit
+    columns that don't exist yet), so data is silently dropped — exactly how the
+    prod DB sat at 047 and lost tasks/graphs. Refusing to boot is the safe
+    failure: the container crash-loops loudly (ECS restarts it, by which point a
+    lock-holding draining container is gone) instead of serving against a schema
+    the code can't use. It retries first so transient DDL-lock contention
+    resolves on its own rather than turning straight into a crash-loop.
     """
     from pathlib import Path as _Path
 
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     cfg_path = _Path(__file__).parent / "alembic.ini"
     if not cfg_path.is_file():
-        log.warning("alembic.ini not found, skipping startup migration")
-        return
+        raise RuntimeError(
+            "alembic.ini not found — refusing to start without verifying the DB schema"
+        )
     cfg = Config(str(cfg_path))
-    try:
-        command.upgrade(cfg, "head")
-    except Exception:
-        # Don't crash startup on a migration error — log and let the app
-        # boot. A broken migration is the operator's problem to fix; the
-        # process should still come up so the existing app keeps serving.
-        log.exception("alembic upgrade head failed at startup")
+    expected = set(ScriptDirectory.from_config(cfg).get_heads())
+
+    last_error: str | None = None
+    for attempt in range(1, _MIGRATION_MAX_ATTEMPTS + 1):
+        try:
+            command.upgrade(cfg, "head")
+            current = _db_current_heads()
+            if current == expected:
+                log.info("schema_at_head", revision=sorted(expected))
+                return
+            last_error = f"DB at {sorted(current)}, expected {sorted(expected)}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "startup_migration_attempt_failed",
+            attempt=attempt,
+            max_attempts=_MIGRATION_MAX_ATTEMPTS,
+            error=last_error,
+        )
+        if attempt < _MIGRATION_MAX_ATTEMPTS:
+            time.sleep(min(2**attempt, _MIGRATION_BACKOFF_CAP_S))
+
+    raise RuntimeError(
+        f"Schema not at alembic head after {_MIGRATION_MAX_ATTEMPTS} attempts; "
+        f"refusing to start so the app never serves against a stale schema "
+        f"(would silently drop tasks/graphs). Last error: {last_error}"
+    )
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run alembic migrations BEFORE create_all so we never query columns
     # that don't exist yet on the deployed DB. Threaded to dodge the
-    # nested-event-loop problem in migrations/env.py.
-    await asyncio.to_thread(_run_alembic_upgrade_sync)
+    # nested-event-loop problem in migrations/env.py. Raises (crash-loops the
+    # container) if the schema can't be brought to head — never serve stale.
+    await asyncio.to_thread(_ensure_schema_at_head_sync)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -2309,6 +2495,7 @@ async def lifespan(app: FastAPI):
 
     # Seed admin user if no users exist
     from orchestrator.router import seed_admin_user
+
     await seed_admin_user()
 
     # Auto-discover repos from GitHub. Runs as a background task — with many
@@ -2328,11 +2515,13 @@ async def lifespan(app: FastAPI):
 
     # Resume trio parents that were in-flight when the orchestrator last stopped.
     from agent.lifecycle.trio.recovery import resume_all_trio_parents
+
     await resume_all_trio_parents()
 
     # Same for scaffold parents (ADR-018) — wire up the freeform PO-standin
     # gates so they don't strand on container restart.
     from agent.lifecycle.scaffold.recovery import resume_all_scaffold_parents
+
     await resume_all_scaffold_parents()
 
     bg = [
@@ -2380,6 +2569,7 @@ app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     from shared.preflight import check_all
+
     print("Running preflight checks...")
     check_all()
     uvicorn.run("run:app", host="0.0.0.0", port=2020, reload=False)
