@@ -1,0 +1,114 @@
+name: deploy-aws
+
+# Build the auto-agent + web-next images, push to ECR, and roll the Fargate
+# service. Replaces the on-VM `scripts/deploy.sh` build (which filled the VM's
+# disk on every deploy). Manual for now; flip the `push` trigger on once you're
+# happy running it automatically.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+
+permissions:
+  id-token: write   # for OIDC role assumption
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_AUTOAGENT: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/autoagent
+  ECR_WEBNEXT: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/autoagent-web-next
+  CLUSTER: autoagent
+  SERVICE: autoagent
+  # Infra IDs the one-off migration task needs (non-secret; mirror scripts/aws/config.env).
+  LOG_GROUP: /ecs/autoagent
+  AUTOAGENT_SG_ID: sg-0eaaccf9b1f076a94
+  PUBLIC_SUBNET_IDS: subnet-0934a497a75a5b9ff,subnet-00aa8bee7a7f224c3,subnet-0870425ffc3def374
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push auto-agent
+        run: |
+          TAG="${GITHUB_SHA::12}"
+          docker build \
+            --build-arg GITHUB_TOKEN="${{ secrets.TEAM_MEMORY_TOKEN }}" \
+            -t "$ECR_AUTOAGENT:$TAG" -t "$ECR_AUTOAGENT:latest" .
+          docker push "$ECR_AUTOAGENT:$TAG"
+          docker push "$ECR_AUTOAGENT:latest"
+
+      - name: Build & push web-next
+        run: |
+          TAG="${GITHUB_SHA::12}"
+          docker build \
+            -t "$ECR_WEBNEXT:$TAG" -t "$ECR_WEBNEXT:latest" ./web-next
+          docker push "$ECR_WEBNEXT:$TAG"
+          docker push "$ECR_WEBNEXT:latest"
+
+      # Apply DB migrations BEFORE rolling new code, so the new image never runs
+      # against an un-migrated schema. Runs `alembic upgrade head` as a one-off
+      # Fargate task on the just-pushed image; fails the deploy if it errors.
+      # (Without this the schema silently drifted — prod sat at alembic 047 while
+      # the code expected 057, which broke the code-graph + auto-heal features.)
+      - name: Run DB migrations
+        run: |
+          set -euo pipefail
+          ACCT="${{ vars.AWS_ACCOUNT_ID }}"
+          TAG="${GITHUB_SHA::12}"
+          EXEC_ROLE="arn:aws:iam::${ACCT}:role/autoagent-exec"
+          TASK_ROLE="arn:aws:iam::${ACCT}:role/autoagent-task"
+          ENV_BUCKET="autoagent-env-${ACCT}"
+          SUBNET1="$(echo "$PUBLIC_SUBNET_IDS" | cut -d, -f1)"
+          SH='cd /app && export PYTHONPATH=/app && echo BEFORE: && alembic current && alembic upgrade head && echo AFTER: && alembic current && echo MIGRATE_OK'
+          SH_B64="$(printf '%s' "$SH" | base64 | tr -d '\n')"
+          cat > /tmp/migrate-td.json <<JSON
+          {"family":"autoagent-migrate","networkMode":"awsvpc","requiresCompatibilities":["FARGATE"],
+           "cpu":"512","memory":"1024","executionRoleArn":"${EXEC_ROLE}","taskRoleArn":"${TASK_ROLE}",
+           "containerDefinitions":[{"name":"migrate","image":"${ECR_AUTOAGENT}:${TAG}","essential":true,
+             "command":["sh","-c","echo ${SH_B64} | base64 -d | sh"],
+             "environmentFiles":[{"value":"arn:aws:s3:::${ENV_BUCKET}/autoagent.env","type":"s3"}],
+             "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"${LOG_GROUP}","awslogs-region":"${AWS_REGION}","awslogs-stream-prefix":"migrate"}}}]}
+          JSON
+          aws ecs register-task-definition --region "$AWS_REGION" --cli-input-json file:///tmp/migrate-td.json >/dev/null
+          ARN="$(aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition autoagent-migrate \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET1],securityGroups=[$AUTOAGENT_SG_ID],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)"
+          echo "migration task: $ARN"
+          aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$ARN"
+          aws logs get-log-events --region "$AWS_REGION" --log-group-name "$LOG_GROUP" \
+            --log-stream-name "migrate/migrate/$(basename "$ARN")" --query 'events[].message' --output text 2>/dev/null || true
+          CODE="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)"
+          echo "migration exit code: $CODE"
+          [ "$CODE" = "0" ] || { echo "::error::DB migration failed — aborting deploy before rolling new code"; exit 1; }
+
+      - name: Roll the service
+        run: |
+          aws ecs update-service \
+            --cluster "$CLUSTER" --service "$SERVICE" \
+            --force-new-deployment --region "$AWS_REGION"
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" --services "$SERVICE" --region "$AWS_REGION"
+
+# --- One-time setup this workflow expects -----------------------------------
+# Repo VARIABLES:  AWS_REGION, AWS_ACCOUNT_ID, AWS_DEPLOY_ROLE_ARN
+# Repo SECRETS:    TEAM_MEMORY_TOKEN  (a GH token that can install the private
+#                  team-memory package — same one used as the Docker build-arg)
+# AWS_DEPLOY_ROLE_ARN is an IAM role with a GitHub OIDC trust policy and
+# permissions for ecr:* (push) + ecs:UpdateService/DescribeServices. Created in
+# 09_iam.sh (commented section) once the OIDC provider exists.
+# The "Run DB migrations" step additionally needs: ecs:RegisterTaskDefinition,
+# ecs:RunTask, ecs:DescribeTasks, logs:GetLogEvents, and iam:PassRole for the
+# autoagent-exec + autoagent-task roles (so it can launch the one-off task).
