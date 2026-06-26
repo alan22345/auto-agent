@@ -10,7 +10,7 @@ import {
   type HealthLoopStatus,
 } from '@/lib/health-loop';
 
-export const healthLoopKeys = {
+const healthLoopKeys = {
   status: (repoId: number | null) => ['health-loop', 'status', repoId] as const,
   findings: (repoId: number | null) => ['health-loop', 'findings', repoId] as const,
 };
