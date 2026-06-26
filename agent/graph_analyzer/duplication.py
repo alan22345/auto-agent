@@ -596,4 +596,4 @@ def compute_clones(
     return groups
 
 
-__all__ = ["compute_clones", "normalize_tokens"]
+__all__ = ["compute_clones"]
