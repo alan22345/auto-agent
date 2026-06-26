@@ -27,7 +27,9 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-# Statuses that count as "active" (occupying a slot)
+# Statuses that count as "in flight" — a task here occupies its repo and its
+# org's quota, so a second task must not start on the same repo. Used for
+# per-repo and per-org busy detection, NOT for the global compute pool.
 ACTIVE_STATUSES = {
     TaskStatus.PLANNING,
     TaskStatus.AWAITING_APPROVAL,
@@ -38,6 +40,19 @@ ACTIVE_STATUSES = {
     TaskStatus.AWAITING_REVIEW,
     TaskStatus.ITERATING,  # ADR-017: PR open + actively re-iterating on feedback
     TaskStatus.BLOCKED,
+}
+
+# Statuses that actually consume a compute worker — an agent loop is running
+# right now. The global ``max_concurrent_workers`` pool bounds THESE only.
+# A task merely *waiting* (on a human approval, on CI, blocked on an error)
+# holds no worker; counting it against the pool let a few parked tasks
+# silently exhaust every slot and wedge all new dispatch until a human deleted
+# them. The cap is admission control for QUEUED work, not a hard compute
+# ceiling (trio/scaffold run states were never counted either).
+RUNNING_STATUSES = {
+    TaskStatus.PLANNING,
+    TaskStatus.CODING,
+    TaskStatus.ITERATING,
 }
 
 
@@ -73,9 +88,13 @@ async def _lease_held_safe() -> bool:
 
 
 async def count_active(session: AsyncSession) -> int:
-    """Total active tasks across all users and repos."""
+    """Tasks currently consuming a compute worker, across all users and repos.
+
+    Counts ``RUNNING_STATUSES`` (an agent loop is executing) — not tasks parked
+    waiting on a human or external system, which hold no worker.
+    """
     result = await session.execute(
-        select(func.count(Task.id)).where(Task.status.in_(ACTIVE_STATUSES))
+        select(func.count(Task.id)).where(Task.status.in_(RUNNING_STATUSES))
     )
     return result.scalar_one()
 
