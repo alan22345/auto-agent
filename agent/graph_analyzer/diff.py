@@ -114,22 +114,42 @@ def apply_plan(
 
     Files in the cascade set have their ``processed`` entry dropped so the
     pipeline's main walk picks them up again in the same run.
+
+    Edges carry FLAT string ``source``/``target`` node ids (see
+    ``shared.types.Edge``), not nested ``{"id", "file"}`` dicts. We resolve an
+    endpoint's owning file from the node table (``id`` → ``file``), falling
+    back to the ``"<file>::<symbol>"`` id convention when a node row is absent.
     """
     cascade: set[str] = set()
+
+    # Map every node id to its file once, up front. Endpoints reference node
+    # ids; this resolves the file each edge end belongs to without assuming a
+    # nested edge shape. Built from the original node set so removed nodes still
+    # resolve while we filter their edges.
+    id_to_file = {n["id"]: n.get("file") for n in blob.get("nodes", [])}
+
+    def endpoint_file(node_id: str) -> str | None:
+        f = id_to_file.get(node_id)
+        if f is None and isinstance(node_id, str) and "::" in node_id:
+            f = node_id.split("::", 1)[0]
+        return f
 
     # --- D ---
     for path in plan.deleted:
         cross_file_callers = {
-            e["source"]["file"]
+            f
             for e in blob.get("edges", [])
-            if e["target"]["file"] == path and e["source"]["file"] != path
+            if endpoint_file(e["target"]) == path
+            and (f := endpoint_file(e["source"])) is not None
+            and f != path
         }
         cascade.update(cross_file_callers)
-        blob["nodes"] = [n for n in blob.get("nodes", []) if n["file"] != path]
+        blob["nodes"] = [n for n in blob.get("nodes", []) if n.get("file") != path]
         blob["edges"] = [
             e
             for e in blob.get("edges", [])
-            if e["source"]["file"] != path and e["target"]["file"] != path
+            if endpoint_file(e["source"]) != path
+            and endpoint_file(e["target"]) != path
         ]
         processed.pop(path, None)
     # Drop processed entries for all cascade files collected during D
@@ -139,22 +159,26 @@ def apply_plan(
     # --- M / T (with smart cascade) ---
     for path in plan.modified:
         cross_file_targets = {
-            e["target"]["id"]
+            e["target"]
             for e in blob.get("edges", [])
-            if e["target"]["file"] == path and e["source"]["file"] != path
+            if endpoint_file(e["target"]) == path
+            and endpoint_file(e["source"]) != path
         }
         callers_by_target: dict[str, set[str]] = {}
         for e in blob.get("edges", []):
-            if e["target"]["file"] == path and e["source"]["file"] != path:
-                callers_by_target.setdefault(e["target"]["id"], set()).add(
-                    e["source"]["file"]
-                )
+            if (
+                endpoint_file(e["target"]) == path
+                and (caller := endpoint_file(e["source"])) is not None
+                and caller != path
+            ):
+                callers_by_target.setdefault(e["target"], set()).add(caller)
 
-        blob["nodes"] = [n for n in blob.get("nodes", []) if n["file"] != path]
+        blob["nodes"] = [n for n in blob.get("nodes", []) if n.get("file") != path]
         blob["edges"] = [
             e
             for e in blob.get("edges", [])
-            if e["source"]["file"] != path and e["target"]["file"] != path
+            if endpoint_file(e["source"]) != path
+            and endpoint_file(e["target"]) != path
         ]
         processed.pop(path, None)
 
@@ -170,23 +194,15 @@ def apply_plan(
     # --- R100: pure rename, rewrite paths ---
     for old, new in plan.renamed_pure:
         for n in blob.get("nodes", []):
-            if n["file"] == old:
+            if n.get("file") == old:
                 n["file"] = new
                 if n.get("id", "").startswith(f"{old}::"):
                     n["id"] = n["id"].replace(f"{old}::", f"{new}::", 1)
         for e in blob.get("edges", []):
-            if e["source"]["file"] == old:
-                e["source"]["file"] = new
-                if e["source"].get("id", "").startswith(f"{old}::"):
-                    e["source"]["id"] = e["source"]["id"].replace(
-                        f"{old}::", f"{new}::", 1
-                    )
-            if e["target"]["file"] == old:
-                e["target"]["file"] = new
-                if e["target"].get("id", "").startswith(f"{old}::"):
-                    e["target"]["id"] = e["target"]["id"].replace(
-                        f"{old}::", f"{new}::", 1
-                    )
+            for end in ("source", "target"):
+                node_id = e.get(end)
+                if isinstance(node_id, str) and node_id.startswith(f"{old}::"):
+                    e[end] = node_id.replace(f"{old}::", f"{new}::", 1)
         if old in processed:
             processed[new] = processed.pop(old)
 
