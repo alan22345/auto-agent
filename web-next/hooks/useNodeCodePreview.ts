@@ -17,7 +17,7 @@ interface Params {
   lineEnd: number | null;
 }
 
-export function codePreviewKey({ repoId, path, lineStart, lineEnd }: Params) {
+function codePreviewKey({ repoId, path, lineStart, lineEnd }: Params) {
   return ['code-graph', 'code-preview', repoId, path, lineStart, lineEnd] as const;
 }
 
