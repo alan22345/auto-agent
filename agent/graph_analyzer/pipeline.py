@@ -1306,3 +1306,16 @@ def overall_status(statuses: list[AreaStatus]) -> str:
     if n_failed == len(statuses):
         return "failed"
     return "partial"
+
+
+# ``walk_files`` is intentionally absent: it is an internal helper consumed
+# only by ``_iter_area_files`` (and directly by tests), with no production
+# importer, so it is not part of this module's public API. ``__all__`` only
+# governs ``import *``; the direct test imports of ``walk_files`` are
+# unaffected.
+__all__ = [
+    "analyser_version",
+    "overall_status",
+    "run_partial_pipeline",
+    "run_pipeline",
+]
