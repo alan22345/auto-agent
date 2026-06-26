@@ -1,0 +1,12 @@
+# config.env holds the autoagent DB password + harpoon coordinates — never commit it.
+config.env
+# the rendered (non-template) task definition contains the final image URIs/arns
+task-def.json
+# any local env dumps pulled from the VM during migration
+*.env.dump
+*.sql
+*.tar.gz
+# one-off, target-specific debugging/forensics scripts — kept local, not repo tooling
+probe_*.sh
+trigger_graph_*.sh
+force_rebuild_*.sh
