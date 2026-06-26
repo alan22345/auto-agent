@@ -181,8 +181,8 @@ async def _write_answer(attempt_id: int, answer: str) -> None:
 
 # ---------------------------------------------------------------------------
 # ADR-018 — scaffold-flow gate standins. The scaffold parent task drives
-# three gates that need a PO standin when ``task.freeform_mode is True``:
-# the intent grill, the root-ADR approval, and each per-domain ADR
+# gates that need a PO standin when ``task.freeform_mode is True``:
+# the per-domain grill, the root-ADR approval, and each per-domain ADR
 # approval. These helpers own the "PO writes the gate file directly"
 # pattern — no skill / Claude Code roundtrip; we already know the JSON
 # shape so a Python-side write is the simplest correct thing.
@@ -191,146 +191,6 @@ async def _write_answer(attempt_id: int, answer: str) -> None:
 # decision when grounding is missing (no product_brief, no partial
 # intent.md), mirroring the ADR-015 §6 standin contract.
 # ---------------------------------------------------------------------------
-
-
-async def po_answer_intent_grill(task, question: str, workspace_root: str) -> None:
-    """PO standin answers an intent-grill question (freeform mode).
-
-    The intent grill runs at the very start of a scaffold task, before
-    any product brief or ARCHITECTURE.md exists. The PO grounds its
-    answer in (a) the task description and (b) any partial
-    ``.auto-agent/intent.md`` the grill has already written. When neither
-    yields enough signal, the PO falls back to a deterministic default
-    and logs ``fallback_default(source=heuristic)`` so the audit trail
-    is unambiguous.
-
-    Writes ``.auto-agent/intent_grill_answer.json`` — the intent-grill
-    agent reads this file when it re-enters its session.
-    """
-
-    from agent.lifecycle.workspace_paths import (
-        INTENT_GRILL_ANSWER_PATH,
-        INTENT_PATH,
-    )
-
-    description = (getattr(task, "description", "") or "").strip()
-    title = (getattr(task, "title", "") or "").strip()
-
-    partial_intent = ""
-    intent_abs = Path(workspace_root) / INTENT_PATH
-    if intent_abs.exists():
-        try:
-            partial_intent = intent_abs.read_text(errors="replace")[:2000]
-        except OSError:
-            partial_intent = ""
-
-    fallback_reasons: list[str] = []
-
-    if not description and not partial_intent:
-        fallback_reasons.append("intent_grill:no_description_or_partial_intent")
-        answer = (
-            "Default answer (heuristic): proceed with the simplest, smallest "
-            "scope that matches the task title literally. Defer everything "
-            "the title does not explicitly name; we will revisit if the user "
-            "pushes back."
-        )
-        cited: list[str] = []
-        log.warning(
-            "fallback_default(source=heuristic) standin_kind=po gate=intent_grill "
-            "reason=no_description_or_partial_intent task_id=%s",
-            getattr(task, "id", None),
-        )
-    else:
-        # Build a system prompt that names the PO standin's role explicitly so
-        # the LLM stays in character on a scaffold task that has no
-        # product_brief yet (ADR-018 §2 — scaffold tasks pre-date the brief).
-        system_prompt = (
-            "You are the Product Owner standin for a brand-new scaffold task. "
-            "No product brief exists yet — that's what this whole scaffold run "
-            "produces. Answer the intent-grill agent's question grounded in "
-            "the task description and any partial intent.md content below. "
-            "Pick a sensible default when the inputs are truly under-"
-            "determined; never escape to the user."
-        )
-        prompt_parts: list[str] = []
-        if title:
-            prompt_parts.append(f"# Task title\n\n{title}\n")
-        if description:
-            prompt_parts.append(f"# Task description\n\n{description}\n")
-        if partial_intent:
-            prompt_parts.append(f"# Partial .auto-agent/intent.md so far\n\n{partial_intent}\n")
-        prompt_parts.append(
-            "The intent-grill agent has paused with this question:\n\n"
-            f"{question}\n\n"
-            "Answer as the PO standin in 1-3 sentences. Output ONLY a JSON\n"
-            'object on its own lines: ```json\n{"answer": "<your answer>"}\n```'
-        )
-        prompt = "\n\n".join(prompt_parts)
-
-        agent = create_agent(
-            workspace_root,
-            readonly=True,
-            max_turns=4,
-            task_description=(
-                f"PO standin answers intent-grill question for task #{getattr(task, 'id', '?')}"
-            ),
-            repo_name=getattr(getattr(task, "repo", None), "name", None),
-        )
-
-        answer: str
-        cited = ["task.description"] if description else []
-        if partial_intent:
-            cited.append("intent.md(partial)")
-        try:
-            result = await agent.run(prompt, system=system_prompt)
-            output = getattr(result, "output", "") or ""
-            parsed = parse_json_response(output)
-            if isinstance(parsed, dict) and "answer" in parsed:
-                answer = str(parsed["answer"])
-            else:
-                fallback_reasons.append("intent_grill:unparseable_output")
-                log.warning(
-                    "fallback_default(source=heuristic) standin_kind=po gate=intent_grill "
-                    "reason=unparseable_output task_id=%s",
-                    getattr(task, "id", None),
-                )
-                answer = (
-                    "Default answer (heuristic): proceed with the simplest scope "
-                    "consistent with the task description; defer the rest."
-                )
-                cited = []
-        except Exception as exc:
-            fallback_reasons.append("intent_grill:agent_failed")
-            log.exception(
-                "fallback_default(source=heuristic) standin_kind=po gate=intent_grill "
-                "reason=agent_failed task_id=%s exc=%s",
-                getattr(task, "id", None),
-                type(exc).__name__,
-            )
-            answer = (
-                "Default answer (heuristic): proceed with the simplest scope "
-                "consistent with the task description; defer the rest."
-            )
-            cited = []
-
-    payload = {
-        "schema_version": "1",
-        "question": question,
-        "answer": answer,
-        "source": "po_standin",
-        "cited_context": cited,
-        "fallback_reasons": fallback_reasons,
-    }
-    out_path = Path(workspace_root) / INTENT_GRILL_ANSWER_PATH
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2))
-
-    log.info(
-        "po_agent.intent_grill_answered task_id=%s answer_preview=%r fallback=%s",
-        getattr(task, "id", None),
-        answer[:120],
-        bool(fallback_reasons),
-    )
 
 
 async def po_answer_domain_grill(
@@ -347,8 +207,8 @@ async def po_answer_domain_grill(
     ``000-system.md`` (so the standin can see what the system-level
     decomposition already settled). When grounding is missing the PO
     falls back to a deterministic default and logs
-    ``fallback_default(source=heuristic)`` — same contract as
-    :func:`po_answer_intent_grill`.
+    ``fallback_default(source=heuristic)`` — the ADR-015 §6 standin
+    contract.
 
     Writes ``.auto-agent/domain_grill_answers/<slug>.json`` — the
     domain-grill agent reads this file when it re-enters its session.

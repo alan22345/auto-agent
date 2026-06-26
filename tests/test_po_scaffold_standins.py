@@ -2,8 +2,8 @@
 
 Covers:
 
-1. The three new ``agent.po_agent`` functions
-   (``po_answer_intent_grill``, ``po_approve_root_adr``,
+1. The ``agent.po_agent`` standin functions
+   (``po_answer_domain_grill``, ``po_approve_root_adr``,
    ``po_approve_domain_adr``) — each writes the canonical verdict file
    at the right path, with valid JSON, and never escapes.
 
@@ -63,91 +63,7 @@ def workspace() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. po_answer_intent_grill — writes intent_grill_answer.json
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_po_answer_intent_grill_writes_answer_file_with_partial_intent(
-    workspace: str,
-) -> None:
-    """When a partial intent.md exists, the PO uses it as grounding context
-    via a one-shot agent and writes a JSON answer file with citations."""
-
-    from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH, INTENT_PATH
-    from agent.po_agent import po_answer_intent_grill
-
-    # Seed a partial intent.md so the PO has grounding context.
-    (Path(workspace) / INTENT_PATH).write_text(
-        "# Intent\n\n## What the user wants\nA dead-simple TODO app.\n"
-    )
-
-    # Stub the one-shot agent so we don't actually hit the LLM.
-    fake_agent = SimpleNamespace(
-        run=AsyncMock(
-            return_value=SimpleNamespace(
-                output='```json\n{"answer": "Yes — keep it minimal, one user only."}\n```'
-            )
-        )
-    )
-    with patch("agent.po_agent.create_agent", return_value=fake_agent):
-        await po_answer_intent_grill(
-            _make_task(),
-            "Do we need multi-user support?",
-            workspace,
-        )
-
-    path = Path(workspace) / INTENT_GRILL_ANSWER_PATH
-    assert path.is_file(), "intent_grill_answer.json was not written"
-    payload = json.loads(path.read_text())
-    assert payload["schema_version"] == "1"
-    assert payload["source"] == "po_standin"
-    assert "answer" in payload
-    assert "keep it minimal" in payload["answer"]
-    assert "task.description" in payload["cited_context"]
-    assert "intent.md(partial)" in payload["cited_context"]
-    assert payload["fallback_reasons"] == []
-
-
-@pytest.mark.asyncio
-async def test_po_answer_intent_grill_falls_back_when_no_context(workspace: str) -> None:
-    """No description, no partial intent → heuristic default + fallback marker."""
-
-    from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH
-    from agent.po_agent import po_answer_intent_grill
-
-    task = _make_task(description="")
-    await po_answer_intent_grill(task, "Anything?", workspace)
-
-    payload = json.loads((Path(workspace) / INTENT_GRILL_ANSWER_PATH).read_text())
-    assert payload["fallback_reasons"]
-    assert any("intent_grill" in r for r in payload["fallback_reasons"])
-    # Never escapes — the file is still written with a usable answer.
-    assert "Default answer" in payload["answer"]
-
-
-@pytest.mark.asyncio
-async def test_po_answer_intent_grill_falls_back_on_unparseable_llm_output(
-    workspace: str,
-) -> None:
-    """LLM returns garbage → heuristic fallback, no crash, file still written."""
-
-    from agent.lifecycle.workspace_paths import INTENT_GRILL_ANSWER_PATH
-    from agent.po_agent import po_answer_intent_grill
-
-    fake_agent = SimpleNamespace(
-        run=AsyncMock(return_value=SimpleNamespace(output="not json at all"))
-    )
-    with patch("agent.po_agent.create_agent", return_value=fake_agent):
-        await po_answer_intent_grill(_make_task(), "Q?", workspace)
-
-    payload = json.loads((Path(workspace) / INTENT_GRILL_ANSWER_PATH).read_text())
-    assert any("unparseable_output" in r for r in payload["fallback_reasons"])
-    assert "Default answer" in payload["answer"]
-
-
-# ---------------------------------------------------------------------------
-# 1b. po_answer_domain_grill — writes domain_grill_answers/<slug>.json
+# 1. po_answer_domain_grill — writes domain_grill_answers/<slug>.json
 # ---------------------------------------------------------------------------
 
 
