@@ -5,7 +5,7 @@ Covers:
   - RedisStreamPublisher: xadd is called with the right key + payload, and
     the underlying client is reused across publishes (one connection, not
     one per call).
-  - Module-level publish/set_publisher/get_publisher swap.
+  - Module-level publish/set_publisher/_get_publisher swap.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from shared.events import (
     Event,
     InMemoryPublisher,
     RedisStreamPublisher,
-    get_publisher,
+    _get_publisher,
     publish,
     set_publisher,
 )
@@ -151,13 +151,13 @@ class TestModuleLevelPublishHelper:
         from shared import events as events_mod
         events_mod._publisher = None
         with pytest.raises(RuntimeError, match="No Publisher registered"):
-            get_publisher()
+            _get_publisher()
 
     @pytest.mark.asyncio
     async def test_set_and_publish_routes_to_active_publisher(self):
         pub = InMemoryPublisher()
         set_publisher(pub)
-        assert get_publisher() is pub
+        assert _get_publisher() is pub
 
         ev = Event(type="task.created", task_id=7)
         await publish(ev)

@@ -860,7 +860,7 @@ def set_publisher(publisher: _Publisher) -> None:
     _publisher = publisher
 
 
-def get_publisher() -> _Publisher:
+def _get_publisher() -> _Publisher:
     """Return the active publisher. Raises if none is registered — every
     process must wire one in before publishing."""
     if _publisher is None:
@@ -877,4 +877,4 @@ async def publish(event: Event) -> None:
     This is the public publish seam — every emitter calls this single
     function. Connection lifecycle is owned by the publisher, not the caller.
     """
-    await get_publisher().publish(event)
+    await _get_publisher().publish(event)
