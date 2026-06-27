@@ -50,7 +50,7 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
       ? 'Repo default: freeform. Toggling on routes this task through the human-in-loop gates.'
       : 'Repo default: human-in-loop. Toggling on lets the standin agents approve every gate.';
 
-  async function submit() {
+  const submit = async () => {
     if (!title.trim() || busy) return;
     setBusy(true);
     setError(null);
@@ -71,7 +71,7 @@ export function NewTaskForm({ onCreated }: { onCreated?: () => void } = {}) {
     } finally {
       setBusy(false);
     }
-  }
+  };
 
   function onTitleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter') {
