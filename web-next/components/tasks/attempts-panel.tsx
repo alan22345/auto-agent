@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useVerifyAttempts } from '@/hooks/useVerifyAttempts';
 import { useReviewAttempts } from '@/hooks/useReviewAttempts';
@@ -37,45 +37,80 @@ function OverallBadge({ status }: { status: string }) {
   );
 }
 
-function VerifyRow({ a }: { a: VerifyAttemptOut }) {
+function FailureReason({ reason }: { reason?: string | null }) {
+  if (!reason) return null;
+  return (
+    <div className="mt-1 text-[11px] text-red-600 dark:text-red-400">
+      reason: {reason}
+    </div>
+  );
+}
+
+function LogTail({ logTail }: { logTail?: string | null }) {
+  if (!logTail) return null;
+  return (
+    <details className="mt-1 text-[11px]">
+      <summary className="cursor-pointer text-muted-foreground">
+        server log tail
+      </summary>
+      <pre className="mt-1 whitespace-pre-wrap text-[10px]">{logTail}</pre>
+    </details>
+  );
+}
+
+function AttemptRowFrame({
+  cycle,
+  status,
+  pills,
+  children,
+}: {
+  cycle: number;
+  status: string;
+  pills?: ReactNode;
+  children?: ReactNode;
+}) {
   return (
     <div className="border-l-2 pl-3 py-1.5">
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        <span className="font-medium">Cycle {a.cycle}</span>
-        <OverallBadge status={a.status} />
-        <StatusPill value={a.boot_check} label="boot" />
-        <StatusPill value={a.intent_check} label="intent" />
+        <span className="font-medium">Cycle {cycle}</span>
+        <OverallBadge status={status} />
+        {pills}
       </div>
+      {children}
+    </div>
+  );
+}
+
+function VerifyRow({ a }: { a: VerifyAttemptOut }) {
+  return (
+    <AttemptRowFrame
+      cycle={a.cycle}
+      status={a.status}
+      pills={
+        <>
+          <StatusPill value={a.boot_check} label="boot" />
+          <StatusPill value={a.intent_check} label="intent" />
+        </>
+      }
+    >
       {a.intent_judgment && (
         <pre className="mt-1 whitespace-pre-wrap text-[11px] text-muted-foreground">
           {a.intent_judgment}
         </pre>
       )}
-      {a.failure_reason && (
-        <div className="mt-1 text-[11px] text-red-600 dark:text-red-400">
-          reason: {a.failure_reason}
-        </div>
-      )}
-      {a.log_tail && (
-        <details className="mt-1 text-[11px]">
-          <summary className="cursor-pointer text-muted-foreground">
-            server log tail
-          </summary>
-          <pre className="mt-1 whitespace-pre-wrap text-[10px]">{a.log_tail}</pre>
-        </details>
-      )}
-    </div>
+      <FailureReason reason={a.failure_reason} />
+      <LogTail logTail={a.log_tail} />
+    </AttemptRowFrame>
   );
 }
 
 function ReviewRow({ a }: { a: ReviewAttemptOut }) {
   return (
-    <div className="border-l-2 pl-3 py-1.5">
-      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        <span className="font-medium">Cycle {a.cycle}</span>
-        <OverallBadge status={a.status} />
-        <StatusPill value={a.ui_check} label="ui" />
-      </div>
+    <AttemptRowFrame
+      cycle={a.cycle}
+      status={a.status}
+      pills={<StatusPill value={a.ui_check} label="ui" />}
+    >
       {a.code_review_verdict && (
         <details className="mt-1 text-[11px]" open={a.status !== 'pass'}>
           <summary className="cursor-pointer text-muted-foreground">
@@ -94,20 +129,9 @@ function ReviewRow({ a }: { a: ReviewAttemptOut }) {
           <pre className="mt-1 whitespace-pre-wrap text-[11px]">{a.ui_judgment}</pre>
         </details>
       )}
-      {a.failure_reason && (
-        <div className="mt-1 text-[11px] text-red-600 dark:text-red-400">
-          reason: {a.failure_reason}
-        </div>
-      )}
-      {a.log_tail && (
-        <details className="mt-1 text-[11px]">
-          <summary className="cursor-pointer text-muted-foreground">
-            server log tail
-          </summary>
-          <pre className="mt-1 whitespace-pre-wrap text-[10px]">{a.log_tail}</pre>
-        </details>
-      )}
-    </div>
+      <FailureReason reason={a.failure_reason} />
+      <LogTail logTail={a.log_tail} />
+    </AttemptRowFrame>
   );
 }
 

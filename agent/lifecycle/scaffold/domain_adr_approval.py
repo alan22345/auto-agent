@@ -27,10 +27,10 @@ import structlog
 from sqlalchemy import select
 
 from agent.lifecycle.scaffold._promotion import promote_adr_to_docs
+from agent.lifecycle.scaffold._verdicts import read_all_verdicts as _read_all_verdicts
 from agent.lifecycle.scaffold._workspace import prepare_scaffold_workspace
 from agent.lifecycle.scaffold.validators import parse_domains
 from agent.lifecycle.workspace_paths import (
-    DOMAIN_ADR_APPROVALS_DIR,
     ROOT_ADR_PATH,
     domain_adr_approval_path,
     domain_adr_path,
@@ -58,27 +58,6 @@ def _write_verdict(workspace: str, slug: str, payload: dict[str, Any]) -> str:
     with open(abs_path, "w") as fh:
         json.dump(payload, fh, indent=2)
     return abs_path
-
-
-def _read_all_verdicts(workspace: str) -> dict[str, dict]:
-    """Read every ``<slug>.json`` under domain_adr_approvals/."""
-
-    dir_abs = os.path.join(workspace, DOMAIN_ADR_APPROVALS_DIR)
-    if not os.path.isdir(dir_abs):
-        return {}
-    out: dict[str, dict] = {}
-    for entry in os.listdir(dir_abs):
-        if not entry.endswith(".json"):
-            continue
-        slug = entry[: -len(".json")]
-        try:
-            with open(os.path.join(dir_abs, entry)) as fh:
-                payload = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            out[slug] = payload
-    return out
 
 
 async def apply_verdict(

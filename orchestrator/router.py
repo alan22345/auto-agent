@@ -2327,8 +2327,8 @@ def _publish_scaffold_decision(
         pass
 
 
-def _dispatch_scaffold_driver(task_id: int) -> None:
-    """Fire-and-forget re-invocation of ``run_scaffold_parent``.
+async def _run_scaffold_driver(task_id: int) -> None:
+    """Reload the task and re-invoke ``run_scaffold_parent``.
 
     Imported lazily so the router does not take a build-time dependency
     on the agent layer at module load. The driver loads its own fresh
@@ -2337,24 +2337,29 @@ def _dispatch_scaffold_driver(task_id: int) -> None:
     calling.
     """
 
+    try:
+        from agent.lifecycle.scaffold import run_scaffold_parent
+        from shared.database import async_session as _async_session_local
+
+        async with _async_session_local() as s:
+            t = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        await run_scaffold_parent(t)
+    except Exception:  # pragma: no cover — driver invocation is best-effort
+        import structlog
+
+        structlog.get_logger().exception(
+            "scaffold.router.driver_dispatch_failed", task_id=task_id
+        )
+
+
+def _dispatch_scaffold_driver(task_id: int) -> None:
+    """Fire-and-forget re-invocation of ``run_scaffold_parent``."""
+
     import asyncio as _asyncio
 
-    async def _go() -> None:
-        try:
-            from agent.lifecycle.scaffold import run_scaffold_parent
-            from shared.database import async_session as _async_session_local
-
-            async with _async_session_local() as s:
-                t = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
-            await run_scaffold_parent(t)
-        except Exception:  # pragma: no cover — driver invocation is best-effort
-            import structlog
-
-            structlog.get_logger().exception(
-                "scaffold.router.driver_dispatch_failed", task_id=task_id
-            )
-
-    _asyncio.create_task(_go())  # noqa: RUF006 — fire-and-forget driver kick
+    _asyncio.create_task(  # noqa: RUF006 — fire-and-forget driver kick
+        _run_scaffold_driver(task_id)
+    )
 
 
 @router.post(
