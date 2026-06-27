@@ -9,6 +9,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api';
+import { useVerdictAction } from '@/hooks/useVerdictAction';
 import type { ScaffoldVerdict } from '@/lib/tasks';
 
 // ADR-018 Phase B-gate — the root ADR is the system-level design doc.
@@ -19,39 +20,22 @@ export function RootAdrReviewCard({ taskId }: { taskId: number }) {
   const rootQuery = useRootAdr(taskId);
   const submit = useSubmitRootAdrVerdict();
   const [comments, setComments] = useState('');
-  const [submitting, setSubmitting] = useState<ScaffoldVerdict | null>(null);
   const [showComments, setShowComments] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const { submitting, localError, runVerdict } = useVerdictAction();
 
   async function onVerdict(verdict: ScaffoldVerdict) {
-    if (submitting) return;
-    // ``revise`` is comments-required to be useful to the architect; if
-    // the user clicks Revise without writing anything we surface the
-    // comment box and stop. Same for Reject — capture the reason.
-    if (
-      (verdict === 'revise' || verdict === 'rejected') &&
-      !comments.trim()
-    ) {
-      setShowComments(true);
-      setLocalError(`Add a comment explaining why you ${verdict} this ADR.`);
-      return;
-    }
-    setSubmitting(verdict);
-    setLocalError(null);
-    try {
-      await submit.mutateAsync({ taskId, verdict, comments });
+    // ``revise`` is comments-required to be useful to the architect; if the
+    // user clicks Revise/Reject without writing anything we surface the
+    // comment box (via onMissingComment) and stop.
+    const ok = await runVerdict(
+      verdict,
+      comments,
+      () => submit.mutateAsync({ taskId, verdict, comments }),
+      () => setShowComments(true),
+    );
+    if (ok) {
       setComments('');
       setShowComments(false);
-    } catch (e) {
-      setLocalError(
-        e instanceof ApiError
-          ? e.detail
-          : e instanceof Error
-            ? e.message
-            : 'Failed to record verdict',
-      );
-    } finally {
-      setSubmitting(null);
     }
   }
 

@@ -115,7 +115,7 @@ export function RepoDetail({ config }: Props) {
   const isArchPreset = CRON_PRESETS.some((p) => p.value === archCron);
   const saving = status.kind === 'saving';
 
-  function handleSave(e: React.FormEvent) {
+  const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
 
@@ -147,7 +147,7 @@ export function RepoDetail({ config }: Props) {
       savingRef.current = false;
       setStatus({ kind: 'error', message: 'Save timed out — check your connection.' });
     }, 8000);
-  }
+  };
 
   return (
     <div className="max-w-2xl">
