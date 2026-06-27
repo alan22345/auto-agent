@@ -1,9 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import {
-  findViolations,
-  ViolationsPanel,
-} from '@/components/code-graph/violations-panel';
+import { ViolationsPanel } from '@/components/code-graph/violations-panel';
+import { findViolations } from '@/components/code-graph/violations';
 import type { RepoGraphBlob } from '@/types/api';
 
 const _NODES = [
