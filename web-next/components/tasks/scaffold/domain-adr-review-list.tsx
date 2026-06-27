@@ -64,12 +64,12 @@ function DomainAdrRow({
   const [comments, setComments] = useState('');
   const { submitting, localError, runVerdict } = useVerdictAction();
 
-  async function onVerdict(verdict: ScaffoldVerdict) {
+  const onVerdict = async (verdict: ScaffoldVerdict) => {
     const ok = await runVerdict(verdict, comments, () =>
       submit.mutateAsync({ taskId, domainSlug: entry.slug, verdict, comments }),
     );
     if (ok) setComments('');
-  }
+  };
 
   // Once a verdict is in for this domain, hide the buttons — the user
   // can still re-open the row to view the ADR. ``revise`` is the only

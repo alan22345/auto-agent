@@ -60,6 +60,8 @@ def call_api(prompt, options, context):
 
 
 async def _run_agent(prompt, options, context):
+    from _git_helpers import capture_committed_diff, init_git_workspace
+
     variables = context.get("vars", {})
     fixture = variables.get("fixture", "")
     task = variables.get("task", prompt)
@@ -77,24 +79,7 @@ async def _run_agent(prompt, options, context):
         _write_gitignore(workspace)
 
         # Initialize git so tools work
-        proc = await asyncio.create_subprocess_exec(
-            "git", "init", cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        proc = await asyncio.create_subprocess_exec(
-            "git", "add", "-A", cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        proc = await asyncio.create_subprocess_exec(
-            "git", "commit", "-m", "initial", "--allow-empty",
-            cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@test",
-                 "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@test"},
-        )
-        await proc.communicate()
+        await init_git_workspace(workspace)
 
         # Graph arm (ADR-025): build an AST-only graph over the fixture
         # and patch the DB seams so query_repo_graph + the nudge work
@@ -165,19 +150,7 @@ async def _run_agent(prompt, options, context):
         staged_diff, _ = await proc.communicate()
 
         # Also check committed changes (agent may have committed)
-        proc = await asyncio.create_subprocess_exec(
-            "git", "log", "--oneline", "-1", "--format=%H", cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        head_hash, _ = await proc.communicate()
-
-        committed_diff = b""
-        if head_hash.strip():
-            proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "HEAD~1..HEAD", cwd=workspace,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            committed_diff, _ = await proc.communicate()
+        committed_diff = await capture_committed_diff(workspace)
 
         # Identify which files actually changed (from git)
         proc = await asyncio.create_subprocess_exec(

@@ -23,7 +23,7 @@ export function RootAdrReviewCard({ taskId }: { taskId: number }) {
   const [showComments, setShowComments] = useState(false);
   const { submitting, localError, runVerdict } = useVerdictAction();
 
-  async function onVerdict(verdict: ScaffoldVerdict) {
+  const onVerdict = async (verdict: ScaffoldVerdict) => {
     // ``revise`` is comments-required to be useful to the architect; if the
     // user clicks Revise/Reject without writing anything we surface the
     // comment box (via onMissingComment) and stop.
@@ -37,7 +37,7 @@ export function RootAdrReviewCard({ taskId }: { taskId: number }) {
       setComments('');
       setShowComments(false);
     }
-  }
+  };
 
   if (rootQuery.isLoading) {
     return (
