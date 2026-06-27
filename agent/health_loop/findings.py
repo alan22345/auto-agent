@@ -126,7 +126,7 @@ class HealthFinding(BaseModel, frozen=True):
     severity: float
 
 
-def extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
+def _extract_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
     """Flatten a blob into normalized :class:`HealthFinding` records.
 
     One finding per dead-code item, cycle, clone group, hotspot, and
@@ -217,7 +217,7 @@ def rank_findings(blob: RepoGraphBlob) -> list[HealthFinding]:
     deterministic total order.
     """
     return sorted(
-        extract_findings(blob),
+        _extract_findings(blob),
         key=lambda f: (-CATEGORY_WEIGHTS[f.category], -f.severity, f.finding_hash),
     )
 
