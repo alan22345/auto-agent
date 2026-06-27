@@ -85,6 +85,55 @@ def _history_to_messages(history: list[dict]) -> list[Message]:
     return out
 
 
+async def _drive_search_to_queue(
+    *,
+    queue: asyncio.Queue[dict | None],
+    loop: AgentLoop,
+    prior_messages: list[Message],
+    user_message: str,
+    system_prompt: str,
+    max_wallclock_seconds: int,
+) -> None:
+    """Run the search agent loop, pushing NDJSON events onto *queue*.
+
+    Always terminates by putting the ``None`` sentinel so the consuming
+    generator in :func:`run_search_turn` knows the loop has finished.
+    """
+    try:
+        prior_summary = "\n\n".join(
+            f"{m.role.upper()}: {m.content}" for m in prior_messages
+        )
+        full_prompt = (
+            (f"Previous turns in this session:\n{prior_summary}\n\n---\n\n"
+             if prior_summary else "")
+            + f"User: {user_message}"
+        )
+        result = await asyncio.wait_for(
+            loop.run(prompt=full_prompt, system=system_prompt),
+            timeout=max_wallclock_seconds,
+        )
+        await queue.put({
+            "type": "done",
+            "answer": result.output,
+            "input_tokens": result.tokens_used.input_tokens,
+            "output_tokens": result.tokens_used.output_tokens,
+        })
+    except asyncio.TimeoutError:
+        logger.warning("search_loop_timeout", seconds=max_wallclock_seconds)
+        await queue.put({
+            "type": "error",
+            "message": (
+                f"Search timed out after {max_wallclock_seconds}s. "
+                "Try a more specific question or split it into parts."
+            ),
+        })
+    except Exception as e:
+        logger.warning("search_loop_failed", error=str(e))
+        await queue.put({"type": "error", "message": str(e)})
+    finally:
+        await queue.put(None)
+
+
 async def run_search_turn(
     *,
     user_message: str,
@@ -149,42 +198,16 @@ async def run_search_turn(
         organization_id=None,
     )
 
-    async def runner() -> None:
-        try:
-            prior_summary = "\n\n".join(
-                f"{m.role.upper()}: {m.content}" for m in prior_messages
-            )
-            full_prompt = (
-                (f"Previous turns in this session:\n{prior_summary}\n\n---\n\n"
-                 if prior_summary else "")
-                + f"User: {user_message}"
-            )
-            result = await asyncio.wait_for(
-                loop.run(prompt=full_prompt, system=system_prompt),
-                timeout=max_wallclock_seconds,
-            )
-            await queue.put({
-                "type": "done",
-                "answer": result.output,
-                "input_tokens": result.tokens_used.input_tokens,
-                "output_tokens": result.tokens_used.output_tokens,
-            })
-        except asyncio.TimeoutError:
-            logger.warning("search_loop_timeout", seconds=max_wallclock_seconds)
-            await queue.put({
-                "type": "error",
-                "message": (
-                    f"Search timed out after {max_wallclock_seconds}s. "
-                    "Try a more specific question or split it into parts."
-                ),
-            })
-        except Exception as e:
-            logger.warning("search_loop_failed", error=str(e))
-            await queue.put({"type": "error", "message": str(e)})
-        finally:
-            await queue.put(None)
-
-    task = asyncio.create_task(runner())
+    task = asyncio.create_task(
+        _drive_search_to_queue(
+            queue=queue,
+            loop=loop,
+            prior_messages=prior_messages,
+            user_message=user_message,
+            system_prompt=system_prompt,
+            max_wallclock_seconds=max_wallclock_seconds,
+        )
+    )
     try:
         while True:
             event = await queue.get()

@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { useVerdictAction } from '@/hooks/useVerdictAction';
 import type { ScaffoldVerdict } from '@/lib/tasks';
 import type { ScaffoldDomainAdrEntry } from '@/types/api';
 
@@ -61,39 +62,13 @@ function DomainAdrRow({
   const submit = useSubmitDomainAdrVerdict();
   const [open, setOpen] = useState(false);
   const [comments, setComments] = useState('');
-  const [submitting, setSubmitting] = useState<ScaffoldVerdict | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const { submitting, localError, runVerdict } = useVerdictAction();
 
   async function onVerdict(verdict: ScaffoldVerdict) {
-    if (submitting) return;
-    if (
-      (verdict === 'revise' || verdict === 'rejected') &&
-      !comments.trim()
-    ) {
-      setLocalError(`Add a comment explaining why you ${verdict} this ADR.`);
-      return;
-    }
-    setSubmitting(verdict);
-    setLocalError(null);
-    try {
-      await submit.mutateAsync({
-        taskId,
-        domainSlug: entry.slug,
-        verdict,
-        comments,
-      });
-      setComments('');
-    } catch (e) {
-      setLocalError(
-        e instanceof ApiError
-          ? e.detail
-          : e instanceof Error
-            ? e.message
-            : 'Failed to record verdict',
-      );
-    } finally {
-      setSubmitting(null);
-    }
+    const ok = await runVerdict(verdict, comments, () =>
+      submit.mutateAsync({ taskId, domainSlug: entry.slug, verdict, comments }),
+    );
+    if (ok) setComments('');
   }
 
   // Once a verdict is in for this domain, hide the buttons — the user
