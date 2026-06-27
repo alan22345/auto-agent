@@ -87,7 +87,7 @@ def compare_route(route: str, base: RouteResult, branch: RouteResult) -> RouteDi
     return None
 
 
-def diff_results(
+def _diff_results(
     base: dict[str, RouteResult],
     branch: dict[str, RouteResult],
 ) -> list[RouteDiff]:
@@ -167,7 +167,7 @@ async def differential_verify(
                     note="neither workspace booted a dev server; no routes compared",
                 )
 
-            diffs = diff_results(base_results, branch_results)
+            diffs = _diff_results(base_results, branch_results)
             return DifferentialResult(regressed=bool(diffs), diffs=diffs)
         finally:
             await branch_handle.teardown()

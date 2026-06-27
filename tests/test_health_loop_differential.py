@@ -9,8 +9,8 @@ import pytest
 from agent.health_loop import differential
 from agent.health_loop.differential import (
     RouteDiff,
+    _diff_results,
     compare_route,
-    diff_results,
     differential_verify,
 )
 from agent.lifecycle.verify_primitives import RouteResult, ServerHandle
@@ -66,14 +66,14 @@ def test_diff_results_flags_changed_route_only():
         "/a": RouteResult(ok=True, status=200, body="x"),  # unchanged
         "/b": RouteResult(ok=True, status=500, body="y"),  # changed
     }
-    diffs = diff_results(base, branch)
+    diffs = _diff_results(base, branch)
     assert [d.route for d in diffs] == ["/b"]
 
 
 def test_diff_results_flags_route_missing_on_one_side():
     base = {"/a": RouteResult(ok=True, status=200, body="x")}
     branch = {}  # /a disappeared from the branch
-    diffs = diff_results(base, branch)
+    diffs = _diff_results(base, branch)
     assert len(diffs) == 1
     assert diffs[0].route == "/a"
     assert "missing" in diffs[0].detail.lower()
@@ -82,7 +82,7 @@ def test_diff_results_flags_route_missing_on_one_side():
 def test_diff_results_empty_when_identical():
     base = {"/a": RouteResult(ok=True, status=200, body="x")}
     branch = {"/a": RouteResult(ok=True, status=200, body="x")}
-    assert diff_results(base, branch) == []
+    assert _diff_results(base, branch) == []
 
 
 def _running(url="http://127.0.0.1:9000"):
