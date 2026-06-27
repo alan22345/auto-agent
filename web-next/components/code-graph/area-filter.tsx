@@ -194,17 +194,3 @@ export function AreaFilter({
     </div>
   );
 }
-
-/**
- * Pure helper — given a flat list of area names and a hidden set,
- * return the count of areas that are currently visible. Useful for
- * tests + future toolbar variants.
- */
-export function visibleAreaCount(
-  areas: string[],
-  hidden: Set<string>,
-): number {
-  let n = 0;
-  for (const a of areas) if (!hidden.has(a)) n += 1;
-  return n;
-}
