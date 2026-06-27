@@ -340,5 +340,4 @@ __all__ = [
     "parse_manifest_file",
     "read_all_manifests",
     "reconcile",
-    "validate_manifest",
 ]

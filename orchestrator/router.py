@@ -3581,7 +3581,7 @@ class HealthLoopStartRequest(BaseModel):
     cleanup_branch: str | None = None
 
 
-class HealthLoopSuppressRequest(BaseModel):
+class _HealthLoopSuppressRequest(BaseModel):
     finding_hash: str = Field(..., min_length=1, max_length=64)
 
 
@@ -3750,7 +3750,7 @@ async def list_health_findings(
 @router.post("/repos/{repo_id}/health-loop/suppress", response_model=HealthLoopStatusResponse)
 async def suppress_health_finding(
     repo_id: int,
-    body: HealthLoopSuppressRequest,
+    body: _HealthLoopSuppressRequest,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> HealthLoopStatusResponse:
