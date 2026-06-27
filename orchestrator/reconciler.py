@@ -55,7 +55,7 @@ _REDRIVEN_STATUSES = {
 }
 
 
-def is_silently_stuck(
+def _is_silently_stuck(
     task: Task,
     *,
     now: datetime,
@@ -125,7 +125,7 @@ async def _reconcile_once() -> list[int]:
     stuck: list[int] = []
     for task in rows:
         alive = await task_channel(task.id).is_alive()
-        if is_silently_stuck(task, now=now, heartbeat_alive=alive):
+        if _is_silently_stuck(task, now=now, heartbeat_alive=alive):
             stuck.append(task.id)
             await _surface_stuck(task)
 
