@@ -300,7 +300,7 @@ class RedisTaskChannelFactory:
 # ---------------------------------------------------------------------------
 
 
-class InMemoryTaskChannel:
+class _InMemoryTaskChannel:
     """Test per-task channel that delegates to its factory's storage."""
 
     def __init__(self, task_id: int, factory: InMemoryTaskChannelFactory) -> None:
@@ -368,8 +368,8 @@ class InMemoryTaskChannelFactory:
         self.telegram_bindings: dict[int, int] = {}
         self.slack_bindings: dict[str, int] = {}
 
-    def for_task(self, task_id: int) -> InMemoryTaskChannel:
-        return InMemoryTaskChannel(task_id, self)
+    def for_task(self, task_id: int) -> _InMemoryTaskChannel:
+        return _InMemoryTaskChannel(task_id, self)
 
     async def task_id_for_telegram_message(self, message_id: int) -> int | None:
         return self.telegram_bindings.get(message_id)
