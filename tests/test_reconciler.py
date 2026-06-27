@@ -71,7 +71,7 @@ def test_states_owned_by_other_loops_are_skipped(status) -> None:
 
 
 # ---------------------------------------------------------------------------
-# reconcile_once — the DB sweep (flag, exclude terminal, notify once)
+# _reconcile_once — the DB sweep (flag, exclude terminal, notify once)
 # ---------------------------------------------------------------------------
 
 
@@ -136,7 +136,7 @@ async def _harness(session, monkeypatch):
 async def test_sweep_flags_and_notifies_stuck_task(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
         task = await _seed(session, status=TaskStatus.AWAITING_DESIGN_APPROVAL, age_minutes=600)
-        stuck = await rec.reconcile_once()
+        stuck = await rec._reconcile_once()
         assert stuck == [task.id]
         notify.assert_awaited_once()
 
@@ -146,7 +146,7 @@ async def test_sweep_ignores_terminal_and_fresh(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
         await _seed(session, status=TaskStatus.DONE, age_minutes=600)
         await _seed(session, status=TaskStatus.VERIFYING, age_minutes=1)
-        stuck = await rec.reconcile_once()
+        stuck = await rec._reconcile_once()
         assert stuck == []
         notify.assert_not_awaited()
 
@@ -155,6 +155,6 @@ async def test_sweep_ignores_terminal_and_fresh(session, monkeypatch) -> None:
 async def test_sweep_notifies_once_per_stall(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
         await _seed(session, status=TaskStatus.BLOCKED, age_minutes=600)
-        await rec.reconcile_once()
-        await rec.reconcile_once()  # second sweep, same stall
+        await rec._reconcile_once()
+        await rec._reconcile_once()  # second sweep, same stall
         notify.assert_awaited_once()
