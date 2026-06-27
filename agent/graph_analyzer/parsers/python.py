@@ -811,6 +811,38 @@ _COGNITIVE_NESTING_TYPES: frozenset[str] = frozenset(
 _NESTED_DEF_TYPES: frozenset[str] = frozenset({"function_definition", "class_definition"})
 
 
+def _count_cyclomatic(node: object) -> int:
+    """Count decision-point nodes in *node*'s subtree, not descending into
+    nested function/class definitions (those are scored separately)."""
+    count = 0
+    for child in node.children:  # type: ignore[attr-defined]
+        if child.type in _NESTED_DEF_TYPES:
+            continue  # don't descend into nested defs
+        if child.type in _CYCLOMATIC_DECISION_TYPES:
+            count += 1
+        count += _count_cyclomatic(child)
+    return count
+
+
+def _count_cognitive(node: object, nesting: int) -> int:
+    """Sum the nesting-sensitive cognitive contributions of *node*'s subtree,
+    stopping at nested function/class definitions."""
+    total = 0
+    for child in node.children:  # type: ignore[attr-defined]
+        t = child.type
+        if t in _NESTED_DEF_TYPES:
+            continue  # stop at nested defs
+        if t in _COGNITIVE_NESTING_TYPES:
+            total += 1 + nesting
+            total += _count_cognitive(child, nesting + 1)
+        elif t in ("elif_clause", "else_clause", "boolean_operator"):
+            total += 1
+            total += _count_cognitive(child, nesting)
+        else:
+            total += _count_cognitive(child, nesting)
+    return total
+
+
 def _compute_complexity(func_node) -> tuple[int, int]:
     """Return ``(cyclomatic, cognitive)`` for *func_node*.
 
@@ -821,35 +853,8 @@ def _compute_complexity(func_node) -> tuple[int, int]:
     cyclomatic = 1 + count of decision-point nodes.
     cognitive  = sum of per-node contributions (nesting-sensitive).
     """
-    cyclomatic = 1
-    cognitive = 0
-
-    def _walk_cyclomatic(node: object) -> None:
-        nonlocal cyclomatic
-        for child in node.children:  # type: ignore[attr-defined]
-            if child.type in _NESTED_DEF_TYPES:
-                continue  # don't descend into nested defs
-            if child.type in _CYCLOMATIC_DECISION_TYPES:
-                cyclomatic += 1
-            _walk_cyclomatic(child)
-
-    def _walk_cognitive(node: object, nesting: int) -> None:
-        nonlocal cognitive
-        for child in node.children:  # type: ignore[attr-defined]
-            t = child.type
-            if t in _NESTED_DEF_TYPES:
-                continue  # stop at nested defs
-            if t in _COGNITIVE_NESTING_TYPES:
-                cognitive += 1 + nesting
-                _walk_cognitive(child, nesting + 1)
-            elif t in ("elif_clause", "else_clause", "boolean_operator"):
-                cognitive += 1
-                _walk_cognitive(child, nesting)
-            else:
-                _walk_cognitive(child, nesting)
-
-    _walk_cyclomatic(func_node)
-    _walk_cognitive(func_node, nesting=0)
+    cyclomatic = 1 + _count_cyclomatic(func_node)
+    cognitive = _count_cognitive(func_node, nesting=0)
 
     return cyclomatic, cognitive
 
