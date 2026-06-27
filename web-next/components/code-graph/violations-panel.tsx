@@ -16,19 +16,13 @@ import { useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ChevronRight } from 'lucide-react';
-import type { Edge, Node, RepoGraphBlob } from '@/types/api';
+import type { RepoGraphBlob } from '@/types/api';
+import { findViolations } from './violations';
 
 interface Props {
   blob: RepoGraphBlob;
   highlightedEdgeId?: string | null;
   onSelectEdge?: (edgeId: string | null) => void;
-}
-
-interface ViolationRow {
-  edgeId: string;
-  sourceLabel: string;
-  targetLabel: string;
-  reason: string;
 }
 
 export function ViolationsPanel({
@@ -114,32 +108,4 @@ export function ViolationsPanel({
       )}
     </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
-
-function violationEdgeId(edge: Edge): string {
-  // Same canonical form the graph-canvas uses so the parent page can
-  // correlate panel rows with cytoscape edge data.
-  return `${edge.source}->${edge.target}:${edge.kind}`;
-}
-
-export function findViolations(blob: RepoGraphBlob): ViolationRow[] {
-  const labels = new Map<string, string>();
-  for (const n of blob.nodes as Node[]) {
-    labels.set(n.id, n.label ?? n.id);
-  }
-  const out: ViolationRow[] = [];
-  for (const e of blob.edges as Edge[]) {
-    if (!e.boundary_violation) continue;
-    out.push({
-      edgeId: violationEdgeId(e),
-      sourceLabel: labels.get(e.source) ?? e.source,
-      targetLabel: labels.get(e.target) ?? e.target,
-      reason: e.violation_reason ?? 'boundary_violation',
-    });
-  }
-  return out;
 }
