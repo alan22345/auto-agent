@@ -23,8 +23,8 @@ from shared.task_channel import (
     InMemoryTaskChannelFactory,
     RedisTaskChannel,
     RedisTaskChannelFactory,
+    _get_task_channel_factory,
     _InMemoryTaskChannel,
-    get_task_channel_factory,
     set_task_channel_factory,
     task_channel,
     task_id_for_telegram_message,
@@ -285,7 +285,7 @@ class TestFactoryFacade:
         mod._factory = None
         try:
             with pytest.raises(RuntimeError, match="No TaskChannelFactory registered"):
-                get_task_channel_factory()
+                _get_task_channel_factory()
         finally:
             mod._factory = previous
 

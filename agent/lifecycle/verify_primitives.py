@@ -879,7 +879,7 @@ def _collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
 _ALLOW_STUB_SECTION_HEADER = "## Allow-stub opt-outs in this PR"
 
 
-def format_allow_stub_section(optouts: list[AllowStubOptout]) -> str:
+def _format_allow_stub_section(optouts: list[AllowStubOptout]) -> str:
     """Render the markdown section appended to PR bodies — ADR-015 §8.
 
     Empty list → empty string (PRs without allow-stub get no section).
@@ -912,7 +912,7 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
     """
 
     optouts = _collect_allow_stub_optouts(diff)
-    section = format_allow_stub_section(optouts)
+    section = _format_allow_stub_section(optouts)
     if not section:
         return body
     suffix = "\n\n" + section if not body.endswith("\n") else "\n" + section
