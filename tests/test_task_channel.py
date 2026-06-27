@@ -20,10 +20,10 @@ from shared.task_channel import (
     HEARTBEAT_TTL_SECONDS,
     TASK_STREAM_PATTERN,
     TELEGRAM_BINDING_TTL_SECONDS,
-    InMemoryTaskChannel,
     InMemoryTaskChannelFactory,
     RedisTaskChannel,
     RedisTaskChannelFactory,
+    _InMemoryTaskChannel,
     get_task_channel_factory,
     set_task_channel_factory,
     task_channel,
@@ -308,7 +308,7 @@ class TestInMemoryAdapterImplementsProtocol:
     def test_per_task_handle_carries_task_id(self):
         f = InMemoryTaskChannelFactory()
         ch = f.for_task(77)
-        assert isinstance(ch, InMemoryTaskChannel)
+        assert isinstance(ch, _InMemoryTaskChannel)
         assert ch.task_id == 77
 
     def test_redis_per_task_handle_carries_task_id(self):
