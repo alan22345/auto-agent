@@ -114,7 +114,7 @@ async def _surface_stuck(task: Task) -> None:
         log.warning("reconciler.notify_failed", task_id=task.id, exc_info=True)
 
 
-async def reconcile_once() -> list[int]:
+async def _reconcile_once() -> list[int]:
     """One sweep. Surface every silently-stuck task; return their ids."""
     from shared.task_channel import task_channel
 
@@ -140,7 +140,7 @@ async def reconciler_loop() -> None:
     while True:
         try:
             await asyncio.sleep(RECONCILE_INTERVAL_SECS)
-            await reconcile_once()
+            await _reconcile_once()
         except asyncio.CancelledError:
             log.info("reconciler.cancelled")
             raise

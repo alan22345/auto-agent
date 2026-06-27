@@ -820,7 +820,7 @@ def grep_diff_for_stubs(diff: str) -> StubResult:
 # ---------------------------------------------------------------------------
 
 
-def collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
+def _collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
     """Walk a unified diff and return every ``# auto-agent: allow-stub`` line.
 
     Used by the PR-creation path to surface intentional stubs in the PR
@@ -911,7 +911,7 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
     so clean PRs don't gain a noisy empty section.
     """
 
-    optouts = collect_allow_stub_optouts(diff)
+    optouts = _collect_allow_stub_optouts(diff)
     section = format_allow_stub_section(optouts)
     if not section:
         return body

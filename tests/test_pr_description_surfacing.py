@@ -9,7 +9,7 @@ section to the PR body before ``gh pr create`` runs.
 This module is the authoritative spec for two pure helpers in
 :mod:`agent.lifecycle.verify_primitives`:
 
-  * :func:`collect_allow_stub_optouts` — given a unified diff, returns the
+  * :func:`_collect_allow_stub_optouts` — given a unified diff, returns the
     list of allow-stub locations (file, line, surrounding context).
   * :func:`format_allow_stub_section` — given that list, returns the
     markdown bullets to append to a PR body. Empty list → empty string
@@ -22,7 +22,7 @@ import textwrap
 
 
 def test_collect_allow_stub_optouts_finds_single_location() -> None:
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -36,7 +36,7 @@ def test_collect_allow_stub_optouts_finds_single_location() -> None:
         +        raise NotImplementedError  # auto-agent: allow-stub
         """
     )
-    optouts = collect_allow_stub_optouts(diff)
+    optouts = _collect_allow_stub_optouts(diff)
     assert len(optouts) == 1
     assert optouts[0].file == "abc/base.py"
     # The line carrying the allow-stub annotation has a real line number.
@@ -46,7 +46,7 @@ def test_collect_allow_stub_optouts_finds_single_location() -> None:
 
 def test_collect_allow_stub_optouts_skips_non_optout_stubs() -> None:
     """Stubs without ``# auto-agent: allow-stub`` are NOT opt-outs."""
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -58,11 +58,11 @@ def test_collect_allow_stub_optouts_skips_non_optout_stubs() -> None:
         +    raise NotImplementedError
         """
     )
-    assert collect_allow_stub_optouts(diff) == []
+    assert _collect_allow_stub_optouts(diff) == []
 
 
 def test_collect_allow_stub_optouts_multi_file() -> None:
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -80,7 +80,7 @@ def test_collect_allow_stub_optouts_multi_file() -> None:
         +    pass  # placeholder  # auto-agent: allow-stub
         """
     )
-    optouts = collect_allow_stub_optouts(diff)
+    optouts = _collect_allow_stub_optouts(diff)
     files = {o.file for o in optouts}
     assert files == {"a.py", "b.py"}
     assert len(optouts) == 2
