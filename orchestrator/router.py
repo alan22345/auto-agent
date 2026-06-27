@@ -1350,14 +1350,14 @@ async def assign_repo(
     return _task_to_response(task)
 
 
-class BranchUpdate(BaseModel):
+class _BranchUpdate(BaseModel):
     branch_name: str
 
 
 @router.patch("/tasks/{task_id}/branch", response_model=TaskData)
 async def set_branch_name(
     task_id: int,
-    req: BranchUpdate,
+    req: _BranchUpdate,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:

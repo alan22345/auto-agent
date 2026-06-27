@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from orchestrator.reconciler import RECONCILE_STALL_THRESHOLD, is_silently_stuck
+from orchestrator.reconciler import RECONCILE_STALL_THRESHOLD, _is_silently_stuck
 from shared.models import Organization, Plan, Task, TaskStatus
 
 NOW = datetime(2026, 6, 26, 12, 0, 0, tzinfo=UTC)
@@ -41,23 +41,23 @@ def _task(status: TaskStatus, updated_at: datetime) -> Task:
     ],
 )
 def test_stalled_uncovered_states_are_flagged(status) -> None:
-    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is True
+    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is True
 
 
 def test_fresh_task_is_not_flagged() -> None:
     task = _task(TaskStatus.AWAITING_DESIGN_APPROVAL, FRESH)
-    assert is_silently_stuck(task, now=NOW, heartbeat_alive=False) is False
+    assert _is_silently_stuck(task, now=NOW, heartbeat_alive=False) is False
 
 
 def test_live_heartbeat_is_not_flagged() -> None:
     # An agent actively looping (even past the threshold) is alive — never flag.
     task = _task(TaskStatus.VERIFYING, STALE)
-    assert is_silently_stuck(task, now=NOW, heartbeat_alive=True) is False
+    assert _is_silently_stuck(task, now=NOW, heartbeat_alive=True) is False
 
 
 @pytest.mark.parametrize("status", [TaskStatus.DONE, TaskStatus.FAILED])
 def test_terminal_tasks_are_never_flagged(status) -> None:
-    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
+    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
 
 
 @pytest.mark.parametrize(
@@ -67,7 +67,7 @@ def test_terminal_tasks_are_never_flagged(status) -> None:
 def test_states_owned_by_other_loops_are_skipped(status) -> None:
     # queued_dispatch_poller / task_timeout_watchdog already re-drive these;
     # the backstop must not double-report them.
-    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
+    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
 
 
 # ---------------------------------------------------------------------------
