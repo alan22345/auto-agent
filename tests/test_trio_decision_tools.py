@@ -12,51 +12,12 @@ import pytest
 from agent.tools.base import ToolContext
 from agent.tools.trio_decision import (
     DecisionSink,
-    SubmitBacklogTool,
     SubmitReviewVerdictTool,
 )
 
 
 def _ctx() -> ToolContext:
     return ToolContext(workspace="/tmp/ws")
-
-
-@pytest.mark.asyncio
-async def test_submit_backlog_normalises_and_records():
-    sink = DecisionSink()
-    tool = SubmitBacklogTool(sink)
-    result = await tool.execute(
-        {"items": [
-            {"id": "T1", "title": "first", "description": "do a"},
-            {"id": "T2", "title": "second", "description": "do b"},
-        ]},
-        _ctx(),
-    )
-    assert not result.is_error
-    assert sink.backlog is not None
-    assert [it["id"] for it in sink.backlog] == ["T1", "T2"]
-    assert all(it["status"] == "pending" for it in sink.backlog)
-
-
-@pytest.mark.asyncio
-async def test_submit_backlog_rejects_empty_items():
-    sink = DecisionSink()
-    result = await SubmitBacklogTool(sink).execute({"items": []}, _ctx())
-    assert result.is_error
-    assert sink.backlog is None
-
-
-@pytest.mark.asyncio
-async def test_submit_backlog_assigns_ids_when_missing():
-    sink = DecisionSink()
-    result = await SubmitBacklogTool(sink).execute(
-        {"items": [
-            {"title": "no-id", "description": "x"},
-        ]},
-        _ctx(),
-    )
-    assert not result.is_error
-    assert sink.backlog[0]["id"] == "T1"
 
 
 @pytest.mark.asyncio
