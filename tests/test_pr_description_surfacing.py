@@ -11,7 +11,7 @@ This module is the authoritative spec for two pure helpers in
 
   * :func:`_collect_allow_stub_optouts` — given a unified diff, returns the
     list of allow-stub locations (file, line, surrounding context).
-  * :func:`format_allow_stub_section` — given that list, returns the
+  * :func:`_format_allow_stub_section` — given that list, returns the
     markdown bullets to append to a PR body. Empty list → empty string
     (PRs without allow-stub get no extra section).
 """
@@ -90,7 +90,7 @@ def test_format_allow_stub_section_with_optouts() -> None:
     """Non-empty list → ``## Allow-stub opt-outs in this PR`` section."""
     from agent.lifecycle.verify_primitives import (
         AllowStubOptout,
-        format_allow_stub_section,
+        _format_allow_stub_section,
     )
 
     optouts = [
@@ -103,7 +103,7 @@ def test_format_allow_stub_section_with_optouts() -> None:
             file="foo.py", line=12, snippet="pass  # placeholder  # auto-agent: allow-stub"
         ),
     ]
-    section = format_allow_stub_section(optouts)
+    section = _format_allow_stub_section(optouts)
     assert section.startswith("## Allow-stub opt-outs in this PR")
     assert "abc/base.py:5" in section
     assert "foo.py:12" in section
@@ -113,9 +113,9 @@ def test_format_allow_stub_section_with_optouts() -> None:
 
 def test_format_allow_stub_section_empty_list() -> None:
     """Empty list → empty string (no section appended)."""
-    from agent.lifecycle.verify_primitives import format_allow_stub_section
+    from agent.lifecycle.verify_primitives import _format_allow_stub_section
 
-    assert format_allow_stub_section([]) == ""
+    assert _format_allow_stub_section([]) == ""
 
 
 def test_pr_body_surfacing_appends_section(tmp_path) -> None:
