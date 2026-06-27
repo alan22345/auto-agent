@@ -208,5 +208,4 @@ def apply_pinned_artefacts_to_system_prompt(
 
 __all__ = [
     "apply_pinned_artefacts_to_system_prompt",
-    "build_pinned_block",
 ]
