@@ -230,10 +230,21 @@ async def _notify_stall_recovery(task: Task) -> None:
         log.warning("trio.watchdog.notify_failed", task_id=task.id, exc_info=True)
 
 
+# Handle each stall episode once. Without this the watchdog re-notified AND
+# re-dispatched every stale parent on every 5-min tick — in prod that was 28
+# orphaned parents each firing a telegram every tick, forever, while the
+# re-dispatch never advanced them. Keyed by (task_id, updated_at): a parent that
+# actually progresses bumps ``updated_at`` and is re-armed for a fresh attempt;
+# one that can't is left quiet instead of hammered. (Sibling of the reconciler's
+# ``_surfaced`` — same once-per-episode contract.)
+_stall_handled: set[tuple[int, str]] = set()
+
+
 async def resume_stalled_trio_parents_once() -> list[int]:
-    """One watchdog tick. Re-invoke the driver for stale trio parents; notify
-    the owner of each. Returns the resumed task ids (empty when nothing
-    stalled) so the loop and tests can observe progress.
+    """One watchdog tick. Re-invoke the driver for stale trio parents not already
+    handled this stall episode; notify the owner of each. Returns the resumed
+    task ids (empty when nothing fresh stalled) so the loop and tests can observe
+    progress.
     """
     cutoff = datetime.now(UTC) - _TRIO_STALL_THRESHOLD
     async with async_session() as s:
@@ -247,18 +258,20 @@ async def resume_stalled_trio_parents_once() -> list[int]:
             .all()
         )
 
-    if not rows:
+    fresh = [r for r in rows if (r.id, str(r.updated_at)) not in _stall_handled]
+    if not fresh:
         return []
 
     log.warning(
         "trio.watchdog.stalled_detected",
-        count=len(rows),
-        task_ids=[r.id for r in rows],
+        count=len(fresh),
+        task_ids=[r.id for r in fresh],
     )
-    for parent in rows:
+    for parent in fresh:
+        _stall_handled.add((parent.id, str(parent.updated_at)))
         await _notify_stall_recovery(parent)
         asyncio.create_task(_run_trio_parent_logged(parent))  # noqa: RUF006
-    return [r.id for r in rows]
+    return [r.id for r in fresh]
 
 
 async def trio_heartbeat_watchdog() -> None:

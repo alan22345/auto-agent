@@ -19,6 +19,23 @@ from shared import events as _events_mod
 from shared import task_channel as _task_channel_mod
 from shared.events import InMemoryPublisher, set_publisher
 from shared.task_channel import InMemoryTaskChannelFactory, set_task_channel_factory
+from tests.db_guard import NonTestDatabaseError, assert_test_database
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Abort the whole session before any test touches a non-test database.
+
+    The DB-backed suite seeds orgs/tasks and create/drops tables. Run against a
+    real DATABASE_URL it pollutes production (the 2026-06-27 health-loop-coder
+    incident). Fail loud here rather than let a single test write one row.
+    """
+    try:
+        assert_test_database(
+            os.environ.get("DATABASE_URL"),
+            allow_override=os.environ.get("ALLOW_NONTEST_DB") == "1",
+        )
+    except NonTestDatabaseError as exc:
+        raise pytest.UsageError(str(exc)) from exc
 
 
 @pytest.fixture(autouse=True)

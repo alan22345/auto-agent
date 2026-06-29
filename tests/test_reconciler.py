@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from orchestrator.reconciler import RECONCILE_STALL_THRESHOLD, _is_silently_stuck
+from orchestrator.reconciler import RECONCILE_STALL_THRESHOLD, is_silently_stuck
 from shared.models import Organization, Plan, Task, TaskStatus
 
 NOW = datetime(2026, 6, 26, 12, 0, 0, tzinfo=UTC)
@@ -32,32 +32,54 @@ def _task(status: TaskStatus, updated_at: datetime) -> Task:
 @pytest.mark.parametrize(
     "status",
     [
-        TaskStatus.AWAITING_DESIGN_APPROVAL,
-        TaskStatus.AWAITING_CLARIFICATION,
-        TaskStatus.BLOCKED,
         TaskStatus.CLASSIFYING,
         TaskStatus.VERIFYING,
-        TaskStatus.AWAITING_REQUIRED_SECRETS,
+        TaskStatus.TRIO_EXECUTING,
+        TaskStatus.ARCHITECT_DESIGNING,
+        TaskStatus.FINAL_REVIEW,
+        TaskStatus.PR_CREATED,
     ],
 )
-def test_stalled_uncovered_states_are_flagged(status) -> None:
-    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is True
+def test_stalled_system_driven_states_are_flagged(status) -> None:
+    # The backstop's whole job: a state the SYSTEM should be advancing has gone
+    # silent past the threshold with no heartbeat → a real strand, surface it.
+    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskStatus.AWAITING_CLARIFICATION,
+        TaskStatus.AWAITING_APPROVAL,
+        TaskStatus.AWAITING_DESIGN_APPROVAL,
+        TaskStatus.AWAITING_REQUIRED_SECRETS,
+        TaskStatus.BLOCKED,
+        TaskStatus.BLOCKED_ON_AUTH,
+        TaskStatus.BLOCKED_ON_QUOTA,
+    ],
+)
+def test_human_gated_states_are_not_flagged(status) -> None:
+    # A human / external actor is the expected driver, so "stuck with nothing
+    # driving it" is false — the task is correctly parked on someone's input.
+    # Flagging these paged the owner about tasks waiting on *them* (33
+    # awaiting_clarification alerts in one prod run).
+    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
 
 
 def test_fresh_task_is_not_flagged() -> None:
-    task = _task(TaskStatus.AWAITING_DESIGN_APPROVAL, FRESH)
-    assert _is_silently_stuck(task, now=NOW, heartbeat_alive=False) is False
+    task = _task(TaskStatus.VERIFYING, FRESH)
+    assert is_silently_stuck(task, now=NOW, heartbeat_alive=False) is False
 
 
 def test_live_heartbeat_is_not_flagged() -> None:
     # An agent actively looping (even past the threshold) is alive — never flag.
     task = _task(TaskStatus.VERIFYING, STALE)
-    assert _is_silently_stuck(task, now=NOW, heartbeat_alive=True) is False
+    assert is_silently_stuck(task, now=NOW, heartbeat_alive=True) is False
 
 
 @pytest.mark.parametrize("status", [TaskStatus.DONE, TaskStatus.FAILED])
 def test_terminal_tasks_are_never_flagged(status) -> None:
-    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
+    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
 
 
 @pytest.mark.parametrize(
@@ -67,11 +89,11 @@ def test_terminal_tasks_are_never_flagged(status) -> None:
 def test_states_owned_by_other_loops_are_skipped(status) -> None:
     # queued_dispatch_poller / task_timeout_watchdog already re-drive these;
     # the backstop must not double-report them.
-    assert _is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
+    assert is_silently_stuck(_task(status, STALE), now=NOW, heartbeat_alive=False) is False
 
 
 # ---------------------------------------------------------------------------
-# _reconcile_once — the DB sweep (flag, exclude terminal, notify once)
+# reconcile_once — the DB sweep (flag, exclude terminal, notify once)
 # ---------------------------------------------------------------------------
 
 
@@ -135,8 +157,8 @@ async def _harness(session, monkeypatch):
 @pytest.mark.asyncio
 async def test_sweep_flags_and_notifies_stuck_task(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
-        task = await _seed(session, status=TaskStatus.AWAITING_DESIGN_APPROVAL, age_minutes=600)
-        stuck = await rec._reconcile_once()
+        task = await _seed(session, status=TaskStatus.VERIFYING, age_minutes=600)
+        stuck = await rec.reconcile_once()
         assert stuck == [task.id]
         notify.assert_awaited_once()
 
@@ -146,7 +168,7 @@ async def test_sweep_ignores_terminal_and_fresh(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
         await _seed(session, status=TaskStatus.DONE, age_minutes=600)
         await _seed(session, status=TaskStatus.VERIFYING, age_minutes=1)
-        stuck = await rec._reconcile_once()
+        stuck = await rec.reconcile_once()
         assert stuck == []
         notify.assert_not_awaited()
 
@@ -154,7 +176,7 @@ async def test_sweep_ignores_terminal_and_fresh(session, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_sweep_notifies_once_per_stall(session, monkeypatch) -> None:
     async with _harness(session, monkeypatch) as (rec, notify):
-        await _seed(session, status=TaskStatus.BLOCKED, age_minutes=600)
-        await rec._reconcile_once()
-        await rec._reconcile_once()  # second sweep, same stall
+        await _seed(session, status=TaskStatus.CLASSIFYING, age_minutes=600)
+        await rec.reconcile_once()
+        await rec.reconcile_once()  # second sweep, same stall
         notify.assert_awaited_once()

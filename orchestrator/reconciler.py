@@ -54,8 +54,30 @@ _REDRIVEN_STATUSES = {
     TaskStatus.CODING,
 }
 
+# A human or external actor — not a system loop — is the expected driver of
+# these, so "stuck with nothing driving it" is simply false: the task is
+# correctly parked on someone's input (an approval, an answer, fixed creds, a
+# quota reset). Flagging them paged the owner every few hours about tasks
+# waiting on *them* — 33 awaiting_clarification alerts in a single prod sweep.
+# The backstop exists for SILENT SYSTEM strands; a human queue is not a strand.
+_HUMAN_GATED = {
+    TaskStatus.AWAITING_APPROVAL,
+    TaskStatus.AWAITING_PLAN_APPROVAL,
+    TaskStatus.AWAITING_CLARIFICATION,
+    TaskStatus.AWAITING_REVIEW,
+    TaskStatus.AWAITING_DESIGN_APPROVAL,
+    TaskStatus.AWAITING_INTENT_GRILL,
+    TaskStatus.AWAITING_ROOT_ADR_APPROVAL,
+    TaskStatus.AWAITING_DOMAIN_GRILL,
+    TaskStatus.AWAITING_DOMAIN_ADR_APPROVAL,
+    TaskStatus.AWAITING_REQUIRED_SECRETS,
+    TaskStatus.BLOCKED,
+    TaskStatus.BLOCKED_ON_AUTH,
+    TaskStatus.BLOCKED_ON_QUOTA,
+}
 
-def _is_silently_stuck(
+
+def is_silently_stuck(
     task: Task,
     *,
     now: datetime,
@@ -70,6 +92,8 @@ def _is_silently_stuck(
     task that is merely taking a long time.
     """
     if task.status in _TERMINAL or task.status in _REDRIVEN_STATUSES:
+        return False
+    if task.status in _HUMAN_GATED:
         return False
     if heartbeat_alive:
         return False
@@ -114,7 +138,7 @@ async def _surface_stuck(task: Task) -> None:
         log.warning("reconciler.notify_failed", task_id=task.id, exc_info=True)
 
 
-async def _reconcile_once() -> list[int]:
+async def reconcile_once() -> list[int]:
     """One sweep. Surface every silently-stuck task; return their ids."""
     from shared.task_channel import task_channel
 
@@ -125,7 +149,7 @@ async def _reconcile_once() -> list[int]:
     stuck: list[int] = []
     for task in rows:
         alive = await task_channel(task.id).is_alive()
-        if _is_silently_stuck(task, now=now, heartbeat_alive=alive):
+        if is_silently_stuck(task, now=now, heartbeat_alive=alive):
             stuck.append(task.id)
             await _surface_stuck(task)
 
@@ -140,7 +164,7 @@ async def reconciler_loop() -> None:
     while True:
         try:
             await asyncio.sleep(RECONCILE_INTERVAL_SECS)
-            await _reconcile_once()
+            await reconcile_once()
         except asyncio.CancelledError:
             log.info("reconciler.cancelled")
             raise
