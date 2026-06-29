@@ -1350,14 +1350,14 @@ async def assign_repo(
     return _task_to_response(task)
 
 
-class BranchUpdate(BaseModel):
+class _BranchUpdate(BaseModel):
     branch_name: str
 
 
 @router.patch("/tasks/{task_id}/branch", response_model=TaskData)
 async def set_branch_name(
     task_id: int,
-    req: BranchUpdate,
+    req: _BranchUpdate,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> TaskData:
@@ -2327,8 +2327,8 @@ def _publish_scaffold_decision(
         pass
 
 
-def _dispatch_scaffold_driver(task_id: int) -> None:
-    """Fire-and-forget re-invocation of ``run_scaffold_parent``.
+async def _run_scaffold_driver(task_id: int) -> None:
+    """Reload the task and re-invoke ``run_scaffold_parent``.
 
     Imported lazily so the router does not take a build-time dependency
     on the agent layer at module load. The driver loads its own fresh
@@ -2337,24 +2337,29 @@ def _dispatch_scaffold_driver(task_id: int) -> None:
     calling.
     """
 
+    try:
+        from agent.lifecycle.scaffold import run_scaffold_parent
+        from shared.database import async_session as _async_session_local
+
+        async with _async_session_local() as s:
+            t = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        await run_scaffold_parent(t)
+    except Exception:  # pragma: no cover — driver invocation is best-effort
+        import structlog
+
+        structlog.get_logger().exception(
+            "scaffold.router.driver_dispatch_failed", task_id=task_id
+        )
+
+
+def _dispatch_scaffold_driver(task_id: int) -> None:
+    """Fire-and-forget re-invocation of ``run_scaffold_parent``."""
+
     import asyncio as _asyncio
 
-    async def _go() -> None:
-        try:
-            from agent.lifecycle.scaffold import run_scaffold_parent
-            from shared.database import async_session as _async_session_local
-
-            async with _async_session_local() as s:
-                t = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
-            await run_scaffold_parent(t)
-        except Exception:  # pragma: no cover — driver invocation is best-effort
-            import structlog
-
-            structlog.get_logger().exception(
-                "scaffold.router.driver_dispatch_failed", task_id=task_id
-            )
-
-    _asyncio.create_task(_go())  # noqa: RUF006 — fire-and-forget driver kick
+    _asyncio.create_task(  # noqa: RUF006 — fire-and-forget driver kick
+        _run_scaffold_driver(task_id)
+    )
 
 
 @router.post(
@@ -3581,7 +3586,7 @@ class HealthLoopStartRequest(BaseModel):
     cleanup_branch: str | None = None
 
 
-class HealthLoopSuppressRequest(BaseModel):
+class _HealthLoopSuppressRequest(BaseModel):
     finding_hash: str = Field(..., min_length=1, max_length=64)
 
 
@@ -3750,7 +3755,7 @@ async def list_health_findings(
 @router.post("/repos/{repo_id}/health-loop/suppress", response_model=HealthLoopStatusResponse)
 async def suppress_health_finding(
     repo_id: int,
-    body: HealthLoopSuppressRequest,
+    body: _HealthLoopSuppressRequest,
     session: AsyncSession = Depends(get_session),
     org_id: int = Depends(current_org_id_dep),
 ) -> HealthLoopStatusResponse:

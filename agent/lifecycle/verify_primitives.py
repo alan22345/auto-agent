@@ -820,7 +820,7 @@ def grep_diff_for_stubs(diff: str) -> StubResult:
 # ---------------------------------------------------------------------------
 
 
-def collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
+def _collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
     """Walk a unified diff and return every ``# auto-agent: allow-stub`` line.
 
     Used by the PR-creation path to surface intentional stubs in the PR
@@ -879,7 +879,7 @@ def collect_allow_stub_optouts(diff: str) -> list[AllowStubOptout]:
 _ALLOW_STUB_SECTION_HEADER = "## Allow-stub opt-outs in this PR"
 
 
-def format_allow_stub_section(optouts: list[AllowStubOptout]) -> str:
+def _format_allow_stub_section(optouts: list[AllowStubOptout]) -> str:
     """Render the markdown section appended to PR bodies — ADR-015 §8.
 
     Empty list → empty string (PRs without allow-stub get no section).
@@ -911,8 +911,8 @@ def augment_pr_body_with_optouts(body: str, diff: str) -> str:
     so clean PRs don't gain a noisy empty section.
     """
 
-    optouts = collect_allow_stub_optouts(diff)
-    section = format_allow_stub_section(optouts)
+    optouts = _collect_allow_stub_optouts(diff)
+    section = _format_allow_stub_section(optouts)
     if not section:
         return body
     suffix = "\n\n" + section if not body.endswith("\n") else "\n" + section

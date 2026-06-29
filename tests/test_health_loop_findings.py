@@ -7,7 +7,7 @@ from datetime import datetime
 from agent.health_loop.findings import (
     CATEGORY_WEIGHTS,
     HealthFinding,
-    extract_findings,
+    _extract_findings,
     finding_hash,
     rank_findings,
     select_batch,
@@ -113,7 +113,7 @@ def test_extract_covers_every_category():
             FileHealth(file="ok.py", maintainability_index=90.0, band="good"),
         ],
     )
-    found = extract_findings(blob)
+    found = _extract_findings(blob)
     cats = {f.category for f in found}
     assert cats == {"dead_code", "cycle", "clone", "hotspot", "poor_file"}
     assert all("ok.py" not in f.files for f in found if f.category == "poor_file")
@@ -141,8 +141,8 @@ def test_clone_finding_hash_stable_across_line_shifts():
             family_id=None,
         )
 
-    h1 = extract_findings(_blob(clones=[_clone(1, 9)]))[0].finding_hash
-    h2 = extract_findings(_blob(clones=[_clone(40, 48)]))[0].finding_hash
+    h1 = _extract_findings(_blob(clones=[_clone(1, 9)]))[0].finding_hash
+    h2 = _extract_findings(_blob(clones=[_clone(40, 48)]))[0].finding_hash
     assert h1 == h2
 
 
@@ -156,7 +156,7 @@ def test_extract_excludes_dependency_findings():
             DeadCodeFinding(kind="undeclared_dependency", target="bcrypt", file=None, reason="x"),
         ]
     )
-    assert extract_findings(blob) == []
+    assert _extract_findings(blob) == []
 
 
 def test_extract_excludes_nextjs_route_entry_files():
@@ -178,7 +178,7 @@ def test_extract_excludes_nextjs_route_entry_files():
             for p in specials
         ]
     )
-    assert extract_findings(blob) == []
+    assert _extract_findings(blob) == []
 
 
 def test_extract_excludes_entry_dirs_and_basenames():
@@ -197,7 +197,7 @@ def test_extract_excludes_entry_dirs_and_basenames():
             for p in paths
         ]
     )
-    assert extract_findings(blob) == []
+    assert _extract_findings(blob) == []
 
 
 def test_extract_excludes_dispatch_handlers():
@@ -216,7 +216,7 @@ def test_extract_excludes_dispatch_handlers():
             for t in handlers
         ]
     )
-    kept = {f.title for f in extract_findings(blob)}
+    kept = {f.title for f in _extract_findings(blob)}
     # handle / handle_* / on_* / run_*_loop excluded; the poller (no matching
     # affix) survives and would be judged by the coder + gates.
     assert all("handle_coding" not in t for t in kept)
@@ -242,7 +242,7 @@ def test_extract_keeps_genuine_orphan_export_and_file():
             ),
         ]
     )
-    titles = {f.title for f in extract_findings(blob)}
+    titles = {f.title for f in _extract_findings(blob)}
     assert any("formatBytes" in t for t in titles)
     assert any("orphan-widget" in t for t in titles)
 
@@ -254,7 +254,7 @@ def test_extract_severity_reflects_magnitude():
             FileHealth(file="bad.py", maintainability_index=35.0, band="poor"),
         ]
     )
-    found = {f.files[0]: f for f in extract_findings(blob)}
+    found = {f.files[0]: f for f in _extract_findings(blob)}
     assert found["worse.py"].severity > found["bad.py"].severity
 
 

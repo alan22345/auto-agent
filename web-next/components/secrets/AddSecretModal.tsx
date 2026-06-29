@@ -46,7 +46,7 @@ export function AddSecretModal({ repoId, open, onOpenChange }: Props) {
     setKeyError(validateKey(v));
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const err = validateKey(key);
     if (err) {
@@ -70,7 +70,7 @@ export function AddSecretModal({ repoId, open, onOpenChange }: Props) {
         },
       },
     );
-  }
+  };
 
   function handleOpenChange(next: boolean) {
     if (!next) {

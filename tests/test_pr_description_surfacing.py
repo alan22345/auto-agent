@@ -9,9 +9,9 @@ section to the PR body before ``gh pr create`` runs.
 This module is the authoritative spec for two pure helpers in
 :mod:`agent.lifecycle.verify_primitives`:
 
-  * :func:`collect_allow_stub_optouts` — given a unified diff, returns the
+  * :func:`_collect_allow_stub_optouts` — given a unified diff, returns the
     list of allow-stub locations (file, line, surrounding context).
-  * :func:`format_allow_stub_section` — given that list, returns the
+  * :func:`_format_allow_stub_section` — given that list, returns the
     markdown bullets to append to a PR body. Empty list → empty string
     (PRs without allow-stub get no extra section).
 """
@@ -22,7 +22,7 @@ import textwrap
 
 
 def test_collect_allow_stub_optouts_finds_single_location() -> None:
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -36,7 +36,7 @@ def test_collect_allow_stub_optouts_finds_single_location() -> None:
         +        raise NotImplementedError  # auto-agent: allow-stub
         """
     )
-    optouts = collect_allow_stub_optouts(diff)
+    optouts = _collect_allow_stub_optouts(diff)
     assert len(optouts) == 1
     assert optouts[0].file == "abc/base.py"
     # The line carrying the allow-stub annotation has a real line number.
@@ -46,7 +46,7 @@ def test_collect_allow_stub_optouts_finds_single_location() -> None:
 
 def test_collect_allow_stub_optouts_skips_non_optout_stubs() -> None:
     """Stubs without ``# auto-agent: allow-stub`` are NOT opt-outs."""
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -58,11 +58,11 @@ def test_collect_allow_stub_optouts_skips_non_optout_stubs() -> None:
         +    raise NotImplementedError
         """
     )
-    assert collect_allow_stub_optouts(diff) == []
+    assert _collect_allow_stub_optouts(diff) == []
 
 
 def test_collect_allow_stub_optouts_multi_file() -> None:
-    from agent.lifecycle.verify_primitives import collect_allow_stub_optouts
+    from agent.lifecycle.verify_primitives import _collect_allow_stub_optouts
 
     diff = textwrap.dedent(
         """\
@@ -80,7 +80,7 @@ def test_collect_allow_stub_optouts_multi_file() -> None:
         +    pass  # placeholder  # auto-agent: allow-stub
         """
     )
-    optouts = collect_allow_stub_optouts(diff)
+    optouts = _collect_allow_stub_optouts(diff)
     files = {o.file for o in optouts}
     assert files == {"a.py", "b.py"}
     assert len(optouts) == 2
@@ -90,7 +90,7 @@ def test_format_allow_stub_section_with_optouts() -> None:
     """Non-empty list → ``## Allow-stub opt-outs in this PR`` section."""
     from agent.lifecycle.verify_primitives import (
         AllowStubOptout,
-        format_allow_stub_section,
+        _format_allow_stub_section,
     )
 
     optouts = [
@@ -103,7 +103,7 @@ def test_format_allow_stub_section_with_optouts() -> None:
             file="foo.py", line=12, snippet="pass  # placeholder  # auto-agent: allow-stub"
         ),
     ]
-    section = format_allow_stub_section(optouts)
+    section = _format_allow_stub_section(optouts)
     assert section.startswith("## Allow-stub opt-outs in this PR")
     assert "abc/base.py:5" in section
     assert "foo.py:12" in section
@@ -113,9 +113,9 @@ def test_format_allow_stub_section_with_optouts() -> None:
 
 def test_format_allow_stub_section_empty_list() -> None:
     """Empty list → empty string (no section appended)."""
-    from agent.lifecycle.verify_primitives import format_allow_stub_section
+    from agent.lifecycle.verify_primitives import _format_allow_stub_section
 
-    assert format_allow_stub_section([]) == ""
+    assert _format_allow_stub_section([]) == ""
 
 
 def test_pr_body_surfacing_appends_section(tmp_path) -> None:

@@ -1,26 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import {
-  AreaFilter,
-  visibleAreaCount,
-} from '@/components/code-graph/area-filter';
-
-describe('visibleAreaCount', () => {
-  it('subtracts the hidden set size from the total', () => {
-    const areas = ['agent', 'orchestrator', 'web'];
-    expect(visibleAreaCount(areas, new Set())).toBe(3);
-    expect(visibleAreaCount(areas, new Set(['agent']))).toBe(2);
-    expect(visibleAreaCount(areas, new Set(['agent', 'web']))).toBe(1);
-  });
-
-  it('ignores hidden entries that are not in the areas list', () => {
-    // Defensive — the hidden set is plumbed from caller state and may
-    // briefly carry stale names after a graph refresh.
-    expect(
-      visibleAreaCount(['agent'], new Set(['agent', 'gone-area'])),
-    ).toBe(0);
-  });
-});
+import { AreaFilter } from '@/components/code-graph/area-filter';
 
 describe('AreaFilter component', () => {
   it('renders the visible/total counter in the toggle label', () => {

@@ -300,7 +300,7 @@ class RedisTaskChannelFactory:
 # ---------------------------------------------------------------------------
 
 
-class InMemoryTaskChannel:
+class _InMemoryTaskChannel:
     """Test per-task channel that delegates to its factory's storage."""
 
     def __init__(self, task_id: int, factory: InMemoryTaskChannelFactory) -> None:
@@ -368,8 +368,8 @@ class InMemoryTaskChannelFactory:
         self.telegram_bindings: dict[int, int] = {}
         self.slack_bindings: dict[str, int] = {}
 
-    def for_task(self, task_id: int) -> InMemoryTaskChannel:
-        return InMemoryTaskChannel(task_id, self)
+    def for_task(self, task_id: int) -> _InMemoryTaskChannel:
+        return _InMemoryTaskChannel(task_id, self)
 
     async def task_id_for_telegram_message(self, message_id: int) -> int | None:
         return self.telegram_bindings.get(message_id)
@@ -407,7 +407,7 @@ def set_task_channel_factory(factory: TaskChannelFactory) -> None:
     _factory = factory
 
 
-def get_task_channel_factory() -> TaskChannelFactory:
+def _get_task_channel_factory() -> TaskChannelFactory:
     """Return the active factory. Raises if none is registered — every
     process must wire one in before using the seam."""
     if _factory is None:
@@ -422,7 +422,7 @@ def task_channel(task_id: int) -> TaskChannel:
     """Return a :class:`TaskChannel` scoped to *task_id* via the active
     factory. Connection lifecycle is owned by the factory, not the
     caller."""
-    return get_task_channel_factory().for_task(task_id)
+    return _get_task_channel_factory().for_task(task_id)
 
 
 async def task_id_for_telegram_message(message_id: int) -> int | None:
@@ -433,11 +433,11 @@ async def task_id_for_telegram_message(message_id: int) -> int | None:
     key. Forcing the caller to instantiate a per-task handle just to
     read would be a worse abstraction.
     """
-    return await get_task_channel_factory().task_id_for_telegram_message(message_id)
+    return await _get_task_channel_factory().task_id_for_telegram_message(message_id)
 
 
 async def task_id_for_slack_message(message_ts: str) -> int | None:
     """Look up the task a previously-bound Slack message belongs to.
     Slack identifies messages by ``ts`` (a timestamp string), not numeric ID.
     """
-    return await get_task_channel_factory().task_id_for_slack_message(message_ts)
+    return await _get_task_channel_factory().task_id_for_slack_message(message_ts)

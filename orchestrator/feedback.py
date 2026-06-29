@@ -122,19 +122,3 @@ async def analyze_patterns(
         lines.append(line)
 
     return "\n".join(lines)
-
-
-def build_learning_context(outcomes: list[TaskOutcome]) -> str:
-    """Build a context string from recent rejected outcomes to inject into Claude Code prompts."""
-    if not outcomes:
-        return ""
-
-    rejected = [o for o in outcomes if not o.pr_approved and o.feedback_summary]
-    if not rejected:
-        return ""
-
-    lines = ["## Lessons from recent PRs (avoid these patterns):"]
-    for o in rejected[:5]:
-        lines.append(f"- {o.feedback_summary[:200]}")
-
-    return "\n".join(lines)

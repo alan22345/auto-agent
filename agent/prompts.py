@@ -747,7 +747,7 @@ def build_review_prompt(base_branch: str = "main") -> str:
     return REVIEW_PROMPT.format(base_branch=base_branch)
 
 
-def build_pr_independent_review_prompt(
+def _build_pr_independent_review_prompt(
     title: str,
     description: str,
     pr_url: str,
@@ -793,7 +793,7 @@ def build_pr_independent_review_prompt_with_ui_check(
     verdict. When the server isn't running, fall back to the code-only suffix
     so the JSON shape stays uniform.
     """
-    base = build_pr_independent_review_prompt(title, description, pr_url, base_branch)
+    base = _build_pr_independent_review_prompt(title, description, pr_url, base_branch)
     if not server_url or not affected_routes:
         return base + _UI_CHECK_PROMPT_SUFFIX_CODE_ONLY
     route_lines = "\n".join(

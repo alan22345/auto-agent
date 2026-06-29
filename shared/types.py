@@ -1036,13 +1036,6 @@ class ReviewAttemptOut(BaseModel):
 # --- Architect/Builder/Reviewer trio types ---
 
 
-class RepairContext(BaseModel):
-    """Passed to architect.checkpoint on parent re-entry after integration PR CI failure."""
-
-    ci_log: str
-    failed_pr_url: str
-
-
 class ArchitectAttemptOut(BaseModel):
     """API shape for an architect_attempts row."""
 

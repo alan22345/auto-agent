@@ -12,17 +12,16 @@ event pipeline.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import structlog
 from sqlalchemy import select
 
+from agent.lifecycle.scaffold._verdicts import read_all_verdicts as _read_all_verdicts
 from agent.lifecycle.scaffold._workspace import prepare_scaffold_workspace
 from agent.lifecycle.scaffold.validators import parse_domains
 from agent.lifecycle.workspace_paths import (
-    DOMAIN_ADR_APPROVALS_DIR,
     ROOT_ADR_PATH,
     domain_adr_path,
 )
@@ -121,25 +120,6 @@ async def check_secrets_gate(task: Task) -> bool:
     # If fired=False a concurrent request already advanced the task; the
     # other caller owns the dispatch.
     return fired
-
-
-def _read_all_verdicts(workspace: str) -> dict[str, dict[str, Any]]:
-    dir_abs = os.path.join(workspace, DOMAIN_ADR_APPROVALS_DIR)
-    if not os.path.isdir(dir_abs):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for entry in os.listdir(dir_abs):
-        if not entry.endswith(".json"):
-            continue
-        slug = entry[: -len(".json")]
-        try:
-            with open(os.path.join(dir_abs, entry)) as fh:
-                payload = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            out[slug] = payload
-    return out
 
 
 async def run(task: Task) -> list[int]:

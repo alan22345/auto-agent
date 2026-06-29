@@ -10,6 +10,36 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api';
 
+function errorMessage(e: unknown): string {
+  return e instanceof ApiError
+    ? e.detail
+    : e instanceof Error
+      ? e.message
+      : 'Failed to submit answer';
+}
+
+async function submitIntentGrillAnswer(args: {
+  taskId: number;
+  answer: string;
+  submit: ReturnType<typeof useSubmitIntentGrillAnswer>;
+  setAnswer: (v: string) => void;
+  setSubmitting: (v: boolean) => void;
+  setLocalError: (v: string | null) => void;
+}): Promise<void> {
+  const { taskId, answer, submit, setAnswer, setSubmitting, setLocalError } =
+    args;
+  setSubmitting(true);
+  setLocalError(null);
+  try {
+    await submit.mutateAsync({ taskId, answer });
+    setAnswer('');
+  } catch (e) {
+    setLocalError(errorMessage(e));
+  } finally {
+    setSubmitting(false);
+  }
+}
+
 // ADR-018 Phase A gate card — the intent-grill agent pauses on a
 // question and waits for the user to answer. The answer is written to
 // ``.auto-agent/intent_grill_answer.json`` and the scaffold driver is
@@ -26,22 +56,14 @@ export function IntentGrillCard({ taskId }: { taskId: number }) {
 
   async function onSubmit() {
     if (!answer.trim() || submitting) return;
-    setSubmitting(true);
-    setLocalError(null);
-    try {
-      await submit.mutateAsync({ taskId, answer });
-      setAnswer('');
-    } catch (e) {
-      setLocalError(
-        e instanceof ApiError
-          ? e.detail
-          : e instanceof Error
-            ? e.message
-            : 'Failed to submit answer',
-      );
-    } finally {
-      setSubmitting(false);
-    }
+    await submitIntentGrillAnswer({
+      taskId,
+      answer,
+      submit,
+      setAnswer,
+      setSubmitting,
+      setLocalError,
+    });
   }
 
   const intentMd = intentQuery.data?.markdown ?? '';

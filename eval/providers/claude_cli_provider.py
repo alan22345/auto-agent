@@ -12,6 +12,9 @@ import tempfile
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROVIDERS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PROVIDERS_DIR not in sys.path:
+    sys.path.insert(0, _PROVIDERS_DIR)
 
 
 def call_api(prompt, options, context):
@@ -20,6 +23,8 @@ def call_api(prompt, options, context):
 
 
 async def _run_cli(prompt, options, context):
+    from _git_helpers import capture_committed_diff, init_git_workspace
+
     variables = context.get("vars", {})
     fixture = variables.get("fixture", "")
     task = variables.get("task", prompt)
@@ -32,24 +37,7 @@ async def _run_cli(prompt, options, context):
         _write_gitignore(workspace)
 
         # Initialize git
-        for cmd in [
-            ["git", "init"],
-            ["git", "add", "-A"],
-        ]:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=workspace,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-
-        proc = await asyncio.create_subprocess_exec(
-            "git", "commit", "-m", "initial", "--allow-empty",
-            cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@test",
-                 "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@test"},
-        )
-        await proc.communicate()
+        await init_git_workspace(workspace)
 
         # Run Claude Code CLI
         proc = await asyncio.create_subprocess_exec(
@@ -83,19 +71,7 @@ async def _run_cli(prompt, options, context):
         diff_out, _ = await proc.communicate()
 
         # Also check committed changes
-        proc = await asyncio.create_subprocess_exec(
-            "git", "log", "--oneline", "-1", "--format=%H", cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        head_hash, _ = await proc.communicate()
-
-        committed_diff = b""
-        if head_hash.strip():
-            proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "HEAD~1..HEAD", cwd=workspace,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            committed_diff, _ = await proc.communicate()
+        committed_diff = await capture_committed_diff(workspace)
 
         # Read modified files
         modified_files = {}

@@ -93,6 +93,14 @@ from __future__ import annotations
 import re
 import sys
 
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
+
 from shared.types import DeadCodeFinding
 
 # ---------------------------------------------------------------------------
@@ -292,6 +300,86 @@ def _top_level_js(module_target: str) -> str | None:
     return spec.split("/")[0]
 
 
+def _parse_pyproject(toml_path: str) -> set[str]:
+    """Return the PEP-503-normalised declared deps from one ``pyproject.toml``.
+
+    Reads ``[project].dependencies`` (PEP 621) and
+    ``[tool.poetry.dependencies]`` (Poetry, with the ``python`` key excluded).
+    Returns an empty set if the file can't be read or no TOML parser is
+    available.
+    """
+    if tomllib is None:
+        return set()
+    try:
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return set()
+
+    raw_names: list[str] = []
+
+    # PEP 621: [project].dependencies
+    project = data.get("project") or {}
+    pep621_deps = project.get("dependencies") or []
+    if isinstance(pep621_deps, list):
+        raw_names.extend(pep621_deps)
+
+    # Poetry: [tool.poetry.dependencies]
+    tool = data.get("tool") or {}
+    poetry = tool.get("poetry") or {}
+    poetry_deps = poetry.get("dependencies") or {}
+    if isinstance(poetry_deps, dict):
+        for k in poetry_deps:
+            if k.lower() == "python":
+                continue
+            raw_names.append(k)
+
+    normalized: set[str] = set()
+    for raw in raw_names:
+        if not isinstance(raw, str):
+            continue
+        name = _strip_python_version_specifier(raw)
+        if name:
+            normalized.add(_pep503_normalize(name))
+    return normalized
+
+
+def _parse_requirements(req_path: str) -> set[str]:
+    """Parse a requirements*.txt file and return normalised package names.
+
+    Skips:
+    - Comment lines (# ...)
+    - Include flags (-r, -c)
+    - Editable installs (-e)
+    - Blank lines
+
+    For each valid line, strips everything from the first of
+    `` ; < > = ! ~ [ `` to get the bare package name, then PEP-503-normalises.
+    """
+    normalized: set[str] = set()
+    try:
+        with open(req_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Skip -r / -c / -e flags
+                if line.startswith("-"):
+                    continue
+                # Strip inline comments
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                # Split at first version/extras/env-marker delimiter
+                # delimiters: space ; < > = ! ~ [
+                bare = re.split(r"[\s;<>=!~\[]", line, maxsplit=1)[0].strip()
+                if bare:
+                    normalized.add(_pep503_normalize(bare))
+    except Exception:
+        pass
+    return normalized
+
+
 def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
     """Read Python deps from ALL ``pyproject.toml`` and ``requirements*.txt`` files
     found under *workspace*.
@@ -312,87 +400,6 @@ def _read_python_deps(workspace: str) -> tuple[set[str], set[str]]:
     import os
 
     from agent.graph_analyzer.pipeline import _DEFAULT_EXCLUDE_DIRS
-
-    try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            tomllib = None  # type: ignore[assignment]
-
-    def _parse_pyproject(toml_path: str) -> set[str]:
-        if tomllib is None:
-            return set()
-        try:
-            with open(toml_path, "rb") as f:
-                data = tomllib.load(f)
-        except Exception:
-            return set()
-
-        raw_names: list[str] = []
-
-        # PEP 621: [project].dependencies
-        project = data.get("project") or {}
-        pep621_deps = project.get("dependencies") or []
-        if isinstance(pep621_deps, list):
-            raw_names.extend(pep621_deps)
-
-        # Poetry: [tool.poetry.dependencies]
-        tool = data.get("tool") or {}
-        poetry = tool.get("poetry") or {}
-        poetry_deps = poetry.get("dependencies") or {}
-        if isinstance(poetry_deps, dict):
-            for k in poetry_deps:
-                if k.lower() == "python":
-                    continue
-                raw_names.append(k)
-
-        normalized: set[str] = set()
-        for raw in raw_names:
-            if not isinstance(raw, str):
-                continue
-            name = _strip_python_version_specifier(raw)
-            if name:
-                normalized.add(_pep503_normalize(name))
-        return normalized
-
-    def _parse_requirements(req_path: str) -> set[str]:
-        """Parse a requirements*.txt file and return normalised package names.
-
-        Skips:
-        - Comment lines (# ...)
-        - Include flags (-r, -c)
-        - Editable installs (-e)
-        - Blank lines
-
-        For each valid line, strips everything from the first of
-        `` ; < > = ! ~ [ `` to get the bare package name, then PEP-503-normalises.
-        """
-        normalized: set[str] = set()
-        try:
-            with open(req_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    # Skip -r / -c / -e flags
-                    if line.startswith("-"):
-                        continue
-                    # Strip inline comments
-                    line = line.split("#")[0].strip()
-                    if not line:
-                        continue
-                    # Split at first version/extras/env-marker delimiter
-                    # delimiters: space ; < > = ! ~ [
-                    import re as _re
-
-                    bare = _re.split(r"[\s;<>=!~\[]", line, maxsplit=1)[0].strip()
-                    if bare:
-                        normalized.add(_pep503_normalize(bare))
-        except Exception:
-            pass
-        return normalized
 
     union: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(workspace):

@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  blobToCytoscapeElements,
-  computeSearchClasses,
-} from '@/components/code-graph/graph-canvas';
+import { blobToCytoscapeElements } from '@/components/code-graph/graph-elements';
+import { computeSearchClasses } from '@/components/code-graph/graph-canvas';
 import type { RepoGraphBlob } from '@/types/api';
 
 const blob: RepoGraphBlob = {

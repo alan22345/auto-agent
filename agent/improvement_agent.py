@@ -224,50 +224,6 @@ async def _handle_architecture_analysis(session: AsyncSession, config: FreeformC
 # ---------------------------------------------------------------------------
 
 
-async def improvement_answer_grill(
-    task,
-    question: str,
-    workspace_root: str,
-    *,
-    session_blob: dict | None = None,
-) -> None:
-    """Improvement-agent standin answers a grill question (freeform)."""
-
-    from agent.lifecycle.standin import ImprovementAgentStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = ImprovementAgentStandin(task=task, repo=repo)
-    await standin.answer_grill(
-        question,
-        {
-            "workspace_root": workspace_root,
-            "improvement_session": session_blob or {},
-        },
-    )
-
-
-async def improvement_approve_design(
-    task,
-    design_md: str,
-    workspace_root: str,
-    *,
-    session_blob: dict | None = None,
-) -> None:
-    """Improvement-agent standin approves/rejects a complex_large design."""
-
-    from agent.lifecycle.standin import ImprovementAgentStandin
-
-    repo = await _load_repo(task.repo_id)
-    standin = ImprovementAgentStandin(task=task, repo=repo)
-    await standin.approve_design(
-        design_md,
-        {
-            "workspace_root": workspace_root,
-            "improvement_session": session_blob or {},
-        },
-    )
-
-
 async def improvement_review_pr(
     task,
     pr_diff: str,

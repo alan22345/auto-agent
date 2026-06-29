@@ -25,7 +25,7 @@ from shared.config import settings
 logger = structlog.get_logger()
 
 
-def http_enabled() -> bool:
+def _http_enabled() -> bool:
     """True when the hosted HTTP MCP backend is configured."""
     url = (getattr(settings, "team_memory_mcp_url", "") or "").strip()
     token = (getattr(settings, "team_memory_mcp_token", "") or "").strip()
@@ -34,7 +34,7 @@ def http_enabled() -> bool:
 
 def configured() -> bool:
     """True when team-memory is reachable by either backend (HTTP or direct DB)."""
-    if http_enabled():
+    if _http_enabled():
         return True
     from shared.database import team_memory_session
 
@@ -78,7 +78,7 @@ async def recall(
     include_history: bool = False,
     max_results: int = 10,
 ) -> dict[str, Any]:
-    if http_enabled():
+    if _http_enabled():
         return await _call_tool(
             "recall",
             {
@@ -116,7 +116,7 @@ async def remember(
     aliases: list[str] | None = None,
     file_anchors: list[str] | None = None,
 ) -> dict[str, Any]:
-    if http_enabled():
+    if _http_enabled():
         return await _call_tool(
             "remember",
             {
@@ -161,7 +161,7 @@ async def correct(
     source: str | None = None,
     author: str | None = None,
 ) -> dict[str, Any]:
-    if http_enabled():
+    if _http_enabled():
         return await _call_tool(
             "correct",
             {

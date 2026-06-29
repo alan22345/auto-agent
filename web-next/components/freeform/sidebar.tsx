@@ -23,7 +23,7 @@ export function FreeformSidebar({ configs, view, onView, onConfigsChange }: Prop
     return (a.repo_name ?? '').localeCompare(b.repo_name ?? '');
   });
 
-  async function handleDelete(repoName: string) {
+  const handleDelete = async (repoName: string) => {
     if (
       !confirm(
         `Remove ${repoName}? This will disable freeform mode and remove it from the dashboard. Existing tasks will not be deleted.`,
@@ -48,7 +48,7 @@ export function FreeformSidebar({ configs, view, onView, onConfigsChange }: Prop
         alert('Error deleting repo: ' + String(err));
       }
     }
-  }
+  };
 
   return (
     <aside className="w-56 shrink-0 border-r border-border bg-card flex flex-col overflow-y-auto">
